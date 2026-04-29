@@ -1,0 +1,11 @@
+{
+  "name": "serve-sim-repo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "build:swift": "cd packages/serve-sim && ./build.sh"
+  }
+}

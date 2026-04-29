@@ -1,0 +1,270 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+
+      - name: Client tests
+        run: bun test packages/serve-sim-client/src/__tests__/
+
+  publish-serve-sim:
+    needs: [test]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect serve-sim changes
+        id: changes
+        run: |
+          # Publish if source changed OR local version differs from npm
+          # (gap state from a previous run that published but failed to
+          # push the bump back to main).
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          SOURCE_CHANGED=false
+          if echo "$CHANGED" | grep -q "^packages/serve-sim/"; then
+            SOURCE_CHANGED=true
+          fi
+
+          LOCAL=$(node -p "require('./packages/serve-sim/package.json').version")
+          NPM_V=$(npm view serve-sim version 2>/dev/null || echo "")
+          GAP=false
+          if [ -n "$NPM_V" ] && [ "$NPM_V" != "$LOCAL" ]; then
+            echo "serve-sim gap: local=$LOCAL npm=$NPM_V"
+            GAP=true
+          fi
+
+          if [ "$SOURCE_CHANGED" = "true" ] || [ "$GAP" = "true" ]; then
+            echo "sim=true" >> $GITHUB_OUTPUT
+          else
+            echo "sim=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup bun
+        if: steps.changes.outputs.sim == 'true'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Node.js
+        if: steps.changes.outputs.sim == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        if: steps.changes.outputs.sim == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Boot iOS simulator for serve-sim tests
+        if: steps.changes.outputs.sim == 'true'
+        id: boot-sim
+        run: |
+          # Pick the newest available iOS simulator device. The runner image
+          # ships pre-created sims — boot one so the serve-sim idle-floor
+          # integration test has something real to talk to. Fallback: create
+          # one from the latest iOS runtime.
+          UDID=$(xcrun simctl list devices available -j | node -e "
+            const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+            const iosRuntimes = Object.keys(data.devices).filter(r => r.includes('iOS'));
+            iosRuntimes.sort().reverse();
+            for (const runtime of iosRuntimes) {
+              for (const d of data.devices[runtime]) {
+                if (d.isAvailable && d.name.includes('iPhone')) {
+                  console.log(d.udid);
+                  process.exit(0);
+                }
+              }
+            }
+          ")
+          if [ -z "$UDID" ]; then
+            echo "No pre-created iOS simulator found; creating one from the latest runtime"
+            RUNTIME=$(xcrun simctl list runtimes -j | node -e "
+              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const ios = data.runtimes.filter(r => r.isAvailable && r.identifier.includes('iOS'));
+              ios.sort((a, b) => a.version.localeCompare(b.version));
+              console.log(ios[ios.length - 1].identifier);
+            ")
+            DEVICETYPE=$(xcrun simctl list devicetypes -j | node -e "
+              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const iphones = data.devicetypes.filter(d => d.identifier.includes('iPhone'));
+              console.log(iphones[iphones.length - 1].identifier);
+            ")
+            UDID=$(xcrun simctl create "ci-test-iphone" "$DEVICETYPE" "$RUNTIME")
+          fi
+          echo "Booting simulator $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          open -ga Simulator || true
+          echo "udid=$UDID" >> $GITHUB_OUTPUT
+
+      - name: serve-sim tests (idle floor regression)
+        if: steps.changes.outputs.sim == 'true'
+        run: bun test packages/serve-sim/src/__tests__/
+
+      - name: Shutdown simulator
+        if: always() && steps.boot-sim.outputs.udid != ''
+        run: |
+          xcrun simctl shutdown "${{ steps.boot-sim.outputs.udid }}" || true
+
+      - name: Build and publish serve-sim
+        if: steps.changes.outputs.sim == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd packages/serve-sim
+
+          # Bump from max(local, npm-published) + 1 so a previous run that
+          # published but failed to push the bump back to main can't poison
+          # the next run with a 403 from npm.
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view serve-sim version 2>/dev/null || echo "")
+          [ -z "$PUBLISHED" ] && PUBLISHED="$LOCAL"
+          NEW=$(node -e "
+            const a='$LOCAL'.split('.').map(Number);
+            const b='$PUBLISHED'.split('.').map(Number);
+            const max=(a[0]>b[0]||(a[0]===b[0]&&a[1]>b[1])||(a[0]===b[0]&&a[1]===b[1]&&a[2]>b[2]))?a:b;
+            max[2]++;
+            console.log(max.join('.'));
+          ")
+          echo "Bumped serve-sim: local=$LOCAL npm=$PUBLISHED -> $NEW"
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json'));
+            p.version = '$NEW';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+
+          bun run build:swift
+          bun run build
+
+          npm publish --access public
+
+      - name: Configure git and commit version bump
+        if: steps.changes.outputs.sim == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packages/serve-sim/package.json
+          if git diff --cached --quiet; then
+            echo "No version bump to commit"
+          else
+            git commit -m "chore: bump serve-sim version [skip ci]"
+            for i in 1 2 3; do
+              if git push; then exit 0; fi
+              echo "Push rejected (attempt $i/3), rebasing on origin/main..."
+              git pull --rebase --autostash origin main || break
+            done
+            echo "::error::Failed to push serve-sim version bump after 3 attempts. npm has been advanced; next run will self-heal."
+            exit 1
+          fi
+
+  publish-client:
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Detect serve-sim-client changes
+        id: changes
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+          SOURCE_CHANGED=false
+          if echo "$CHANGED" | grep -q "^packages/serve-sim-client/"; then
+            SOURCE_CHANGED=true
+          fi
+
+          LOCAL=$(node -p "require('./packages/serve-sim-client/package.json').version")
+          NPM_V=$(npm view serve-sim-client version 2>/dev/null || echo "")
+          GAP=false
+          if [ -n "$NPM_V" ] && [ "$NPM_V" != "$LOCAL" ]; then
+            echo "serve-sim-client gap: local=$LOCAL npm=$NPM_V"
+            GAP=true
+          fi
+
+          if [ "$SOURCE_CHANGED" = "true" ] || [ "$GAP" = "true" ]; then
+            echo "client=true" >> $GITHUB_OUTPUT
+          else
+            echo "client=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and publish serve-sim-client
+        if: steps.changes.outputs.client == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd packages/serve-sim-client
+
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view serve-sim-client version 2>/dev/null || echo "")
+          [ -z "$PUBLISHED" ] && PUBLISHED="$LOCAL"
+          NEW=$(node -e "
+            const a='$LOCAL'.split('.').map(Number);
+            const b='$PUBLISHED'.split('.').map(Number);
+            const max=(a[0]>b[0]||(a[0]===b[0]&&a[1]>b[1])||(a[0]===b[0]&&a[1]===b[1]&&a[2]>b[2]))?a:b;
+            max[2]++;
+            console.log(max.join('.'));
+          ")
+          echo "Bumped serve-sim-client: local=$LOCAL npm=$PUBLISHED -> $NEW"
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json'));
+            p.version = '$NEW';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+
+          bun run build
+          npm publish --access public
+
+      - name: Configure git and commit version bump
+        if: steps.changes.outputs.client == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packages/serve-sim-client/package.json
+          if git diff --cached --quiet; then
+            echo "No version bump to commit"
+          else
+            git commit -m "chore: bump serve-sim-client version [skip ci]"
+            for i in 1 2 3; do
+              if git push; then exit 0; fi
+              echo "Push rejected (attempt $i/3), rebasing on origin/main..."
+              git pull --rebase --autostash origin main || break
+            done
+            echo "::error::Failed to push serve-sim-client version bump after 3 attempts. npm has been advanced; next run will self-heal."
+            exit 1
+          fi

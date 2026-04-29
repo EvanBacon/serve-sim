@@ -1,0 +1,46 @@
+{
+  "name": "serve-sim",
+  "version": "0.0.9",
+  "type": "module",
+  "author": {
+    "name": "Evan Bacon",
+    "email": "baconbrix@gmail.com",
+    "url": "https://evanbacon.dev"
+  },
+  "license": "Apache-2.0",
+  "bin": {
+    "serve-sim": "dist/serve-sim.js"
+  },
+  "files": [
+    "dist/serve-sim.js",
+    "dist/middleware.js",
+    "dist/middleware.cjs",
+    "src/middleware.ts",
+    "src/state.ts",
+    "bin/serve-sim-bin"
+  ],
+  "exports": {
+    "./middleware": {
+      "require": "./dist/middleware.cjs",
+      "import": "./dist/middleware.js",
+      "types": "./src/middleware.ts"
+    },
+    "./state": {
+      "import": "./src/state.ts",
+      "types": "./src/state.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:swift": "./build.sh",
+    "dev": "bun run dev.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "serve-sim-client": "workspace:*",
+    "preact": "^10.29.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}

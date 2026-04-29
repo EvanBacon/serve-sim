@@ -1,0 +1,58 @@
+{
+  "name": "serve-sim-client",
+  "description": "Client library for serve-sim — iOS Simulator streaming and gateway protocol.",
+  "version": "0.1.15",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "author": {
+    "name": "Evan Bacon",
+    "email": "baconbrix@gmail.com",
+    "url": "https://evanbacon.dev"
+  },
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    },
+    "./react": {
+      "import": "./src/react.ts",
+      "types": "./src/react.ts"
+    },
+    "./touch-codec": {
+      "import": "./src/touch-codec.ts",
+      "types": "./src/touch-codec.ts"
+    },
+    "./simulator": {
+      "import": "./src/simulator/index.ts",
+      "types": "./src/simulator/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun"
+  },
+  "dependencies": {
+    "just-bash": "^2.14.0"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}
