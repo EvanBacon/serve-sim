@@ -544,6 +544,152 @@ function useMediaDrop({
   };
 }
 
+// ─── Empty state: pick a simulator to boot ───
+//
+// When no serve-sim helper is running, the middleware has no state file to
+// inject and `window.__SIM_PREVIEW__` is undefined. Instead of telling the
+// user to drop into a terminal, list available simulators inline and let
+// them boot one + start `serve-sim --detach` from the browser.
+
+function BootEmptyState({
+  devices,
+  loading,
+  error,
+  onRefresh,
+}: {
+  devices: SimDevice[];
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const [startingUdid, setStartingUdid] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  const start = useCallback(async (d: SimDevice) => {
+    if (startingUdid) return;
+    setStartingUdid(d.udid);
+    setStartError(null);
+    try {
+      if (d.state !== "Booted") {
+        const boot = await execOnHost(`xcrun simctl boot ${d.udid}`);
+        if (boot.exitCode !== 0) throw new Error(boot.stderr || "Failed to boot simulator");
+      }
+      const detach = await execOnHost(`bunx serve-sim --detach ${d.udid}`);
+      if (detach.exitCode !== 0) throw new Error(detach.stderr || "Failed to start serve-sim");
+
+      // Poll /api until the state file is picked up, then reload. Avoids a
+      // race where the user sees the empty state again because we reloaded
+      // before serve-sim wrote its server-*.json.
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        try {
+          const r = await fetch("/api", { cache: "no-store" });
+          if (r.ok && (await r.json())) {
+            window.location.reload();
+            return;
+          }
+        } catch {}
+        await new Promise((res) => setTimeout(res, 400));
+      }
+      throw new Error("serve-sim started but no stream state appeared");
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : "Failed to start stream");
+      setStartingUdid(null);
+    }
+  }, [startingUdid]);
+
+  const grouped = new Map<string, SimDevice[]>();
+  for (const d of devices) {
+    let list = grouped.get(d.runtime);
+    if (!list) { list = []; grouped.set(d.runtime, list); }
+    list.push(d);
+  }
+  for (const list of grouped.values()) {
+    list.sort((a, b) => {
+      // Booted first, then by device kind, then by name.
+      const ab = a.state === "Booted" ? 0 : 1;
+      const bb = b.state === "Booted" ? 0 : 1;
+      if (ab !== bb) return ab - bb;
+      return deviceKind(a.name) - deviceKind(b.name) || a.name.localeCompare(b.name);
+    });
+  }
+  const sortedGroups = [...grouped.entries()].sort(
+    ([a], [b]) => runtimeOrder(a) - runtimeOrder(b) || a.localeCompare(b),
+  );
+
+  return (
+    <div style={s.page}>
+      <div style={s.empty}>
+        <h1 style={s.emptyTitle}>No serve-sim stream running</h1>
+        <p style={s.emptyHint}>
+          Pick a simulator to boot, or start one yourself with{" "}
+          <code style={s.code}>bunx serve-sim --detach</code>.
+        </p>
+        <div style={bootListStyle}>
+          <div style={pickerHeaderStyle}>
+            <span style={{ fontWeight: 600 }}>Simulators</span>
+            <button onClick={onRefresh} disabled={loading} style={pickerRefreshStyle}>
+              {loading ? "..." : "Refresh"}
+            </button>
+          </div>
+          {error && <div style={pickerErrorStyle}>{error}</div>}
+          {startError && <div style={pickerErrorStyle}>{startError}</div>}
+          {!loading && !error && devices.length === 0 && (
+            <div style={pickerEmptyStyle}>No available simulators found</div>
+          )}
+          {sortedGroups.map(([runtime, devs]) => (
+            <div key={runtime}>
+              <div style={pickerGroupHeaderStyle}>{runtime}</div>
+              {devs.map((d) => {
+                const isStarting = startingUdid === d.udid;
+                const disabled = startingUdid !== null && !isStarting;
+                const isBooted = d.state === "Booted";
+                return (
+                  <div
+                    key={d.udid}
+                    style={{
+                      ...pickerItemStyle,
+                      cursor: disabled ? "default" : "pointer",
+                      opacity: disabled ? 0.5 : 1,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!disabled) e.currentTarget.style.background = "rgba(255,255,255,0.08)";
+                    }}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                    onClick={() => { if (!disabled) start(d); }}
+                  >
+                    <span style={dotStyle(isBooted ? "#4ade80" : "#444")} />
+                    <span style={{ flex: 1, textAlign: "left" }}>{d.name}</span>
+                    <span style={{ fontSize: 10, color: isStarting ? "#a5b4fc" : "#888" }}>
+                      {isStarting
+                        ? (isBooted ? "Starting..." : "Booting...")
+                        : (isBooted ? "Start stream" : "Boot & stream")}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const bootListStyle: CSSProperties = {
+  width: "100%",
+  maxWidth: 360,
+  marginTop: 8,
+  background: "#1c1c1e",
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10,
+  padding: 4,
+  fontFamily: "ui-monospace, monospace",
+  fontSize: 13,
+  color: "#eee",
+  textAlign: "left",
+};
+
 // ─── App ───
 
 function App() {
@@ -643,15 +789,12 @@ function App() {
 
   if (!config) {
     return (
-      <div style={s.page}>
-        <div style={s.empty}>
-          <h1 style={s.emptyTitle}>No serve-sim stream running</h1>
-          <p style={s.emptyHint}>
-            Boot an iOS simulator and start a stream with{" "}
-            <code style={s.code}>bunx serve-sim --detach</code>, then reload.
-          </p>
-        </div>
-      </div>
+      <BootEmptyState
+        devices={devices}
+        loading={devicesLoading}
+        error={devicesError}
+        onRefresh={fetchDevices}
+      />
     );
   }
 
