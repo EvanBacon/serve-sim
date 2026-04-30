@@ -1346,6 +1346,14 @@ function App() {
   // Without this, the reload button flickers while an RN app is still loading.
   const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean; pid?: number } | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(
+    () => (typeof window !== "undefined" ? window.innerWidth : 0),
+  );
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   useEffect(() => {
     const es = new EventSource("/appstate");
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1503,8 +1511,23 @@ function App() {
     }
   }, [fetchDevices]);
 
+  // When the tools panel is open and the viewport has room, shift the
+  // simulator left so it stays centered in the visible (non-panel) area.
+  // PANEL_WIDTH is the panel itself; +24 covers its right offset + a gap.
+  const PANEL_TOTAL = PANEL_WIDTH + 24;
+  const shiftForPanel =
+    panelOpen && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
+      ? PANEL_TOTAL
+      : 0;
+
   return (
-    <div style={s.page}>
+    <div
+      style={{
+        ...s.page,
+        paddingRight: 24 + shiftForPanel,
+        transition: "padding-right 0.25s ease",
+      }}
+    >
       <SimulatorToolbar
         exec={execOnHost}
         deviceUdid={config.device}
@@ -1543,9 +1566,20 @@ function App() {
         </SimulatorToolbar.Actions>
       </SimulatorToolbar>
       <div
+        style={{
+          flex: "1 1 0",
+          minHeight: 0,
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+      <div
         ref={simContainerRef}
         style={{
           maxWidth: frameMaxWidth,
+          maxHeight: "100%",
           width: "100%",
           aspectRatio: `${screenWidth} / ${screenHeight}`,
           position: "relative",
@@ -1578,6 +1612,7 @@ function App() {
             <span style={{ fontSize: 13, fontWeight: 500 }}>Drop media or .ipa</span>
           </div>
         )}
+      </div>
       </div>
 
       {/* Upload toasts */}
