@@ -7,7 +7,7 @@ import { join } from "path";
 declare const __PREVIEW_HTML_B64__: string;
 const STATE_DIR = join(tmpdir(), "serve-sim");
 
-interface ServeSimState {
+export interface ServeSimState {
   pid: number;
   port: number;
   device: string;
@@ -125,6 +125,27 @@ function readServeSimStates(): ServeSimState[] {
   return states;
 }
 
+export function selectServeSimState(
+  states: ServeSimState[],
+  device?: string | null,
+): ServeSimState | null {
+  if (device) {
+    return states.find((state) => state.device === device) ?? null;
+  }
+  return states[0] ?? null;
+}
+
+function queryDevice(rawUrl: string): string | null {
+  const qIndex = rawUrl.indexOf("?");
+  if (qIndex === -1) return null;
+  return new URLSearchParams(rawUrl.slice(qIndex + 1)).get("device");
+}
+
+function endpoint(base: string, path: string, device: string): string {
+  const value = `${base}${path}`;
+  return `${value}?device=${encodeURIComponent(device)}`;
+}
+
 let _html: string | null = null;
 function loadHtml(): string {
   if (!_html) {
@@ -136,6 +157,8 @@ function loadHtml(): string {
 export interface SimMiddlewareOptions {
   /** Base path to serve the preview at. Default: "/.sim" */
   basePath?: string;
+  /** Pin this preview server to a specific simulator UDID. */
+  device?: string;
 }
 
 /**
@@ -153,11 +176,12 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     const rawUrl: string = req.url ?? "";
     const qIndex = rawUrl.indexOf("?");
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
+    const selectedDevice = queryDevice(rawUrl) ?? options?.device ?? null;
 
     // Serve the preview page
     if (url === base || url === base + "/") {
       const states = readServeSimStates();
-      const state = states[0] ?? null;
+      const state = selectServeSimState(states, selectedDevice);
       let html = loadHtml();
 
       if (state) {
@@ -166,7 +190,8 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         // and connects to the WS directly (WS has no CORS).
         const config = JSON.stringify({
           ...state,
-          logsEndpoint: base + "/logs",
+          logsEndpoint: endpoint(base, "/logs", state.device),
+          appStateEndpoint: endpoint(base, "/appstate", state.device),
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
@@ -183,11 +208,12 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     // JSON API: serve-sim state
     if (url === base + "/api") {
       const states = readServeSimStates();
+      const state = selectServeSimState(states, selectedDevice);
       res.writeHead(200, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       });
-      res.end(JSON.stringify(states[0] || null));
+      res.end(JSON.stringify(state || null));
       return;
     }
 
@@ -224,12 +250,13 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     // SSE: simctl log stream
     if (url === base + "/logs") {
       const states = readServeSimStates();
-      if (states.length === 0) {
+      const state = selectServeSimState(states, selectedDevice);
+      if (!state) {
         res.writeHead(404);
         res.end("No serve-sim device");
         return;
       }
-      const udid = states[0].device;
+      const udid = state.device;
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -266,12 +293,13 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     // stays narrow and the client can listen without rate-limit concerns.
     if (url === base + "/appstate") {
       const states = readServeSimStates();
-      if (states.length === 0) {
+      const state = selectServeSimState(states, selectedDevice);
+      if (!state) {
         res.writeHead(404);
         res.end("No serve-sim device");
         return;
       }
-      const udid = states[0].device;
+      const udid = state.device;
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
