@@ -544,6 +544,273 @@ function useMediaDrop({
   };
 }
 
+// ─── Side panel (tools) ───
+
+interface AppDetails {
+  bundleId: string;
+  isReactNative: boolean;
+  pid?: number;
+  displayName?: string;
+  shortVersion?: string;
+  bundleVersion?: string;
+  minOS?: string;
+  executable?: string;
+  appPath?: string;
+  iconDataUrl?: string | null;
+  loading: boolean;
+  error?: string;
+}
+
+function shellEscape(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+async function fetchAppDetails(
+  exec: (cmd: string) => Promise<ExecResult>,
+  udid: string,
+  bundleId: string,
+): Promise<Partial<AppDetails>> {
+  const ctn = await exec(`xcrun simctl get_app_container ${udid} ${shellEscape(bundleId)} app`);
+  if (ctn.exitCode !== 0) {
+    return { error: ctn.stderr.trim() || "App not found on simulator" };
+  }
+  const appPath = ctn.stdout.trim();
+  if (!appPath) return { error: "Empty app path" };
+
+  // Read Info.plist as JSON. plutil -convert json -o - is available on macOS.
+  const plist = await exec(`plutil -convert json -o - ${shellEscape(appPath + "/Info.plist")}`);
+  let info: any = {};
+  if (plist.exitCode === 0) {
+    try { info = JSON.parse(plist.stdout); } catch {}
+  }
+
+  // Try to find app icon. CFBundleIcons → primary → CFBundleIconFiles last entry,
+  // fall back to CFBundleIconFiles / CFBundleIconFile.
+  let iconName: string | undefined;
+  const primary = info?.CFBundleIcons?.CFBundlePrimaryIcon
+    ?? info?.["CFBundleIcons~ipad"]?.CFBundlePrimaryIcon;
+  const iconFiles: string[] | undefined = primary?.CFBundleIconFiles ?? info?.CFBundleIconFiles;
+  if (iconFiles && iconFiles.length > 0) iconName = iconFiles[iconFiles.length - 1];
+  else if (typeof info?.CFBundleIconFile === "string") iconName = info.CFBundleIconFile;
+
+  let iconDataUrl: string | null = null;
+  if (iconName) {
+    // Icons are commonly compiled into Assets.car; loose PNGs may exist as
+    // <icon>@2x.png / @3x.png. Try a handful of candidates.
+    const candidates = [
+      `${iconName}@3x.png`,
+      `${iconName}@2x.png`,
+      `${iconName}.png`,
+      `${iconName}60x60@3x.png`,
+      `${iconName}60x60@2x.png`,
+    ];
+    const find = await exec(
+      `bash -c ${shellEscape(
+        candidates.map((c) => `[ -f ${shellEscape(appPath + "/" + c)} ] && echo ${shellEscape(appPath + "/" + c)} && exit 0`).join("; ") + "; exit 1",
+      )}`,
+    );
+    const iconPath = find.stdout.trim();
+    if (iconPath) {
+      const b64 = await exec(`base64 -i ${shellEscape(iconPath)}`);
+      if (b64.exitCode === 0) {
+        iconDataUrl = `data:image/png;base64,${b64.stdout.replace(/\s+/g, "")}`;
+      }
+    }
+  }
+
+  return {
+    appPath,
+    displayName: info.CFBundleDisplayName ?? info.CFBundleName,
+    shortVersion: info.CFBundleShortVersionString,
+    bundleVersion: info.CFBundleVersion,
+    minOS: info.MinimumOSVersion,
+    executable: info.CFBundleExecutable,
+    iconDataUrl,
+  };
+}
+
+function AppDetectionTool({
+  udid,
+  currentApp,
+}: {
+  udid: string;
+  currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
+}) {
+  const [details, setDetails] = useState<AppDetails | null>(null);
+
+  useEffect(() => {
+    if (!currentApp) { setDetails(null); return; }
+    let cancelled = false;
+    setDetails({
+      bundleId: currentApp.bundleId,
+      isReactNative: currentApp.isReactNative,
+      pid: currentApp.pid,
+      loading: true,
+    });
+    fetchAppDetails(execOnHost, udid, currentApp.bundleId).then((extra) => {
+      if (cancelled) return;
+      setDetails({
+        bundleId: currentApp.bundleId,
+        isReactNative: currentApp.isReactNative,
+        pid: currentApp.pid,
+        loading: false,
+        ...extra,
+      });
+    });
+    return () => { cancelled = true; };
+  }, [udid, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
+
+  if (!details) {
+    return (
+      <div style={panelStyles.empty}>
+        Waiting for an app to come to the foreground…
+      </div>
+    );
+  }
+
+  return (
+    <div style={panelStyles.section}>
+      <div style={panelStyles.appHeader}>
+        {details.iconDataUrl ? (
+          <img src={details.iconDataUrl} style={panelStyles.appIcon} alt="" />
+        ) : (
+          <div style={{ ...panelStyles.appIcon, background: "#2a2a2c" }} />
+        )}
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={panelStyles.appName}>
+            {details.displayName ?? details.bundleId}
+            {details.loading && <span style={panelStyles.spinner}> …</span>}
+          </div>
+          <div style={panelStyles.appBundle} title={details.bundleId}>
+            {details.bundleId}
+          </div>
+        </div>
+      </div>
+
+      {details.error && <div style={panelStyles.error}>{details.error}</div>}
+
+      <dl style={panelStyles.dl}>
+        <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "…" : "—"} />
+        <Row label="Min iOS" value={details.minOS ?? (details.loading ? "…" : "—")} />
+        <Row label="Executable" value={details.executable ?? (details.loading ? "…" : "—")} />
+        <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
+        {details.isReactNative && <Row label="React Native" value="Yes" />}
+        <Row
+          label="App path"
+          value={details.appPath ?? (details.loading ? "…" : "—")}
+          mono
+          action={
+            details.appPath
+              ? {
+                  title: "Reveal in Finder",
+                  onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
+                  icon: (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="7" y1="17" x2="17" y2="7" />
+                      <polyline points="10 7 17 7 17 14" />
+                    </svg>
+                  ),
+                }
+              : undefined
+          }
+        />
+      </dl>
+    </div>
+  );
+}
+
+function Row({
+  label,
+  value,
+  mono,
+  action,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  action?: { title: string; onClick: () => void; icon: ReactNode };
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      style={panelStyles.row}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <dt style={panelStyles.dt}>{label}</dt>
+      <dd
+        style={{
+          ...panelStyles.dd,
+          fontFamily: mono ? "ui-monospace, monospace" : undefined,
+          fontSize: mono ? 11 : 12,
+          position: "relative",
+        }}
+        title={value}
+      >
+        {value}
+        {action && (
+          <div
+            style={{
+              ...panelStyles.rowActionWrap,
+              opacity: hover ? 1 : 0,
+              transform: hover ? "translateX(0)" : "translateX(4px)",
+              pointerEvents: hover ? "auto" : "none",
+            }}
+          >
+            <button
+              type="button"
+              onClick={action.onClick}
+              title={action.title}
+              aria-label={action.title}
+              style={panelStyles.rowAction}
+            >
+              {action.icon}
+            </button>
+          </div>
+        )}
+      </dd>
+    </div>
+  );
+}
+
+function ToolsPanel({
+  open,
+  onClose,
+  udid,
+  currentApp,
+}: {
+  open: boolean;
+  onClose: () => void;
+  udid: string;
+  currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
+}) {
+  return (
+    <aside
+      style={{
+        ...panelStyles.panel,
+        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
+        opacity: open ? 1 : 0,
+        pointerEvents: open ? "auto" : "none",
+      }}
+      aria-hidden={!open}
+    >
+      <header style={panelStyles.header}>
+        <span style={panelStyles.headerTitle}>Tools</span>
+        <button onClick={onClose} style={panelStyles.closeBtn} aria-label="Close panel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </header>
+
+      <div style={panelStyles.body}>
+        <AppDetectionTool udid={udid} currentApp={currentApp} />
+      </div>
+    </aside>
+  );
+}
+
 // ─── App ───
 
 function App() {
@@ -708,13 +975,14 @@ function App() {
   // Debounced commit: during launch/switch, iOS can fire multiple foreground
   // transitions within a few hundred ms (splash → app, scene restore, etc.).
   // Without this, the reload button flickers while an RN app is still loading.
-  const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean } | null>(null);
+  const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean; pid?: number } | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
   useEffect(() => {
     const es = new EventSource("/appstate");
     let timer: ReturnType<typeof setTimeout> | null = null;
     es.onmessage = (e) => {
       try {
-        const next = JSON.parse(e.data);
+        const next = JSON.parse(e.data) as { bundleId: string; pid?: number; isReactNative: boolean };
         if (timer) clearTimeout(timer);
         // Commit RN app instantly (show the button ASAP); delay non-RN so a
         // transient foreground blip doesn't hide it.
@@ -928,6 +1196,30 @@ function App() {
         </div>
       )}
 
+      {/* Tools panel toggle */}
+      <button
+        onClick={() => setPanelOpen((o) => !o)}
+        style={{
+          ...panelStyles.toggle,
+          opacity: panelOpen ? 0 : 1,
+          pointerEvents: panelOpen ? "none" : "auto",
+        }}
+        aria-label="Open tools panel"
+        title="Open tools"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2.5" />
+          <line x1="15" y1="4" x2="15" y2="20" />
+        </svg>
+      </button>
+
+      <ToolsPanel
+        open={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        udid={config.device}
+        currentApp={currentApp}
+      />
+
       {/* Status bar */}
       <div style={s.bar}>
         <span style={{ ...s.live, color: streaming ? "#4ade80" : "#666" }}>
@@ -1069,6 +1361,168 @@ const pickerGroupHeaderStyle: CSSProperties = {
   color: "rgba(255,255,255,0.4)",
   textTransform: "uppercase",
   letterSpacing: "0.08em",
+};
+
+const PANEL_WIDTH = 320;
+
+const panelStyles: Record<string, CSSProperties> = {
+  toggle: {
+    position: "fixed",
+    top: 16,
+    right: 16,
+    width: 30,
+    height: 30,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    borderRadius: 6,
+    color: "rgba(255,255,255,0.6)",
+    cursor: "pointer",
+    transition: "background 0.15s ease, color 0.15s ease",
+    zIndex: 40,
+  },
+  panel: {
+    position: "fixed",
+    top: 12,
+    right: 12,
+    bottom: 12,
+    width: PANEL_WIDTH,
+    background: "rgba(20,20,22,0.92)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 14,
+    color: "#eee",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    transition: "transform 0.25s ease, opacity 0.2s ease",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    fontFamily: "-apple-system, system-ui, sans-serif",
+    zIndex: 35,
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "6px 10px 6px 12px",
+  },
+  headerTitle: { fontSize: 11, fontWeight: 500, color: "rgba(255,255,255,0.55)" },
+  closeBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#aaa",
+    cursor: "pointer",
+    padding: 4,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 4,
+  },
+  body: { padding: 14, overflowY: "auto", flex: 1 },
+  sectionTitle: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: "rgba(255,255,255,0.5)",
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    margin: "0 0 10px",
+  },
+  section: {
+    background: "#1c1c1e",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 10,
+    padding: 12,
+  },
+  empty: {
+    background: "#1c1c1e",
+    border: "1px dashed rgba(255,255,255,0.1)",
+    borderRadius: 10,
+    padding: 16,
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 12,
+    textAlign: "center",
+  },
+  appHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 10 },
+  appIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    flexShrink: 0,
+    objectFit: "cover",
+    border: "1px solid rgba(255,255,255,0.08)",
+  },
+  appName: {
+    fontSize: 14,
+    fontWeight: 600,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  appBundle: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.5)",
+    fontFamily: "ui-monospace, monospace",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  spinner: { color: "rgba(255,255,255,0.4)", fontWeight: 400 },
+  error: {
+    background: "rgba(248,113,113,0.08)",
+    border: "1px solid rgba(248,113,113,0.2)",
+    color: "#fca5a5",
+    fontSize: 11,
+    padding: "6px 8px",
+    borderRadius: 6,
+    marginBottom: 10,
+  },
+  dl: { margin: 0, display: "flex", flexDirection: "column", gap: 6 },
+  row: { display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 },
+  dt: {
+    margin: 0,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.5)",
+    width: 84,
+    flexShrink: 0,
+  },
+  dd: {
+    margin: 0,
+    fontSize: 12,
+    color: "#eee",
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  rowActionWrap: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    paddingLeft: 28,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    background: "linear-gradient(to right, rgba(28,28,30,0) 0%, #1c1c1e 55%)",
+    transition: "opacity 0.15s ease, transform 0.15s ease",
+  },
+  rowAction: {
+    width: 20,
+    height: 20,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    borderRadius: 4,
+    color: "#fff",
+    cursor: "pointer",
+    padding: 0,
+  },
 };
 
 // ─── Mount ───
