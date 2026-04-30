@@ -19,8 +19,19 @@ final class HTTPServer {
 
             let client = self.clientManager.addMJPEGClient()
 
+            // WebKit (Safari/iOS Safari/WKWebView) refuses to expose a
+            // multipart/x-mixed-replace response body to fetch()'s
+            // ReadableStream — reader.read() rejects with "Load failed" on
+            // the first chunk. Consumers that read the stream via fetch()
+            // (rather than <img>) can opt in to a plain byte stream by
+            // requesting ?raw=1; the JPEG frames on the wire are unchanged.
+            let raw = request.queryParams.contains { $0.0 == "raw" && $0.1 == "1" }
+            let contentType = raw
+                ? "application/octet-stream"
+                : "multipart/x-mixed-replace; boundary=frame"
+
             return .raw(200, "OK", [
-                "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+                "Content-Type": contentType,
                 "Cache-Control": "no-cache, no-store",
                 "Connection": "keep-alive",
                 "Access-Control-Allow-Origin": "*",

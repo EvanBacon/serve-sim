@@ -40,10 +40,16 @@ function useMjpegStream(streamUrl: string | null) {
       })
       .catch(() => {});
 
-    // Read the MJPEG stream and extract JPEG frames
+    // Read the MJPEG stream and extract JPEG frames.
+    // ?raw=1 tells the server to use Content-Type application/octet-stream
+    // instead of multipart/x-mixed-replace; WebKit refuses to expose
+    // multipart bodies to fetch()'s ReadableStream.
+    const fetchUrlObj = new URL(streamUrl);
+    fetchUrlObj.searchParams.set("raw", "1");
+    const fetchUrl = fetchUrlObj.toString();
     (async () => {
       try {
-        const res = await fetch(streamUrl, { signal: controller.signal });
+        const res = await fetch(fetchUrl, { signal: controller.signal });
         const reader = res.body?.getReader();
         if (!reader) return;
 
