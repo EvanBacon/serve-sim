@@ -3,10 +3,15 @@
  * Unified serve-sim build.
  *
  * Produces, all minified and with no runtime deps on workspace packages:
- *   dist/serve-sim.js      ESM bin (bun target) referenced by package.json#bin
+ *   dist/serve-sim.js      ESM bin (node target) referenced by package.json#bin
  *   dist/serve-sim         Compiled single-file executable (bun --compile)
  *   dist/middleware.js    Public subpath export "serve-sim/middleware" (ESM)
  *   dist/middleware.cjs   Thin CJS wrapper for the same
+ *
+ * The bin and middleware bundles target `node` so users without `bun` on
+ * their PATH can still run `npx serve-sim` / mount the Connect middleware.
+ * Bun-native APIs (Bun.serve, Bun.sleepSync) are detected at runtime via
+ * `src/runtime.ts` and used when available, with Node stdlib fallbacks.
  *
  * The preview HTML (bundled client.tsx + Preact + serve-sim-client, base64
  * encoded) is injected into every artifact that could need to serve the UI
@@ -85,7 +90,7 @@ const PREVIEW_DEFINE = { __PREVIEW_HTML_B64__: JSON.stringify(htmlB64) };
 
 const mwResult = await Bun.build({
   entrypoints: [resolve(root, "src/middleware.ts")],
-  target: "bun",
+  target: "node",
   format: "esm",
   minify: true,
   outdir: distDir,
@@ -110,7 +115,7 @@ console.log("dist/middleware.cjs (wrapper)");
 
 const binJsResult = await Bun.build({
   entrypoints: [resolve(root, "src/index.ts")],
-  target: "bun",
+  target: "node",
   format: "esm",
   minify: true,
   outdir: distDir,
@@ -123,8 +128,17 @@ if (!binJsResult.success) {
   for (const log of binJsResult.logs) console.error(log);
   process.exit(1);
 }
-const binJsSize = (await binJsResult.outputs[0].text()).length;
-console.log(`dist/serve-sim.js   ${kb(binJsSize)}`);
+
+// Replace the source `#!/usr/bin/env bun` shebang with `node` so the
+// published `dist/serve-sim.js` runs under plain Node. Bun ignores shebangs
+// when invoked as `bun script.js`, so this doesn't break Bun users either.
+const binJsPath = resolve(distDir, "serve-sim.js");
+const binJsRaw = await binJsResult.outputs[0].text();
+const binJsPatched = binJsRaw.startsWith("#!")
+  ? binJsRaw.replace(/^#![^\n]*\n/, "#!/usr/bin/env node\n")
+  : `#!/usr/bin/env node\n${binJsRaw}`;
+writeFileSync(binJsPath, binJsPatched);
+console.log(`dist/serve-sim.js   ${kb(binJsPatched.length)}`);
 
 // ─── 5. Compiled single-file executable ──────────────────────────────────
 // Bun.build doesn't expose --compile yet, so shell out. The define arg carries

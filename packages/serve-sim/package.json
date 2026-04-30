@@ -20,6 +20,9 @@
   "bin": {
     "serve-sim": "dist/serve-sim.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "files": [
     "dist/serve-sim.js",
     "dist/middleware.js",
