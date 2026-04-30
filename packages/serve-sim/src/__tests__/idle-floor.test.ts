@@ -194,7 +194,7 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
 
     expect(firstFrameAt).not.toBeNull();
     expect(firstFrameAt).toBeLessThanOrEqual(FIRST_FRAME_BUDGET_MS);
-  });
+  }, FIRST_FRAME_BUDGET_MS + 5000);
 
   test(`idle floor emits >= ${MIN_FRAMES_IN_IDLE_WINDOW} frames in ${IDLE_WINDOW_MS}ms`, async () => {
     const t0 = Date.now();
@@ -235,5 +235,5 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
     // Every frame should have a reasonable size — serve-sim emits a real
     // JPEG, not an empty buffer.
     for (const s of sizes) expect(s).toBeGreaterThan(1000);
-  });
+  }, IDLE_WINDOW_MS + 5000);
 });
