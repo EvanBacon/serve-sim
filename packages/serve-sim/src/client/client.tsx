@@ -38,12 +38,13 @@ function useMjpegStream(streamUrl: string | null) {
       .then((c: { width: number; height: number }) => {
         if (c.width > 0 && c.height > 0) setConfig(c);
       })
-      .catch(() => {});
+      .catch(() => { });
 
-    // Read the MJPEG stream and extract JPEG frames
+    const fetchUrlObj = new URL(streamUrl, window.location.href);
+    const fetchUrl = fetchUrlObj.toString();
     (async () => {
       try {
-        const res = await fetch(streamUrl, { signal: controller.signal });
+        const res = await fetch(fetchUrl, { signal: controller.signal });
         const reader = res.body?.getReader();
         if (!reader) return;
 
@@ -152,6 +153,8 @@ declare global {
       port: number;
       device: string;
       logsEndpoint?: string;
+      /** Same-origin reverse-proxied preview (defer auxiliary SSE so MJPEG + WS open first). */
+      proxiedPreview?: boolean;
     };
   }
 }
@@ -433,7 +436,7 @@ async function uploadDroppedFile(
       throw new Error(result.stderr || `${label} failed (exit ${result.exitCode})`);
     }
   } finally {
-    exec(`bash -c 'rm -f ${tmpPath}'`).catch(() => {});
+    exec(`bash -c 'rm -f ${tmpPath}'`).catch(() => { });
   }
 }
 
@@ -588,7 +591,7 @@ function BootEmptyState({
             window.location.reload();
             return;
           }
-        } catch {}
+        } catch { }
         await new Promise((res) => setTimeout(res, 400));
       }
       throw new Error("serve-sim started but no stream state appeared");
@@ -717,11 +720,14 @@ function App() {
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
-  // Stream simctl logs into the browser console with colors + grouping
+  // Stream simctl logs into the browser console with colors + grouping.
+  // Tunnel mode: defer opening this SSE so Safari (and similar browsers) can
+  // open the MJPEG fetch + WebSocket first — HTTP/1.1 allows only ~6 parallel
+  // connections per host; logs + appstate + dev reload would starve /stream.mjpeg.
   useEffect(() => {
     if (!config?.logsEndpoint) return;
-    const es = new EventSource(config.logsEndpoint);
-
+    const delay = config.proxiedPreview ? 750 : 0;
+    let es: EventSource | null = null;
     const procColors = new Map<string, string>();
     const palette = [
       "#8be9fd", "#50fa7b", "#ffb86c", "#ff79c6", "#bd93f9",
@@ -742,50 +748,55 @@ function App() {
     let lastProc = "";
     let groupOpen = false;
 
-    es.onmessage = (event) => {
-      try {
-        const entry = JSON.parse(event.data);
-        const proc = entry.processImagePath?.split("/").pop() ?? entry.senderImagePath?.split("/").pop() ?? "";
-        const subsystem = entry.subsystem ?? "";
-        const category = entry.category ?? "";
-        const msg = entry.eventMessage ?? "";
-        if (!msg) return;
+    const wireEs = () => {
+      es = new EventSource(config.logsEndpoint);
+      es.onmessage = (event) => {
+        try {
+          const entry = JSON.parse(event.data);
+          const proc = entry.processImagePath?.split("/").pop() ?? entry.senderImagePath?.split("/").pop() ?? "";
+          const subsystem = entry.subsystem ?? "";
+          const category = entry.category ?? "";
+          const msg = entry.eventMessage ?? "";
+          if (!msg) return;
 
-        if (proc !== lastProc) {
-          if (groupOpen) console.groupEnd();
-          const color = colorFor(proc);
-          console.groupCollapsed(
-            `%c${proc}${subsystem ? ` %c${subsystem}${category ? ":" + category : ""}` : ""}`,
-            `color:${color};font-weight:bold`,
-            ...(subsystem ? ["color:#888;font-weight:normal"] : []),
-          );
-          groupOpen = true;
-          lastProc = proc;
-        }
+          if (proc !== lastProc) {
+            if (groupOpen) console.groupEnd();
+            const color = colorFor(proc);
+            console.groupCollapsed(
+              `%c${proc}${subsystem ? ` %c${subsystem}${category ? ":" + category : ""}` : ""}`,
+              `color:${color};font-weight:bold`,
+              ...(subsystem ? ["color:#888;font-weight:normal"] : []),
+            );
+            groupOpen = true;
+            lastProc = proc;
+          }
 
-        const level = (entry.messageType ?? "").toLowerCase();
-        const tag = subsystem && proc === lastProc
-          ? `%c${category || subsystem}%c `
-          : "";
-        const tagStyles = tag
-          ? ["color:#888;font-style:italic", "color:inherit"]
-          : [];
+          const level = (entry.messageType ?? "").toLowerCase();
+          const tag = subsystem && proc === lastProc
+            ? `%c${category || subsystem}%c `
+            : "";
+          const tagStyles = tag
+            ? ["color:#888;font-style:italic", "color:inherit"]
+            : [];
 
-        if (level === "fault" || level === "error") {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:#ff5555");
-        } else if (level === "debug") {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:#6272a4");
-        } else {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:inherit");
-        }
-      } catch {}
+          if (level === "fault" || level === "error") {
+            console.log(`${tag}%c${msg}`, ...tagStyles, "color:#ff5555");
+          } else if (level === "debug") {
+            console.log(`${tag}%c${msg}`, ...tagStyles, "color:#6272a4");
+          } else {
+            console.log(`${tag}%c${msg}`, ...tagStyles, "color:inherit");
+          }
+        } catch { }
+      };
     };
+    const timer = delay ? window.setTimeout(wireEs, delay) : (wireEs(), 0);
 
     return () => {
+      if (delay) window.clearTimeout(timer);
       if (groupOpen) console.groupEnd();
-      es.close();
+      es?.close();
     };
-  }, [config?.logsEndpoint]);
+  }, [config?.logsEndpoint, !!config?.proxiedPreview]);
 
   if (!config) {
     return (
@@ -813,8 +824,8 @@ function App() {
   const imgBorderRadius = screenBorderRadius(deviceType);
   const frameMaxWidth = deviceType === "vision" ? 580
     : deviceType === "ipad" ? 400
-    : deviceType === "watch" ? 200
-    : 320;
+      : deviceType === "watch" ? 200
+        : 320;
 
   // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
   const mjpeg = useMjpegStream(config.streamUrl);
@@ -853,20 +864,31 @@ function App() {
   // Without this, the reload button flickers while an RN app is still loading.
   const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean } | null>(null);
   useEffect(() => {
-    const es = new EventSource("/appstate");
+    const openDelay = config.proxiedPreview ? 750 : 0;
+    let es: EventSource | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    es.onmessage = (e) => {
-      try {
-        const next = JSON.parse(e.data);
-        if (timer) clearTimeout(timer);
-        // Commit RN app instantly (show the button ASAP); delay non-RN so a
-        // transient foreground blip doesn't hide it.
-        const delay = next?.isReactNative ? 0 : 600;
-        timer = setTimeout(() => setCurrentApp(next), delay);
-      } catch {}
+    const wireAppstate = () => {
+      es = new EventSource("/appstate");
+      es.onmessage = (e) => {
+        try {
+          const next = JSON.parse(e.data);
+          if (timer) clearTimeout(timer);
+          // Commit RN app instantly (show the button ASAP); delay non-RN so a
+          // transient foreground blip doesn't hide it.
+          const delay = next?.isReactNative ? 0 : 600;
+          timer = setTimeout(() => setCurrentApp(next), delay);
+        } catch { }
+      };
     };
-    return () => { if (timer) clearTimeout(timer); es.close(); };
-  }, []);
+    const openTimer = openDelay
+      ? window.setTimeout(wireAppstate, openDelay)
+      : (wireAppstate(), 0);
+    return () => {
+      if (openDelay) window.clearTimeout(openTimer);
+      if (timer) clearTimeout(timer);
+      es?.close();
+    };
+  }, [!!config.proxiedPreview]);
 
   // Cmd+R to reload the RN/Expo bundle. RCTKeyCommands on iOS listens for
   // this combo and triggers DevSupport reload. We hold Meta, tap R, release.
@@ -934,7 +956,7 @@ function App() {
           execOnHost(`xcrun simctl ui ${config.device} appearance`).then((r) => {
             const next = r.stdout.trim() === "dark" ? "light" : "dark";
             return execOnHost(`xcrun simctl ui ${config.device} appearance ${next}`);
-          }).catch(() => {});
+          }).catch(() => { });
         }
         return;
       }

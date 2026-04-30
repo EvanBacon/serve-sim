@@ -6,9 +6,16 @@
  * Run: bun --watch dev.ts
  */
 import { readdirSync, readFileSync, existsSync, unlinkSync, watch } from "fs";
-import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
+import {
+  execSync,
+  spawn,
+  exec,
+  execFile,
+  type ChildProcess,
+} from "child_process";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { previewPublicState } from "./src/middleware";
 
 const RN_BUNDLE_IDS = new Set<string>([
   "host.exp.Exponent",
@@ -24,23 +31,59 @@ const RN_MARKERS = [
 function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
   if (RN_BUNDLE_IDS.has(bundleId)) return Promise.resolve(true);
   return new Promise((r) => {
-    execFile("xcrun", ["simctl", "get_app_container", udid, bundleId, "app"],
+    execFile(
+      "xcrun",
+      ["simctl", "get_app_container", udid, bundleId, "app"],
       { timeout: 2000 },
       (err, stdout) => {
         if (err) return r(false);
         const appPath = stdout.trim();
         if (!appPath) return r(false);
-        for (const m of RN_MARKERS) if (existsSync(join(appPath, m))) return r(true);
+        for (const m of RN_MARKERS)
+          if (existsSync(join(appPath, m))) return r(true);
         r(false);
-      });
+      },
+    );
   });
 }
-const NON_UI_BUNDLE_RE = /(WidgetRenderer|ExtensionHost|\.extension(\.|$)|Service|PlaceholderApp|InCallService|CallUI|InCallUI|com\.apple\.Preferences\.Cellular|com\.apple\.purplebuddy|com\.apple\.chrono|com\.apple\.shuttle|com\.apple\.usernotificationsui)/i;
+const NON_UI_BUNDLE_RE =
+  /(WidgetRenderer|ExtensionHost|\.extension(\.|$)|Service|PlaceholderApp|InCallService|CallUI|InCallUI|com\.apple\.Preferences\.Cellular|com\.apple\.purplebuddy|com\.apple\.chrono|com\.apple\.shuttle|com\.apple\.usernotificationsui)/i;
 function isUserFacingBundle(bundleId: string): boolean {
   return !NON_UI_BUNDLE_RE.test(bundleId);
 }
 
-const PORT = Number(process.env.PORT) || 3200;
+const envPortRaw = process.env.PORT;
+const preferredPort =
+  envPortRaw !== undefined && envPortRaw !== ""
+    ? Number(envPortRaw) || 3200
+    : 3200;
+/** When set, bind only `preferredPort` and exit if it is in use. */
+const portPinned = envPortRaw !== undefined && envPortRaw !== "";
+
+/** Same preview URL overrides as `serve-sim -H … --tls` (scan full argv for `bun run dev …`). */
+function parsePreviewCli(): { hostname?: string; tls: boolean } {
+  let hostname: string | undefined;
+  let tls = false;
+  for (let i = 2; i < process.argv.length; i++) {
+    const arg = process.argv[i]!;
+    if (arg === "--hostname" || arg === "-H") {
+      hostname = process.argv[++i] ?? "";
+      continue;
+    }
+    if (arg === "--tls") tls = true;
+  }
+  const h = hostname?.trim();
+  return { hostname: h || undefined, tls };
+}
+
+const previewCli = parsePreviewCli();
+if (previewCli.tls && !previewCli.hostname) {
+  console.error(
+    "[serve-sim dev] --tls requires --hostname <host> (public host for stream URLs).",
+  );
+  process.exit(1);
+}
+
 const STATE_DIR = join(tmpdir(), "serve-sim");
 const CLIENT_DIR = resolve(import.meta.dir, "src/client");
 const CLIENT_ENTRY = resolve(CLIENT_DIR, "client.tsx");
@@ -50,7 +93,10 @@ const CLIENT_ENTRY = resolve(CLIENT_DIR, "client.tsx");
 // Cache simctl's booted-device set briefly (1.5s). dev.ts calls
 // readServeSimStates() on every request, so uncached we'd invoke simctl
 // per page view / per /logs / per /appstate.
-let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
+let bootedSnapshot: { at: number; booted: Set<string> | null } = {
+  at: 0,
+  booted: null,
+};
 function getBootedUdids(): Set<string> | null {
   const now = Date.now();
   if (bootedSnapshot.booted && now - bootedSnapshot.at < 1500) {
@@ -96,7 +142,9 @@ function readServeSimStates() {
       try {
         process.kill(state.pid, 0);
       } catch {
-        try { unlinkSync(path); } catch {}
+        try {
+          unlinkSync(path);
+        } catch {}
         continue;
       }
       // Helper alive but bound to a shutdown simulator — the Swift helper
@@ -106,8 +154,12 @@ function readServeSimStates() {
         console.error(
           `\x1b[33m[serve-sim] Recycling stale helper pid ${state.pid} — device ${state.device} is no longer booted.\x1b[0m`,
         );
-        try { process.kill(state.pid, "SIGTERM"); } catch {}
-        try { unlinkSync(path); } catch {}
+        try {
+          process.kill(state.pid, "SIGTERM");
+        } catch {}
+        try {
+          unlinkSync(path);
+        } catch {}
         continue;
       }
       states.push(state);
@@ -134,10 +186,15 @@ async function buildClient() {
     },
   });
   if (result.success) {
-    clientJs = (await result.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
+    clientJs = (await result.outputs[0].text()).replace(
+      /<\/script>/gi,
+      "<\\/script>",
+    );
     clientError = "";
     const ms = (performance.now() - start).toFixed(0);
-    console.log(`\x1b[32m✓\x1b[0m Bundled client.tsx (${(clientJs.length / 1024).toFixed(0)} KB) in ${ms}ms`);
+    console.log(
+      `\x1b[32m✓\x1b[0m Bundled client.tsx (${(clientJs.length / 1024).toFixed(0)} KB) in ${ms}ms`,
+    );
   } else {
     clientError = result.logs.map((l) => String(l)).join("\n");
     console.error("\x1b[31m✗\x1b[0m Build failed:\n" + clientError);
@@ -167,8 +224,15 @@ watch(CLIENT_DIR, { recursive: true }, (_event, filename) => {
 function buildHtml(): string {
   const states = readServeSimStates();
   const state = states[0] ?? null;
-  const configScript = state
-    ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({ ...state, logsEndpoint: "/logs" })}</script>`
+  const previewState =
+    state && previewCli.hostname ? previewPublicState(state, "") : state;
+
+  const configScript = previewState
+    ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({
+        ...previewState,
+        logsEndpoint: "/logs",
+        ...(previewCli.hostname ? { proxiedPreview: true } : {}),
+      })}</script>`
     : "";
 
   return `<!doctype html>
@@ -182,9 +246,12 @@ function buildHtml(): string {
 ${configScript}
 <script type="module">${clientJs}</script>
 <script>
-// Auto-reload on rebuild
-const es = new EventSource("/__dev/reload");
-es.onmessage = (e) => { if (e.data === "reload") location.reload(); };
+// Auto-reload on rebuild (delay when tunneling so Safari can open MJPEG + ws first — ~6 conn/host)
+const __devEsDelay = ${previewCli.hostname ? 900 : 0};
+setTimeout(() => {
+  const es = new EventSource("/__dev/reload");
+  es.onmessage = (e) => { if (e.data === "reload") location.reload(); };
+}, __devEsDelay);
 </script>
 ${clientError ? `<pre style="position:fixed;inset:0;z-index:9999;background:#1a0000;color:#ff6b6b;padding:24px;margin:0;font-size:13px;overflow:auto;white-space:pre-wrap">${clientError.replace(/</g, "&lt;")}</pre>` : ""}
 </body></html>`;
@@ -192,169 +259,314 @@ ${clientError ? `<pre style="position:fixed;inset:0;z-index:9999;background:#1a0
 
 // ─── Server ───
 
-Bun.serve({
-  port: PORT,
-  idleTimeout: 255, // SSE / MJPEG streams are long-lived
-  fetch(req) {
-    const url = new URL(req.url);
+const devTunnelWs = {
+  open(ws: import("bun").ServerWebSocket<{ backendPort: number }>) {
+    const port = ws.data.backendPort;
+    const backend = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    backend.binaryType = "arraybuffer";
+    (ws as unknown as { __b: WebSocket }).__b = backend;
+    backend.addEventListener("message", (ev) => {
+      ws.send(ev.data as ArrayBuffer);
+    });
+    backend.addEventListener("close", () => ws.close());
+    backend.addEventListener("error", () => ws.close());
+  },
+  message(
+    ws: import("bun").ServerWebSocket<{ backendPort: number }>,
+    message: ArrayBuffer | Buffer,
+  ) {
+    (ws as unknown as { __b?: WebSocket }).__b?.send(message);
+  },
+  close(ws: import("bun").ServerWebSocket<{ backendPort: number }>) {
+    try {
+      (ws as unknown as { __b?: WebSocket }).__b?.close();
+    } catch {}
+  },
+};
 
-    // Dev reload SSE
-    if (url.pathname === "/__dev/reload") {
-      const stream = new ReadableStream({
-        start(controller) {
-          reloadClients.add(controller);
-          controller.enqueue(":\n\n");
-        },
-        cancel(controller) {
-          reloadClients.delete(controller);
-        },
-      });
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    }
+const devFetch = (
+  req: Request,
+  server?: import("bun").Server<{ backendPort: number }>,
+) => {
+  const url = new URL(req.url);
 
-    // Serve-sim state API
-    if (url.pathname === "/api") {
+  // Tunnel mode: same-origin stream + config + ws proxied to the Swift helper
+  if (previewCli.hostname) {
+    if (
+      req.method === "GET" &&
+      (url.pathname === "/stream.mjpeg" || url.pathname === "/config")
+    ) {
       const states = readServeSimStates();
-      return Response.json(states[0] ?? null, {
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
-
-    // POST /exec — run a shell command and return stdout/stderr/exitCode.
-    if (url.pathname === "/exec" && req.method === "POST") {
-      return req.json().then((body: any) => {
-        const command: string = body?.command ?? "";
-        if (!command) {
-          return Response.json({ stdout: "", stderr: "Missing command", exitCode: 1 }, { status: 400 });
-        }
-        return new Promise<Response>((resolve) => {
-          exec(command, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-            resolve(Response.json({
-              stdout: stdout.toString(),
-              stderr: stderr.toString(),
-              exitCode: err ? (err as any).code ?? 1 : 0,
-            }));
-          });
-        });
-      });
-    }
-
-    // SSE logs
-    if (url.pathname === "/logs") {
-      const states = readServeSimStates();
-      if (states.length === 0) {
-        return new Response("No serve-sim device", { status: 404 });
-      }
-      const udid = states[0].device;
-      const stream = new ReadableStream({
-        start(controller) {
-          const child: ChildProcess = spawn("xcrun", [
-            "simctl", "spawn", udid, "log", "stream",
-            "--style", "ndjson", "--level", "info",
-          ], { stdio: ["ignore", "pipe", "ignore"] });
-
-          let buf = "";
-          child.stdout!.on("data", (chunk: Buffer) => {
-            buf += chunk.toString();
-            let nl: number;
-            while ((nl = buf.indexOf("\n")) !== -1) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (line) {
-                try {
-                  controller.enqueue(`data: ${line}\n\n`);
-                } catch {
-                  child.kill();
-                }
-              }
-            }
-          });
-          child.on("close", () => {
-            try { controller.close(); } catch {}
-          });
-          // Clean up when client disconnects
-          req.signal.addEventListener("abort", () => child.kill());
-        },
-      });
-      return new Response(stream, {
+      const st = states[0];
+      if (!st) return new Response("No serve-sim device", { status: 404 });
+      return fetch(`http://127.0.0.1:${st.port}${url.pathname}${url.search}`, {
+        signal: req.signal,
+        cache: "no-store",
         headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
+          Accept: req.headers.get("Accept") ?? "*/*",
         },
       });
     }
-
-    // SSE foreground-app changes (filtered in the CLI; browser just listens).
-    if (url.pathname === "/appstate") {
+    if (url.pathname === "/ws" && server) {
       const states = readServeSimStates();
-      if (states.length === 0) {
-        return new Response("No serve-sim device", { status: 404 });
-      }
-      const udid = states[0].device;
-      const stream = new ReadableStream({
-        start(controller) {
-          const child: ChildProcess = spawn("xcrun", [
-            "simctl", "spawn", udid, "log", "stream",
-            "--style", "ndjson", "--level", "info",
-            "--predicate",
-            'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
-          ], { stdio: ["ignore", "pipe", "ignore"] });
-          const FG_RE = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/;
-          let lastBundle = "";
-          let buf = "";
-          child.stdout!.on("data", (chunk: Buffer) => {
-            buf += chunk.toString();
-            let nl: number;
-            while ((nl = buf.indexOf("\n")) !== -1) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (!line) continue;
-              let msg: string;
-              try { msg = JSON.parse(line).eventMessage ?? ""; } catch { continue; }
-              const m = FG_RE.exec(msg);
-              if (!m) continue;
-              const bundleId = m[1]!;
-              const pid = parseInt(m[2]!, 10);
-              if (!isUserFacingBundle(bundleId)) continue;
-              if (bundleId === lastBundle) continue;
-              lastBundle = bundleId;
-              detectReactNative(udid, bundleId).then((isReactNative) => {
-                try {
-                  controller.enqueue(`data: ${JSON.stringify({ bundleId, pid, isReactNative })}\n\n`);
-                } catch {
-                  child.kill();
-                }
-              });
-            }
-          });
-          child.on("close", () => { try { controller.close(); } catch {} });
-          req.signal.addEventListener("abort", () => child.kill());
-        },
-      });
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
+      const st = states[0];
+      if (!st) return new Response("No serve-sim device", { status: 404 });
+      const upgraded = server.upgrade(req, { data: { backendPort: st.port } });
+      if (upgraded) return undefined as unknown as Response;
     }
+  }
 
-    // Serve the HTML page (fresh on every request — picks up state + rebuild)
-    return new Response(buildHtml(), {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store",
+  // Dev reload SSE
+  if (url.pathname === "/__dev/reload") {
+    const stream = new ReadableStream({
+      start(controller) {
+        reloadClients.add(controller);
+        controller.enqueue(":\n\n");
+      },
+      cancel(controller) {
+        reloadClients.delete(controller);
       },
     });
-  },
-});
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  }
 
-console.log(`\n  \x1b[36mserve-sim dev\x1b[0m  http://localhost:${PORT}\n`);
+  // Serve-sim state API
+  if (url.pathname === "/api") {
+    const states = readServeSimStates();
+    return Response.json(states[0] ?? null, {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+
+  // POST /exec — run a shell command and return stdout/stderr/exitCode.
+  if (url.pathname === "/exec" && req.method === "POST") {
+    return req.json().then((body: any) => {
+      const command: string = body?.command ?? "";
+      if (!command) {
+        return Response.json(
+          { stdout: "", stderr: "Missing command", exitCode: 1 },
+          { status: 400 },
+        );
+      }
+      return new Promise<Response>((resolve) => {
+        exec(
+          command,
+          { maxBuffer: 16 * 1024 * 1024 },
+          (err, stdout, stderr) => {
+            resolve(
+              Response.json({
+                stdout: stdout.toString(),
+                stderr: stderr.toString(),
+                exitCode: err ? ((err as any).code ?? 1) : 0,
+              }),
+            );
+          },
+        );
+      });
+    });
+  }
+
+  // SSE logs
+  if (url.pathname === "/logs") {
+    const states = readServeSimStates();
+    if (states.length === 0) {
+      return new Response("No serve-sim device", { status: 404 });
+    }
+    const udid = states[0].device;
+    const stream = new ReadableStream({
+      start(controller) {
+        const child: ChildProcess = spawn(
+          "xcrun",
+          [
+            "simctl",
+            "spawn",
+            udid,
+            "log",
+            "stream",
+            "--style",
+            "ndjson",
+            "--level",
+            "info",
+          ],
+          { stdio: ["ignore", "pipe", "ignore"] },
+        );
+
+        let buf = "";
+        child.stdout!.on("data", (chunk: Buffer) => {
+          buf += chunk.toString();
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) !== -1) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (line) {
+              try {
+                controller.enqueue(`data: ${line}\n\n`);
+              } catch {
+                child.kill();
+              }
+            }
+          }
+        });
+        child.on("close", () => {
+          try {
+            controller.close();
+          } catch {}
+        });
+        // Clean up when client disconnects
+        req.signal.addEventListener("abort", () => child.kill());
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  }
+
+  // SSE foreground-app changes (filtered in the CLI; browser just listens).
+  if (url.pathname === "/appstate") {
+    const states = readServeSimStates();
+    if (states.length === 0) {
+      return new Response("No serve-sim device", { status: 404 });
+    }
+    const udid = states[0].device;
+    const stream = new ReadableStream({
+      start(controller) {
+        const child: ChildProcess = spawn(
+          "xcrun",
+          [
+            "simctl",
+            "spawn",
+            udid,
+            "log",
+            "stream",
+            "--style",
+            "ndjson",
+            "--level",
+            "info",
+            "--predicate",
+            'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
+          ],
+          { stdio: ["ignore", "pipe", "ignore"] },
+        );
+        const FG_RE =
+          /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/;
+        let lastBundle = "";
+        let buf = "";
+        child.stdout!.on("data", (chunk: Buffer) => {
+          buf += chunk.toString();
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) !== -1) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line) continue;
+            let msg: string;
+            try {
+              msg = JSON.parse(line).eventMessage ?? "";
+            } catch {
+              continue;
+            }
+            const m = FG_RE.exec(msg);
+            if (!m) continue;
+            const bundleId = m[1]!;
+            const pid = parseInt(m[2]!, 10);
+            if (!isUserFacingBundle(bundleId)) continue;
+            if (bundleId === lastBundle) continue;
+            lastBundle = bundleId;
+            detectReactNative(udid, bundleId).then((isReactNative) => {
+              try {
+                controller.enqueue(
+                  `data: ${JSON.stringify({ bundleId, pid, isReactNative })}\n\n`,
+                );
+              } catch {
+                child.kill();
+              }
+            });
+          }
+        });
+        child.on("close", () => {
+          try {
+            controller.close();
+          } catch {}
+        });
+        req.signal.addEventListener("abort", () => child.kill());
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  }
+
+  // Serve the HTML page (fresh on every request — picks up state + rebuild)
+  return new Response(buildHtml(), {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+};
+
+const maxScan = portPinned ? 1 : 50;
+let server: ReturnType<typeof Bun.serve> | undefined;
+let lastErr: unknown;
+for (let i = 0; i < maxScan; i++) {
+  const p = preferredPort + i;
+  try {
+    const devServeOpts: Record<string, unknown> = {
+      port: p,
+      idleTimeout: 255, // SSE / MJPEG streams are long-lived
+      fetch: devFetch,
+    };
+    if (previewCli.hostname) devServeOpts.websocket = devTunnelWs;
+    server = Bun.serve(devServeOpts as Parameters<typeof Bun.serve>[0]);
+    break;
+  } catch (err: any) {
+    lastErr = err;
+    if (err?.code !== "EADDRINUSE") throw err;
+    if (portPinned) break;
+  }
+}
+if (!server) {
+  if ((lastErr as any)?.code === "EADDRINUSE") {
+    if (portPinned) {
+      console.error(
+        `[serve-sim dev] Port ${preferredPort} is already in use. Set PORT to another value or stop the other process.`,
+      );
+    } else {
+      console.error(
+        `[serve-sim dev] No free port in range ${preferredPort}-${preferredPort + maxScan - 1}.`,
+      );
+    }
+  } else {
+    console.error(
+      `[serve-sim dev] Failed to start server: ${(lastErr as any)?.message ?? lastErr}`,
+    );
+  }
+  process.exit(1);
+}
+
+const boundPort = server.port;
+if (!portPinned && boundPort !== preferredPort) {
+  console.log(
+    `\x1b[33m[serve-sim dev]\x1b[0m Port ${preferredPort} was busy; listening on ${boundPort} instead.\n`,
+  );
+}
+
+const previewHint = previewCli.hostname
+  ? `  \x1b[33mtunnel\x1b[0m  /stream.mjpeg /config /ws → helper (expose this port through your tunnel)\n`
+  : "";
+console.log(
+  `\n  \x1b[36mserve-sim dev\x1b[0m  http://localhost:${boundPort}\n${previewHint}`,
+);

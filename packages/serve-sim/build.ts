@@ -13,11 +13,27 @@
  * via the __PREVIEW_HTML_B64__ build-time define.
  */
 import { resolve, dirname } from "path";
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "fs";
 import { spawnSync } from "child_process";
 
 const root = import.meta.dir;
 const distDir = resolve(root, "dist");
+
+/** Resolve a hoisted workspace dependency (preact may live in repo root `node_modules`). */
+function resolvePackageDir(packageName: string, startDir: string): string {
+  let dir = startDir;
+  for (;;) {
+    const candidate = resolve(dir, "node_modules", packageName);
+    if (existsSync(resolve(candidate, "package.json"))) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new Error(
+        `Could not find "${packageName}" under node_modules (walked up from ${startDir}). Run install from the repo root.`,
+      );
+    }
+    dir = parent;
+  }
+}
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
 
@@ -27,23 +43,36 @@ function kb(n: number): string {
 
 // ─── 1. Bundle the browser client (React aliased to Preact) ───────────────
 
+const preactRoot = resolvePackageDir("preact", root);
+const preactCompat = resolve(preactRoot, "compat/dist/compat.module.js");
+const preactCompatClient = resolve(preactRoot, "compat/client.mjs");
+const preactJsxRuntime = resolve(
+  preactRoot,
+  "jsx-runtime/dist/jsxRuntime.module.js",
+);
+
 const clientResult = await Bun.build({
   entrypoints: [resolve(root, "src/client/client.tsx")],
   minify: true,
   target: "browser",
   format: "esm",
   define: { "process.env.NODE_ENV": '"production"' },
-  plugins: [{
-    name: "preact-alias",
-    setup(build) {
-      const preactCompat = resolve(root, "node_modules/preact/compat/dist/compat.module.js");
-      const preactCompatClient = resolve(root, "node_modules/preact/compat/client.mjs");
-      const preactJsxRuntime = resolve(root, "node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js");
-      build.onResolve({ filter: /^react-dom\/client$/ }, () => ({ path: preactCompatClient }));
-      build.onResolve({ filter: /^react(-dom)?$/ }, () => ({ path: preactCompat }));
-      build.onResolve({ filter: /^react\/jsx(-dev)?-runtime$/ }, () => ({ path: preactJsxRuntime }));
+  plugins: [
+    {
+      name: "preact-alias",
+      setup(build) {
+        build.onResolve({ filter: /^react-dom\/client$/ }, () => ({
+          path: preactCompatClient,
+        }));
+        build.onResolve({ filter: /^react(-dom)?$/ }, () => ({
+          path: preactCompat,
+        }));
+        build.onResolve({ filter: /^react\/jsx(-dev)?-runtime$/ }, () => ({
+          path: preactJsxRuntime,
+        }));
+      },
     },
-  }],
+  ],
 });
 
 if (!clientResult.success) {
@@ -52,14 +81,19 @@ if (!clientResult.success) {
   process.exit(1);
 }
 
-const clientJs = (await clientResult.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
+const clientJs = (await clientResult.outputs[0].text()).replace(
+  /<\/script>/gi,
+  "<\\/script>",
+);
 console.log(`client bundle     ${kb(clientJs.length)}`);
 
 // ─── 2. Inline client into preview HTML, base64-encode for the define ────
 
 // Committed ICO copy of Simulator.app's AppIcon, inlined as a data URI so the
 // preview tab shows the same icon as the native app.
-const faviconBytes = readFileSync(resolve(root, "src/client/simulator-icon.ico"));
+const faviconBytes = readFileSync(
+  resolve(root, "src/client/simulator-icon.ico"),
+);
 const faviconTag = `<link rel="icon" type="image/x-icon" href="data:image/x-icon;base64,${faviconBytes.toString("base64")}">`;
 console.log(`favicon           ${kb(faviconBytes.length)}`);
 
@@ -77,7 +111,9 @@ ${faviconTag}
 </body></html>`;
 
 const htmlB64 = Buffer.from(html).toString("base64");
-console.log(`preview html      ${kb(html.length)}  (base64 ${kb(htmlB64.length)})`);
+console.log(
+  `preview html      ${kb(html.length)}  (base64 ${kb(htmlB64.length)})`,
+);
 
 const PREVIEW_DEFINE = { __PREVIEW_HTML_B64__: JSON.stringify(htmlB64) };
 
@@ -89,7 +125,17 @@ const mwResult = await Bun.build({
   format: "esm",
   minify: true,
   outdir: distDir,
-  external: ["fs", "path", "os", "child_process", "url"],
+  external: [
+    "fs",
+    "path",
+    "os",
+    "child_process",
+    "url",
+    "http",
+    "http-proxy",
+    "net",
+    "stream",
+  ],
   define: PREVIEW_DEFINE,
 });
 if (!mwResult.success) {
@@ -115,7 +161,23 @@ const binJsResult = await Bun.build({
   minify: true,
   outdir: distDir,
   naming: "serve-sim.js",
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer"],
+  external: [
+    "fs",
+    "path",
+    "os",
+    "child_process",
+    "url",
+    "net",
+    "tls",
+    "crypto",
+    "stream",
+    "events",
+    "http",
+    "https",
+    "http-proxy",
+    "zlib",
+    "buffer",
+  ],
   define: PREVIEW_DEFINE,
 });
 if (!binJsResult.success) {
@@ -137,8 +199,10 @@ const compile = spawnSync(
     "--compile",
     "--minify",
     resolve(root, "src/index.ts"),
-    "--outfile", resolve(distDir, "serve-sim"),
-    "--define", `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
+    "--outfile",
+    resolve(distDir, "serve-sim"),
+    "--define",
+    `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
   ],
   { stdio: "inherit" },
 );
