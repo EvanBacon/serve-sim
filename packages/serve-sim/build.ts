@@ -128,16 +128,8 @@ if (!binJsResult.success) {
   process.exit(1);
 }
 
-// Replace the source `#!/usr/bin/env bun` shebang with `node` so the
-// published `dist/serve-sim.js` runs under plain Node. Bun ignores shebangs
-// when invoked as `bun script.js`, so this doesn't break Bun users either.
-const binJsPath = resolve(distDir, "serve-sim.js");
-const binJsRaw = await binJsResult.outputs[0].text();
-const binJsPatched = binJsRaw.startsWith("#!")
-  ? binJsRaw.replace(/^#![^\n]*\n/, "#!/usr/bin/env node\n")
-  : `#!/usr/bin/env node\n${binJsRaw}`;
-writeFileSync(binJsPath, binJsPatched);
-console.log(`dist/serve-sim.js   ${kb(binJsPatched.length)}`);
+const binJsSize = (await binJsResult.outputs[0].text()).length;
+console.log(`dist/serve-sim.js   ${kb(binJsSize)}`);
 
 // ─── 5. Compiled single-file executable ──────────────────────────────────
 // Bun.build doesn't expose --compile yet, so shell out. The define arg carries
