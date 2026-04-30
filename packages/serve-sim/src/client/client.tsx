@@ -773,6 +773,225 @@ function Row({
   );
 }
 
+// ─── Permissions tool ───
+//
+// Drives `xcrun simctl privacy <udid> <grant|revoke|reset> <service> <bundleId>`.
+// Service names are simctl's, not TCC's. We don't read current state — the
+// last action the user pressed is highlighted as the assumed status until they
+// reset (which clears highlight).
+
+const PERMISSION_SERVICES: { key: string; label: string }[] = [
+  { key: "camera", label: "Camera" },
+  { key: "microphone", label: "Microphone" },
+  { key: "photos", label: "Photos" },
+  { key: "photos-add", label: "Add to Photos" },
+  { key: "contacts", label: "Contacts" },
+  { key: "calendar", label: "Calendar" },
+  { key: "reminders", label: "Reminders" },
+  { key: "location", label: "Location" },
+  { key: "location-always", label: "Location (Always)" },
+  { key: "motion", label: "Motion" },
+  { key: "media-library", label: "Media Library" },
+  { key: "siri", label: "Siri" },
+];
+
+type PermAction = "grant" | "revoke" | "reset";
+type PermState = Record<string, PermAction | undefined>;
+
+function AppPermissionsTool({
+  udid,
+  bundleId,
+}: {
+  udid: string;
+  bundleId: string | null;
+}) {
+  const [state, setState] = useState<PermState>({});
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+
+  // Reset assumed state whenever the foreground app changes.
+  useEffect(() => { setState({}); setError(null); }, [bundleId]);
+
+  const apply = useCallback(
+    async (service: string, action: PermAction) => {
+      if (!bundleId) return;
+      const key = `${service}:${action}`;
+      setPending(key);
+      setError(null);
+      try {
+        const res = await execOnHost(
+          `xcrun simctl privacy ${udid} ${action} ${service} ${shellEscape(bundleId)}`,
+        );
+        if (res.exitCode !== 0) {
+          setError(res.stderr.trim() || `simctl privacy failed (exit ${res.exitCode})`);
+          return;
+        }
+        setState((s) => ({ ...s, [service]: action === "reset" ? undefined : action }));
+      } finally {
+        setPending(null);
+      }
+    },
+    [udid, bundleId],
+  );
+
+  const resetAll = useCallback(async () => {
+    if (!bundleId) return;
+    setPending("__all__");
+    setError(null);
+    try {
+      const res = await execOnHost(
+        `xcrun simctl privacy ${udid} reset all ${shellEscape(bundleId)}`,
+      );
+      if (res.exitCode !== 0) {
+        setError(res.stderr.trim() || `simctl privacy failed (exit ${res.exitCode})`);
+        return;
+      }
+      setState({});
+    } finally {
+      setPending(null);
+    }
+  }, [udid, bundleId]);
+
+  if (!bundleId) {
+    return (
+      <div style={panelStyles.empty}>
+        Permissions appear once an app is in the foreground.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...panelStyles.section, padding: "8px 12px" }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={panelStyles.permsToggle}
+        aria-expanded={open}
+      >
+        <span style={{ ...panelStyles.sectionTitle, margin: 0 }}>Permissions</span>
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            transform: open ? "rotate(90deg)" : "rotate(0deg)",
+            transition: "transform 0.15s",
+            flexShrink: 0,
+          }}
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
+
+      {open && error && <div style={{ ...panelStyles.error, marginTop: 8 }}>{error}</div>}
+
+      {open && <div style={panelStyles.permsScrollWrap}>
+        <div style={panelStyles.permsScroll}>
+        {PERMISSION_SERVICES.map(({ key, label }) => {
+          const current = state[key];
+          return (
+            <div key={key} style={panelStyles.permRow}>
+              <span style={panelStyles.permLabel}>{label}</span>
+              <div style={panelStyles.permSeg} role="group" aria-label={label}>
+                <PermBtn
+                  active={current === "grant"}
+                  pending={pending === `${key}:grant`}
+                  onClick={() => apply(key, "grant")}
+                  variant="grant"
+                  title="Allow"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="5 12 10 17 19 7" />
+                  </svg>
+                </PermBtn>
+                <PermBtn
+                  active={current === "revoke"}
+                  pending={pending === `${key}:revoke`}
+                  onClick={() => apply(key, "revoke")}
+                  variant="revoke"
+                  title="Deny"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                  </svg>
+                </PermBtn>
+                <PermBtn
+                  active={false}
+                  pending={pending === `${key}:reset`}
+                  onClick={() => apply(key, "reset")}
+                  variant="reset"
+                  title="Reset"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 12a9 9 0 1 0 3.5-7.1" />
+                    <polyline points="3 3 3 9 9 9" />
+                  </svg>
+                </PermBtn>
+              </div>
+            </div>
+          );
+        })}
+        </div>
+        <div style={panelStyles.permsFadeTop} />
+        <div style={panelStyles.permsFadeBottom} />
+      </div>}
+
+      {open && (
+        <div style={panelStyles.permsFooter}>
+          <button
+            onClick={resetAll}
+            disabled={pending === "__all__"}
+            style={panelStyles.resetAllBtn}
+            title="xcrun simctl privacy reset all"
+          >
+            {pending === "__all__" ? "…" : "Reset all"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PermBtn({
+  active,
+  pending,
+  onClick,
+  variant,
+  title,
+  children,
+}: {
+  active: boolean;
+  pending: boolean;
+  onClick: () => void;
+  variant: "grant" | "revoke" | "reset";
+  title: string;
+  children: ReactNode;
+}) {
+  const accent = variant === "grant" ? "#4ade80" : variant === "revoke" ? "#f87171" : "#a5b4fc";
+  return (
+    <button
+      onClick={onClick}
+      disabled={pending}
+      title={title}
+      aria-label={title}
+      style={{
+        ...panelStyles.permBtn,
+        background: active ? `${accent}22` : "transparent",
+        color: active ? accent : "rgba(255,255,255,0.55)",
+        opacity: pending ? 0.5 : 1,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function ToolsPanel({
   open,
   onClose,
@@ -806,6 +1025,7 @@ function ToolsPanel({
 
       <div style={panelStyles.body}>
         <AppDetectionTool udid={udid} currentApp={currentApp} />
+        <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
       </div>
     </aside>
   );
@@ -1421,7 +1641,7 @@ const panelStyles: Record<string, CSSProperties> = {
     justifyContent: "center",
     borderRadius: 4,
   },
-  body: { padding: 14, overflowY: "auto", flex: 1 },
+  body: { padding: 14, overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 12 },
   sectionTitle: {
     fontSize: 11,
     fontWeight: 600,
@@ -1509,6 +1729,107 @@ const panelStyles: Record<string, CSSProperties> = {
     justifyContent: "flex-end",
     background: "linear-gradient(to right, rgba(28,28,30,0) 0%, #1c1c1e 55%)",
     transition: "opacity 0.15s ease, transform 0.15s ease",
+  },
+  permsToggle: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 6,
+    background: "transparent",
+    border: "none",
+    color: "rgba(255,255,255,0.5)",
+    padding: 0,
+    margin: 0,
+    cursor: "pointer",
+    width: "100%",
+    textAlign: "left",
+    lineHeight: 1,
+  },
+  permsScrollWrap: {
+    position: "relative",
+    marginTop: 8,
+  },
+  permsScroll: {
+    maxHeight: 260,
+    overflowY: "auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    padding: "8px 0",
+    scrollbarWidth: "thin",
+  },
+  permsFadeTop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 14,
+    pointerEvents: "none",
+    background: "linear-gradient(to bottom, #1c1c1e 0%, rgba(28,28,30,0) 100%)",
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+  },
+  permsFadeBottom: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 14,
+    pointerEvents: "none",
+    background: "linear-gradient(to top, #1c1c1e 0%, rgba(28,28,30,0) 100%)",
+  },
+  permsFooter: {
+    display: "flex",
+    justifyContent: "flex-end",
+    paddingTop: 8,
+  },
+  resetAllBtn: {
+    background: "transparent",
+    border: "1px solid rgba(255,255,255,0.12)",
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 10,
+    padding: "3px 8px",
+    borderRadius: 5,
+    cursor: "pointer",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+  },
+  permsList: { display: "flex", flexDirection: "column", gap: 4, marginTop: 4 },
+  permRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    padding: "4px 2px",
+  },
+  permLabel: {
+    fontSize: 12,
+    color: "#eee",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    flex: 1,
+    minWidth: 0,
+  },
+  permSeg: {
+    display: "flex",
+    gap: 2,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 6,
+    padding: 2,
+  },
+  permBtn: {
+    width: 24,
+    height: 22,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    border: "none",
+    borderRadius: 4,
+    cursor: "pointer",
+    padding: 0,
+    transition: "background 0.12s, color 0.12s",
   },
   rowAction: {
     width: 20,
