@@ -1041,12 +1041,13 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   // Try requested port; if busy and the user didn't pin it, scan forward.
   const maxScan = portExplicit ? 1 : 50;
   let boundPort = servePort;
+  let previewServer: ReturnType<typeof Bun.serve> | null = null;
   let lastErr: unknown;
   let bound = false;
   for (let i = 0; i < maxScan; i++) {
     const p = servePort + i;
     try {
-      bindPreviewServer(p, middleware);
+      previewServer = bindPreviewServer(p, middleware);
       boundPort = p;
       bound = true;
       break;
@@ -1074,9 +1075,16 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   if (networkIP) console.log(`  - Network: http://${networkIP}:${boundPort}`);
   console.log("");
 
+  const keepAlive = setInterval(() => {}, 1 << 30);
+
   // Exit cleanly on Ctrl+C
-  process.on("SIGINT", () => process.exit(0));
-  process.on("SIGTERM", () => process.exit(0));
+  const shutdown = () => {
+    clearInterval(keepAlive);
+    previewServer?.stop(true);
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
   await new Promise(() => {});
 }
 
