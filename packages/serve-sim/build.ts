@@ -10,8 +10,7 @@
  *
  * The bin and middleware bundles target `node` so users without `bun` on
  * their PATH can still run `npx serve-sim` / mount the Connect middleware.
- * Bun-native APIs (Bun.serve, Bun.sleepSync) are detected at runtime via
- * `src/runtime.ts` and used when available, with Node stdlib fallbacks.
+ * Runtime server and timing behavior is implemented with Node stdlib APIs.
  *
  * The preview HTML (bundled client.tsx + Preact + serve-sim-client, base64
  * encoded) is injected into every artifact that could need to serve the UI

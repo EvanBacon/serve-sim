@@ -1080,8 +1080,6 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
 }
 
 function bindPreviewServer(port: number, middleware: ReturnType<typeof import("./middleware").simMiddleware>) {
-  // `servePreview` is async on both runtimes so we get uniform listen-error
-  // handling (Bun.serve throws synchronously, node:http reports via 'error').
   return servePreview({ port, middleware });
 }
 
