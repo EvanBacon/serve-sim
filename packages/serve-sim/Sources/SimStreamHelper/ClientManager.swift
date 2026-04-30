@@ -11,6 +11,7 @@ final class ClientManager {
 
     /// Latest JPEG frame data, replaced on each new frame
     private var latestFrame: Data?
+    private var frameSequence = 0
     private var mjpegClients: [ObjectIdentifier: MJPEGClient] = [:]
     private var nextClientId = 0
 
@@ -28,6 +29,17 @@ final class ClientManager {
         queue.async {
             self.screenWidth = width
             self.screenHeight = height
+        }
+    }
+
+    func streamSnapshot() -> (width: Int, height: Int, hasFrame: Bool, frameSequence: Int) {
+        queue.sync {
+            (
+                width: self.screenWidth,
+                height: self.screenHeight,
+                hasFrame: self.latestFrame != nil,
+                frameSequence: self.frameSequence
+            )
         }
     }
 
@@ -123,6 +135,7 @@ final class ClientManager {
     func broadcastFrame(jpegData: Data) {
         queue.async {
             self.latestFrame = jpegData
+            self.frameSequence += 1
             guard !self.mjpegClients.isEmpty else { return }
             for (_, client) in self.mjpegClients {
                 client.send(frame: jpegData)

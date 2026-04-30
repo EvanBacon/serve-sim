@@ -105,6 +105,17 @@ function useMjpegStream(streamUrl: string | null) {
   return { subscribeFrame, frame, config };
 }
 
+function shouldUseNativeMjpegImage(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  const vendor = navigator.vendor;
+  return (
+    /Safari/i.test(ua) &&
+    /Apple Computer/i.test(vendor) &&
+    !/(Chrome|Chromium|CriOS|FxiOS|Edg)/i.test(ua)
+  );
+}
+
 
 // ─── HID keyboard mapping ───
 
@@ -816,8 +827,11 @@ function App() {
     : deviceType === "watch" ? 200
     : 320;
 
-  // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
-  const mjpeg = useMjpegStream(config.streamUrl);
+  const useNativeMjpeg = shouldUseNativeMjpegImage();
+  // Chrome doesn't support multipart/x-mixed-replace in <img>, so parse the
+  // stream manually there. Safari handles MJPEG images natively but can buffer
+  // multipart fetch bodies, so let the image element own the stream in Safari.
+  const mjpeg = useMjpegStream(useNativeMjpeg ? null : config.streamUrl);
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -1070,9 +1084,9 @@ function App() {
           onStreamTouch={onStreamTouch}
           onStreamMultiTouch={onStreamMultiTouch}
           onStreamButton={onStreamButton}
-          subscribeFrame={mjpeg.subscribeFrame}
-          streamFrame={mjpeg.frame}
-          streamConfig={mjpeg.config}
+          subscribeFrame={useNativeMjpeg ? undefined : mjpeg.subscribeFrame}
+          streamFrame={useNativeMjpeg ? null : mjpeg.frame}
+          streamConfig={useNativeMjpeg ? null : mjpeg.config}
         />
         {mediaDrop.isDragOver && (
           <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>

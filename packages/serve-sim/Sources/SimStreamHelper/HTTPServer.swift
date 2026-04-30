@@ -12,6 +12,16 @@ final class HTTPServer {
         self.port = port
     }
 
+    private func jsonResponse(_ object: AnyObject) -> HttpResponse {
+        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
+        return .raw(200, "OK", [
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        ]) { writer in
+            try writer.write(data)
+        }
+    }
+
     func start() throws {
         // MJPEG stream endpoint
         server["/stream.mjpeg"] = { [weak self] request in
@@ -61,15 +71,19 @@ final class HTTPServer {
 
         // Config endpoint
         server["/config"] = { [weak self] request in
-            let size = self?.clientManager ?? nil
-            let w = size?.screenWidth ?? 0
-            let h = size?.screenHeight ?? 0
-            return HttpResponse.ok(.json(["width": w, "height": h] as AnyObject))
+            guard let self else { return .notFound }
+            let snapshot = self.clientManager.streamSnapshot()
+            return self.jsonResponse([
+                "width": snapshot.width,
+                "height": snapshot.height,
+                "hasFrame": snapshot.hasFrame,
+                "frameSequence": snapshot.frameSequence,
+            ] as AnyObject)
         }
 
         // Health endpoint
-        server["/health"] = { _ in
-            return .ok(.json(["status": "ok"] as AnyObject))
+        server["/health"] = { [weak self] _ in
+            return self?.jsonResponse(["status": "ok"] as AnyObject) ?? .notFound
         }
 
         // CORS preflight

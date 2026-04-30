@@ -176,6 +176,66 @@ export function SimulatorView({
     };
   }, [relayMode, subscribeFrame]);
 
+  useEffect(() => {
+    if (!relayMode || subscribeFrame) return;
+
+    let cancelled = false;
+    let lastSequence: number | null = null;
+    const STARTUP_MS = 6000;
+
+    const markFrame = (sequence: number) => {
+      if (lastSequence !== sequence) {
+        lastSequence = sequence;
+        frameCountRef.current++;
+        lastFrameAtRef.current = Date.now();
+      }
+      if (!connectedRef.current) {
+        setConnected(true);
+        setError(null);
+      }
+    };
+
+    const pollStreamState = async () => {
+      try {
+        const res = await fetch(`${url}/config`, { cache: "no-store" });
+        if (!res.ok) return;
+        const config = await res.json() as {
+          width?: number;
+          height?: number;
+          hasFrame?: boolean;
+          frameSequence?: number;
+        };
+        if (cancelled) return;
+        if (config.width && config.height) {
+          setScreenSize((prev) =>
+            prev && prev.width === config.width && prev.height === config.height
+              ? prev
+              : { width: config.width, height: config.height },
+          );
+        }
+        if (config.hasFrame && typeof config.frameSequence === "number") {
+          markFrame(config.frameSequence);
+        }
+      } catch {
+        // Retry on the next poll.
+      }
+    };
+
+    const watchdog = setTimeout(() => {
+      if (!connectedRef.current) {
+        setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
+      }
+    }, STARTUP_MS);
+    void pollStreamState();
+    const interval = setInterval(() => void pollStreamState(), 1000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(watchdog);
+      clearInterval(interval);
+    };
+  }, [relayMode, subscribeFrame, url]);
+
   const sendTouch = useCallback(
     (touch: {
       type: "begin" | "move" | "end";
@@ -570,6 +630,7 @@ export function SimulatorView({
         {relayMode && (
           <img
             ref={relayImgRef}
+            src={subscribeFrame ? undefined : streamUrl}
             draggable={false}
             onLoad={(e) => {
               const el = e.currentTarget;
@@ -579,6 +640,14 @@ export function SimulatorView({
                     ? prev
                     : { width: el.naturalWidth, height: el.naturalHeight },
                 );
+                if (!connectedRef.current) {
+                  if (!subscribeFrame) {
+                    frameCountRef.current++;
+                    lastFrameAtRef.current = Date.now();
+                  }
+                  setConnected(true);
+                  setError(null);
+                }
               }
             }}
             style={{
