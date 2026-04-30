@@ -8,6 +8,15 @@
     "url": "https://evanbacon.dev"
   },
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EvanBacon/serve-sim.git",
+    "directory": "packages/serve-sim"
+  },
+  "homepage": "https://github.com/EvanBacon/serve-sim#readme",
+  "bugs": {
+    "url": "https://github.com/EvanBacon/serve-sim/issues"
+  },
   "bin": {
     "serve-sim": "dist/serve-sim.js"
   },
