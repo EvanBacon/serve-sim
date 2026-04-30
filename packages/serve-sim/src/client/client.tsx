@@ -40,7 +40,12 @@ function useMjpegStream(streamUrl: string | null) {
       })
       .catch(() => { });
 
-    const fetchUrlObj = new URL(streamUrl, window.location.href);
+    // Read the MJPEG stream and extract JPEG frames.
+    // ?raw=1 tells the server to use Content-Type application/octet-stream
+    // instead of multipart/x-mixed-replace; WebKit refuses to expose
+    // multipart bodies to fetch()'s ReadableStream.
+    const fetchUrlObj = new URL(streamUrl);
+    fetchUrlObj.searchParams.set("raw", "1");
     const fetchUrl = fetchUrlObj.toString();
     (async () => {
       try {
@@ -547,6 +552,420 @@ function useMediaDrop({
   };
 }
 
+// ─── Side panel (tools) ───
+
+interface AppDetails {
+  bundleId: string;
+  isReactNative: boolean;
+  pid?: number;
+  displayName?: string;
+  shortVersion?: string;
+  bundleVersion?: string;
+  minOS?: string;
+  executable?: string;
+  appPath?: string;
+  iconDataUrl?: string | null;
+  loading: boolean;
+  error?: string;
+}
+
+function shellEscape(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+async function fetchAppDetails(
+  exec: (cmd: string) => Promise<ExecResult>,
+  udid: string,
+  bundleId: string,
+): Promise<Partial<AppDetails>> {
+  const ctn = await exec(`xcrun simctl get_app_container ${udid} ${shellEscape(bundleId)} app`);
+  if (ctn.exitCode !== 0) {
+    return { error: ctn.stderr.trim() || "App not found on simulator" };
+  }
+  const appPath = ctn.stdout.trim();
+  if (!appPath) return { error: "Empty app path" };
+
+  // Read Info.plist as JSON. plutil -convert json -o - is available on macOS.
+  const plist = await exec(`plutil -convert json -o - ${shellEscape(appPath + "/Info.plist")}`);
+  let info: any = {};
+  if (plist.exitCode === 0) {
+    try { info = JSON.parse(plist.stdout); } catch { }
+  }
+
+  // Try to find app icon. CFBundleIcons → primary → CFBundleIconFiles last entry,
+  // fall back to CFBundleIconFiles / CFBundleIconFile.
+  let iconName: string | undefined;
+  const primary = info?.CFBundleIcons?.CFBundlePrimaryIcon
+    ?? info?.["CFBundleIcons~ipad"]?.CFBundlePrimaryIcon;
+  const iconFiles: string[] | undefined = primary?.CFBundleIconFiles ?? info?.CFBundleIconFiles;
+  if (iconFiles && iconFiles.length > 0) iconName = iconFiles[iconFiles.length - 1];
+  else if (typeof info?.CFBundleIconFile === "string") iconName = info.CFBundleIconFile;
+
+  let iconDataUrl: string | null = null;
+  if (iconName) {
+    // Icons are commonly compiled into Assets.car; loose PNGs may exist as
+    // <icon>@2x.png / @3x.png. Try a handful of candidates.
+    const candidates = [
+      `${iconName}@3x.png`,
+      `${iconName}@2x.png`,
+      `${iconName}.png`,
+      `${iconName}60x60@3x.png`,
+      `${iconName}60x60@2x.png`,
+    ];
+    const find = await exec(
+      `bash -c ${shellEscape(
+        candidates.map((c) => `[ -f ${shellEscape(appPath + "/" + c)} ] && echo ${shellEscape(appPath + "/" + c)} && exit 0`).join("; ") + "; exit 1",
+      )}`,
+    );
+    const iconPath = find.stdout.trim();
+    if (iconPath) {
+      const b64 = await exec(`base64 -i ${shellEscape(iconPath)}`);
+      if (b64.exitCode === 0) {
+        iconDataUrl = `data:image/png;base64,${b64.stdout.replace(/\s+/g, "")}`;
+      }
+    }
+  }
+
+  return {
+    appPath,
+    displayName: info.CFBundleDisplayName ?? info.CFBundleName,
+    shortVersion: info.CFBundleShortVersionString,
+    bundleVersion: info.CFBundleVersion,
+    minOS: info.MinimumOSVersion,
+    executable: info.CFBundleExecutable,
+    iconDataUrl,
+  };
+}
+
+function AppDetectionTool({
+  udid,
+  currentApp,
+}: {
+  udid: string;
+  currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
+}) {
+  const [details, setDetails] = useState<AppDetails | null>(null);
+
+  useEffect(() => {
+    if (!currentApp) { setDetails(null); return; }
+    let cancelled = false;
+    setDetails({
+      bundleId: currentApp.bundleId,
+      isReactNative: currentApp.isReactNative,
+      pid: currentApp.pid,
+      loading: true,
+    });
+    fetchAppDetails(execOnHost, udid, currentApp.bundleId).then((extra) => {
+      if (cancelled) return;
+      setDetails({
+        bundleId: currentApp.bundleId,
+        isReactNative: currentApp.isReactNative,
+        pid: currentApp.pid,
+        loading: false,
+        ...extra,
+      });
+    });
+    return () => { cancelled = true; };
+  }, [udid, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
+
+  if (!details) {
+    return (
+      <div style={panelStyles.empty}>
+        Waiting for an app to come to the foreground…
+      </div>
+    );
+  }
+
+  return (
+    <div style={panelStyles.section}>
+      <div style={panelStyles.appHeader}>
+        {details.iconDataUrl ? (
+          <img src={details.iconDataUrl} style={panelStyles.appIcon} alt="" />
+        ) : (
+          <div style={{ ...panelStyles.appIcon, background: "#2a2a2c" }} />
+        )}
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={panelStyles.appName}>
+            {details.displayName ?? details.bundleId}
+            {details.loading && <span style={panelStyles.spinner}> …</span>}
+          </div>
+          <div style={panelStyles.appBundle} title={details.bundleId}>
+            {details.bundleId}
+          </div>
+        </div>
+      </div>
+
+      {details.error && <div style={panelStyles.error}>{details.error}</div>}
+
+      <dl style={panelStyles.dl}>
+        <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "…" : "—"} />
+        <Row label="Min iOS" value={details.minOS ?? (details.loading ? "…" : "—")} />
+        <Row label="Executable" value={details.executable ?? (details.loading ? "…" : "—")} />
+        <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
+        {details.isReactNative && <Row label="React Native" value="Yes" />}
+        <Row
+          label="App path"
+          value={details.appPath ?? (details.loading ? "…" : "—")}
+          mono
+          action={
+            details.appPath
+              ? {
+                title: "Reveal in Finder",
+                onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
+                icon: (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="7" y1="17" x2="17" y2="7" />
+                    <polyline points="10 7 17 7 17 14" />
+                  </svg>
+                ),
+              }
+              : undefined
+          }
+        />
+      </dl>
+    </div>
+  );
+}
+
+function Row({
+  label,
+  value,
+  mono,
+  action,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  action?: { title: string; onClick: () => void; icon: ReactNode };
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      style={panelStyles.row}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <dt style={panelStyles.dt}>{label}</dt>
+      <dd
+        style={{
+          ...panelStyles.dd,
+          fontFamily: mono ? "ui-monospace, monospace" : undefined,
+          fontSize: mono ? 11 : 12,
+          position: "relative",
+        }}
+        title={value}
+      >
+        {value}
+        {action && (
+          <div
+            style={{
+              ...panelStyles.rowActionWrap,
+              opacity: hover ? 1 : 0,
+              transform: hover ? "translateX(0)" : "translateX(4px)",
+              pointerEvents: hover ? "auto" : "none",
+            }}
+          >
+            <button
+              type="button"
+              onClick={action.onClick}
+              title={action.title}
+              aria-label={action.title}
+              style={panelStyles.rowAction}
+            >
+              {action.icon}
+            </button>
+          </div>
+        )}
+      </dd>
+    </div>
+  );
+}
+
+// ─── Permissions tool ───
+//
+// Drives `xcrun simctl privacy <udid> <grant|revoke|reset> <service> <bundleId>`.
+// Service names are simctl's, not TCC's. We don't read current state — the
+// last action the user pressed is highlighted as the assumed status until they
+// reset (which clears highlight).
+
+const PERMISSION_SERVICES: { key: string; label: string }[] = [
+  { key: "camera", label: "Camera" },
+  { key: "microphone", label: "Microphone" },
+  { key: "photos", label: "Photos" },
+  { key: "photos-add", label: "Add to Photos" },
+  { key: "contacts", label: "Contacts" },
+  { key: "calendar", label: "Calendar" },
+  { key: "reminders", label: "Reminders" },
+  { key: "location", label: "Location" },
+  { key: "location-always", label: "Location (Always)" },
+  { key: "motion", label: "Motion" },
+  { key: "media-library", label: "Media Library" },
+  { key: "siri", label: "Siri" },
+];
+
+type PermAction = "grant" | "revoke" | "reset";
+type PermState = Record<string, PermAction | undefined>;
+
+function AppPermissionsTool({
+  udid,
+  bundleId,
+}: {
+  udid: string;
+  bundleId: string | null;
+}) {
+  const [state, setState] = useState<PermState>({});
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+
+  // Reset assumed state whenever the foreground app changes.
+  useEffect(() => { setState({}); setError(null); }, [bundleId]);
+
+  const apply = useCallback(
+    async (service: string, action: PermAction) => {
+      if (!bundleId) return;
+      const key = `${service}:${action}`;
+      setPending(key);
+      setError(null);
+      try {
+        const res = await execOnHost(
+          `xcrun simctl privacy ${udid} ${action} ${service} ${shellEscape(bundleId)}`,
+        );
+        if (res.exitCode !== 0) {
+          setError(res.stderr.trim() || `simctl privacy failed (exit ${res.exitCode})`);
+          return;
+        }
+        setState((s) => ({ ...s, [service]: action === "reset" ? undefined : action }));
+      } finally {
+        setPending(null);
+      }
+    },
+    [udid, bundleId],
+  );
+
+  const resetAll = useCallback(async () => {
+    if (!bundleId) return;
+    setPending("__all__");
+    setError(null);
+    try {
+      const res = await execOnHost(
+        `xcrun simctl privacy ${udid} reset all ${shellEscape(bundleId)}`,
+      );
+      if (res.exitCode !== 0) {
+        setError(res.stderr.trim() || `simctl privacy failed (exit ${res.exitCode})`);
+        return;
+      }
+      setState({});
+    } finally {
+      setPending(null);
+    }
+  }, [udid, bundleId]);
+
+  if (!bundleId) {
+    return (
+      <div style={panelStyles.empty}>
+        Permissions appear once an app is in the foreground.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...panelStyles.section, padding: "8px 12px" }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={panelStyles.permsToggle}
+        aria-expanded={open}
+      >
+        <span style={{ ...panelStyles.sectionTitle, margin: 0 }}>Permissions</span>
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            transform: open ? "rotate(90deg)" : "rotate(0deg)",
+            transition: "transform 0.15s",
+            flexShrink: 0,
+          }}
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
+
+      {open && error && <div style={{ ...panelStyles.error, marginTop: 8 }}>{error}</div>}
+
+      {open && <div style={panelStyles.permsScrollWrap}>
+        <div style={panelStyles.permsScroll}>
+          {PERMISSION_SERVICES.map(({ key, label }) => {
+            const current = state[key];
+            return (
+              <div key={key} style={panelStyles.permRow}>
+                <span style={panelStyles.permLabel}>{label}</span>
+                <div style={panelStyles.permSeg} role="group" aria-label={label}>
+                  <PermBtn
+                    active={current === "grant"}
+                    pending={pending === `${key}:grant`}
+                    onClick={() => apply(key, "grant")}
+                    variant="grant"
+                    title="Allow"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="5 12 10 17 19 7" />
+                    </svg>
+                  </PermBtn>
+                  <PermBtn
+                    active={current === "revoke"}
+                    pending={pending === `${key}:revoke`}
+                    onClick={() => apply(key, "revoke")}
+                    variant="revoke"
+                    title="Deny"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                    </svg>
+                  </PermBtn>
+                  <PermBtn
+                    active={false}
+                    pending={pending === `${key}:reset`}
+                    onClick={() => apply(key, "reset")}
+                    variant="reset"
+                    title="Reset"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 12a9 9 0 1 0 3.5-7.1" />
+                      <polyline points="3 3 3 9 9 9" />
+                    </svg>
+                  </PermBtn>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={panelStyles.permsFadeTop} />
+        <div style={panelStyles.permsFadeBottom} />
+      </div>}
+
+      {open && (
+        <div style={panelStyles.permsFooter}>
+          <button
+            onClick={resetAll}
+            disabled={pending === "__all__"}
+            style={panelStyles.resetAllBtn}
+            title="xcrun simctl privacy reset all"
+          >
+            {pending === "__all__" ? "…" : "Reset all"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Empty state: pick a simulator to boot ───
 //
 // When no serve-sim helper is running, the middleware has no state file to
@@ -676,6 +1095,79 @@ function BootEmptyState({
         </div>
       </div>
     </div>
+  );
+}
+
+function PermBtn({
+  active,
+  pending,
+  onClick,
+  variant,
+  title,
+  children,
+}: {
+  active: boolean;
+  pending: boolean;
+  onClick: () => void;
+  variant: "grant" | "revoke" | "reset";
+  title: string;
+  children: ReactNode;
+}) {
+  const accent = variant === "grant" ? "#4ade80" : variant === "revoke" ? "#f87171" : "#a5b4fc";
+  return (
+    <button
+      onClick={onClick}
+      disabled={pending}
+      title={title}
+      aria-label={title}
+      style={{
+        ...panelStyles.permBtn,
+        background: active ? `${accent}22` : "transparent",
+        color: active ? accent : "rgba(255,255,255,0.55)",
+        opacity: pending ? 0.5 : 1,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ToolsPanel({
+  open,
+  onClose,
+  udid,
+  currentApp,
+}: {
+  open: boolean;
+  onClose: () => void;
+  udid: string;
+  currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
+}) {
+  return (
+    <aside
+      style={{
+        ...panelStyles.panel,
+        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
+        opacity: open ? 1 : 0,
+        pointerEvents: open ? "auto" : "none",
+      }}
+      aria-hidden={!open}
+    >
+      <header style={panelStyles.header}>
+        <span style={panelStyles.headerTitle}>Tools</span>
+        <button onClick={onClose} style={panelStyles.closeBtn} aria-label="Close panel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </header>
+
+      <div style={panelStyles.body}>
+        <AppDetectionTool udid={udid} currentApp={currentApp} />
+        <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
+      </div>
+    </aside>
   );
 }
 
@@ -862,11 +1354,13 @@ function App() {
   // Debounced commit: during launch/switch, iOS can fire multiple foreground
   // transitions within a few hundred ms (splash → app, scene restore, etc.).
   // Without this, the reload button flickers while an RN app is still loading.
-  const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean } | null>(null);
+  const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean; pid?: number } | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
   useEffect(() => {
     const openDelay = config.proxiedPreview ? 750 : 0;
     let es: EventSource | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
+<<<<<<< HEAD
     const wireAppstate = () => {
       es = new EventSource("/appstate");
       es.onmessage = (e) => {
@@ -879,6 +1373,17 @@ function App() {
           timer = setTimeout(() => setCurrentApp(next), delay);
         } catch { }
       };
+=======
+    es.onmessage = (e) => {
+      try {
+        const next = JSON.parse(e.data) as { bundleId: string; pid?: number; isReactNative: boolean };
+        if (timer) clearTimeout(timer);
+        // Commit RN app instantly (show the button ASAP); delay non-RN so a
+        // transient foreground blip doesn't hide it.
+        const delay = next?.isReactNative ? 0 : 600;
+        timer = setTimeout(() => setCurrentApp(next), delay);
+      } catch {}
+>>>>>>> origin/main
     };
     const openTimer = openDelay
       ? window.setTimeout(wireAppstate, openDelay)
@@ -1126,6 +1631,30 @@ function App() {
         </div>
       )}
 
+      {/* Tools panel toggle */}
+      <button
+        onClick={() => setPanelOpen((o) => !o)}
+        style={{
+          ...panelStyles.toggle,
+          opacity: panelOpen ? 0 : 1,
+          pointerEvents: panelOpen ? "none" : "auto",
+        }}
+        aria-label="Open tools panel"
+        title="Open tools"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2.5" />
+          <line x1="15" y1="4" x2="15" y2="20" />
+        </svg>
+      </button>
+
+      <ToolsPanel
+        open={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        udid={config.device}
+        currentApp={currentApp}
+      />
+
       {/* Status bar */}
       <div style={s.bar}>
         <span style={{ ...s.live, color: streaming ? "#4ade80" : "#666" }}>
@@ -1267,6 +1796,269 @@ const pickerGroupHeaderStyle: CSSProperties = {
   color: "rgba(255,255,255,0.4)",
   textTransform: "uppercase",
   letterSpacing: "0.08em",
+};
+
+const PANEL_WIDTH = 320;
+
+const panelStyles: Record<string, CSSProperties> = {
+  toggle: {
+    position: "fixed",
+    top: 16,
+    right: 16,
+    width: 30,
+    height: 30,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    borderRadius: 6,
+    color: "rgba(255,255,255,0.6)",
+    cursor: "pointer",
+    transition: "background 0.15s ease, color 0.15s ease",
+    zIndex: 40,
+  },
+  panel: {
+    position: "fixed",
+    top: 12,
+    right: 12,
+    bottom: 12,
+    width: PANEL_WIDTH,
+    background: "rgba(20,20,22,0.92)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 14,
+    color: "#eee",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    transition: "transform 0.25s ease, opacity 0.2s ease",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    fontFamily: "-apple-system, system-ui, sans-serif",
+    zIndex: 35,
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "6px 10px 6px 12px",
+  },
+  headerTitle: { fontSize: 11, fontWeight: 500, color: "rgba(255,255,255,0.55)" },
+  closeBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#aaa",
+    cursor: "pointer",
+    padding: 4,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 4,
+  },
+  body: { padding: 14, overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 12 },
+  sectionTitle: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: "rgba(255,255,255,0.5)",
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    margin: "0 0 10px",
+  },
+  section: {
+    background: "#1c1c1e",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 10,
+    padding: 12,
+  },
+  empty: {
+    background: "#1c1c1e",
+    border: "1px dashed rgba(255,255,255,0.1)",
+    borderRadius: 10,
+    padding: 16,
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 12,
+    textAlign: "center",
+  },
+  appHeader: { display: "flex", alignItems: "center", gap: 12, marginBottom: 10 },
+  appIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    flexShrink: 0,
+    objectFit: "cover",
+    border: "1px solid rgba(255,255,255,0.08)",
+  },
+  appName: {
+    fontSize: 14,
+    fontWeight: 600,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  appBundle: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.5)",
+    fontFamily: "ui-monospace, monospace",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  spinner: { color: "rgba(255,255,255,0.4)", fontWeight: 400 },
+  error: {
+    background: "rgba(248,113,113,0.08)",
+    border: "1px solid rgba(248,113,113,0.2)",
+    color: "#fca5a5",
+    fontSize: 11,
+    padding: "6px 8px",
+    borderRadius: 6,
+    marginBottom: 10,
+  },
+  dl: { margin: 0, display: "flex", flexDirection: "column", gap: 6 },
+  row: { display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 },
+  dt: {
+    margin: 0,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.5)",
+    width: 84,
+    flexShrink: 0,
+  },
+  dd: {
+    margin: 0,
+    fontSize: 12,
+    color: "#eee",
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  rowActionWrap: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    paddingLeft: 28,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    background: "linear-gradient(to right, rgba(28,28,30,0) 0%, #1c1c1e 55%)",
+    transition: "opacity 0.15s ease, transform 0.15s ease",
+  },
+  permsToggle: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 6,
+    background: "transparent",
+    border: "none",
+    color: "rgba(255,255,255,0.5)",
+    padding: 0,
+    margin: 0,
+    cursor: "pointer",
+    width: "100%",
+    textAlign: "left",
+    lineHeight: 1,
+  },
+  permsScrollWrap: {
+    position: "relative",
+    marginTop: 8,
+  },
+  permsScroll: {
+    maxHeight: 260,
+    overflowY: "auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    padding: "8px 0",
+    scrollbarWidth: "thin",
+  },
+  permsFadeTop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 14,
+    pointerEvents: "none",
+    background: "linear-gradient(to bottom, #1c1c1e 0%, rgba(28,28,30,0) 100%)",
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+  },
+  permsFadeBottom: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 14,
+    pointerEvents: "none",
+    background: "linear-gradient(to top, #1c1c1e 0%, rgba(28,28,30,0) 100%)",
+  },
+  permsFooter: {
+    display: "flex",
+    justifyContent: "flex-end",
+    paddingTop: 8,
+  },
+  resetAllBtn: {
+    background: "transparent",
+    border: "1px solid rgba(255,255,255,0.12)",
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 10,
+    padding: "3px 8px",
+    borderRadius: 5,
+    cursor: "pointer",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+  },
+  permsList: { display: "flex", flexDirection: "column", gap: 4, marginTop: 4 },
+  permRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    padding: "4px 2px",
+  },
+  permLabel: {
+    fontSize: 12,
+    color: "#eee",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    flex: 1,
+    minWidth: 0,
+  },
+  permSeg: {
+    display: "flex",
+    gap: 2,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 6,
+    padding: 2,
+  },
+  permBtn: {
+    width: 24,
+    height: 22,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    border: "none",
+    borderRadius: 4,
+    cursor: "pointer",
+    padding: 0,
+    transition: "background 0.12s, color 0.12s",
+  },
+  rowAction: {
+    width: 20,
+    height: 20,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    borderRadius: 4,
+    color: "#fff",
+    cursor: "pointer",
+    padding: 0,
+  },
 };
 
 // ─── Mount ───
