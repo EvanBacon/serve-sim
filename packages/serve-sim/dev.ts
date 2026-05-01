@@ -46,12 +46,6 @@ const STATE_DIR = join(tmpdir(), "serve-sim");
 const CLIENT_DIR = resolve(import.meta.dir, "src/client");
 const CLIENT_ENTRY = resolve(CLIENT_DIR, "client.tsx");
 const axStreamerCache = createAxStreamerCache();
-const SSE_HEADERS = {
-  "Content-Type": "text/event-stream",
-  "Cache-Control": "no-cache",
-  Connection: "keep-alive",
-  "X-Accel-Buffering": "no",
-};
 
 // ─── Serve-sim state ───
 
@@ -222,7 +216,11 @@ Bun.serve({
         },
       });
       return new Response(stream, {
-        headers: SSE_HEADERS,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
       });
     }
 
@@ -252,7 +250,11 @@ Bun.serve({
         },
       });
       return new Response(stream, {
-        headers: SSE_HEADERS,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
       });
     }
 
@@ -313,7 +315,11 @@ Bun.serve({
         },
       });
       return new Response(stream, {
-        headers: SSE_HEADERS,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
       });
     }
 
@@ -365,7 +371,11 @@ Bun.serve({
         },
       });
       return new Response(stream, {
-        headers: SSE_HEADERS,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
       });
     }
 

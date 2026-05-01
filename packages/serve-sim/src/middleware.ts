@@ -7,12 +7,6 @@ import { createAxStreamerCache } from "./ax";
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
 const STATE_DIR = join(tmpdir(), "serve-sim");
-const SSE_HEADERS = {
-  "Content-Type": "text/event-stream",
-  "Cache-Control": "no-cache",
-  Connection: "keep-alive",
-  "X-Accel-Buffering": "no",
-};
 
 interface ServeSimState {
   pid: number;
@@ -210,7 +204,12 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         res.end("No serve-sim device");
         return;
       }
-      res.writeHead(200, SSE_HEADERS);
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
       res.write(":\n\n");
       const ax = axStreamerCache.get(states[0]!.device);
       const removeClient = ax.addClient(res);
@@ -257,7 +256,12 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         return;
       }
       const udid = states[0].device;
-      res.writeHead(200, SSE_HEADERS);
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
       res.write(":\n\n");
 
       const child: ChildProcess = spawn("xcrun", [
@@ -294,7 +298,12 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         return;
       }
       const udid = states[0].device;
-      res.writeHead(200, SSE_HEADERS);
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
       res.write(":\n\n");
 
       const child: ChildProcess = spawn("xcrun", [
