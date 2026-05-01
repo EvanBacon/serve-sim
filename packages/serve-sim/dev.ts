@@ -224,14 +224,13 @@ watch(CLIENT_DIR, { recursive: true }, (_event, filename) => {
 function buildHtml(): string {
   const states = readServeSimStates();
   const state = states[0] ?? null;
-  const previewState =
-    state && previewCli.hostname ? previewPublicState(state, "") : state;
+  const previewState = state ? previewPublicState(state, "") : null;
 
   const configScript = previewState
     ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({
         ...previewState,
         logsEndpoint: "/logs",
-        ...(previewCli.hostname ? { proxiedPreview: true } : {}),
+        proxiedPreview: true,
       })}</script>`
     : "";
 
@@ -246,8 +245,8 @@ function buildHtml(): string {
 ${configScript}
 <script type="module">${clientJs}</script>
 <script>
-// Auto-reload on rebuild (delay when tunneling so Safari can open MJPEG + ws first — ~6 conn/host)
-const __devEsDelay = ${previewCli.hostname ? 900 : 0};
+// Auto-reload on rebuild (delay when proxied so Safari can open MJPEG + ws first — ~6 conn/host)
+const __devEsDelay = ${previewState ? 900 : 0};
 setTimeout(() => {
   const es = new EventSource("/__dev/reload");
   es.onmessage = (e) => { if (e.data === "reload") location.reload(); };
@@ -290,30 +289,28 @@ const devFetch = (
 ) => {
   const url = new URL(req.url);
 
-  // Tunnel mode: same-origin stream + config + ws proxied to the Swift helper
-  if (previewCli.hostname) {
-    if (
-      req.method === "GET" &&
-      (url.pathname === "/stream.mjpeg" || url.pathname === "/config")
-    ) {
-      const states = readServeSimStates();
-      const st = states[0];
-      if (!st) return new Response("No serve-sim device", { status: 404 });
-      return fetch(`http://127.0.0.1:${st.port}${url.pathname}${url.search}`, {
-        signal: req.signal,
-        cache: "no-store",
-        headers: {
-          Accept: req.headers.get("Accept") ?? "*/*",
-        },
-      });
-    }
-    if (url.pathname === "/ws" && server) {
-      const states = readServeSimStates();
-      const st = states[0];
-      if (!st) return new Response("No serve-sim device", { status: 404 });
-      const upgraded = server.upgrade(req, { data: { backendPort: st.port } });
-      if (upgraded) return undefined as unknown as Response;
-    }
+  // Same-origin stream + config + ws → helper (avoids localhost vs 127.0.0.1 CORS).
+  if (
+    req.method === "GET" &&
+    (url.pathname === "/stream.mjpeg" || url.pathname === "/config")
+  ) {
+    const states = readServeSimStates();
+    const st = states[0];
+    if (!st) return new Response("No serve-sim device", { status: 404 });
+    return fetch(`http://127.0.0.1:${st.port}${url.pathname}${url.search}`, {
+      signal: req.signal,
+      cache: "no-store",
+      headers: {
+        Accept: req.headers.get("Accept") ?? "*/*",
+      },
+    });
+  }
+  if (url.pathname === "/ws" && server) {
+    const states = readServeSimStates();
+    const st = states[0];
+    if (!st) return new Response("No serve-sim device", { status: 404 });
+    const upgraded = server.upgrade(req, { data: { backendPort: st.port } });
+    if (upgraded) return undefined as unknown as Response;
   }
 
   // Dev reload SSE
@@ -528,9 +525,11 @@ for (let i = 0; i < maxScan; i++) {
       port: p,
       idleTimeout: 255, // SSE / MJPEG streams are long-lived
       fetch: devFetch,
+      websocket: devTunnelWs,
     };
-    if (previewCli.hostname) devServeOpts.websocket = devTunnelWs;
-    server = Bun.serve(devServeOpts as Parameters<typeof Bun.serve>[0]);
+    server = Bun.serve(
+      devServeOpts as unknown as Parameters<typeof Bun.serve>[0],
+    );
     break;
   } catch (err: any) {
     lastErr = err;
@@ -565,8 +564,8 @@ if (!portPinned && boundPort !== preferredPort) {
 }
 
 const previewHint = previewCli.hostname
-  ? `  \x1b[33mtunnel\x1b[0m  /stream.mjpeg /config /ws → helper (expose this port through your tunnel)\n`
-  : "";
+  ? `  \x1b[33mtunnel\x1b[0m  expose this port through your tunnel (same-origin /stream.mjpeg /config /ws)\n`
+  : `  \x1b[90m/stream.mjpeg /config /ws\x1b[0m → helper (same-origin; no CORS)\n`;
 console.log(
   `\n  \x1b[36mserve-sim dev\x1b[0m  http://localhost:${boundPort}\n${previewHint}`,
 );

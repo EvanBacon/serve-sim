@@ -10,11 +10,25 @@ import {
 } from "serve-sim-client/simulator";
 
 /**
- * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
- * Chrome doesn't support multipart/x-mixed-replace in <img> tags,
- * so we manually read the stream and extract JPEG boundaries.
+ * Safari (and WebKit without Chromium) does not reliably expose MJPEG bytes
+ * from fetch() ReadableStream; the preview uses a native `<img src>` there
+ * instead (`prefersNativeMjpegImg` + `relayNativeMjpegSrc` on SimulatorView).
+ * Chromium does not decode multipart MJPEG in `<img>`, so we parse the stream.
  */
-function useMjpegStream(streamUrl: string | null) {
+function prefersNativeMjpegImg(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  if (!/AppleWebKit/.test(ua)) return false;
+  // Chromium-based browsers (incl. Chrome on iOS = CriOS) expose fetch() stream bodies.
+  if (/Chrome|Chromium|CriOS|Edg|OPR|Brave|FxiOS/.test(ua)) return false;
+  return true;
+}
+
+/**
+ * Fetches `/config` and optionally reads the MJPEG stream as JPEG blob URLs.
+ * When `parseStream` is false, only `/config` is fetched (WebKit native img path).
+ */
+function useMjpegStream(streamUrl: string | null, parseStream = true) {
   const [config, setConfig] = useState<{ width: number; height: number } | null>(null);
   const subscribersRef = useRef<Set<(blobUrl: string) => void>>(new Set());
   const [frame, setFrame] = useState<string | null>(null);
@@ -44,69 +58,72 @@ function useMjpegStream(streamUrl: string | null) {
     // ?raw=1 tells the server to use Content-Type application/octet-stream
     // instead of multipart/x-mixed-replace; WebKit refuses to expose
     // multipart bodies to fetch()'s ReadableStream.
-    const fetchUrlObj = new URL(streamUrl);
-    fetchUrlObj.searchParams.set("raw", "1");
-    const fetchUrl = fetchUrlObj.toString();
-    (async () => {
-      try {
-        const res = await fetch(fetchUrl, { signal: controller.signal });
-        const reader = res.body?.getReader();
-        if (!reader) return;
+    // `streamUrl` may be same-origin relative (`/stream.mjpeg` in proxied preview).
+    if (parseStream) {
+      const fetchUrlObj = new URL(streamUrl, window.location.href);
+      fetchUrlObj.searchParams.set("raw", "1");
+      const fetchUrl = fetchUrlObj.toString();
+      (async () => {
+        try {
+          const res = await fetch(fetchUrl, { signal: controller.signal });
+          const reader = res.body?.getReader();
+          if (!reader) return;
 
-        let buffer = new Uint8Array(0);
+          let buffer = new Uint8Array(0);
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          // Append new data
-          const newBuf = new Uint8Array(buffer.length + value.length);
-          newBuf.set(buffer);
-          newBuf.set(value, buffer.length);
-          buffer = newBuf;
-
-          // Look for JPEG frames: find Content-Length or JPEG markers (FFD8...FFD9)
-          // Simpler approach: split on boundary markers and extract JPEG data
           while (true) {
-            // Find first JPEG start (FF D8)
-            let jpegStart = -1;
-            for (let i = 0; i < buffer.length - 1; i++) {
-              if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) {
-                jpegStart = i;
-                break;
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // Append new data
+            const newBuf = new Uint8Array(buffer.length + value.length);
+            newBuf.set(buffer);
+            newBuf.set(value, buffer.length);
+            buffer = newBuf;
+
+            // Look for JPEG frames: find Content-Length or JPEG markers (FFD8...FFD9)
+            // Simpler approach: split on boundary markers and extract JPEG data
+            while (true) {
+              // Find first JPEG start (FF D8)
+              let jpegStart = -1;
+              for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) {
+                  jpegStart = i;
+                  break;
+                }
               }
-            }
-            if (jpegStart === -1) break;
+              if (jpegStart === -1) break;
 
-            // Find JPEG end (FF D9) after the start
-            let jpegEnd = -1;
-            for (let i = jpegStart + 2; i < buffer.length - 1; i++) {
-              if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) {
-                jpegEnd = i + 2;
-                break;
+              // Find JPEG end (FF D9) after the start
+              let jpegEnd = -1;
+              for (let i = jpegStart + 2; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) {
+                  jpegEnd = i + 2;
+                  break;
+                }
               }
-            }
-            if (jpegEnd === -1) break;
+              if (jpegEnd === -1) break;
 
-            // Extract the JPEG frame
-            const jpeg = buffer.slice(jpegStart, jpegEnd);
-            buffer = buffer.slice(jpegEnd);
+              // Extract the JPEG frame
+              const jpeg = buffer.slice(jpegStart, jpegEnd);
+              buffer = buffer.slice(jpegEnd);
 
-            const blob = new Blob([jpeg], { type: "image/jpeg" });
-            const blobUrl = URL.createObjectURL(blob);
-            setFrame(blobUrl);
-            for (const cb of subscribersRef.current) {
-              cb(blobUrl);
+              const blob = new Blob([jpeg], { type: "image/jpeg" });
+              const blobUrl = URL.createObjectURL(blob);
+              setFrame(blobUrl);
+              for (const cb of subscribersRef.current) {
+                cb(blobUrl);
+              }
             }
           }
+        } catch {
+          // Aborted or network error
         }
-      } catch {
-        // Aborted or network error
-      }
-    })();
+      })();
+    }
 
     return () => controller.abort();
-  }, [streamUrl]);
+  }, [streamUrl, parseStream]);
 
   return { subscribeFrame, frame, config };
 }
@@ -1319,8 +1336,12 @@ function App() {
       : deviceType === "watch" ? 200
         : 320;
 
-  // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
-  const mjpeg = useMjpegStream(config.streamUrl);
+  // Chromium: parse MJPEG via fetch + blob URLs. Safari: native <img> (relayNativeMjpegSrc).
+  const webkitNativeMjpeg = prefersNativeMjpegImg();
+  const mjpeg = useMjpegStream(config.streamUrl, !webkitNativeMjpeg);
+  const relayNativeMjpegSrc = webkitNativeMjpeg
+    ? new URL(config.streamUrl, window.location.href).href
+    : undefined;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -1360,7 +1381,6 @@ function App() {
     const openDelay = config.proxiedPreview ? 750 : 0;
     let es: EventSource | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
-<<<<<<< HEAD
     const wireAppstate = () => {
       es = new EventSource("/appstate");
       es.onmessage = (e) => {
@@ -1373,17 +1393,6 @@ function App() {
           timer = setTimeout(() => setCurrentApp(next), delay);
         } catch { }
       };
-=======
-    es.onmessage = (e) => {
-      try {
-        const next = JSON.parse(e.data) as { bundleId: string; pid?: number; isReactNative: boolean };
-        if (timer) clearTimeout(timer);
-        // Commit RN app instantly (show the button ASAP); delay non-RN so a
-        // transient foreground blip doesn't hide it.
-        const delay = next?.isReactNative ? 0 : 600;
-        timer = setTimeout(() => setCurrentApp(next), delay);
-      } catch {}
->>>>>>> origin/main
     };
     const openTimer = openDelay
       ? window.setTimeout(wireAppstate, openDelay)
@@ -1600,6 +1609,7 @@ function App() {
           subscribeFrame={mjpeg.subscribeFrame}
           streamFrame={mjpeg.frame}
           streamConfig={mjpeg.config}
+          relayNativeMjpegSrc={relayNativeMjpegSrc}
         />
         {mediaDrop.isDragOver && (
           <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>

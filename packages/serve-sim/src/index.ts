@@ -1245,6 +1245,7 @@ async function serve(
     basePath: "/",
     previewHostname: preview.hostname,
     previewTls: preview.tls,
+    sameOriginPreview: true,
   });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
@@ -1255,7 +1256,7 @@ async function serve(
   for (let i = 0; i < maxScan; i++) {
     const p = servePort + i;
     try {
-      bindPreviewServer(p, middleware, !!preview.hostname);
+      bindPreviewServer(p, middleware);
       boundPort = p;
       bound = true;
       break;
@@ -1323,39 +1324,38 @@ const tunnelWebSocketHandlers = {
 function bindPreviewServer(
   port: number,
   middleware: ReturnType<typeof import("./middleware").simMiddleware>,
-  previewTunnel: boolean,
 ) {
   const serveOpts: Record<string, unknown> = {
     port,
     idleTimeout: 255, // max — MJPEG streams are long-lived
+    websocket: tunnelWebSocketHandlers,
     async fetch(
       req: Request,
       server: import("bun").Server<{ backendPort: number }>,
     ) {
-      if (previewTunnel) {
-        const u = new URL(req.url);
-        if (
-          req.method === "GET" &&
-          (u.pathname === "/stream.mjpeg" || u.pathname === "/config")
-        ) {
-          const st = readAllStates()[0];
-          if (!st) return new Response("No serve-sim device", { status: 404 });
-          return fetch(`http://127.0.0.1:${st.port}${u.pathname}${u.search}`, {
-            signal: req.signal,
-            cache: "no-store",
-            headers: {
-              Accept: req.headers.get("Accept") ?? "*/*",
-            },
-          });
-        }
-        if (u.pathname === "/ws") {
-          const st = readAllStates()[0];
-          if (!st) return new Response("No serve-sim device", { status: 404 });
-          const upgraded = server.upgrade(req, {
-            data: { backendPort: st.port },
-          });
-          if (upgraded) return undefined as unknown as Response;
-        }
+      // Same-origin /stream.mjpeg, /config, /ws → helper (avoids localhost vs 127.0.0.1 CORS).
+      const u = new URL(req.url);
+      if (
+        req.method === "GET" &&
+        (u.pathname === "/stream.mjpeg" || u.pathname === "/config")
+      ) {
+        const st = readAllStates()[0];
+        if (!st) return new Response("No serve-sim device", { status: 404 });
+        return fetch(`http://127.0.0.1:${st.port}${u.pathname}${u.search}`, {
+          signal: req.signal,
+          cache: "no-store",
+          headers: {
+            Accept: req.headers.get("Accept") ?? "*/*",
+          },
+        });
+      }
+      if (u.pathname === "/ws") {
+        const st = readAllStates()[0];
+        if (!st) return new Response("No serve-sim device", { status: 404 });
+        const upgraded = server.upgrade(req, {
+          data: { backendPort: st.port },
+        });
+        if (upgraded) return undefined as unknown as Response;
       }
 
       // Methods that may carry a body get it pre-read here so the shim can
@@ -1477,8 +1477,7 @@ function bindPreviewServer(
       });
     },
   };
-  if (previewTunnel) serveOpts.websocket = tunnelWebSocketHandlers;
-  return Bun.serve(serveOpts as Parameters<typeof Bun.serve>[0]);
+  return Bun.serve(serveOpts as unknown as Parameters<typeof Bun.serve>[0]);
 }
 
 function printHelp() {

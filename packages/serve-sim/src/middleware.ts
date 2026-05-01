@@ -92,10 +92,15 @@ function proxyHttpToHelper(
  */
 export function attachServeSimTunnelWsProxy(
   server: Server,
-  options: Pick<SimMiddlewareOptions, "basePath" | "previewHostname">,
+  options: Pick<
+    SimMiddlewareOptions,
+    "basePath" | "previewHostname" | "sameOriginPreview"
+  >,
 ): void {
   const base = (options.basePath ?? "/.sim").replace(/\/+$/, "");
-  if (!options.previewHostname?.trim()) return;
+  const useSameOrigin =
+    !!options.previewHostname?.trim() || !!options.sameOriginPreview;
+  if (!useSameOrigin) return;
   const wsPath = `${base}/ws`;
 
   server.on("upgrade", (req, socket, head) => {
@@ -261,6 +266,12 @@ export interface SimMiddlewareOptions {
   previewHostname?: string;
   /** Reserved (tunnel URLs are path-based). */
   previewTls?: boolean;
+  /**
+   * Bun/CLI built-in preview: same-origin stream URLs + proxy GET stream/config
+   * to the helper (avoids CORS when the page is `http://localhost:*` and the
+   * helper is `http://127.0.0.1:*`).
+   */
+  sameOriginPreview?: boolean;
 }
 
 /**
@@ -274,15 +285,16 @@ export interface SimMiddlewareOptions {
 export function simMiddleware(options?: SimMiddlewareOptions) {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
   const previewHost = options?.previewHostname?.trim();
+  const useSameOriginStream = !!previewHost || !!options?.sameOriginPreview;
 
   return (req: any, res: any, next?: () => void) => {
     const rawUrl: string = req.url ?? "";
     const qIndex = rawUrl.indexOf("?");
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
 
-    // Tunnel mode: proxy MJPEG + JSON config to the Swift helper (same paths as on the helper).
+    // Same-origin preview / tunnel: proxy MJPEG + JSON config to the Swift helper.
     if (
-      previewHost &&
+      useSameOriginStream &&
       req.method === "GET" &&
       (url === base + "/stream.mjpeg" || url === base + "/config")
     ) {
@@ -307,17 +319,14 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       let html = loadHtml();
 
       if (state) {
-        // Pass real serve-sim URLs directly. The client parses the MJPEG
-        // stream via fetch() (CORS is fine — serve-sim sends Access-Control-Allow-Origin: *)
-        // and connects to the WS directly (WS has no CORS).
-        const previewState = previewHost
+        const previewState = useSameOriginStream
           ? previewPublicState(state, base)
           : state;
 
         const config = JSON.stringify({
           ...previewState,
           logsEndpoint: base + "/logs",
-          ...(previewHost ? { proxiedPreview: true } : {}),
+          ...(useSameOriginStream ? { proxiedPreview: true } : {}),
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
