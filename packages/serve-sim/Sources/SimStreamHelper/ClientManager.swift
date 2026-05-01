@@ -5,9 +5,11 @@ import Swifter
 final class ClientManager {
     private var wsSessions: [ObjectIdentifier: WebSocketSession] = [:]
     private let queue = DispatchQueue(label: "client-manager")
+    private let configLock = NSLock()
 
-    private(set) var screenWidth = 0
-    private(set) var screenHeight = 0
+    private var screenWidth = 0
+    private var screenHeight = 0
+    private var screenOrientation = "portrait"
 
     /// Latest JPEG frame data, replaced on each new frame
     private var latestFrame: Data?
@@ -18,17 +20,33 @@ final class ClientManager {
     var onButton: ((String) -> Void)?
     var onMultiTouch: ((MultiTouchEventPayload) -> Void)?
     var onKey: ((KeyEventPayload) -> Void)?
-    var onOrientation: ((UInt32) -> Void)?
+    var onOrientation: ((UInt32) -> Bool)?
     var onCADebug: ((CADebugEventPayload) -> Void)?
     var onMemoryWarning: (() -> Void)?
 
     // MARK: - Configuration
 
     func setScreenSize(width: Int, height: Int) {
-        queue.async {
-            self.screenWidth = width
-            self.screenHeight = height
-        }
+        configLock.lock()
+        screenWidth = width
+        screenHeight = height
+        configLock.unlock()
+    }
+
+    private func setScreenOrientation(_ orientation: String) {
+        configLock.lock()
+        screenOrientation = orientation
+        configLock.unlock()
+    }
+
+    func screenConfig() -> [String: Any] {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return [
+            "width": screenWidth,
+            "height": screenHeight,
+            "orientation": screenOrientation,
+        ]
     }
 
     // MARK: - MJPEG Client Management
@@ -109,7 +127,11 @@ final class ClientManager {
                 print("[clients] Unknown orientation: \(json.orientation)")
                 return
             }
-            onOrientation?(value)
+            if onOrientation?(value) == true {
+                setScreenOrientation(json.orientation)
+            } else {
+                print("[clients] Orientation request failed: \(json.orientation)")
+            }
         } else if type == 0x08 { // WS_MSG_CA_DEBUG
             guard let json = try? JSONDecoder().decode(CADebugEventPayload.self, from: data[1...]) else { return }
             onCADebug?(json)

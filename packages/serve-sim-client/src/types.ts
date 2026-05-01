@@ -1,5 +1,18 @@
 // Protocol types for the device gateway wire protocol.
 
+export type SimulatorOrientation =
+  | "portrait"
+  | "portrait_upside_down"
+  | "landscape_left"
+  | "landscape_right";
+
+export interface StreamConfig {
+  width: number;
+  height: number;
+  /** Last orientation requested through serve-sim, when known. */
+  orientation?: SimulatorOrientation;
+}
+
 export interface ExecMessage {
   type: "exec";
   id: string;

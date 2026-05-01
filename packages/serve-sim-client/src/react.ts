@@ -4,6 +4,7 @@ import type { ConnectOptions, GatewayShell, ShellResult } from "./gateway";
 import { fetchGatewayStatus } from "./discovery";
 import type { GatewayStatus, DiscoverOptions } from "./discovery";
 import type { AdaptiveState, ConnectionQuality } from "./transport";
+import type { StreamConfig } from "./types";
 
 export type { GatewayStatus, DiscoverOptions } from "./discovery";
 export { fetchGatewayStatus } from "./discovery";
@@ -29,7 +30,7 @@ export interface StreamAPI {
    * Callback receives a blob URL (object URL) pointing to the JPEG frame. */
   subscribeFrame: (cb: (blobUrl: string) => void) => () => void;
   frame: string | null;
-  config: { width: number; height: number } | null;
+  config: StreamConfig | null;
   /** Current adaptive FPS (may change dynamically based on network conditions). */
   adaptiveFps: number;
   /** Adaptive state: "normal" when at full FPS, "degraded" when reduced. */
@@ -52,7 +53,7 @@ export function useGateway(options: UseGatewayOptions): UseGatewayResult {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const streamFrameRef = useRef<string | null>(null);
   const frameListenersRef = useRef(new Set<(blobUrl: string) => void>());
-  const [streamConfig, setStreamConfig] = useState<{ width: number; height: number } | null>(null);
+  const [streamConfig, setStreamConfig] = useState<StreamConfig | null>(null);
   const [adaptiveFps, setAdaptiveFps] = useState(30);
   const [adaptiveState, setAdaptiveState] = useState<AdaptiveState>("normal");
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality | null>(null);

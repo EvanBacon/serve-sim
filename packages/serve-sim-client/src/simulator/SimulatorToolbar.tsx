@@ -9,12 +9,16 @@ import {
   type HTMLAttributes,
   type ReactNode,
 } from "react";
+import type { SimulatorOrientation } from "../types.js";
 import { getDeviceType, type DeviceType } from "./deviceFrames.js";
 
 type ExecFn = (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+type RotateFn = (orientation: SimulatorOrientation) => void | Promise<void>;
 
 interface ToolbarContextValue {
   exec: ExecFn;
+  onRotate?: RotateFn;
+  orientation?: SimulatorOrientation | null;
   deviceUdid?: string | null;
   deviceName?: string | null;
   deviceRuntime?: string | null;
@@ -35,6 +39,10 @@ function useToolbar(component: string): ToolbarContextValue {
 
 export interface SimulatorToolbarProps extends HTMLAttributes<HTMLDivElement> {
   exec: ExecFn;
+  /** Optional direct rotate handler. Defaults to shelling out to `serve-sim rotate`. */
+  onRotate?: RotateFn;
+  /** Current requested orientation, when known. Keeps the built-in rotate button in sync. */
+  orientation?: SimulatorOrientation | null;
   deviceUdid?: string | null;
   deviceName?: string | null;
   deviceRuntime?: string | null;
@@ -62,6 +70,8 @@ const toolbarStyle: CSSProperties = {
 
 function SimulatorToolbarRoot({
   exec,
+  onRotate,
+  orientation,
   deviceUdid,
   deviceName,
   deviceRuntime,
@@ -75,6 +85,8 @@ function SimulatorToolbarRoot({
   const effectiveDisabled = disabled || !deviceUdid || !streaming;
   const value: ToolbarContextValue = {
     exec,
+    onRotate,
+    orientation,
     deviceUdid,
     deviceName,
     deviceRuntime,
@@ -285,13 +297,7 @@ function watchHomeAppleScript(): string {
 // delivered to the guest as UIDeviceOrientation values via serve-sim's
 // PurpleWorkspacePort bridge — see HIDInjector.sendOrientation on the Swift
 // side.
-type Orientation =
-  | "portrait"
-  | "landscape_left"
-  | "portrait_upside_down"
-  | "landscape_right";
-
-const ROTATE_LEFT_CYCLE: Record<Orientation, Orientation> = {
+const ROTATE_LEFT_CYCLE: Record<SimulatorOrientation, SimulatorOrientation> = {
   portrait: "landscape_left",
   landscape_left: "portrait_upside_down",
   portrait_upside_down: "landscape_right",
@@ -401,10 +407,10 @@ const RotateButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function 
   const ctx = useToolbar("RotateButton");
   const cantRotate = ctx.deviceType === "watch" || ctx.deviceType === "vision";
   // Reset the cycle when the device changes — each sim boots in portrait.
-  const [orientation, setOrientation] = useState<Orientation>("portrait");
+  const [orientation, setOrientation] = useState<SimulatorOrientation>("portrait");
   useEffect(() => {
-    setOrientation("portrait");
-  }, [ctx.deviceUdid]);
+    setOrientation(ctx.orientation ?? "portrait");
+  }, [ctx.deviceUdid, ctx.orientation]);
 
   return (
     <ToolbarButton
@@ -415,9 +421,13 @@ const RotateButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function 
         onClick?.(e);
         if (e.defaultPrevented) return;
         if (!ctx.deviceUdid || cantRotate) return;
-        const next = ROTATE_LEFT_CYCLE[orientation];
+        const next = ROTATE_LEFT_CYCLE[ctx.orientation ?? orientation];
         setOrientation(next);
-        void ctx.exec(`serve-sim rotate ${next} -d ${ctx.deviceUdid}`);
+        if (ctx.onRotate) {
+          void ctx.onRotate(next);
+        } else {
+          void ctx.exec(`serve-sim rotate ${next} -d ${ctx.deviceUdid}`);
+        }
       }}
       {...rest}
     >

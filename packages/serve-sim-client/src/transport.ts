@@ -1,8 +1,8 @@
 import { defineCommand } from "just-bash";
-import type { ClientMessage, ServerMessage } from "./types";
+import type { ClientMessage, ServerMessage, StreamConfig } from "./types";
 import { encodeSingleTouch, encodeMultiTouch } from "./touch-codec";
 
-export type { ClientMessage, ServerMessage } from "./types";
+export type { ClientMessage, ServerMessage, SimulatorOrientation, StreamConfig } from "./types";
 export { encodeSingleTouch, encodeMultiTouch, decodeTouchMessage, isBinaryTouchMessage } from "./touch-codec";
 export type { SingleTouchData, MultiTouchData, DecodedSingleTouch, DecodedMultiTouch } from "./touch-codec";
 
@@ -51,7 +51,7 @@ const DEFAULT_FILE_OP_TIMEOUT_MS = 30_000;
 
 /** Listener receives a blob URL (object URL) pointing to the JPEG frame data. */
 export type StreamFrameListener = (blobUrl: string) => void;
-export type StreamConfigListener = (config: { width: number; height: number }) => void;
+export type StreamConfigListener = (config: StreamConfig) => void;
 export type ConnectionQuality = "good" | "degraded" | "poor";
 export type ConnectionQualityListener = (quality: ConnectionQuality) => void;
 

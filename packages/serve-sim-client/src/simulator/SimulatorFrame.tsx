@@ -1,12 +1,14 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import type { StreamConfig } from "../types.js";
 import {
-  DEVICE_FRAMES,
   DeviceFrameChrome,
-  SIMULATOR_SCREENS,
+  fallbackScreenSize,
   getDeviceType,
   screenBorderRadius,
-  type DeviceType,
+  simulatorAspectRatio,
+  simulatorMaxWidth,
 } from "./deviceFrames.js";
+import { isLandscapeConfig } from "./orientation.js";
 import { SimulatorStream, type SimulatorStreamProps } from "./SimulatorStream.js";
 
 export interface SimulatorFrameProps
@@ -25,14 +27,6 @@ export interface SimulatorFrameProps
   style?: CSSProperties;
 }
 
-/** Default per-device-type max-widths, in px. */
-const DEFAULT_MAX_WIDTHS: Record<DeviceType, number> = {
-  iphone: 320,
-  ipad: 400,
-  watch: 200,
-  vision: 580,
-};
-
 /**
  * Self-contained simulator UI: renders the device frame chrome and the
  * streaming view sized to match the real simulator screen. The caller only
@@ -46,27 +40,55 @@ export function SimulatorFrame({
   children,
   className,
   style,
+  onScreenConfigChange,
   ...streamProps
 }: SimulatorFrameProps) {
   const deviceType = getDeviceType(deviceName);
-  const frame = DEVICE_FRAMES[deviceType];
-  const screen = deviceName ? SIMULATOR_SCREENS[deviceName] : null;
+  const [liveScreenConfig, setLiveScreenConfig] = useState<StreamConfig | null>(null);
+  const fallbackScreen = fallbackScreenSize(deviceType, deviceName);
+  const streamConfig = streamProps.stream?.config ?? null;
+  const activeScreen = liveScreenConfig ?? streamConfig ?? fallbackScreen;
+  const isLandscape = isLandscapeConfig(activeScreen);
+  const isRotatedLandscape = isLandscape && fallbackScreen.width < fallbackScreen.height;
+  const shouldShowChrome = showChrome && !bare && !isRotatedLandscape;
 
-  // Aspect ratio: prefer exact simulator pixel dimensions, fall back to the
-  // frame's screen area (bezel-inset) so the stream always matches its frame.
-  const aspectRatio = bare
-    ? `${frame.width} / ${frame.height}`
-    : screen
-      ? `${screen.width} / ${screen.height}`
-      : `${frame.width - 2 * frame.bezelX} / ${frame.height - 2 * frame.bezelY}`;
+  useEffect(() => {
+    setLiveScreenConfig(null);
+  }, [deviceName, streamProps.device, streamProps.stream]);
 
-  const imgBorderRadius = bare ? 44 : screenBorderRadius(deviceType);
-  const maxWidth = DEFAULT_MAX_WIDTHS[deviceType];
+  useEffect(() => {
+    if (!streamConfig) return;
+    setLiveScreenConfig((prev) =>
+      prev &&
+      prev.width === streamConfig.width &&
+      prev.height === streamConfig.height &&
+      prev.orientation === streamConfig.orientation
+        ? prev
+        : streamConfig,
+    );
+  }, [streamConfig?.width, streamConfig?.height, streamConfig?.orientation]);
+
+  const handleScreenConfigChange = useCallback((config: StreamConfig) => {
+    setLiveScreenConfig((prev) =>
+      prev &&
+      prev.width === config.width &&
+      prev.height === config.height &&
+      prev.orientation === config.orientation
+        ? prev
+        : config,
+    );
+    onScreenConfigChange?.(config);
+  }, [onScreenConfigChange]);
+
+  const aspectRatio = simulatorAspectRatio(activeScreen, fallbackScreen);
+  const imgBorderRadius = bare ? 44 : screenBorderRadius(deviceType, activeScreen);
+  const maxWidth = simulatorMaxWidth(deviceType, activeScreen);
 
   return (
     <div
       data-simulator-frame
       data-device-type={deviceType}
+      data-orientation={isLandscape ? "landscape" : "portrait"}
       className={className}
       style={{
         position: "relative",
@@ -91,8 +113,9 @@ export function SimulatorFrame({
           borderRadius: imgBorderRadius,
           cornerShape: "superellipse(1.3)",
         } as CSSProperties}
+        onScreenConfigChange={handleScreenConfigChange}
       />
-      {showChrome && !bare && (
+      {shouldShowChrome && (
         <div
           style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 10 }}
         >

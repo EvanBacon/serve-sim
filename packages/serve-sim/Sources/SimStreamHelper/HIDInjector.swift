@@ -393,10 +393,10 @@ final class HIDInjector {
     /// `GraphicsServices._PurpleEventCallback` → backboardd. This is how
     /// Simulator.app itself rotates the device, and how idb's
     /// `FBSimulatorPurpleHID.orientationEvent:` is delivered.
-    func sendOrientation(orientation: UInt32) {
+    func sendOrientation(orientation: UInt32) -> Bool {
         guard let device = simDevice else {
             fputs("[hid] sendOrientation: no SimDevice (setup not called?)\n", stderr)
-            return
+            return false
         }
 
         let lookupSel = NSSelectorFromString("lookup:error:")
@@ -405,7 +405,7 @@ final class HIDInjector {
         ) -> mach_port_t
         guard let lookupIMP = class_getMethodImplementation(object_getClass(device)!, lookupSel) else {
             fputs("[hid] sendOrientation: -[SimDevice lookup:error:] not found\n", stderr)
-            return
+            return false
         }
         let lookup = unsafeBitCast(lookupIMP, to: LookupFunc.self)
 
@@ -413,13 +413,13 @@ final class HIDInjector {
         let purplePort = lookup(device, lookupSel, "PurpleWorkspacePort" as NSString, &lookupError)
         if purplePort == 0 {
             fputs("[hid] sendOrientation: PurpleWorkspacePort not found (\(lookupError?.localizedDescription ?? "no error")). Simulator.app must be running.\n", stderr)
-            return
+            return false
         }
 
         // 112-byte aligned buffer (>= 108 = align4(4 + 0x6B), the msgh_size
         // for a GSEvent with a 4-byte orientation payload).
         var buf = [UInt8](repeating: 0, count: 112)
-        buf.withUnsafeMutableBufferPointer { ptr in
+        return buf.withUnsafeMutableBufferPointer { ptr in
             let base = UnsafeMutableRawPointer(ptr.baseAddress!)
             let header = base.assumingMemoryBound(to: mach_msg_header_t.self)
             header.pointee.msgh_bits = mach_msg_bits_t(MACH_MSG_TYPE_COPY_SEND)
@@ -439,8 +439,10 @@ final class HIDInjector {
             let kr = mach_msg_send(header)
             if kr != KERN_SUCCESS {
                 fputs("[hid] sendOrientation: mach_msg_send failed (\(kr))\n", stderr)
+                return false
             } else {
                 print("[hid] Orientation set to \(orientation)")
+                return true
             }
         }
     }

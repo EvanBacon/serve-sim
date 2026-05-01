@@ -2,11 +2,15 @@ import { createRoot } from "react-dom/client";
 import { useEffect, useState, useCallback, useRef, type CSSProperties, type DragEvent, type ReactNode } from "react";
 import {
   SimulatorView,
+  fallbackScreenSize,
   screenBorderRadius,
-  DEVICE_FRAMES,
   SimulatorToolbar,
   getDeviceType,
+  simulatorAspectRatio,
+  simulatorMaxWidth,
   type DeviceType,
+  type SimulatorOrientation,
+  type StreamConfig,
 } from "serve-sim-client/simulator";
 
 /**
@@ -15,9 +19,8 @@ import {
  * so we manually read the stream and extract JPEG boundaries.
  */
 function useMjpegStream(streamUrl: string | null) {
-  const [config, setConfig] = useState<{ width: number; height: number } | null>(null);
+  const [config, setConfig] = useState<StreamConfig | null>(null);
   const subscribersRef = useRef<Set<(blobUrl: string) => void>>(new Set());
-  const [frame, setFrame] = useState<string | null>(null);
 
   const subscribeFrame = useCallback(
     (cb: (blobUrl: string) => void) => {
@@ -30,15 +33,30 @@ function useMjpegStream(streamUrl: string | null) {
   useEffect(() => {
     if (!streamUrl) return;
     const controller = new AbortController();
+    let stopped = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // Fetch config for screen dimensions
+    // Poll config for screen dimensions + requested orientation.
     const baseUrl = streamUrl.replace(/\/stream\.mjpeg$/, "");
-    fetch(`${baseUrl}/config`, { signal: controller.signal })
-      .then((r) => r.json())
-      .then((c: { width: number; height: number }) => {
-        if (c.width > 0 && c.height > 0) setConfig(c);
-      })
-      .catch(() => {});
+    const applyConfig = (c: StreamConfig) => {
+      if (c.width <= 0 || c.height <= 0) return;
+      setConfig((prev) =>
+        prev &&
+        prev.width === c.width &&
+        prev.height === c.height &&
+        prev.orientation === c.orientation
+          ? prev
+          : c,
+      );
+    };
+    const fetchConfig = () => {
+      fetch(`${baseUrl}/config`, { signal: controller.signal })
+        .then((r) => r.json())
+        .then(applyConfig)
+        .catch(() => {});
+    };
+    fetchConfig();
+    const configInterval = setInterval(fetchConfig, 1000);
 
     // Read the MJPEG stream and extract JPEG frames.
     // ?raw=1 tells the server to use Content-Type application/octet-stream
@@ -47,11 +65,21 @@ function useMjpegStream(streamUrl: string | null) {
     const fetchUrlObj = new URL(streamUrl);
     fetchUrlObj.searchParams.set("raw", "1");
     const fetchUrl = fetchUrlObj.toString();
-    (async () => {
+    const scheduleRetry = () => {
+      if (stopped || controller.signal.aborted || retryTimer) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        void readStream();
+      }, 1000);
+    };
+    const readStream = async () => {
       try {
         const res = await fetch(fetchUrl, { signal: controller.signal });
         const reader = res.body?.getReader();
-        if (!reader) return;
+        if (!reader) {
+          scheduleRetry();
+          return;
+        }
 
         let buffer = new Uint8Array(0);
 
@@ -94,7 +122,10 @@ function useMjpegStream(streamUrl: string | null) {
 
             const blob = new Blob([jpeg], { type: "image/jpeg" });
             const blobUrl = URL.createObjectURL(blob);
-            setFrame(blobUrl);
+            if (subscribersRef.current.size === 0) {
+              URL.revokeObjectURL(blobUrl);
+              continue;
+            }
             for (const cb of subscribersRef.current) {
               cb(blobUrl);
             }
@@ -102,13 +133,21 @@ function useMjpegStream(streamUrl: string | null) {
         }
       } catch {
         // Aborted or network error
+      } finally {
+        scheduleRetry();
       }
-    })();
+    };
+    void readStream();
 
-    return () => controller.abort();
+    return () => {
+      stopped = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      controller.abort();
+      clearInterval(configInterval);
+    };
   }, [streamUrl]);
 
-  return { subscribeFrame, frame, config };
+  return { subscribeFrame, frame: null, config };
 }
 
 
@@ -1300,25 +1339,52 @@ function App() {
   }, [selectedDevice?.name]);
 
   const deviceType: DeviceType = getDeviceType(selectedDevice?.name);
-  const deviceFrame = DEVICE_FRAMES[deviceType];
-  const screenWidth = deviceFrame.width - 2 * deviceFrame.bezelX;
-  const screenHeight = deviceFrame.height - 2 * deviceFrame.bezelY;
-  const imgBorderRadius = screenBorderRadius(deviceType);
-  const frameMaxWidth = deviceType === "vision" ? 580
-    : deviceType === "ipad" ? 400
-    : deviceType === "watch" ? 200
-    : 320;
 
   // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
   const mjpeg = useMjpegStream(config.streamUrl);
+  const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
+  const activeStreamConfig = liveStreamConfig ?? mjpeg.config ?? fallbackScreenSize(deviceType, selectedDevice?.name);
+  const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
+  const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
+  const frameAspectRatio = simulatorAspectRatio(activeStreamConfig);
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
   useEffect(() => {
-    const ws = new WebSocket(config.wsUrl);
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
-    return () => { ws.close(); wsRef.current = null; };
+    let stopped = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let currentWs: WebSocket | null = null;
+
+    const scheduleReconnect = () => {
+      if (stopped || reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, 1000);
+    };
+
+    const connect = () => {
+      const ws = new WebSocket(config.wsUrl);
+      ws.binaryType = "arraybuffer";
+      currentWs = ws;
+      wsRef.current = ws;
+      ws.onclose = () => {
+        if (wsRef.current === ws) wsRef.current = null;
+        scheduleReconnect();
+      };
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (wsRef.current === currentWs) wsRef.current = null;
+      currentWs?.close();
+    };
   }, [config.wsUrl]);
 
   const sendWs = useCallback((tag: number, payload: object) => {
@@ -1334,6 +1400,36 @@ function App() {
   const onStreamTouch = useCallback((data: any) => sendWs(0x03, data), [sendWs]);
   const onStreamMultiTouch = useCallback((data: any) => sendWs(0x05, data), [sendWs]);
   const onStreamButton = useCallback((button: string) => sendWs(0x04, { button }), [sendWs]);
+  const onScreenConfigChange = useCallback((next: StreamConfig) => {
+    setLiveStreamConfig((prev) =>
+      prev &&
+      prev.width === next.width &&
+      prev.height === next.height &&
+      prev.orientation === next.orientation
+        ? prev
+        : next,
+    );
+  }, []);
+  const rotateDevice = useCallback((orientation: SimulatorOrientation) => {
+    sendWs(0x07, { orientation });
+  }, [sendWs]);
+
+  useEffect(() => {
+    setLiveStreamConfig(null);
+  }, [config.streamUrl]);
+
+  useEffect(() => {
+    const confirmedConfig = mjpeg.config;
+    if (!confirmedConfig) return;
+    setLiveStreamConfig((prev) =>
+      prev &&
+      prev.width === confirmedConfig.width &&
+      prev.height === confirmedConfig.height &&
+      prev.orientation === confirmedConfig.orientation
+        ? prev
+        : null,
+    );
+  }, [mjpeg.config?.width, mjpeg.config?.height, mjpeg.config?.orientation]);
 
   const sendKey = useCallback((type: "down" | "up", usage: number) => {
     sendWs(0x06, { type, usage });
@@ -1528,91 +1624,90 @@ function App() {
         transition: "padding-right 0.25s ease",
       }}
     >
-      <SimulatorToolbar
-        exec={execOnHost}
-        deviceUdid={config.device}
-        deviceName={selectedDevice?.name ?? null}
-        deviceRuntime={selectedDevice?.runtime ?? null}
-        streaming={streaming}
-        style={{ maxWidth: frameMaxWidth }}
-      >
-        <DevicePicker
-          devices={devices}
-          selectedUdid={config.device}
-          loading={devicesLoading}
-          error={devicesError}
-          stoppingUdids={stoppingUdids}
-          onRefresh={fetchDevices}
-          onSelect={switchToDevice}
-          onStop={stopDevice}
-          trigger={<SimulatorToolbar.Title />}
-        />
-        <SimulatorToolbar.Actions>
-          {currentApp?.isReactNative && (
-            <SimulatorToolbar.Button
-              aria-label="Reload React Native bundle"
-              title="Reload (Cmd+R)"
-              onClick={() => void sendReactNativeReload()}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3 12a9 9 0 1 0 3.5-7.1" />
-                <polyline points="3 3 3 9 9 9" />
-              </svg>
-            </SimulatorToolbar.Button>
-          )}
-          <SimulatorToolbar.HomeButton
-            onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-          />
-        </SimulatorToolbar.Actions>
-      </SimulatorToolbar>
       <div
         style={{
-          flex: "1 1 0",
-          minHeight: 0,
-          width: "100%",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-      <div
-        ref={simContainerRef}
-        style={{
+          ...s.simulatorStack,
           maxWidth: frameMaxWidth,
-          maxHeight: "100%",
-          width: "100%",
-          aspectRatio: `${screenWidth} / ${screenHeight}`,
-          position: "relative",
         }}
-        {...mediaDrop.dropZoneProps}
       >
-        <SimulatorView
-          url={config.url}
-          style={{ width: "100%", height: "100%", border: "none" }}
-          imageStyle={{
-            borderRadius: imgBorderRadius,
-            cornerShape: "superellipse(1.3)",
-          } as CSSProperties}
-          hideControls
-          onStreamingChange={setStreaming}
-          onStreamTouch={onStreamTouch}
-          onStreamMultiTouch={onStreamMultiTouch}
-          onStreamButton={onStreamButton}
-          subscribeFrame={mjpeg.subscribeFrame}
-          streamFrame={mjpeg.frame}
-          streamConfig={mjpeg.config}
-        />
-        {mediaDrop.isDragOver && (
-          <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
-            <span style={{ fontSize: 13, fontWeight: 500 }}>Drop media or .ipa</span>
-          </div>
-        )}
-      </div>
+        <SimulatorToolbar
+          exec={execOnHost}
+          onRotate={rotateDevice}
+          orientation={activeStreamConfig.orientation ?? null}
+          deviceUdid={config.device}
+          deviceName={selectedDevice?.name ?? null}
+          deviceRuntime={selectedDevice?.runtime ?? null}
+          streaming={streaming}
+        >
+          <DevicePicker
+            devices={devices}
+            selectedUdid={config.device}
+            loading={devicesLoading}
+            error={devicesError}
+            stoppingUdids={stoppingUdids}
+            onRefresh={fetchDevices}
+            onSelect={switchToDevice}
+            onStop={stopDevice}
+            trigger={<SimulatorToolbar.Title />}
+          />
+          <SimulatorToolbar.Actions>
+            <SimulatorToolbar.HomeButton
+              onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
+            />
+            {currentApp?.isReactNative && (
+              <SimulatorToolbar.Button
+                aria-label="Reload React Native bundle"
+                title="Reload (Cmd+R)"
+                onClick={() => void sendReactNativeReload()}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 12a9 9 0 1 0 3.5-7.1" />
+                  <polyline points="3 3 3 9 9 9" />
+                </svg>
+              </SimulatorToolbar.Button>
+            )}
+            <SimulatorToolbar.RotateButton title="Rotate device" />
+          </SimulatorToolbar.Actions>
+        </SimulatorToolbar>
+        <div
+          ref={simContainerRef}
+          style={{
+            maxWidth: frameMaxWidth,
+            maxHeight: "100%",
+            width: "100%",
+            aspectRatio: frameAspectRatio,
+            position: "relative",
+          }}
+          {...mediaDrop.dropZoneProps}
+        >
+          <SimulatorView
+            url={config.url}
+            style={{ width: "100%", height: "100%", border: "none" }}
+            imageStyle={{
+              borderRadius: imgBorderRadius,
+              cornerShape: "superellipse(1.3)",
+            } as CSSProperties}
+            hideControls
+            onStreamingChange={setStreaming}
+            onStreamTouch={onStreamTouch}
+            onStreamMultiTouch={onStreamMultiTouch}
+            onStreamButton={onStreamButton}
+            subscribeFrame={mjpeg.subscribeFrame}
+            streamFrame={mjpeg.frame}
+            streamConfig={activeStreamConfig}
+            onScreenConfigChange={onScreenConfigChange}
+          />
+          {mediaDrop.isDragOver && (
+            <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>Drop media or .ipa</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Upload toasts */}
@@ -1675,6 +1770,16 @@ const s: Record<string, CSSProperties> = {
     display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
     height: "100vh", background: "#0a0a0a", padding: 24, gap: 12,
     fontFamily: "-apple-system, system-ui, sans-serif",
+    boxSizing: "border-box",
+  },
+  simulatorStack: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 12,
+    width: "100%",
+    minWidth: 0,
+    transition: "max-width 0.25s ease",
   },
   bar: {
     display: "flex", alignItems: "center", gap: 10,
