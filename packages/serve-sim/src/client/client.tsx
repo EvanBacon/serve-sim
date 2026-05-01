@@ -1227,6 +1227,8 @@ function AxDomOverlay({
             aria-label={`Select ${axNode.label}`}
             aria-description={summary}
             onClick={() => onSelect(key)}
+            onMouseEnter={() => onHighlight(key)}
+            onMouseLeave={() => onHighlight(null)}
             onFocus={() => onHighlight(key)}
             onBlur={() => onHighlight(null)}
             style={{
@@ -1693,38 +1695,6 @@ function App() {
     }
   }, [axOverlayEnabled]);
 
-  const highlightAxElementAtClientPoint = useCallback((clientX: number, clientY: number) => {
-    if (!axOverlayEnabled || !axSnapshot?.screen.width || !axSnapshot.screen.height) return;
-    const rect = simContainerRef.current?.getBoundingClientRect();
-    if (!rect?.width || !rect.height) return;
-
-    const x = ((clientX - rect.left) / rect.width) * axSnapshot.screen.width;
-    const y = ((clientY - rect.top) / rect.height) * axSnapshot.screen.height;
-    if (x < 0 || y < 0 || x > axSnapshot.screen.width || y > axSnapshot.screen.height) {
-      setHighlightedAxKey((current) => (current === null ? current : null));
-      return;
-    }
-
-    let nextKey: string | null = null;
-    let nextArea = Number.POSITIVE_INFINITY;
-    axSnapshot.elements.forEach((element, index) => {
-      const frame = element.frame;
-      const contains =
-        x >= frame.x &&
-        y >= frame.y &&
-        x <= frame.x + frame.width &&
-        y <= frame.y + frame.height;
-      if (!contains) return;
-
-      const area = frame.width * frame.height;
-      if (area >= nextArea) return;
-      nextArea = area;
-      nextKey = axElementKey(element);
-    });
-
-    setHighlightedAxKey((current) => (current === nextKey ? current : nextKey));
-  }, [axOverlayEnabled, axSnapshot]);
-
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
       const inside = !!simContainerRef.current?.contains(e.target as Node);
@@ -1940,12 +1910,6 @@ function App() {
           position: "relative",
         }}
         {...mediaDrop.dropZoneProps}
-        onMouseMove={
-          axOverlayEnabled
-            ? (event) => highlightAxElementAtClientPoint(event.clientX, event.clientY)
-            : undefined
-        }
-        onMouseLeave={axOverlayEnabled ? () => setHighlightedAxKey(null) : undefined}
       >
         <SimulatorView
           url={config.url}
