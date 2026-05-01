@@ -1,14 +1,13 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import type { AxElement, AxRect, AxSnapshot } from "./ax-types";
+import { AXE_NOT_INSTALLED_ERROR } from "./ax-shared";
+import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
-export type { AxElement, AxRect, AxSnapshot } from "./ax-types";
+export type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
 const SNAPSHOT_TIMEOUT_MS = 3500;
 const MAX_ELEMENTS = 500;
 const POLL_INTERVAL_MS = 500;
-const AXE_INSTALL_URL = "https://github.com/cameroncooke/AXe";
-const AXE_NOT_INSTALLED_ERROR = `AXe is not installed. Install it from ${AXE_INSTALL_URL}.`;
 const execFileAsync = promisify(execFile);
 
 interface RawAxeNode {

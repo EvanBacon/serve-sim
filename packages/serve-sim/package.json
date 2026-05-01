@@ -24,7 +24,7 @@
     "dist/serve-sim.js",
     "dist/middleware.js",
     "dist/middleware.cjs",
-    "src/ax-types.ts",
+    "src/ax-shared.ts",
     "src/ax.ts",
     "src/middleware.ts",
     "src/state.ts",

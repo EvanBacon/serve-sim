@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
-import type { AxElement, AxRect, AxSnapshot } from "../ax-types";
+import { AXE_INSTALL_URL, AXE_NOT_INSTALLED_ERROR } from "../ax-shared";
+import type { AxElement, AxRect, AxSnapshot } from "../ax-shared";
 import {
   useEffect,
   useState,
@@ -172,10 +173,8 @@ declare global {
   }
 }
 
-const AXE_INSTALL_URL = "https://github.com/cameroncooke/AXe";
-
 function isAxeUnavailable(snapshot: AxSnapshot | null) {
-  return snapshot?.errors?.some((error) => error.includes("AXe is not installed")) ?? false;
+  return snapshot?.errors?.includes(AXE_NOT_INSTALLED_ERROR) ?? false;
 }
 
 function useAxSnapshot(endpoint?: string) {
@@ -1195,7 +1194,7 @@ function AxDomOverlay({
     >
       {snapshot.elements.map((element, index) => {
         const key = axElementKey(element);
-        const axNode = axNodeForElement(element, index, snapshot);
+        const axNode = axNodeForElement(element, index);
         const visibleFrame = clampAxFrameForScreen(element.frame, snapshot.screen);
         if (!visibleFrame) return null;
         const summary = axElementSummary(axNode);
@@ -1261,7 +1260,7 @@ function AxTreeTool({
   onToggleOverlay: () => void;
   onHighlight: (key: string | null) => void;
 }) {
-  const elements = snapshot?.elements.slice(0, 40) ?? [];
+  const elements = snapshot?.elements ?? [];
   const axeUnavailable = isAxeUnavailable(snapshot);
   const error = snapshot?.errors?.[0] ?? null;
   return (
@@ -1298,7 +1297,7 @@ function AxTreeTool({
           {elements.map((element, index) => {
             const key = axElementKey(element);
             const active = key === highlightedKey;
-            const axNode = axNodeForElement(element, index, snapshot!);
+            const axNode = axNodeForElement(element, index);
             const size = `${Math.round(element.frame.width)}x${Math.round(element.frame.height)}`;
             const itemTitle = [
               axNode.label,
@@ -1335,7 +1334,7 @@ function AxTreeTool({
   );
 }
 
-function axNodeForElement(element: AxElement, index: number, snapshot: AxSnapshot) {
+function axNodeForElement(element: AxElement, index: number) {
   const label = element.label || element.role || `element ${index + 1}`;
   const role = element.role || element.type;
   return {
@@ -1347,7 +1346,6 @@ function axNodeForElement(element: AxElement, index: number, snapshot: AxSnapsho
     type: element.type,
     enabled: element.enabled,
     frame: element.frame,
-    screen: snapshot.screen,
   };
 }
 
@@ -1914,10 +1912,12 @@ function App() {
           position: "relative",
         }}
         {...mediaDrop.dropZoneProps}
-        onMouseMove={(event) => highlightAxElementAtClientPoint(event.clientX, event.clientY)}
-        onMouseLeave={() => {
-          if (axOverlayEnabled) setHighlightedAxKey(null);
-        }}
+        onMouseMove={
+          axOverlayEnabled
+            ? (event) => highlightAxElementAtClientPoint(event.clientX, event.clientY)
+            : undefined
+        }
+        onMouseLeave={axOverlayEnabled ? () => setHighlightedAxKey(null) : undefined}
       >
         <SimulatorView
           url={config.url}
