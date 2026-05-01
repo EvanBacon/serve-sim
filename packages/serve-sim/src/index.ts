@@ -1,6 +1,15 @@
 #!/usr/bin/env bun
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
 import { join, resolve } from "path";
@@ -45,7 +54,10 @@ function readState(udid?: string): ServerState | null {
  * by the number of running helpers. We cache for 1 second so a flurry of
  * readStateFile() calls (e.g. readAllStates loop) shares one lookup.
  */
-let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
+let bootedSnapshot: { at: number; booted: Set<string> | null } = {
+  at: 0,
+  booted: null,
+};
 function getBootedUdids(): Set<string> | null {
   const now = Date.now();
   if (bootedSnapshot.booted && now - bootedSnapshot.at < 1000) {
@@ -97,8 +109,12 @@ function readStateFile(file: string): ServerState | null {
       console.error(
         `[serve-sim] Helper pid ${state.pid} is bound to device ${state.device} which is no longer booted — killing stale helper.`,
       );
-      try { process.kill(state.pid, "SIGTERM"); } catch {}
-      try { unlinkSync(file); } catch {}
+      try {
+        process.kill(state.pid, "SIGTERM");
+      } catch {}
+      try {
+        unlinkSync(file);
+      } catch {}
       return null;
     }
     return state;
@@ -118,15 +134,22 @@ function readAllStates(): ServerState[] {
 
 function writeState(state: ServerState) {
   ensureStateDir();
-  writeFileSync(stateFileForDevice(state.device), JSON.stringify(state, null, 2));
+  writeFileSync(
+    stateFileForDevice(state.device),
+    JSON.stringify(state, null, 2),
+  );
 }
 
 function clearState(udid?: string) {
   if (udid) {
-    try { unlinkSync(stateFileForDevice(udid)); } catch {}
+    try {
+      unlinkSync(stateFileForDevice(udid));
+    } catch {}
   } else {
     for (const file of listStateFiles()) {
-      try { unlinkSync(file); } catch {}
+      try {
+        unlinkSync(file);
+      } catch {}
     }
   }
 }
@@ -157,7 +180,11 @@ function findHelperBinary(): string {
     writeFileSync(extracted, bytes);
     chmodSync(extracted, 0o755);
     // Re-apply ad-hoc signature so the macOS kernel will exec it.
-    try { execSync(`codesign -s - -f ${JSON.stringify(extracted)}`, { stdio: "ignore" }); } catch {}
+    try {
+      execSync(`codesign -s - -f ${JSON.stringify(extracted)}`, {
+        stdio: "ignore",
+      });
+    } catch {}
   }
   return extracted;
 }
@@ -166,9 +193,14 @@ function findHelperBinary(): string {
 
 function findBootedDevice(): string | null {
   try {
-    const output = execSync("xcrun simctl list devices booted -j", { encoding: "utf-8" });
+    const output = execSync("xcrun simctl list devices booted -j", {
+      encoding: "utf-8",
+    });
     const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
+      devices: Record<
+        string,
+        Array<{ udid: string; name: string; state: string }>
+      >;
     };
     for (const runtime of Object.values(data.devices)) {
       for (const device of runtime) {
@@ -185,9 +217,19 @@ function findBootedDevice(): string | null {
  */
 function pickDefaultDevice(): { udid: string; name: string } | null {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execSync("xcrun simctl list devices -j", {
+      encoding: "utf-8",
+    });
     const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string; isAvailable?: boolean }>>;
+      devices: Record<
+        string,
+        Array<{
+          udid: string;
+          name: string;
+          state: string;
+          isAvailable?: boolean;
+        }>
+      >;
     };
     const iosRuntimes = Object.keys(data.devices)
       .filter((k) => /SimRuntime\.iOS-/i.test(k))
@@ -209,9 +251,14 @@ function pickDefaultDevice(): { udid: string; name: string } | null {
 
 function getDeviceName(udid: string): string | null {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execSync("xcrun simctl list devices -j", {
+      encoding: "utf-8",
+    });
     const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
+      devices: Record<
+        string,
+        Array<{ udid: string; name: string; state: string }>
+      >;
     };
     for (const runtime of Object.values(data.devices)) {
       for (const device of runtime) {
@@ -223,17 +270,27 @@ function getDeviceName(udid: string): string | null {
 }
 
 function resolveDevice(nameOrUDID: string): string {
-  if (/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(nameOrUDID)) {
+  if (
+    /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(
+      nameOrUDID,
+    )
+  ) {
     return nameOrUDID;
   }
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execSync("xcrun simctl list devices -j", {
+      encoding: "utf-8",
+    });
     const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
+      devices: Record<
+        string,
+        Array<{ udid: string; name: string; state: string }>
+      >;
     };
     for (const runtime of Object.values(data.devices)) {
       for (const device of runtime) {
-        if (device.name.toLowerCase() === nameOrUDID.toLowerCase()) return device.udid;
+        if (device.name.toLowerCase() === nameOrUDID.toLowerCase())
+          return device.udid;
       }
     }
   } catch {}
@@ -243,7 +300,9 @@ function resolveDevice(nameOrUDID: string): string {
 
 function isDeviceBooted(udid: string): boolean {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execSync("xcrun simctl list devices -j", {
+      encoding: "utf-8",
+    });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; state: string }>>;
     };
@@ -257,12 +316,21 @@ function isDeviceBooted(udid: string): boolean {
 }
 
 function isProcessAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Kill a process and wait for it to actually exit. */
 function stopProcess(pid: number): void {
-  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
   const deadline = Date.now() + 500;
   while (Date.now() < deadline) {
     try {
@@ -272,17 +340,27 @@ function stopProcess(pid: number): void {
       return;
     }
   }
-  try { process.kill(pid, "SIGKILL"); } catch {}
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {}
   const deadline2 = Date.now() + 500;
   while (Date.now() < deadline2) {
-    try { process.kill(pid, 0); Bun.sleepSync(25); } catch { return; }
+    try {
+      process.kill(pid, 0);
+      Bun.sleepSync(25);
+    } catch {
+      return;
+    }
   }
 }
 
 /** Return PIDs currently holding a TCP port (excluding ourselves). */
 function getPortHolders(port: number): number[] {
   try {
-    const output = execSync(`lsof -ti tcp:${port}`, { encoding: "utf-8", stdio: "pipe" }).trim();
+    const output = execSync(`lsof -ti tcp:${port}`, {
+      encoding: "utf-8",
+      stdio: "pipe",
+    }).trim();
     if (!output) return [];
     const myPid = process.pid;
     return output
@@ -298,9 +376,13 @@ function getPortHolders(port: number): number[] {
 function killPortHolder(port: number): void {
   const pids = getPortHolders(port);
   if (pids.length === 0) return;
-  console.log(`\x1b[90mPort ${port} busy, killing holder pid(s): ${pids.join(", ")}\x1b[0m`);
+  console.log(
+    `\x1b[90mPort ${port} busy, killing holder pid(s): ${pids.join(", ")}\x1b[0m`,
+  );
   for (const pid of pids) {
-    try { process.kill(pid, "SIGKILL"); } catch {}
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
   }
   Bun.sleepSync(100);
 }
@@ -308,11 +390,16 @@ function killPortHolder(port: number): void {
 function bootDevice(udid: string): void {
   if (!isDeviceBooted(udid)) {
     try {
-      execSync(`xcrun simctl boot ${udid}`, { encoding: "utf-8", stdio: "pipe" });
+      execSync(`xcrun simctl boot ${udid}`, {
+        encoding: "utf-8",
+        stdio: "pipe",
+      });
     } catch (err: any) {
       const msg = (err.stderr ?? err.message ?? "").toLowerCase();
       if (!msg.includes("booted") && !msg.includes("current state")) {
-        throw new Error(`Failed to boot device ${udid}: ${err.stderr || err.message}`);
+        throw new Error(
+          `Failed to boot device ${udid}: ${err.stderr || err.message}`,
+        );
       }
     }
   }
@@ -368,7 +455,9 @@ async function ensureBooted(udid: string): Promise<void> {
     });
   } catch (err: any) {
     if (!isDeviceBooted(udid)) {
-      console.error(`Device ${udid} failed to reach booted state: ${err.stderr || err.message}`);
+      console.error(
+        `Device ${udid} failed to reach booted state: ${err.stderr || err.message}`,
+      );
       process.exit(1);
     }
   }
@@ -398,7 +487,10 @@ async function waitForHelperReady(
     if (!isAlive()) break;
     try {
       const res = await fetch(`${url}/health`);
-      if (res.ok) { ready = true; break; }
+      if (res.ok) {
+        ready = true;
+        break;
+      }
     } catch {}
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -420,7 +512,9 @@ async function waitForHelperReady(
   }
 
   let log = "";
-  try { log = readFileSync(logFile, "utf-8").trim(); } catch {}
+  try {
+    log = readFileSync(logFile, "utf-8").trim();
+  } catch {}
   return { ready, log };
 }
 
@@ -445,7 +539,9 @@ async function spawnHelperDetached(opts: SpawnHelperOptions): Promise<{
 
   const childPid = child.pid!;
   let childExited = false;
-  child.once("exit", () => { childExited = true; });
+  child.once("exit", () => {
+    childExited = true;
+  });
 
   const { ready, log } = await waitForHelperReady(
     childPid,
@@ -454,7 +550,12 @@ async function spawnHelperDetached(opts: SpawnHelperOptions): Promise<{
     () => !childExited && isProcessAlive(childPid),
   );
 
-  return { ready, pid: childPid, exited: childExited || !isProcessAlive(childPid), log };
+  return {
+    ready,
+    pid: childPid,
+    exited: childExited || !isProcessAlive(childPid),
+    log,
+  };
 }
 
 /** Spawn the helper attached (for foreground follow mode). Returns the child process. */
@@ -476,7 +577,9 @@ async function spawnHelperAttached(opts: SpawnHelperOptions): Promise<{
 
   const childPid = child.pid!;
   let childExited = false;
-  child.once("exit", () => { childExited = true; });
+  child.once("exit", () => {
+    childExited = true;
+  });
 
   const { ready, log } = await waitForHelperReady(
     childPid,
@@ -499,7 +602,13 @@ async function startHelper(
   const host = "127.0.0.1";
   const helperPath = findHelperBinary();
   const logFile = join(STATE_DIR, `server-${udid}.log`);
-  const spawnOpts: SpawnHelperOptions = { helperPath, udid, port, host, logFile };
+  const spawnOpts: SpawnHelperOptions = {
+    helperPath,
+    udid,
+    port,
+    host,
+    logFile,
+  };
 
   let lastLog = "";
   const MAX_ATTEMPTS = 2;
@@ -546,7 +655,9 @@ async function startHelper(
     }
   }
 
-  const reason = lastLog ? `Helper failed:\n${lastLog}` : "Helper process failed to start";
+  const reason = lastLog
+    ? `Helper failed:\n${lastLog}`
+    : "Helper process failed to start";
   console.error(reason);
   process.exit(1);
 }
@@ -555,21 +666,24 @@ async function startHelper(
 
 /** Foreground follow mode (default). Stays attached, cleans up on Ctrl+C. */
 async function follow(devices: string[], startPort: number, quiet: boolean) {
-  const udids = devices.length > 0
-    ? devices.map(resolveDevice)
-    : (() => {
-        const booted = findBootedDevice();
-        if (booted) return [booted];
-        const fallback = pickDefaultDevice();
-        if (!fallback) {
-          console.error("No device specified and no available iOS simulator found.");
-          process.exit(1);
-        }
-        if (!quiet) {
-          console.log(`No booted simulator — booting ${fallback.name}...`);
-        }
-        return [fallback.udid];
-      })();
+  const udids =
+    devices.length > 0
+      ? devices.map(resolveDevice)
+      : (() => {
+          const booted = findBootedDevice();
+          if (booted) return [booted];
+          const fallback = pickDefaultDevice();
+          if (!fallback) {
+            console.error(
+              "No device specified and no available iOS simulator found.",
+            );
+            process.exit(1);
+          }
+          if (!quiet) {
+            console.log(`No booted simulator — booting ${fallback.name}...`);
+          }
+          return [fallback.udid];
+        })();
 
   const children = new Map<string, ChildProcess>();
   const states: ServerState[] = [];
@@ -622,15 +736,27 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
   // Machine-readable JSON to stdout
   if (states.length === 1) {
     const s = states[0]!;
-    console.log(JSON.stringify({
-      url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
-    }));
+    console.log(
+      JSON.stringify({
+        url: s.url,
+        streamUrl: s.streamUrl,
+        wsUrl: s.wsUrl,
+        port: s.port,
+        device: s.device,
+      }),
+    );
   } else {
-    console.log(JSON.stringify({
-      devices: states.map((s) => ({
-        url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
-      })),
-    }));
+    console.log(
+      JSON.stringify({
+        devices: states.map((s) => ({
+          url: s.url,
+          streamUrl: s.streamUrl,
+          wsUrl: s.wsUrl,
+          port: s.port,
+          device: s.device,
+        })),
+      }),
+    );
   }
 
   // If no new children were spawned (all already running), exit
@@ -670,8 +796,12 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
   // Last-resort synchronous cleanup if something else exits the process
   process.on("exit", () => {
     for (const [udid, child] of children) {
-      try { if (child.pid) process.kill(child.pid, "SIGTERM"); } catch {}
-      try { clearState(udid); } catch {}
+      try {
+        if (child.pid) process.kill(child.pid, "SIGTERM");
+      } catch {}
+      try {
+        clearState(udid);
+      } catch {}
     }
   });
 
@@ -680,19 +810,25 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
 }
 
 /** Detach mode (--detach). Spawns helpers and returns their states. */
-async function detach(devices: string[], startPort: number): Promise<ServerState[]> {
-  const udids = devices.length > 0
-    ? devices.map(resolveDevice)
-    : (() => {
-        const booted = findBootedDevice();
-        if (booted) return [booted];
-        const fallback = pickDefaultDevice();
-        if (!fallback) {
-          console.error("No device specified and no available iOS simulator found.");
-          process.exit(1);
-        }
-        return [fallback.udid];
-      })();
+async function detach(
+  devices: string[],
+  startPort: number,
+): Promise<ServerState[]> {
+  const udids =
+    devices.length > 0
+      ? devices.map(resolveDevice)
+      : (() => {
+          const booted = findBootedDevice();
+          if (booted) return [booted];
+          const fallback = pickDefaultDevice();
+          if (!fallback) {
+            console.error(
+              "No device specified and no available iOS simulator found.",
+            );
+            process.exit(1);
+          }
+          return [fallback.udid];
+        })();
 
   const states: ServerState[] = [];
   let port = startPort;
@@ -726,15 +862,27 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
 function printStatesJSON(states: ServerState[]) {
   if (states.length === 1) {
     const s = states[0]!;
-    console.log(JSON.stringify({
-      url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
-    }));
+    console.log(
+      JSON.stringify({
+        url: s.url,
+        streamUrl: s.streamUrl,
+        wsUrl: s.wsUrl,
+        port: s.port,
+        device: s.device,
+      }),
+    );
   } else {
-    console.log(JSON.stringify({
-      devices: states.map((s) => ({
-        url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
-      })),
-    }));
+    console.log(
+      JSON.stringify({
+        devices: states.map((s) => ({
+          url: s.url,
+          streamUrl: s.streamUrl,
+          wsUrl: s.wsUrl,
+          port: s.port,
+          device: s.device,
+        })),
+      }),
+    );
   }
 }
 
@@ -746,11 +894,17 @@ function listStreams(deviceArg?: string) {
     if (!state) {
       console.log(JSON.stringify({ running: false, device: udid }));
     } else {
-      console.log(JSON.stringify({
-        running: true,
-        url: state.url, streamUrl: state.streamUrl, wsUrl: state.wsUrl,
-        port: state.port, device: state.device, pid: state.pid,
-      }));
+      console.log(
+        JSON.stringify({
+          running: true,
+          url: state.url,
+          streamUrl: state.streamUrl,
+          wsUrl: state.wsUrl,
+          port: state.port,
+          device: state.device,
+          pid: state.pid,
+        }),
+      );
     }
     return;
   }
@@ -760,19 +914,31 @@ function listStreams(deviceArg?: string) {
     console.log(JSON.stringify({ running: false }));
   } else if (states.length === 1) {
     const s = states[0]!;
-    console.log(JSON.stringify({
-      running: true,
-      url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl,
-      port: s.port, device: s.device, pid: s.pid,
-    }));
+    console.log(
+      JSON.stringify({
+        running: true,
+        url: s.url,
+        streamUrl: s.streamUrl,
+        wsUrl: s.wsUrl,
+        port: s.port,
+        device: s.device,
+        pid: s.pid,
+      }),
+    );
   } else {
-    console.log(JSON.stringify({
-      running: true,
-      streams: states.map((s) => ({
-        url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl,
-        port: s.port, device: s.device, pid: s.pid,
-      })),
-    }));
+    console.log(
+      JSON.stringify({
+        running: true,
+        streams: states.map((s) => ({
+          url: s.url,
+          streamUrl: s.streamUrl,
+          wsUrl: s.wsUrl,
+          port: s.port,
+          device: s.device,
+          pid: s.pid,
+        })),
+      }),
+    );
   }
 }
 
@@ -785,7 +951,9 @@ function killStreams(deviceArg?: string) {
       console.log(JSON.stringify({ disconnected: true, device: udid }));
       return;
     }
-    try { process.kill(state.pid, "SIGTERM"); } catch {}
+    try {
+      process.kill(state.pid, "SIGTERM");
+    } catch {}
     clearState(udid);
     console.log(JSON.stringify({ disconnected: true, device: state.device }));
   } else {
@@ -796,7 +964,9 @@ function killStreams(deviceArg?: string) {
     }
     const devices: string[] = [];
     for (const state of states) {
-      try { process.kill(state.pid, "SIGTERM"); } catch {}
+      try {
+        process.kill(state.pid, "SIGTERM");
+      } catch {}
       devices.push(state.device);
     }
     clearState();
@@ -823,7 +993,9 @@ async function gesture(args: string[]) {
   const jsonStr = filteredArgs[0];
   if (!jsonStr) {
     console.error("Usage: serve-sim gesture '<json>'");
-    console.error('Example: serve-sim gesture \'{"type":"begin","x":0.5,"y":0.5}\'');
+    console.error(
+      'Example: serve-sim gesture \'{"type":"begin","x":0.5,"y":0.5}\'',
+    );
     process.exit(1);
   }
 
@@ -845,7 +1017,10 @@ async function gesture(args: string[]) {
       msg[0] = 0x03;
       msg.set(json, 1);
       ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
+      setTimeout(() => {
+        ws.close();
+        resolve();
+      }, 50);
     };
 
     ws.onerror = () => {
@@ -895,7 +1070,10 @@ async function rotate(args: string[]) {
       msg[0] = 0x07;
       msg.set(json, 1);
       ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
+      setTimeout(() => {
+        ws.close();
+        resolve();
+      }, 50);
     };
 
     ws.onerror = () => {
@@ -928,12 +1106,17 @@ async function button(args: string[]) {
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify({ button: buttonName }));
+      const json = new TextEncoder().encode(
+        JSON.stringify({ button: buttonName }),
+      );
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x04;
       msg.set(json, 1);
       ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
+      setTimeout(() => {
+        ws.close();
+        resolve();
+      }, 50);
     };
 
     ws.onerror = () => {
@@ -969,7 +1152,10 @@ async function caDebug(args: string[]) {
     slow: "debug_slow_animations",
   };
   const resolved = option ? (aliases[option] ?? option) : undefined;
-  if (!resolved || !["on", "off", "1", "0", "true", "false"].includes(stateArg)) {
+  if (
+    !resolved ||
+    !["on", "off", "1", "0", "true", "false"].includes(stateArg)
+  ) {
     console.error(
       `Usage: serve-sim ca-debug <option> <on|off> [-d udid]\n  option shortcuts: ${Object.keys(aliases).join(", ")}`,
     );
@@ -986,15 +1172,23 @@ async function caDebug(args: string[]) {
     const ws = new WebSocket(stateFile.wsUrl);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify({ option: resolved, enabled }));
+      const json = new TextEncoder().encode(
+        JSON.stringify({ option: resolved, enabled }),
+      );
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x08;
       msg.set(json, 1);
       ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
+      setTimeout(() => {
+        ws.close();
+        resolve();
+      }, 50);
     };
     ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", stateFile.wsUrl);
+      console.error(
+        "Failed to connect to serve-sim server at",
+        stateFile.wsUrl,
+      );
       reject(new Error("WebSocket connection failed"));
     };
   });
@@ -1016,10 +1210,16 @@ async function memoryWarning(args: string[]) {
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       ws.send(new Uint8Array([0x09]));
-      setTimeout(() => { ws.close(); resolve(); }, 50);
+      setTimeout(() => {
+        ws.close();
+        resolve();
+      }, 50);
     };
     ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", stateFile.wsUrl);
+      console.error(
+        "Failed to connect to serve-sim server at",
+        stateFile.wsUrl,
+      );
       reject(new Error("WebSocket connection failed"));
     };
   });
@@ -1027,7 +1227,12 @@ async function memoryWarning(args: string[]) {
 
 // ─── Serve preview ───
 
-async function serve(servePort: number, devices: string[], portExplicit: boolean) {
+async function serve(
+  servePort: number,
+  devices: string[],
+  portExplicit: boolean,
+  preview: { hostname?: string; tls: boolean },
+) {
   // Ensure a serve-sim stream is running (start one if not)
   const existing = readAllStates();
   if (existing.length === 0) {
@@ -1036,7 +1241,12 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   }
 
   const { simMiddleware } = await import("./middleware");
-  const middleware = simMiddleware({ basePath: "/" });
+  const middleware = simMiddleware({
+    basePath: "/",
+    previewHostname: preview.hostname,
+    previewTls: preview.tls,
+    sameOriginPreview: true,
+  });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
   const maxScan = portExplicit ? 1 : 50;
@@ -1058,12 +1268,18 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   if (!bound) {
     if ((lastErr as any)?.code === "EADDRINUSE") {
       if (portExplicit) {
-        console.error(`Port ${servePort} is already in use. Pass a different --port or stop the other process.`);
+        console.error(
+          `Port ${servePort} is already in use. Pass a different --port or stop the other process.`,
+        );
       } else {
-        console.error(`No available port found in range ${servePort}-${servePort + maxScan - 1}.`);
+        console.error(
+          `No available port found in range ${servePort}-${servePort + maxScan - 1}.`,
+        );
       }
     } else {
-      console.error(`Failed to start preview server: ${(lastErr as any)?.message ?? lastErr}`);
+      console.error(
+        `Failed to start preview server: ${(lastErr as any)?.message ?? lastErr}`,
+      );
     }
     process.exit(1);
   }
@@ -1080,11 +1296,68 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   await new Promise(() => {});
 }
 
-function bindPreviewServer(port: number, middleware: ReturnType<typeof import("./middleware").simMiddleware>) {
-  return Bun.serve({
+const tunnelWebSocketHandlers = {
+  open(ws: import("bun").ServerWebSocket<{ backendPort: number }>) {
+    const p = ws.data.backendPort;
+    const backend = new WebSocket(`ws://127.0.0.1:${p}/ws`);
+    backend.binaryType = "arraybuffer";
+    (ws as unknown as { __b: WebSocket }).__b = backend;
+    backend.addEventListener("message", (ev) => {
+      ws.send(ev.data as ArrayBuffer);
+    });
+    backend.addEventListener("close", () => ws.close());
+    backend.addEventListener("error", () => ws.close());
+  },
+  message(
+    ws: import("bun").ServerWebSocket<{ backendPort: number }>,
+    message: ArrayBuffer | Buffer,
+  ) {
+    (ws as unknown as { __b?: WebSocket }).__b?.send(message);
+  },
+  close(ws: import("bun").ServerWebSocket<{ backendPort: number }>) {
+    try {
+      (ws as unknown as { __b?: WebSocket }).__b?.close();
+    } catch {}
+  },
+};
+
+function bindPreviewServer(
+  port: number,
+  middleware: ReturnType<typeof import("./middleware").simMiddleware>,
+) {
+  const serveOpts: Record<string, unknown> = {
     port,
     idleTimeout: 255, // max — MJPEG streams are long-lived
-    async fetch(req) {
+    websocket: tunnelWebSocketHandlers,
+    async fetch(
+      req: Request,
+      server: import("bun").Server<{ backendPort: number }>,
+    ) {
+      // Same-origin /stream.mjpeg, /config, /ws → helper (avoids localhost vs 127.0.0.1 CORS).
+      const u = new URL(req.url);
+      if (
+        req.method === "GET" &&
+        (u.pathname === "/stream.mjpeg" || u.pathname === "/config")
+      ) {
+        const st = readAllStates()[0];
+        if (!st) return new Response("No serve-sim device", { status: 404 });
+        return fetch(`http://127.0.0.1:${st.port}${u.pathname}${u.search}`, {
+          signal: req.signal,
+          cache: "no-store",
+          headers: {
+            Accept: req.headers.get("Accept") ?? "*/*",
+          },
+        });
+      }
+      if (u.pathname === "/ws") {
+        const st = readAllStates()[0];
+        if (!st) return new Response("No serve-sim device", { status: 404 });
+        const upgraded = server.upgrade(req, {
+          data: { backendPort: st.port },
+        });
+        if (upgraded) return undefined as unknown as Response;
+      }
+
       // Methods that may carry a body get it pre-read here so the shim can
       // replay it as Node-style "data"/"end" events. Without this, any
       // middleware that reads `req.on("data"/"end")` hangs forever — which
@@ -1118,37 +1391,70 @@ function bindPreviewServer(port: number, middleware: ReturnType<typeof import(".
           writeHead(code: number, headers?: Record<string, string>) {
             statusCode = code;
             if (headers) {
-              for (const [k, v] of Object.entries(headers)) resHeaders.set(k, v);
+              for (const [k, v] of Object.entries(headers))
+                resHeaders.set(k, v);
             }
           },
-          setHeader(k: string, v: string) { resHeaders.set(k, v); },
-          get statusCode() { return statusCode; },
-          set statusCode(c: number) { statusCode = c; },
+          setHeader(k: string, v: string) {
+            resHeaders.set(k, v);
+          },
+          get statusCode() {
+            return statusCode;
+          },
+          set statusCode(c: number) {
+            statusCode = c;
+          },
           write(chunk: string | Uint8Array) {
             if (!streaming) {
               // First write — switch to streaming mode
               streaming = true;
               const stream = new ReadableStream({
-                start(ctrl) { streamController = ctrl; },
+                start(ctrl) {
+                  streamController = ctrl;
+                },
               });
-              resolve(new Response(stream, { status: statusCode, headers: resHeaders }));
+              resolve(
+                new Response(stream, {
+                  status: statusCode,
+                  headers: resHeaders,
+                }),
+              );
             }
             try {
-              streamController?.enqueue(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk);
+              streamController?.enqueue(
+                typeof chunk === "string"
+                  ? new TextEncoder().encode(chunk)
+                  : chunk,
+              );
             } catch {}
           },
           end(body?: string | Uint8Array) {
             if (streaming) {
               if (body) {
                 try {
-                  streamController?.enqueue(typeof body === "string" ? new TextEncoder().encode(body) : body);
+                  streamController?.enqueue(
+                    typeof body === "string"
+                      ? new TextEncoder().encode(body)
+                      : body,
+                  );
                 } catch {}
               }
-              try { streamController?.close(); } catch {}
+              try {
+                streamController?.close();
+              } catch {}
             } else {
               if (body) bodyParts.push(body);
-              const fullBody = bodyParts.map(p => typeof p === "string" ? p : new TextDecoder().decode(p)).join("");
-              resolve(new Response(fullBody, { status: statusCode, headers: resHeaders }));
+              const fullBody = bodyParts
+                .map((p) =>
+                  typeof p === "string" ? p : new TextDecoder().decode(p),
+                )
+                .join("");
+              resolve(
+                new Response(fullBody, {
+                  status: statusCode,
+                  headers: resHeaders,
+                }),
+              );
             }
           },
         };
@@ -1170,7 +1476,8 @@ function bindPreviewServer(port: number, middleware: ReturnType<typeof import(".
         });
       });
     },
-  });
+  };
+  return Bun.serve(serveOpts as unknown as Parameters<typeof Bun.serve>[0]);
 }
 
 function printHelp() {
@@ -1195,6 +1502,8 @@ Options:
   -d, --detach        Spawn helper and exit (daemon mode)
   -q, --quiet         Suppress human-readable output, JSON only
       --no-preview    Skip the web preview server; stream in foreground only
+  -H, --hostname <h>  Tunnel mode: same-origin /stream.mjpeg, /config, /ws proxied to the helper
+      --tls           No-op (kept for CLI compatibility); tunnel uses path URLs
       --list [device] List running streams
       --kill [device] Kill running stream(s)
   -h, --help          Show this help
@@ -1202,6 +1511,7 @@ Options:
 Examples:
   serve-sim                             Open simulator preview at localhost:3200
   serve-sim -p 8080                     Preview on a custom port
+  serve-sim -H dev.example.com --tls    Tunnel to preview port; stream hits /stream.mjpeg on same public host
   serve-sim --no-preview                Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --detach                    Start streaming in background (daemon)
@@ -1246,37 +1556,61 @@ let noPreview = false;
 const positionalDevices: string[] = [];
 let listDevice: string | undefined;
 let killDevice: string | undefined;
+let previewHostname: string | undefined;
+let previewTls = false;
 
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i]!;
   switch (arg) {
-    case "--port": case "-p":
+    case "--port":
+    case "-p":
       startPort = parseInt(argv[++i] ?? "3100", 10);
       break;
-    case "--detach": case "-d":
+    case "--detach":
+    case "-d":
       detachMode = true;
       break;
-    case "--quiet": case "-q":
+    case "--quiet":
+    case "-q":
       quiet = true;
+      break;
+    case "--hostname":
+    case "-H": {
+      const v = argv[++i];
+      if (!v || v.startsWith("-")) {
+        console.error(
+          "--hostname requires a host value (e.g. dev.example.com).",
+        );
+        process.exit(1);
+      }
+      previewHostname = v;
+      break;
+    }
+    case "--tls":
+      previewTls = true;
       break;
     case "--no-preview":
       noPreview = true;
       break;
-    case "--list": case "-l":
+    case "--list":
+    case "-l":
       list = true;
       // Optional device arg after --list
       if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) {
         listDevice = argv[++i];
       }
       break;
-    case "--kill": case "-k":
+    case "--kill":
+    case "-k":
       kill = true;
       // Optional device arg after --kill
       if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) {
         killDevice = argv[++i];
       }
       break;
-    case "--help": case "-h": case "help":
+    case "--help":
+    case "-h":
+    case "help":
       help = true;
       break;
     default:
@@ -1295,6 +1629,13 @@ if (help) {
   process.exit(0);
 }
 
+if (previewTls && !previewHostname?.trim()) {
+  console.error(
+    "--tls requires --hostname <host> (use both to enable tunnel / same-origin stream mode).",
+  );
+  process.exit(1);
+}
+
 if (list) {
   listStreams(listDevice);
   process.exit(0);
@@ -1311,5 +1652,8 @@ if (detachMode) {
 } else if (noPreview) {
   await follow(positionalDevices, startPort ?? 3100, quiet);
 } else {
-  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined);
+  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined, {
+    hostname: previewHostname?.trim() || undefined,
+    tls: previewTls,
+  });
 }

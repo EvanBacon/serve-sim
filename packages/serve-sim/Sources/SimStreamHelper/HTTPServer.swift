@@ -70,17 +70,42 @@ final class HTTPServer {
             }
         )
 
-        // Config endpoint
-        server["/config"] = { [weak self] request in
-            let size = self?.clientManager ?? nil
-            let w = size?.screenWidth ?? 0
-            let h = size?.screenHeight ?? 0
-            return HttpResponse.ok(.json(["width": w, "height": h] as AnyObject))
+        // Config endpoint (must send CORS — preview UI is often http://localhost:* while helper is http://127.0.0.1:*)
+        server["/config"] = { [weak self] _ in
+            let w = self?.clientManager.screenWidth ?? 0
+            let h = self?.clientManager.screenHeight ?? 0
+            let obj: [String: Int] = ["width": w, "height": h]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: obj) else {
+                return HttpResponse.raw(500, "Internal Server Error", [
+                    "Access-Control-Allow-Origin": "*",
+                ]) { _ in }
+            }
+            let bytes = [UInt8](jsonData)
+            return HttpResponse.raw(200, "OK", [
+                "Content-Type": "application/json",
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+            ]) { writer in
+                try writer.write(bytes)
+            }
         }
 
         // Health endpoint
         server["/health"] = { _ in
-            return .ok(.json(["status": "ok"] as AnyObject))
+            let obj: [String: String] = ["status": "ok"]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: obj) else {
+                return HttpResponse.raw(500, "Internal Server Error", [
+                    "Access-Control-Allow-Origin": "*",
+                ]) { _ in }
+            }
+            let bytes = [UInt8](jsonData)
+            return HttpResponse.raw(200, "OK", [
+                "Content-Type": "application/json",
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+            ]) { writer in
+                try writer.write(bytes)
+            }
         }
 
         // CORS preflight

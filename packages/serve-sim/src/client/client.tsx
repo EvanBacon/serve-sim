@@ -10,11 +10,25 @@ import {
 } from "serve-sim-client/simulator";
 
 /**
- * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
- * Chrome doesn't support multipart/x-mixed-replace in <img> tags,
- * so we manually read the stream and extract JPEG boundaries.
+ * Safari (and WebKit without Chromium) does not reliably expose MJPEG bytes
+ * from fetch() ReadableStream; the preview uses a native `<img src>` there
+ * instead (`prefersNativeMjpegImg` + `relayNativeMjpegSrc` on SimulatorView).
+ * Chromium does not decode multipart MJPEG in `<img>`, so we parse the stream.
  */
-function useMjpegStream(streamUrl: string | null) {
+function prefersNativeMjpegImg(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  if (!/AppleWebKit/.test(ua)) return false;
+  // Chromium-based browsers (incl. Chrome on iOS = CriOS) expose fetch() stream bodies.
+  if (/Chrome|Chromium|CriOS|Edg|OPR|Brave|FxiOS/.test(ua)) return false;
+  return true;
+}
+
+/**
+ * Fetches `/config` and optionally reads the MJPEG stream as JPEG blob URLs.
+ * When `parseStream` is false, only `/config` is fetched (WebKit native img path).
+ */
+function useMjpegStream(streamUrl: string | null, parseStream = true) {
   const [config, setConfig] = useState<{ width: number; height: number } | null>(null);
   const subscribersRef = useRef<Set<(blobUrl: string) => void>>(new Set());
   const [frame, setFrame] = useState<string | null>(null);
@@ -38,75 +52,78 @@ function useMjpegStream(streamUrl: string | null) {
       .then((c: { width: number; height: number }) => {
         if (c.width > 0 && c.height > 0) setConfig(c);
       })
-      .catch(() => {});
+      .catch(() => { });
 
     // Read the MJPEG stream and extract JPEG frames.
     // ?raw=1 tells the server to use Content-Type application/octet-stream
     // instead of multipart/x-mixed-replace; WebKit refuses to expose
     // multipart bodies to fetch()'s ReadableStream.
-    const fetchUrlObj = new URL(streamUrl);
-    fetchUrlObj.searchParams.set("raw", "1");
-    const fetchUrl = fetchUrlObj.toString();
-    (async () => {
-      try {
-        const res = await fetch(fetchUrl, { signal: controller.signal });
-        const reader = res.body?.getReader();
-        if (!reader) return;
+    // `streamUrl` may be same-origin relative (`/stream.mjpeg` in proxied preview).
+    if (parseStream) {
+      const fetchUrlObj = new URL(streamUrl, window.location.href);
+      fetchUrlObj.searchParams.set("raw", "1");
+      const fetchUrl = fetchUrlObj.toString();
+      (async () => {
+        try {
+          const res = await fetch(fetchUrl, { signal: controller.signal });
+          const reader = res.body?.getReader();
+          if (!reader) return;
 
-        let buffer = new Uint8Array(0);
+          let buffer = new Uint8Array(0);
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          // Append new data
-          const newBuf = new Uint8Array(buffer.length + value.length);
-          newBuf.set(buffer);
-          newBuf.set(value, buffer.length);
-          buffer = newBuf;
-
-          // Look for JPEG frames: find Content-Length or JPEG markers (FFD8...FFD9)
-          // Simpler approach: split on boundary markers and extract JPEG data
           while (true) {
-            // Find first JPEG start (FF D8)
-            let jpegStart = -1;
-            for (let i = 0; i < buffer.length - 1; i++) {
-              if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) {
-                jpegStart = i;
-                break;
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // Append new data
+            const newBuf = new Uint8Array(buffer.length + value.length);
+            newBuf.set(buffer);
+            newBuf.set(value, buffer.length);
+            buffer = newBuf;
+
+            // Look for JPEG frames: find Content-Length or JPEG markers (FFD8...FFD9)
+            // Simpler approach: split on boundary markers and extract JPEG data
+            while (true) {
+              // Find first JPEG start (FF D8)
+              let jpegStart = -1;
+              for (let i = 0; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) {
+                  jpegStart = i;
+                  break;
+                }
               }
-            }
-            if (jpegStart === -1) break;
+              if (jpegStart === -1) break;
 
-            // Find JPEG end (FF D9) after the start
-            let jpegEnd = -1;
-            for (let i = jpegStart + 2; i < buffer.length - 1; i++) {
-              if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) {
-                jpegEnd = i + 2;
-                break;
+              // Find JPEG end (FF D9) after the start
+              let jpegEnd = -1;
+              for (let i = jpegStart + 2; i < buffer.length - 1; i++) {
+                if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) {
+                  jpegEnd = i + 2;
+                  break;
+                }
               }
-            }
-            if (jpegEnd === -1) break;
+              if (jpegEnd === -1) break;
 
-            // Extract the JPEG frame
-            const jpeg = buffer.slice(jpegStart, jpegEnd);
-            buffer = buffer.slice(jpegEnd);
+              // Extract the JPEG frame
+              const jpeg = buffer.slice(jpegStart, jpegEnd);
+              buffer = buffer.slice(jpegEnd);
 
-            const blob = new Blob([jpeg], { type: "image/jpeg" });
-            const blobUrl = URL.createObjectURL(blob);
-            setFrame(blobUrl);
-            for (const cb of subscribersRef.current) {
-              cb(blobUrl);
+              const blob = new Blob([jpeg], { type: "image/jpeg" });
+              const blobUrl = URL.createObjectURL(blob);
+              setFrame(blobUrl);
+              for (const cb of subscribersRef.current) {
+                cb(blobUrl);
+              }
             }
           }
+        } catch {
+          // Aborted or network error
         }
-      } catch {
-        // Aborted or network error
-      }
-    })();
+      })();
+    }
 
     return () => controller.abort();
-  }, [streamUrl]);
+  }, [streamUrl, parseStream]);
 
   return { subscribeFrame, frame, config };
 }
@@ -158,6 +175,8 @@ declare global {
       port: number;
       device: string;
       logsEndpoint?: string;
+      /** Same-origin reverse-proxied preview (defer auxiliary SSE so MJPEG + WS open first). */
+      proxiedPreview?: boolean;
     };
   }
 }
@@ -439,7 +458,7 @@ async function uploadDroppedFile(
       throw new Error(result.stderr || `${label} failed (exit ${result.exitCode})`);
     }
   } finally {
-    exec(`bash -c 'rm -f ${tmpPath}'`).catch(() => {});
+    exec(`bash -c 'rm -f ${tmpPath}'`).catch(() => { });
   }
 }
 
@@ -587,7 +606,7 @@ async function fetchAppDetails(
   const plist = await exec(`plutil -convert json -o - ${shellEscape(appPath + "/Info.plist")}`);
   let info: any = {};
   if (plist.exitCode === 0) {
-    try { info = JSON.parse(plist.stdout); } catch {}
+    try { info = JSON.parse(plist.stdout); } catch { }
   }
 
   // Try to find app icon. CFBundleIcons → primary → CFBundleIconFiles last entry,
@@ -708,15 +727,15 @@ function AppDetectionTool({
           action={
             details.appPath
               ? {
-                  title: "Reveal in Finder",
-                  onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
-                  icon: (
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="7" y1="17" x2="17" y2="7" />
-                      <polyline points="10 7 17 7 17 14" />
-                    </svg>
-                  ),
-                }
+                title: "Reveal in Finder",
+                onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
+                icon: (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="7" y1="17" x2="17" y2="7" />
+                    <polyline points="10 7 17 7 17 14" />
+                  </svg>
+                ),
+              }
               : undefined
           }
         />
@@ -898,51 +917,51 @@ function AppPermissionsTool({
 
       {open && <div style={panelStyles.permsScrollWrap}>
         <div style={panelStyles.permsScroll}>
-        {PERMISSION_SERVICES.map(({ key, label }) => {
-          const current = state[key];
-          return (
-            <div key={key} style={panelStyles.permRow}>
-              <span style={panelStyles.permLabel}>{label}</span>
-              <div style={panelStyles.permSeg} role="group" aria-label={label}>
-                <PermBtn
-                  active={current === "grant"}
-                  pending={pending === `${key}:grant`}
-                  onClick={() => apply(key, "grant")}
-                  variant="grant"
-                  title="Allow"
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="5 12 10 17 19 7" />
-                  </svg>
-                </PermBtn>
-                <PermBtn
-                  active={current === "revoke"}
-                  pending={pending === `${key}:revoke`}
-                  onClick={() => apply(key, "revoke")}
-                  variant="revoke"
-                  title="Deny"
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                  </svg>
-                </PermBtn>
-                <PermBtn
-                  active={false}
-                  pending={pending === `${key}:reset`}
-                  onClick={() => apply(key, "reset")}
-                  variant="reset"
-                  title="Reset"
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 12a9 9 0 1 0 3.5-7.1" />
-                    <polyline points="3 3 3 9 9 9" />
-                  </svg>
-                </PermBtn>
+          {PERMISSION_SERVICES.map(({ key, label }) => {
+            const current = state[key];
+            return (
+              <div key={key} style={panelStyles.permRow}>
+                <span style={panelStyles.permLabel}>{label}</span>
+                <div style={panelStyles.permSeg} role="group" aria-label={label}>
+                  <PermBtn
+                    active={current === "grant"}
+                    pending={pending === `${key}:grant`}
+                    onClick={() => apply(key, "grant")}
+                    variant="grant"
+                    title="Allow"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="5 12 10 17 19 7" />
+                    </svg>
+                  </PermBtn>
+                  <PermBtn
+                    active={current === "revoke"}
+                    pending={pending === `${key}:revoke`}
+                    onClick={() => apply(key, "revoke")}
+                    variant="revoke"
+                    title="Deny"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                    </svg>
+                  </PermBtn>
+                  <PermBtn
+                    active={false}
+                    pending={pending === `${key}:reset`}
+                    onClick={() => apply(key, "reset")}
+                    variant="reset"
+                    title="Reset"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 12a9 9 0 1 0 3.5-7.1" />
+                      <polyline points="3 3 3 9 9 9" />
+                    </svg>
+                  </PermBtn>
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
         </div>
         <div style={panelStyles.permsFadeTop} />
         <div style={panelStyles.permsFadeBottom} />
@@ -1008,7 +1027,7 @@ function BootEmptyState({
             window.location.reload();
             return;
           }
-        } catch {}
+        } catch { }
         await new Promise((res) => setTimeout(res, 400));
       }
       throw new Error("serve-sim started but no stream state appeared");
@@ -1210,11 +1229,14 @@ function App() {
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
-  // Stream simctl logs into the browser console with colors + grouping
+  // Stream simctl logs into the browser console with colors + grouping.
+  // Tunnel mode: defer opening this SSE so Safari (and similar browsers) can
+  // open the MJPEG fetch + WebSocket first — HTTP/1.1 allows only ~6 parallel
+  // connections per host; logs + appstate + dev reload would starve /stream.mjpeg.
   useEffect(() => {
     if (!config?.logsEndpoint) return;
-    const es = new EventSource(config.logsEndpoint);
-
+    const delay = config.proxiedPreview ? 750 : 0;
+    let es: EventSource | null = null;
     const procColors = new Map<string, string>();
     const palette = [
       "#8be9fd", "#50fa7b", "#ffb86c", "#ff79c6", "#bd93f9",
@@ -1235,50 +1257,55 @@ function App() {
     let lastProc = "";
     let groupOpen = false;
 
-    es.onmessage = (event) => {
-      try {
-        const entry = JSON.parse(event.data);
-        const proc = entry.processImagePath?.split("/").pop() ?? entry.senderImagePath?.split("/").pop() ?? "";
-        const subsystem = entry.subsystem ?? "";
-        const category = entry.category ?? "";
-        const msg = entry.eventMessage ?? "";
-        if (!msg) return;
+    const wireEs = () => {
+      es = new EventSource(config.logsEndpoint);
+      es.onmessage = (event) => {
+        try {
+          const entry = JSON.parse(event.data);
+          const proc = entry.processImagePath?.split("/").pop() ?? entry.senderImagePath?.split("/").pop() ?? "";
+          const subsystem = entry.subsystem ?? "";
+          const category = entry.category ?? "";
+          const msg = entry.eventMessage ?? "";
+          if (!msg) return;
 
-        if (proc !== lastProc) {
-          if (groupOpen) console.groupEnd();
-          const color = colorFor(proc);
-          console.groupCollapsed(
-            `%c${proc}${subsystem ? ` %c${subsystem}${category ? ":" + category : ""}` : ""}`,
-            `color:${color};font-weight:bold`,
-            ...(subsystem ? ["color:#888;font-weight:normal"] : []),
-          );
-          groupOpen = true;
-          lastProc = proc;
-        }
+          if (proc !== lastProc) {
+            if (groupOpen) console.groupEnd();
+            const color = colorFor(proc);
+            console.groupCollapsed(
+              `%c${proc}${subsystem ? ` %c${subsystem}${category ? ":" + category : ""}` : ""}`,
+              `color:${color};font-weight:bold`,
+              ...(subsystem ? ["color:#888;font-weight:normal"] : []),
+            );
+            groupOpen = true;
+            lastProc = proc;
+          }
 
-        const level = (entry.messageType ?? "").toLowerCase();
-        const tag = subsystem && proc === lastProc
-          ? `%c${category || subsystem}%c `
-          : "";
-        const tagStyles = tag
-          ? ["color:#888;font-style:italic", "color:inherit"]
-          : [];
+          const level = (entry.messageType ?? "").toLowerCase();
+          const tag = subsystem && proc === lastProc
+            ? `%c${category || subsystem}%c `
+            : "";
+          const tagStyles = tag
+            ? ["color:#888;font-style:italic", "color:inherit"]
+            : [];
 
-        if (level === "fault" || level === "error") {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:#ff5555");
-        } else if (level === "debug") {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:#6272a4");
-        } else {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:inherit");
-        }
-      } catch {}
+          if (level === "fault" || level === "error") {
+            console.log(`${tag}%c${msg}`, ...tagStyles, "color:#ff5555");
+          } else if (level === "debug") {
+            console.log(`${tag}%c${msg}`, ...tagStyles, "color:#6272a4");
+          } else {
+            console.log(`${tag}%c${msg}`, ...tagStyles, "color:inherit");
+          }
+        } catch { }
+      };
     };
+    const timer = delay ? window.setTimeout(wireEs, delay) : (wireEs(), 0);
 
     return () => {
+      if (delay) window.clearTimeout(timer);
       if (groupOpen) console.groupEnd();
-      es.close();
+      es?.close();
     };
-  }, [config?.logsEndpoint]);
+  }, [config?.logsEndpoint, !!config?.proxiedPreview]);
 
   if (!config) {
     return (
@@ -1306,11 +1333,15 @@ function App() {
   const imgBorderRadius = screenBorderRadius(deviceType);
   const frameMaxWidth = deviceType === "vision" ? 580
     : deviceType === "ipad" ? 400
-    : deviceType === "watch" ? 200
-    : 320;
+      : deviceType === "watch" ? 200
+        : 320;
 
-  // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
-  const mjpeg = useMjpegStream(config.streamUrl);
+  // Chromium: parse MJPEG via fetch + blob URLs. Safari: native <img> (relayNativeMjpegSrc).
+  const webkitNativeMjpeg = prefersNativeMjpegImg();
+  const mjpeg = useMjpegStream(config.streamUrl, !webkitNativeMjpeg);
+  const relayNativeMjpegSrc = webkitNativeMjpeg
+    ? new URL(config.streamUrl, window.location.href).href
+    : undefined;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -1355,20 +1386,31 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
-    const es = new EventSource("/appstate");
+    const openDelay = config.proxiedPreview ? 750 : 0;
+    let es: EventSource | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    es.onmessage = (e) => {
-      try {
-        const next = JSON.parse(e.data) as { bundleId: string; pid?: number; isReactNative: boolean };
-        if (timer) clearTimeout(timer);
-        // Commit RN app instantly (show the button ASAP); delay non-RN so a
-        // transient foreground blip doesn't hide it.
-        const delay = next?.isReactNative ? 0 : 600;
-        timer = setTimeout(() => setCurrentApp(next), delay);
-      } catch {}
+    const wireAppstate = () => {
+      es = new EventSource("/appstate");
+      es.onmessage = (e) => {
+        try {
+          const next = JSON.parse(e.data);
+          if (timer) clearTimeout(timer);
+          // Commit RN app instantly (show the button ASAP); delay non-RN so a
+          // transient foreground blip doesn't hide it.
+          const delay = next?.isReactNative ? 0 : 600;
+          timer = setTimeout(() => setCurrentApp(next), delay);
+        } catch { }
+      };
     };
-    return () => { if (timer) clearTimeout(timer); es.close(); };
-  }, []);
+    const openTimer = openDelay
+      ? window.setTimeout(wireAppstate, openDelay)
+      : (wireAppstate(), 0);
+    return () => {
+      if (openDelay) window.clearTimeout(openTimer);
+      if (timer) clearTimeout(timer);
+      es?.close();
+    };
+  }, [!!config.proxiedPreview]);
 
   // Cmd+R to reload the RN/Expo bundle. RCTKeyCommands on iOS listens for
   // this combo and triggers DevSupport reload. We hold Meta, tap R, release.
@@ -1436,7 +1478,7 @@ function App() {
           execOnHost(`xcrun simctl ui ${config.device} appearance`).then((r) => {
             const next = r.stdout.trim() === "dark" ? "light" : "dark";
             return execOnHost(`xcrun simctl ui ${config.device} appearance ${next}`);
-          }).catch(() => {});
+          }).catch(() => { });
         }
         return;
       }
@@ -1601,6 +1643,7 @@ function App() {
           subscribeFrame={mjpeg.subscribeFrame}
           streamFrame={mjpeg.frame}
           streamConfig={mjpeg.config}
+          relayNativeMjpegSrc={relayNativeMjpegSrc}
         />
         {mediaDrop.isDragOver && (
           <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>

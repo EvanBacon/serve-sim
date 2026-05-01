@@ -44,7 +44,11 @@
     "build:swift": "./build.sh",
     "dev": "bun run dev.ts"
   },
+  "dependencies": {
+    "http-proxy": "^1.18.1"
+  },
   "devDependencies": {
+    "@types/http-proxy": "^1.17.15",
     "@types/bun": "latest",
     "serve-sim-client": "workspace:*",
     "preact": "^10.29.1",
