@@ -1370,17 +1370,7 @@ function clampAxFrameForScreen(
 }
 
 function axElementKey(element: AxElement) {
-  const frame = element.frame;
-  return [
-    element.path,
-    element.label,
-    element.role,
-    element.type,
-    frame.x,
-    frame.y,
-    frame.width,
-    frame.height,
-  ].join("|");
+  return element.path;
 }
 
 function axElementSummary(axNode: ReturnType<typeof axNodeForElement>) {

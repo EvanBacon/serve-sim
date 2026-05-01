@@ -11,20 +11,12 @@ const POLL_INTERVAL_MS = 500;
 const execFileAsync = promisify(execFile);
 
 interface RawAxeNode {
-  AXFrame: string;
   AXUniqueId: string | null;
   AXLabel: string | null;
   AXValue: string | null;
-  content_required: boolean;
-  custom_actions: unknown[];
   enabled: boolean;
   frame: AxRect;
-  help: string | null;
-  pid: number;
-  role: string;
   role_description: string;
-  subrole: string | null;
-  title: string | null;
   type: string;
   children: RawAxeNode[];
 }
@@ -55,7 +47,7 @@ function sameRect(a: AxRect, b: AxRect) {
   );
 }
 
-export function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
+function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   const screen = chooseScreenFrame(roots);
   const elements: AxElement[] = [];
 
@@ -103,7 +95,7 @@ function isAxeUnavailableSnapshot(snapshot: AxSnapshot | null) {
   return snapshot?.errors?.includes(AXE_NOT_INSTALLED_ERROR) ?? false;
 }
 
-export function isUsableAxSnapshot(snapshot: AxSnapshot) {
+function isUsableAxSnapshot(snapshot: AxSnapshot) {
   return (
     snapshot.elements.length > 0 &&
     snapshot.screen.width > 1 &&
@@ -111,7 +103,7 @@ export function isUsableAxSnapshot(snapshot: AxSnapshot) {
   );
 }
 
-export async function collectAxSnapshot(udid: string) {
+async function collectAxSnapshot(udid: string) {
   const errors: string[] = [];
 
   try {
@@ -145,7 +137,7 @@ function writeSse(res: { write(chunk: string): void }, payload: unknown) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
-export function createAxStreamer({
+function createAxStreamer({
   udid,
 }: {
   udid: string;
