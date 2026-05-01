@@ -197,6 +197,7 @@ declare global {
       port: number;
       device: string;
       logsEndpoint?: string;
+      appStateEndpoint?: string;
     };
   }
 }
@@ -1040,11 +1041,14 @@ function BootEmptyState({
       // race where the user sees the empty state again because we reloaded
       // before serve-sim wrote its server-*.json.
       const deadline = Date.now() + 15_000;
+      const apiUrl = `/api?device=${encodeURIComponent(d.udid)}`;
       while (Date.now() < deadline) {
         try {
-          const r = await fetch("/api", { cache: "no-store" });
+          const r = await fetch(apiUrl, { cache: "no-store" });
           if (r.ok && (await r.json())) {
-            window.location.reload();
+            const nextUrl = new URL(window.location.href);
+            nextUrl.searchParams.set("device", d.udid);
+            window.location.assign(nextUrl.toString());
             return;
           }
         } catch {}
@@ -1451,7 +1455,7 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
-    const es = new EventSource("/appstate");
+    const es = new EventSource(config.appStateEndpoint ?? "/appstate");
     let timer: ReturnType<typeof setTimeout> | null = null;
     es.onmessage = (e) => {
       try {
@@ -1464,7 +1468,7 @@ function App() {
       } catch {}
     };
     return () => { if (timer) clearTimeout(timer); es.close(); };
-  }, []);
+  }, [config.appStateEndpoint]);
 
   // Cmd+R to reload the RN/Expo bundle. RCTKeyCommands on iOS listens for
   // this combo and triggers DevSupport reload. We hold Meta, tap R, release.
@@ -1559,16 +1563,17 @@ function App() {
     if (switching || d.udid === config.device) return;
     setSwitching(true);
     // Ensure the target simulator is booted (serve-sim boots on --detach but
-    // this keeps the flow snappy) and spin up a helper bound to it. The
-    // preview reads whichever server-*.json state file exists, so the new
-    // helper becomes the active stream after reload.
+    // this keeps the flow snappy) and spin up a helper bound to it. Do not
+    // kill the current helper here; another preview window may be using it.
     try {
       if (d.state !== "Booted") {
         await execOnHost(`xcrun simctl boot ${d.udid}`);
       }
-      await execOnHost(`bunx serve-sim --kill ${config.device}`);
-      await execOnHost(`bunx serve-sim --detach ${d.udid}`);
-      window.location.reload();
+      const detach = await execOnHost(`bunx serve-sim --detach ${d.udid}`);
+      if (detach.exitCode !== 0) throw new Error(detach.stderr || "Failed to start serve-sim");
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set("device", d.udid);
+      window.location.assign(nextUrl.toString());
     } catch {
       setSwitching(false);
     }

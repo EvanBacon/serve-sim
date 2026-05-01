@@ -1028,15 +1028,25 @@ async function memoryWarning(args: string[]) {
 // ─── Serve preview ───
 
 async function serve(servePort: number, devices: string[], portExplicit: boolean) {
-  // Ensure a serve-sim stream is running (start one if not)
-  const existing = readAllStates();
-  if (existing.length === 0) {
-    console.log("Starting simulator stream...");
-    await detach(devices, 3100);
+  let targetDevice: string | undefined;
+
+  if (devices.length > 0) {
+    const states = await detach(devices, 3100);
+    targetDevice = states[0]?.device;
+  } else {
+    // Ensure a serve-sim stream is running (start one if not)
+    const existing = readAllStates();
+    if (existing.length > 0) {
+      targetDevice = existing[0]?.device;
+    } else {
+      console.log("Starting simulator stream...");
+      const states = await detach(devices, 3100);
+      targetDevice = states[0]?.device;
+    }
   }
 
   const { simMiddleware } = await import("./middleware");
-  const middleware = simMiddleware({ basePath: "/" });
+  const middleware = simMiddleware({ basePath: "/", device: targetDevice });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
   const maxScan = portExplicit ? 1 : 50;
