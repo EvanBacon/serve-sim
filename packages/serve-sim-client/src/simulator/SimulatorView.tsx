@@ -6,6 +6,13 @@ import {
   type CSSProperties,
   type MouseEvent,
 } from "react";
+import type { StreamConfig } from "../types.js";
+import {
+  HID_EDGE_BOTTOM,
+  rawEdgeForDisplayEdge,
+  rawPointForDisplayPoint,
+  streamDisplayGeometry,
+} from "./orientation.js";
 
 // Custom round cursor matching the finger dot indicator
 const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='rgba(255,255,255,0.45)' stroke='rgba(0,0,0,0.55)' stroke-width='1.25' filter='drop-shadow(0 1px 2px rgba(0,0,0,0.45))'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -37,7 +44,9 @@ export interface SimulatorViewProps {
   /** Relay mode: latest blob URL JPEG frame from the relay (used for initial render) */
   streamFrame?: string | null;
   /** Relay mode: screen config from relay */
-  streamConfig?: { width: number; height: number } | null;
+  streamConfig?: StreamConfig | null;
+  /** Called when the rendered stream reports new dimensions or orientation. */
+  onScreenConfigChange?: (config: StreamConfig) => void;
   /** Hide the bottom controls bar (Home button + FPS). */
   hideControls?: boolean;
   /** Called when streaming state changes (true = frames are flowing). */
@@ -68,6 +77,7 @@ export function SimulatorView({
   subscribeFrame,
   streamFrame,
   streamConfig,
+  onScreenConfigChange,
   hideControls,
   onStreamingChange,
   connectionQuality,
@@ -75,13 +85,14 @@ export function SimulatorView({
   const relayMode = !!onStreamTouch;
   const imgRef = useRef<HTMLImageElement | null>(null);
   const relayImgRef = useRef<HTMLImageElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [screenSize, setScreenSize] = useState<{
-    width: number;
-    height: number;
-  } | null>(null);
+  const [screenSize, setScreenSize] = useState<StreamConfig | null>(null);
+  const screenSizeRef = useRef<StreamConfig | null>(null);
+  const onScreenConfigChangeRef = useRef(onScreenConfigChange);
+  onScreenConfigChangeRef.current = onScreenConfigChange;
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number } | null>(null);
   useEffect(() => {
@@ -122,6 +133,31 @@ export function SimulatorView({
 
   const streamUrl = `${url}/stream.mjpeg`;
 
+  useEffect(() => {
+    screenSizeRef.current = null;
+    setScreenSize(null);
+  }, [url]);
+
+  const updateScreenConfig = useCallback((config: StreamConfig | null | undefined) => {
+    if (!config || config.width <= 0 || config.height <= 0) return;
+    const prev = screenSizeRef.current;
+    const next =
+      config.orientation === undefined && prev?.orientation
+        ? { ...config, orientation: prev.orientation }
+        : config;
+    if (
+      prev &&
+      prev.width === next.width &&
+      prev.height === next.height &&
+      prev.orientation === next.orientation
+    ) {
+      return;
+    }
+    screenSizeRef.current = next;
+    setScreenSize(next);
+    onScreenConfigChangeRef.current?.(next);
+  }, []);
+
   // Notify parent when streaming state changes
   const onStreamingChangeRef = useRef(onStreamingChange);
   onStreamingChangeRef.current = onStreamingChange;
@@ -132,9 +168,9 @@ export function SimulatorView({
   // In relay mode, use streamConfig for screen size
   useEffect(() => {
     if (relayMode && streamConfig) {
-      setScreenSize(streamConfig);
+      updateScreenConfig(streamConfig);
     }
-  }, [relayMode, streamConfig]);
+  }, [relayMode, streamConfig, updateScreenConfig]);
 
   // In relay mode, subscribe to frames and update img.src directly (bypasses React)
   const connectedRef = useRef(false);
@@ -173,6 +209,10 @@ export function SimulatorView({
     return () => {
       clearTimeout(watchdog);
       unsubscribe?.();
+      if (prevBlobUrlRef.current) {
+        URL.revokeObjectURL(prevBlobUrlRef.current);
+        prevBlobUrlRef.current = null;
+      }
     };
   }, [relayMode, subscribeFrame]);
 
@@ -183,13 +223,22 @@ export function SimulatorView({
       y: number;
       edge?: number;
     }) => {
+      const orientation = streamDisplayGeometry(screenSizeRef.current).inputOrientation;
+      const point = rawPointForDisplayPoint(orientation, touch.x, touch.y);
+      const edge =
+        touch.edge === undefined
+          ? undefined
+          : rawEdgeForDisplayEdge(orientation, touch.edge);
+      const payload =
+        edge === undefined ? { type: touch.type, ...point } : { type: touch.type, ...point, edge };
+
       if (relayMode) {
-        onStreamTouch?.(touch);
+        onStreamTouch?.(payload);
         return;
       }
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const json = new TextEncoder().encode(JSON.stringify(touch));
+      const json = new TextEncoder().encode(JSON.stringify(payload));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = WS_MSG_TOUCH;
       msg.set(json, 1);
@@ -220,13 +269,24 @@ export function SimulatorView({
       x2: number;
       y2: number;
     }) => {
+      const orientation = streamDisplayGeometry(screenSizeRef.current).inputOrientation;
+      const p1 = rawPointForDisplayPoint(orientation, touch.x1, touch.y1);
+      const p2 = rawPointForDisplayPoint(orientation, touch.x2, touch.y2);
+      const payload = {
+        type: touch.type,
+        x1: p1.x,
+        y1: p1.y,
+        x2: p2.x,
+        y2: p2.y,
+      };
+
       if (relayMode) {
-        onStreamMultiTouch?.(touch);
+        onStreamMultiTouch?.(payload);
         return;
       }
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const json = new TextEncoder().encode(JSON.stringify(touch));
+      const json = new TextEncoder().encode(JSON.stringify(payload));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = WS_MSG_MULTI_TOUCH;
       msg.set(json, 1);
@@ -239,15 +299,19 @@ export function SimulatorView({
     // In relay mode, skip direct WS/MJPEG connections
     if (relayMode) return;
 
-    // Fetch screen size from serve-sim config
-    fetch(`${url}/config`)
-      .then((r) => r.json())
-      .then((config: { width: number; height: number }) => {
-        if (config.width > 0 && config.height > 0) {
-          setScreenSize(config);
-        }
-      })
-      .catch(() => {});
+    // Poll config so direct consumers follow orientation changes even when
+    // multipart <img> load events do not fire for each frame.
+    const configAbort = new AbortController();
+    const fetchConfig = () => {
+      fetch(`${url}/config`, { signal: configAbort.signal })
+        .then((r) => r.json())
+        .then((config: StreamConfig) => {
+          updateScreenConfig(config);
+        })
+        .catch(() => {});
+    };
+    fetchConfig();
+    const configInterval = setInterval(fetchConfig, 1000);
 
     // Connect WebSocket for touch input
     const wsUrl = wsUrlProp ?? url.replace(/^http/, "ws") + "/ws";
@@ -320,12 +384,14 @@ export function SimulatorView({
 
     return () => {
       fpsAbort.abort();
+      configAbort.abort();
+      clearInterval(configInterval);
       clearInterval(fpsInterval);
       clearTimeout(startupWatchdog);
       ws.close();
       wsRef.current = null;
     };
-  }, [url, streamUrl, relayMode]);
+  }, [url, streamUrl, relayMode, updateScreenConfig, wsUrlProp]);
 
   // FPS counter + stale-frame detection for relay mode.
   // Unlike non-relay mode (where WS close flips connected=false), relay mode
@@ -360,21 +426,25 @@ export function SimulatorView({
     return relayMode ? relayImgRef.current : imgRef.current;
   }, [relayMode]);
 
+  const getInputRect = useCallback(() => {
+    return surfaceRef.current?.getBoundingClientRect()
+      ?? getViewElement()?.getBoundingClientRect()
+      ?? null;
+  }, [getViewElement]);
+
   const handleTouch = useCallback(
     (type: "begin" | "move" | "end", event: MouseEvent<HTMLElement>) => {
-      const el = getViewElement();
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
+      const rect = getInputRect();
+      if (!rect) return;
       const x = (event.clientX - rect.left) / rect.width;
       const y = (event.clientY - rect.top) / rect.height;
       sendTouch({ type, x, y });
     },
-    [sendTouch],
+    [getInputRect, sendTouch],
   );
 
   // Bottom-edge gesture: forward touches with edge=3 (bottom) so iOS
   // handles the interactive home indicator animation natively.
-  const EDGE_BOTTOM = 3;
   const edgeGestureRef = useRef(false);
 
   // Multi-touch state (mouse Alt+click and real touch)
@@ -494,18 +564,43 @@ export function SimulatorView({
 
   // Compute the exact box that fits the stream's aspect ratio inside the
   // viewport, so the <img> matches the video 1:1 (no letterbox, no clipping).
+  const streamGeometry = streamDisplayGeometry(screenSize);
+  const displayScreenSize = streamGeometry.displayConfig;
   const fittedBox = (() => {
-    if (!screenSize || !viewportSize) return null;
+    if (!displayScreenSize || !viewportSize) return null;
     if (viewportSize.width === 0 || viewportSize.height === 0) return null;
     const scale = Math.min(
-      viewportSize.width / screenSize.width,
-      viewportSize.height / screenSize.height,
+      viewportSize.width / displayScreenSize.width,
+      viewportSize.height / displayScreenSize.height,
     );
     return {
-      width: screenSize.width * scale,
-      height: screenSize.height * scale,
+      width: displayScreenSize.width * scale,
+      height: displayScreenSize.height * scale,
     };
   })();
+  const rotationDegrees = streamGeometry.rotationDegrees;
+  const rotatesSideways = streamGeometry.needsCssRotation && Math.abs(rotationDegrees) === 90;
+  const clipStyle = imageStyle as (CSSProperties & { cornerShape?: string }) | undefined;
+  const streamImageStyle = {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    width: rotatesSideways && fittedBox ? `${fittedBox.height}px` : "100%",
+    height: rotatesSideways && fittedBox ? `${fittedBox.width}px` : "100%",
+    transform: `translate(-50%, -50%)${
+      rotationDegrees === 0 ? "" : ` rotate(${rotationDegrees}deg)`
+    }`,
+    transformOrigin: "center center",
+    cursor: FINGER_CURSOR,
+    display: "block",
+    userSelect: "none",
+    WebkitUserSelect: "none",
+    touchAction: "none",
+    ...imageStyle,
+    ...(rotationDegrees === 0
+      ? {}
+      : { borderRadius: 0, cornerShape: undefined }),
+  } as CSSProperties;
 
   return (
     <div
@@ -534,11 +629,15 @@ export function SimulatorView({
         }}
       >
         <div
+          ref={surfaceRef}
           style={{
             position: "relative",
             width: fittedBox ? `${fittedBox.width}px` : "100%",
             height: fittedBox ? `${fittedBox.height}px` : "100%",
-          }}
+            overflow: "hidden",
+            borderRadius: clipStyle?.borderRadius,
+            cornerShape: clipStyle?.cornerShape,
+          } as CSSProperties}
         >
         <img
           ref={imgRef}
@@ -547,25 +646,10 @@ export function SimulatorView({
           onLoad={(e) => {
             const el = e.currentTarget;
             if (el.naturalWidth > 0 && el.naturalHeight > 0) {
-              setScreenSize((prev) =>
-                prev && prev.width === el.naturalWidth && prev.height === el.naturalHeight
-                  ? prev
-                  : { width: el.naturalWidth, height: el.naturalHeight },
-              );
+              updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
             }
           }}
-          style={relayMode ? { display: "none" } : {
-            position: "absolute",
-            inset: 0,
-            width: "100%",
-            height: "100%",
-            cursor: FINGER_CURSOR,
-            display: "block",
-            userSelect: "none",
-            WebkitUserSelect: "none",
-            touchAction: "none",
-            ...imageStyle,
-          }}
+          style={relayMode ? { display: "none" } : streamImageStyle}
         />
         {relayMode && (
           <img
@@ -574,25 +658,10 @@ export function SimulatorView({
             onLoad={(e) => {
               const el = e.currentTarget;
               if (el.naturalWidth > 0 && el.naturalHeight > 0) {
-                setScreenSize((prev) =>
-                  prev && prev.width === el.naturalWidth && prev.height === el.naturalHeight
-                    ? prev
-                    : { width: el.naturalWidth, height: el.naturalHeight },
-                );
+                updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
               }
             }}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              cursor: FINGER_CURSOR,
-              display: "block",
-              userSelect: "none",
-              WebkitUserSelect: "none" as any,
-              touchAction: "none",
-              ...imageStyle,
-            }}
+            style={streamImageStyle}
           />
         )}
         {/* Interactive overlay — captures all pointer events */}
@@ -605,9 +674,8 @@ export function SimulatorView({
           }}
           onMouseDown={(e) => {
             e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
+            const rect = getInputRect();
+            if (!rect) return;
             const x = (e.clientX - rect.left) / rect.width;
             const y = (e.clientY - rect.top) / rect.height;
 
@@ -626,16 +694,15 @@ export function SimulatorView({
             showTouchIndicator(x, y);
             if (y > 0.88) {
               edgeGestureRef.current = true;
-              sendTouch({ type: "begin", x, y, edge: EDGE_BOTTOM });
+              sendTouch({ type: "begin", x, y, edge: HID_EDGE_BOTTOM });
             } else {
               edgeGestureRef.current = false;
               handleTouch("begin", e);
             }
           }}
           onMouseMove={(e) => {
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
+            const rect = getInputRect();
+            if (!rect) return;
             const x = (e.clientX - rect.left) / rect.width;
             const y = (e.clientY - rect.top) / rect.height;
             lastMousePosRef.current = { x, y };
@@ -670,16 +737,15 @@ export function SimulatorView({
 
             moveTouchIndicator(x, y);
             if (edgeGestureRef.current) {
-              sendTouch({ type: "move", x, y, edge: EDGE_BOTTOM });
+              sendTouch({ type: "move", x, y, edge: HID_EDGE_BOTTOM });
             } else {
               handleTouch("move", e);
             }
           }}
           onMouseUp={(e) => {
             if (multiTouchActiveRef.current) {
-              const el = getViewElement();
-              if (el) {
-                const rect = el.getBoundingClientRect();
+              const rect = getInputRect();
+              if (rect) {
                 const x = (e.clientX - rect.left) / rect.width;
                 const y = (e.clientY - rect.top) / rect.height;
                 if (multiTouchShiftRef.current) {
@@ -709,12 +775,11 @@ export function SimulatorView({
 
             hideTouchIndicator();
             if (edgeGestureRef.current) {
-              const el = getViewElement();
-              if (el) {
-                const rect = el.getBoundingClientRect();
+              const rect = getInputRect();
+              if (rect) {
                 const x = (e.clientX - rect.left) / rect.width;
                 const y = (e.clientY - rect.top) / rect.height;
-                sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
+                sendTouch({ type: "end", x, y, edge: HID_EDGE_BOTTOM });
               }
               edgeGestureRef.current = false;
               return;
@@ -733,12 +798,11 @@ export function SimulatorView({
 
             hideTouchIndicator();
             if (edgeGestureRef.current) {
-              const el = getViewElement();
-              if (el) {
-                const rect = el.getBoundingClientRect();
+              const rect = getInputRect();
+              if (rect) {
                 const x = (e.clientX - rect.left) / rect.width;
                 const y = (e.clientY - rect.top) / rect.height;
-                sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
+                sendTouch({ type: "end", x, y, edge: HID_EDGE_BOTTOM });
               }
               edgeGestureRef.current = false;
               return;
@@ -748,9 +812,8 @@ export function SimulatorView({
           }}
           onTouchStart={(e) => {
             e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
+            const rect = getInputRect();
+            if (!rect) return;
 
             if (e.touches.length >= 2) {
               // Two fingers down — start multi-touch
@@ -782,7 +845,7 @@ export function SimulatorView({
             showTouchIndicator(x, y);
             if (y > 0.88) {
               edgeGestureRef.current = true;
-              sendTouch({ type: "begin", x, y, edge: EDGE_BOTTOM });
+              sendTouch({ type: "begin", x, y, edge: HID_EDGE_BOTTOM });
             } else {
               edgeGestureRef.current = false;
               sendTouch({ type: "begin", x, y });
@@ -790,9 +853,8 @@ export function SimulatorView({
           }}
           onTouchMove={(e) => {
             e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
+            const rect = getInputRect();
+            if (!rect) return;
 
             if (realMultiTouchRef.current && e.touches.length >= 2) {
               const t1 = e.touches[0];
@@ -814,16 +876,15 @@ export function SimulatorView({
             const y = (touch.clientY - rect.top) / rect.height;
             moveTouchIndicator(x, y);
             if (edgeGestureRef.current) {
-              sendTouch({ type: "move", x, y, edge: EDGE_BOTTOM });
+              sendTouch({ type: "move", x, y, edge: HID_EDGE_BOTTOM });
             } else {
               sendTouch({ type: "move", x, y });
             }
           }}
           onTouchEnd={(e) => {
             e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
+            const rect = getInputRect();
+            if (!rect) return;
 
             if (realMultiTouchRef.current) {
               // End multi-touch when all fingers lift (touches.length is remaining fingers)
@@ -855,7 +916,7 @@ export function SimulatorView({
             const y = (touch.clientY - rect.top) / rect.height;
             hideTouchIndicator();
             if (edgeGestureRef.current) {
-              sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
+              sendTouch({ type: "end", x, y, edge: HID_EDGE_BOTTOM });
               edgeGestureRef.current = false;
             } else {
               sendTouch({ type: "end", x, y });

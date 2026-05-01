@@ -3,6 +3,12 @@
  * Supports iPhone, iPad, and Apple Watch frames.
  */
 
+import type { StreamConfig } from "../types.js";
+import {
+  displayStreamConfig,
+  isLandscapeConfig,
+} from "./orientation.js";
+
 export type DeviceType = "iphone" | "ipad" | "watch" | "vision";
 
 export function getDeviceType(name?: string | null): DeviceType {
@@ -74,6 +80,59 @@ export const SIMULATOR_SCREENS: Record<string, { width: number; height: number }
   "Apple Vision Pro": { width: 1920, height: 1080 },
 };
 
+export function simulatorAspectRatio(
+  config?: Pick<StreamConfig, "width" | "height" | "orientation"> | null,
+  fallback?: Pick<StreamConfig, "width" | "height" | "orientation"> | null,
+): string {
+  const size = config && config.width > 0 && config.height > 0 ? config : fallback;
+  const displaySize = displayStreamConfig(size);
+  if (displaySize) {
+    return `${displaySize.width} / ${displaySize.height}`;
+  }
+  return `${DEVICE_FRAMES.iphone.width - 2 * DEVICE_FRAMES.iphone.bezelX} / ${DEVICE_FRAMES.iphone.height - 2 * DEVICE_FRAMES.iphone.bezelY}`;
+}
+
+export function fallbackScreenSize(
+  type: DeviceType = "iphone",
+  deviceName?: string | null,
+): { width: number; height: number } {
+  const known = deviceName ? SIMULATOR_SCREENS[deviceName] : null;
+  if (known) return known;
+  const f = DEVICE_FRAMES[type];
+  return {
+    width: f.width - 2 * f.bezelX,
+    height: f.height - 2 * f.bezelY,
+  };
+}
+
+export function simulatorMaxWidth(
+  type: DeviceType = "iphone",
+  config?: Pick<StreamConfig, "width" | "height" | "orientation"> | null,
+): number {
+  if (isLandscapeConfig(config)) {
+    switch (type) {
+      case "ipad":
+        return 720;
+      case "vision":
+        return 580;
+      case "watch":
+        return 200;
+      default:
+        return 620;
+    }
+  }
+  switch (type) {
+    case "ipad":
+      return 400;
+    case "watch":
+      return 200;
+    case "vision":
+      return 580;
+    default:
+      return 320;
+  }
+}
+
 /** Returns the screen area inset as percentages of the frame, suitable for CSS positioning. */
 export function screenInsets(type: DeviceType = "iphone") {
   const f = DEVICE_FRAMES[type];
@@ -86,10 +145,16 @@ export function screenInsets(type: DeviceType = "iphone") {
 }
 
 /** Border-radius for the screen clip area, scaled proportionally. */
-export function screenBorderRadius(type: DeviceType = "iphone") {
+export function screenBorderRadius(
+  type: DeviceType = "iphone",
+  config?: Pick<StreamConfig, "width" | "height" | "orientation"> | null,
+) {
   const f = DEVICE_FRAMES[type];
   const screenW = f.width - 2 * f.bezelX;
   const screenH = f.height - 2 * f.bezelY;
+  if (screenW < screenH && isLandscapeConfig(config)) {
+    return `${(f.innerRadius / screenH) * 100}% / ${(f.innerRadius / screenW) * 100}%`;
+  }
   return `${(f.innerRadius / screenW) * 100}% / ${(f.innerRadius / screenH) * 100}%`;
 }
 

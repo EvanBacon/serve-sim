@@ -1,10 +1,15 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
 import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
+import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
+
+// `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
+// CLI works under plain `node` too.
+const __dirname = dirnameOf(import.meta.url);
 
 // Embed the Swift helper so `bun build --compile` produces a self-contained
 // `serve-sim` binary. In dev / the un-compiled ESM bin the returned path is a
@@ -139,7 +144,7 @@ function findHelperBinary(): string {
     return swiftHelperEmbeddedPath;
   }
   if (!isEmbedded) {
-    const rel = resolve(import.meta.dir, "../bin/serve-sim-bin");
+    const rel = resolve(__dirname, "../bin/serve-sim-bin");
     if (existsSync(rel)) return rel;
     throw new Error(
       `serve-sim-bin not found. Run 'bun run build:swift' first.\nChecked: ${swiftHelperEmbeddedPath}, ${rel}`,
@@ -160,6 +165,27 @@ function findHelperBinary(): string {
     try { execSync(`codesign -s - -f ${JSON.stringify(extracted)}`, { stdio: "ignore" }); } catch {}
   }
   return extracted;
+}
+
+/**
+ * Env to spawn the Swift helper with. The helper links SimulatorKit/CoreSimulator
+ * via `@rpath`, but the rpath baked in at build time points at whatever Xcode
+ * lived on the build machine (e.g. `/Applications/Xcode_16.4.app/...`). On any
+ * machine with Xcode installed at a different path that lookup fails with
+ * `dyld: Library not loaded: @rpath/SimulatorKit.framework`. Inject the user's
+ * actual Xcode PrivateFrameworks dir so dyld can resolve it regardless.
+ */
+function helperSpawnEnv(): NodeJS.ProcessEnv {
+  let dev: string | null = null;
+  try {
+    dev = execSync("xcode-select -p", { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {}
+  if (!dev) return process.env;
+  const fw = `${dev}/Library/PrivateFrameworks`;
+  return {
+    ...process.env,
+    DYLD_FRAMEWORK_PATH: process.env.DYLD_FRAMEWORK_PATH ? `${fw}:${process.env.DYLD_FRAMEWORK_PATH}` : fw,
+  };
 }
 
 // ─── Device helpers ───
@@ -267,7 +293,7 @@ function stopProcess(pid: number): void {
   while (Date.now() < deadline) {
     try {
       process.kill(pid, 0);
-      Bun.sleepSync(25);
+      sleepSync(25);
     } catch {
       return;
     }
@@ -275,7 +301,7 @@ function stopProcess(pid: number): void {
   try { process.kill(pid, "SIGKILL"); } catch {}
   const deadline2 = Date.now() + 500;
   while (Date.now() < deadline2) {
-    try { process.kill(pid, 0); Bun.sleepSync(25); } catch { return; }
+    try { process.kill(pid, 0); sleepSync(25); } catch { return; }
   }
 }
 
@@ -302,7 +328,7 @@ function killPortHolder(port: number): void {
   for (const pid of pids) {
     try { process.kill(pid, "SIGKILL"); } catch {}
   }
-  Bun.sleepSync(100);
+  sleepSync(100);
 }
 
 function bootDevice(udid: string): void {
@@ -345,13 +371,7 @@ async function findAvailablePort(start: number): Promise<number> {
   const usedPorts = new Set(readAllStates().map((s) => s.port));
   for (let port = start; port < start + 100; port++) {
     if (usedPorts.has(port)) continue;
-    try {
-      const server = Bun.serve({ port, fetch: () => new Response("ok") });
-      server.stop(true);
-      return port;
-    } catch {
-      continue;
-    }
+    if (await isPortFree(port)) return port;
   }
   throw new Error(`No available port found in range ${start}-${start + 99}`);
 }
@@ -439,6 +459,7 @@ async function spawnHelperDetached(opts: SpawnHelperOptions): Promise<{
   const child = nodeSpawn(helperPath, [udid, "--port", String(port)], {
     detached: true,
     stdio: ["ignore", logFd, logFd],
+    env: helperSpawnEnv(),
   });
   child.unref();
   closeSync(logFd);
@@ -471,6 +492,7 @@ async function spawnHelperAttached(opts: SpawnHelperOptions): Promise<{
   const child = nodeSpawn(helperPath, [udid, "--port", String(port)], {
     detached: false,
     stdio: ["ignore", logFd, logFd],
+    env: helperSpawnEnv(),
   });
   closeSync(logFd);
 
@@ -1028,15 +1050,25 @@ async function memoryWarning(args: string[]) {
 // ─── Serve preview ───
 
 async function serve(servePort: number, devices: string[], portExplicit: boolean) {
-  // Ensure a serve-sim stream is running (start one if not)
-  const existing = readAllStates();
-  if (existing.length === 0) {
-    console.log("Starting simulator stream...");
-    await detach(devices, 3100);
+  let targetDevice: string | undefined;
+
+  if (devices.length > 0) {
+    const states = await detach(devices, 3100);
+    targetDevice = states[0]?.device;
+  } else {
+    // Ensure a serve-sim stream is running (start one if not)
+    const existing = readAllStates();
+    if (existing.length > 0) {
+      targetDevice = existing[0]?.device;
+    } else {
+      console.log("Starting simulator stream...");
+      const states = await detach(devices, 3100);
+      targetDevice = states[0]?.device;
+    }
   }
 
   const { simMiddleware } = await import("./middleware");
-  const middleware = simMiddleware({ basePath: "/" });
+  const middleware = simMiddleware({ basePath: "/", device: targetDevice });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
   const maxScan = portExplicit ? 1 : 50;
@@ -1046,7 +1078,7 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   for (let i = 0; i < maxScan; i++) {
     const p = servePort + i;
     try {
-      bindPreviewServer(p, middleware);
+      await bindPreviewServer(p, middleware);
       boundPort = p;
       bound = true;
       break;
@@ -1081,96 +1113,7 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
 }
 
 function bindPreviewServer(port: number, middleware: ReturnType<typeof import("./middleware").simMiddleware>) {
-  return Bun.serve({
-    port,
-    idleTimeout: 255, // max — MJPEG streams are long-lived
-    async fetch(req) {
-      // Methods that may carry a body get it pre-read here so the shim can
-      // replay it as Node-style "data"/"end" events. Without this, any
-      // middleware that reads `req.on("data"/"end")` hangs forever — which
-      // was silently breaking the /exec endpoint the client uses to run
-      // simctl (device picker stayed empty, header stuck on "No simulator").
-      const hasBody = req.method !== "GET" && req.method !== "HEAD";
-      const bodyBuf = hasBody ? new Uint8Array(await req.arrayBuffer()) : null;
-      return new Promise<Response>((resolve) => {
-        // Minimal Node-style req/res shim
-        const url = new URL(req.url);
-        const listeners: Record<string, Array<(arg?: any) => void>> = {};
-        const nodeReq: any = {
-          url: url.pathname + url.search,
-          method: req.method,
-          headers: Object.fromEntries(req.headers.entries()),
-          on(event: string, cb: (arg?: any) => void) {
-            (listeners[event] ??= []).push(cb);
-          },
-        };
-        req.signal.addEventListener("abort", () => {
-          for (const cb of listeners.close ?? []) cb();
-        });
-
-        let statusCode = 200;
-        const resHeaders = new Headers();
-        let bodyParts: (string | Uint8Array)[] = [];
-        let streaming = false;
-        let streamController: ReadableStreamDefaultController | null = null;
-
-        const nodeRes: any = {
-          writeHead(code: number, headers?: Record<string, string>) {
-            statusCode = code;
-            if (headers) {
-              for (const [k, v] of Object.entries(headers)) resHeaders.set(k, v);
-            }
-          },
-          setHeader(k: string, v: string) { resHeaders.set(k, v); },
-          get statusCode() { return statusCode; },
-          set statusCode(c: number) { statusCode = c; },
-          write(chunk: string | Uint8Array) {
-            if (!streaming) {
-              // First write — switch to streaming mode
-              streaming = true;
-              const stream = new ReadableStream({
-                start(ctrl) { streamController = ctrl; },
-              });
-              resolve(new Response(stream, { status: statusCode, headers: resHeaders }));
-            }
-            try {
-              streamController?.enqueue(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk);
-            } catch {}
-          },
-          end(body?: string | Uint8Array) {
-            if (streaming) {
-              if (body) {
-                try {
-                  streamController?.enqueue(typeof body === "string" ? new TextEncoder().encode(body) : body);
-                } catch {}
-              }
-              try { streamController?.close(); } catch {}
-            } else {
-              if (body) bodyParts.push(body);
-              const fullBody = bodyParts.map(p => typeof p === "string" ? p : new TextDecoder().decode(p)).join("");
-              resolve(new Response(fullBody, { status: statusCode, headers: resHeaders }));
-            }
-          },
-        };
-
-        middleware(nodeReq, nodeRes, () => {
-          resolve(new Response("Not found", { status: 404 }));
-        });
-
-        // Replay the pre-read body as Node "data"/"end" events on the next
-        // microtask, giving middleware a chance to subscribe first. Wrap in
-        // a Node Buffer so consumers calling chunk.toString() get the utf-8
-        // string — Uint8Array.toString() returns comma-joined byte values.
-        queueMicrotask(() => {
-          if (bodyBuf && bodyBuf.length > 0) {
-            const chunk = Buffer.from(bodyBuf);
-            for (const cb of listeners.data ?? []) cb(chunk);
-          }
-          for (const cb of listeners.end ?? []) cb();
-        });
-      });
-    },
-  });
+  return servePreview({ port, middleware });
 }
 
 function printHelp() {

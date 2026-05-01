@@ -14,4 +14,9 @@ export { fetchGatewayStatus } from "./discovery";
 export type { GatewayStatus, DiscoverOptions } from "./discovery";
 
 // Protocol types
-export type { ClientMessage, ServerMessage } from "./types";
+export type {
+  ClientMessage,
+  ServerMessage,
+  SimulatorOrientation,
+  StreamConfig,
+} from "./types";

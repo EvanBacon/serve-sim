@@ -6,6 +6,8 @@ cd "$SCRIPT_DIR"
 
 echo "Building serve-sim-bin (arm64)..."
 
+export DEVELOPER_DIR=$(xcode-select -p)
+
 swift build \
     -c release \
     --arch arm64 \

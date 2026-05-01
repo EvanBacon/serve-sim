@@ -31,7 +31,7 @@ I develop the Expo framework, but this tool is completely agnostic to React Nati
 
 ## Install
 
-Requires macOS with Xcode command line tools (`xcrun simctl`).
+Requires macOS with Xcode command line tools (`xcrun simctl`) and Node.js 18+. `bun` is **not** required to run the CLI.
 
 ## CLI
 

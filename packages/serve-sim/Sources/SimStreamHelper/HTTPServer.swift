@@ -7,6 +7,11 @@ final class HTTPServer {
     let clientManager = ClientManager()
     private let server = HttpServer()
     private let port: UInt16
+    private let corsHeaders = [
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    ]
 
     init(port: UInt16 = 3100) {
         self.port = port
@@ -72,25 +77,23 @@ final class HTTPServer {
 
         // Config endpoint
         server["/config"] = { [weak self] request in
-            let size = self?.clientManager ?? nil
-            let w = size?.screenWidth ?? 0
-            let h = size?.screenHeight ?? 0
-            return HttpResponse.ok(.json(["width": w, "height": h] as AnyObject))
+            let config: [String: Any] = self?.clientManager.screenConfig() ?? [
+                "width": 0,
+                "height": 0,
+                "orientation": "portrait",
+            ]
+            return self?.jsonResponse(config) ?? .internalServerError
         }
 
         // Health endpoint
-        server["/health"] = { _ in
-            return .ok(.json(["status": "ok"] as AnyObject))
+        server["/health"] = { [weak self] _ in
+            return self?.jsonResponse(["status": "ok"]) ?? .internalServerError
         }
 
         // CORS preflight
         server.middleware.append { request in
             if request.method == "OPTIONS" {
-                return HttpResponse.raw(204, "No Content", [
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type",
-                ], { _ in })
+                return HttpResponse.raw(204, "No Content", self.corsHeaders, { _ in })
             }
             return nil
         }
@@ -102,5 +105,20 @@ final class HTTPServer {
     func stop() {
         clientManager.stop()
         server.stop()
+    }
+
+    private func jsonResponse(_ object: [String: Any]) -> HttpResponse {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            return .internalServerError
+        }
+
+        var headers = corsHeaders
+        headers["Content-Type"] = "application/json"
+        headers["Cache-Control"] = "no-cache, no-store"
+        headers["Content-Length"] = "\(data.count)"
+
+        return .raw(200, "OK", headers) { writer in
+            try? writer.write(data)
+        }
     }
 }

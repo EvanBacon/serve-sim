@@ -10,11 +10,25 @@ export {
   DEVICE_FRAMES,
   SIMULATOR_SCREENS,
   DeviceFrameChrome,
+  fallbackScreenSize,
   getDeviceType,
   screenBorderRadius,
   screenInsets,
+  simulatorAspectRatio,
+  simulatorMaxWidth,
 } from "./deviceFrames.js";
+export {
+  displayStreamConfig,
+  isLandscapeConfig,
+  isLandscapeOrientation,
+  rawEdgeForDisplayEdge,
+  rawPointForDisplayPoint,
+  rotationDegreesForOrientation,
+  streamDisplayGeometry,
+} from "./orientation.js";
+export type { StreamDisplayGeometry } from "./orientation.js";
 export type { DeviceType } from "./deviceFrames.js";
+export type { SimulatorOrientation, StreamConfig } from "../types.js";
 export { useSimStream } from "./useSimStream.js";
 export type {
   SimStreamInfo,

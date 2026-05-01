@@ -1,6 +1,6 @@
 {
   "name": "serve-sim",
-  "version": "0.1.6",
+  "version": "0.1.10",
   "type": "module",
   "author": {
     "name": "Evan Bacon",
@@ -19,6 +19,9 @@
   },
   "bin": {
     "serve-sim": "dist/serve-sim.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "files": [
     "dist/serve-sim.js",
