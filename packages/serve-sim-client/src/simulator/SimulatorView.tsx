@@ -38,6 +38,12 @@ export interface SimulatorViewProps {
   streamFrame?: string | null;
   /** Relay mode: screen config from relay */
   streamConfig?: { width: number; height: number } | null;
+  /**
+   * Relay mode only: show MJPEG via a native `<img src>` (multipart) instead of
+   * `subscribeFrame` blob URLs. Required for Safari/WebKit, which does not
+   * reliably expose a streaming `fetch()` body for MJPEG.
+   */
+  relayNativeMjpegSrc?: string | null;
   /** Hide the bottom controls bar (Home button + FPS). */
   hideControls?: boolean;
   /** Called when streaming state changes (true = frames are flowing). */
@@ -68,11 +74,13 @@ export function SimulatorView({
   subscribeFrame,
   streamFrame,
   streamConfig,
+  relayNativeMjpegSrc,
   hideControls,
   onStreamingChange,
   connectionQuality,
 }: SimulatorViewProps) {
   const relayMode = !!onStreamTouch;
+  const useNativeRelayVideo = !!(relayMode && relayNativeMjpegSrc);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const relayImgRef = useRef<HTMLImageElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -139,9 +147,11 @@ export function SimulatorView({
   // In relay mode, subscribe to frames and update img.src directly (bypasses React)
   const connectedRef = useRef(false);
   connectedRef.current = connected;
+  const lastFrameAtRef = useRef(0);
   const prevBlobUrlRef = useRef<string | null>(null);
+  const nativeRelayWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (!relayMode || !subscribeFrame) return;
+    if (!relayMode || !subscribeFrame || relayNativeMjpegSrc) return;
     // Startup watchdog: flag the stream as broken if no frame arrives within
     // the window. Catches the silent-failure mode where the helper accepts
     // the MJPEG connection but its underlying simulator was shut down —
@@ -174,7 +184,27 @@ export function SimulatorView({
       clearTimeout(watchdog);
       unsubscribe?.();
     };
-  }, [relayMode, subscribeFrame]);
+  }, [relayMode, subscribeFrame, relayNativeMjpegSrc]);
+
+  // WebKit relay: multipart MJPEG on <img> — fetch()+ReadableStream is unreliable.
+  useEffect(() => {
+    if (!useNativeRelayVideo) return;
+    setConnected(false);
+    setError(null);
+    const STARTUP_MS = 6000;
+    nativeRelayWatchdogRef.current = setTimeout(() => {
+      if (!connectedRef.current) {
+        setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
+      }
+      nativeRelayWatchdogRef.current = null;
+    }, STARTUP_MS);
+    return () => {
+      if (nativeRelayWatchdogRef.current) {
+        clearTimeout(nativeRelayWatchdogRef.current);
+        nativeRelayWatchdogRef.current = null;
+      }
+    };
+  }, [useNativeRelayVideo, relayNativeMjpegSrc]);
 
   const sendTouch = useCallback(
     (touch: {
@@ -247,7 +277,7 @@ export function SimulatorView({
           setScreenSize(config);
         }
       })
-      .catch(() => {});
+      .catch(() => { });
 
     // Connect WebSocket for touch input
     const wsUrl = wsUrlProp ?? url.replace(/^http/, "ws") + "/ws";
@@ -327,13 +357,11 @@ export function SimulatorView({
     };
   }, [url, streamUrl, relayMode]);
 
-  // FPS counter + stale-frame detection for relay mode.
-  // Unlike non-relay mode (where WS close flips connected=false), relay mode
-  // only knows the stream is alive when frames arrive. Without this, killing
-  // the upstream helper leaves the UI stuck on "live" forever.
-  const lastFrameAtRef = useRef(0);
+  // FPS counter + stale-frame detection for relay mode (blob frames only).
+  // Native <img> multipart MJPEG (Safari) does not fire onLoad once per frame,
+  // so lastFrameAtRef would go stale and we'd flip to "connecting" after ~2s.
   useEffect(() => {
-    if (!relayMode) return;
+    if (!relayMode || useNativeRelayVideo) return;
     const STALE_MS = 2000;
     const checkStaleness = () => {
       const last = lastFrameAtRef.current;
@@ -345,20 +373,28 @@ export function SimulatorView({
       frameCountRef.current = 0;
       checkStaleness();
     }, 1000);
-    // Also run when the tab becomes visible again — background tabs throttle
-    // setInterval, so without this the indicator can stay stuck on "live"
-    // after the user refocuses a tab whose stream died in the background.
     const onVis = () => { if (!document.hidden) checkStaleness(); };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [relayMode]);
+  }, [relayMode, useNativeRelayVideo]);
+
+  // FPS for WebKit native <img> MJPEG (onLoad may be sparse; no stale disconnect).
+  useEffect(() => {
+    if (!relayMode || !useNativeRelayVideo) return;
+    const interval = setInterval(() => {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [relayMode, useNativeRelayVideo]);
 
   const getViewElement = useCallback(() => {
+    if (useNativeRelayVideo) return imgRef.current;
     return relayMode ? relayImgRef.current : imgRef.current;
-  }, [relayMode]);
+  }, [relayMode, useNativeRelayVideo]);
 
   const handleTouch = useCallback(
     (type: "begin" | "move" | "end", event: MouseEvent<HTMLElement>) => {
@@ -540,39 +576,24 @@ export function SimulatorView({
             height: fittedBox ? `${fittedBox.height}px` : "100%",
           }}
         >
-        <img
-          ref={imgRef}
-          src={relayMode ? undefined : streamUrl}
-          draggable={false}
-          onLoad={(e) => {
-            const el = e.currentTarget;
-            if (el.naturalWidth > 0 && el.naturalHeight > 0) {
-              setScreenSize((prev) =>
-                prev && prev.width === el.naturalWidth && prev.height === el.naturalHeight
-                  ? prev
-                  : { width: el.naturalWidth, height: el.naturalHeight },
-              );
-            }
-          }}
-          style={relayMode ? { display: "none" } : {
-            position: "absolute",
-            inset: 0,
-            width: "100%",
-            height: "100%",
-            cursor: FINGER_CURSOR,
-            display: "block",
-            userSelect: "none",
-            WebkitUserSelect: "none",
-            touchAction: "none",
-            ...imageStyle,
-          }}
-        />
-        {relayMode && (
           <img
-            ref={relayImgRef}
+            ref={imgRef}
+            src={relayMode ? (useNativeRelayVideo ? relayNativeMjpegSrc : undefined) : streamUrl}
             draggable={false}
             onLoad={(e) => {
               const el = e.currentTarget;
+              if (useNativeRelayVideo) {
+                if (nativeRelayWatchdogRef.current) {
+                  clearTimeout(nativeRelayWatchdogRef.current);
+                  nativeRelayWatchdogRef.current = null;
+                }
+                frameCountRef.current++;
+                lastFrameAtRef.current = Date.now();
+                if (!connectedRef.current) {
+                  setConnected(true);
+                  setError(null);
+                }
+              }
               if (el.naturalWidth > 0 && el.naturalHeight > 0) {
                 setScreenSize((prev) =>
                   prev && prev.width === el.naturalWidth && prev.height === el.naturalHeight
@@ -581,7 +602,7 @@ export function SimulatorView({
                 );
               }
             }}
-            style={{
+            style={relayMode && !useNativeRelayVideo ? { display: "none" } : {
               position: "absolute",
               inset: 0,
               width: "100%",
@@ -589,334 +610,361 @@ export function SimulatorView({
               cursor: FINGER_CURSOR,
               display: "block",
               userSelect: "none",
-              WebkitUserSelect: "none" as any,
+              WebkitUserSelect: "none",
               touchAction: "none",
               ...imageStyle,
             }}
           />
-        )}
-        {/* Interactive overlay — captures all pointer events */}
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            cursor: FINGER_CURSOR,
-            touchAction: "none",
-          }}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
-            const x = (e.clientX - rect.left) / rect.width;
-            const y = (e.clientY - rect.top) / rect.height;
-
-            if (e.altKey) {
-              // Multi-touch mode: begin gesture
-              multiTouchActiveRef.current = true;
-              multiTouchShiftRef.current = e.shiftKey;
-              const fingers = { x1: x, y1: y, x2: 1.0 - x, y2: 1.0 - y };
-              // For pan mode, lock the offset between fingers
-              panOffsetRef.current = { dx: 1.0 - x - x, dy: 1.0 - y - y };
-              setFingerIndicators(fingers);
-              sendMultiTouch({ type: "begin", ...fingers });
-              return;
-            }
-
-            showTouchIndicator(x, y);
-            if (y > 0.88) {
-              edgeGestureRef.current = true;
-              sendTouch({ type: "begin", x, y, edge: EDGE_BOTTOM });
-            } else {
-              edgeGestureRef.current = false;
-              handleTouch("begin", e);
-            }
-          }}
-          onMouseMove={(e) => {
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
-            const x = (e.clientX - rect.left) / rect.width;
-            const y = (e.clientY - rect.top) / rect.height;
-            lastMousePosRef.current = { x, y };
-
-            // Alt-hover preview (no buttons pressed)
-            if (e.buttons === 0) {
-              if (e.altKey) {
-                setFingerIndicators({
-                  x1: x,
-                  y1: y,
-                  x2: 1.0 - x,
-                  y2: 1.0 - y,
-                });
-              }
-              return;
-            }
-
-            if (multiTouchActiveRef.current) {
-              let fingers;
-              if (multiTouchShiftRef.current) {
-                // Pan: both fingers translate together, maintaining fixed spacing
-                const off = panOffsetRef.current;
-                fingers = { x1: x, y1: y, x2: x + off.dx, y2: y + off.dy };
-              } else {
-                // Pinch: fingers mirror around screen center (0.5, 0.5)
-                fingers = { x1: x, y1: y, x2: 1.0 - x, y2: 1.0 - y };
-              }
-              setFingerIndicators(fingers);
-              sendMultiTouch({ type: "move", ...fingers });
-              return;
-            }
-
-            moveTouchIndicator(x, y);
-            if (edgeGestureRef.current) {
-              sendTouch({ type: "move", x, y, edge: EDGE_BOTTOM });
-            } else {
-              handleTouch("move", e);
-            }
-          }}
-          onMouseUp={(e) => {
-            if (multiTouchActiveRef.current) {
+          {relayMode && !useNativeRelayVideo && (
+            <img
+              ref={relayImgRef}
+              draggable={false}
+              onLoad={(e) => {
+                const el = e.currentTarget;
+                if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                  setScreenSize((prev) =>
+                    prev && prev.width === el.naturalWidth && prev.height === el.naturalHeight
+                      ? prev
+                      : { width: el.naturalWidth, height: el.naturalHeight },
+                  );
+                }
+              }}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                cursor: FINGER_CURSOR,
+                display: "block",
+                userSelect: "none",
+                WebkitUserSelect: "none" as any,
+                touchAction: "none",
+                ...imageStyle,
+              }}
+            />
+          )}
+          {/* Interactive overlay — captures all pointer events */}
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              cursor: FINGER_CURSOR,
+              touchAction: "none",
+            }}
+            onMouseDown={(e) => {
+              e.preventDefault();
               const el = getViewElement();
-              if (el) {
-                const rect = el.getBoundingClientRect();
-                const x = (e.clientX - rect.left) / rect.width;
-                const y = (e.clientY - rect.top) / rect.height;
-                if (multiTouchShiftRef.current) {
-                  const off = panOffsetRef.current;
-                  sendMultiTouch({
-                    type: "end",
-                    x1: x,
-                    y1: y,
-                    x2: x + off.dx,
-                    y2: y + off.dy,
-                  });
-                } else {
-                  sendMultiTouch({
-                    type: "end",
+              if (!el) return;
+              const rect = el.getBoundingClientRect();
+              const x = (e.clientX - rect.left) / rect.width;
+              const y = (e.clientY - rect.top) / rect.height;
+
+              if (e.altKey) {
+                // Multi-touch mode: begin gesture
+                multiTouchActiveRef.current = true;
+                multiTouchShiftRef.current = e.shiftKey;
+                const fingers = { x1: x, y1: y, x2: 1.0 - x, y2: 1.0 - y };
+                // For pan mode, lock the offset between fingers
+                panOffsetRef.current = { dx: 1.0 - x - x, dy: 1.0 - y - y };
+                setFingerIndicators(fingers);
+                sendMultiTouch({ type: "begin", ...fingers });
+                return;
+              }
+
+              showTouchIndicator(x, y);
+              if (y > 0.88) {
+                edgeGestureRef.current = true;
+                sendTouch({ type: "begin", x, y, edge: EDGE_BOTTOM });
+              } else {
+                edgeGestureRef.current = false;
+                handleTouch("begin", e);
+              }
+            }}
+            onMouseMove={(e) => {
+              const el = getViewElement();
+              if (!el) return;
+              const rect = el.getBoundingClientRect();
+              const x = (e.clientX - rect.left) / rect.width;
+              const y = (e.clientY - rect.top) / rect.height;
+              lastMousePosRef.current = { x, y };
+
+              // Alt-hover preview (no buttons pressed)
+              if (e.buttons === 0) {
+                if (e.altKey) {
+                  setFingerIndicators({
                     x1: x,
                     y1: y,
                     x2: 1.0 - x,
                     y2: 1.0 - y,
                   });
                 }
+                return;
               }
-              multiTouchActiveRef.current = false;
-              // Keep showing preview if alt is still held
-              if (!e.altKey) setFingerIndicators(null);
-              return;
-            }
 
-            hideTouchIndicator();
-            if (edgeGestureRef.current) {
-              const el = getViewElement();
-              if (el) {
-                const rect = el.getBoundingClientRect();
-                const x = (e.clientX - rect.left) / rect.width;
-                const y = (e.clientY - rect.top) / rect.height;
-                sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
-              }
-              edgeGestureRef.current = false;
-              return;
-            }
-            handleTouch("end", e);
-          }}
-          onMouseLeave={(e) => {
-            if (multiTouchActiveRef.current) {
-              if (fingerIndicators) {
-                sendMultiTouch({ type: "end", ...fingerIndicators });
-              }
-              multiTouchActiveRef.current = false;
-              setFingerIndicators(null);
-              return;
-            }
-
-            hideTouchIndicator();
-            if (edgeGestureRef.current) {
-              const el = getViewElement();
-              if (el) {
-                const rect = el.getBoundingClientRect();
-                const x = (e.clientX - rect.left) / rect.width;
-                const y = (e.clientY - rect.top) / rect.height;
-                sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
-              }
-              edgeGestureRef.current = false;
-              return;
-            }
-            if (e.buttons > 0) handleTouch("end", e);
-            setFingerIndicators(null);
-          }}
-          onTouchStart={(e) => {
-            e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
-
-            if (e.touches.length >= 2) {
-              // Two fingers down — start multi-touch
-              hideTouchIndicator();
-              const t1 = e.touches[0];
-              const t2 = e.touches[1];
-              const fingers = {
-                x1: (t1.clientX - rect.left) / rect.width,
-                y1: (t1.clientY - rect.top) / rect.height,
-                x2: (t2.clientX - rect.left) / rect.width,
-                y2: (t2.clientY - rect.top) / rect.height,
-              };
-              // If a single-touch gesture was already in progress, end it first
-              if (!realMultiTouchRef.current && !edgeGestureRef.current) {
-                sendTouch({ type: "end", x: fingers.x1, y: fingers.y1 });
-              }
-              realMultiTouchRef.current = true;
-              multiTouchActiveRef.current = true;
-              edgeGestureRef.current = false;
-              setFingerIndicators(fingers);
-              sendMultiTouch({ type: "begin", ...fingers });
-              return;
-            }
-
-            const touch = e.touches[0];
-            if (!touch) return;
-            const x = (touch.clientX - rect.left) / rect.width;
-            const y = (touch.clientY - rect.top) / rect.height;
-            showTouchIndicator(x, y);
-            if (y > 0.88) {
-              edgeGestureRef.current = true;
-              sendTouch({ type: "begin", x, y, edge: EDGE_BOTTOM });
-            } else {
-              edgeGestureRef.current = false;
-              sendTouch({ type: "begin", x, y });
-            }
-          }}
-          onTouchMove={(e) => {
-            e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
-
-            if (realMultiTouchRef.current && e.touches.length >= 2) {
-              const t1 = e.touches[0];
-              const t2 = e.touches[1];
-              const fingers = {
-                x1: (t1.clientX - rect.left) / rect.width,
-                y1: (t1.clientY - rect.top) / rect.height,
-                x2: (t2.clientX - rect.left) / rect.width,
-                y2: (t2.clientY - rect.top) / rect.height,
-              };
-              setFingerIndicators(fingers);
-              sendMultiTouch({ type: "move", ...fingers });
-              return;
-            }
-
-            const touch = e.touches[0];
-            if (!touch) return;
-            const x = (touch.clientX - rect.left) / rect.width;
-            const y = (touch.clientY - rect.top) / rect.height;
-            moveTouchIndicator(x, y);
-            if (edgeGestureRef.current) {
-              sendTouch({ type: "move", x, y, edge: EDGE_BOTTOM });
-            } else {
-              sendTouch({ type: "move", x, y });
-            }
-          }}
-          onTouchEnd={(e) => {
-            e.preventDefault();
-            const el = getViewElement();
-            if (!el) return;
-            const rect = el.getBoundingClientRect();
-
-            if (realMultiTouchRef.current) {
-              // End multi-touch when all fingers lift (touches.length is remaining fingers)
-              if (e.touches.length < 2) {
-                const t1 = e.changedTouches[0];
-                // Use last known indicator positions as fallback for the second finger
-                const last = fingerIndicators;
-                if (t1 && last) {
-                  sendMultiTouch({
-                    type: "end",
-                    x1: (t1.clientX - rect.left) / rect.width,
-                    y1: (t1.clientY - rect.top) / rect.height,
-                    x2: last.x2,
-                    y2: last.y2,
-                  });
-                } else if (last) {
-                  sendMultiTouch({ type: "end", ...last });
+              if (multiTouchActiveRef.current) {
+                let fingers;
+                if (multiTouchShiftRef.current) {
+                  // Pan: both fingers translate together, maintaining fixed spacing
+                  const off = panOffsetRef.current;
+                  fingers = { x1: x, y1: y, x2: x + off.dx, y2: y + off.dy };
+                } else {
+                  // Pinch: fingers mirror around screen center (0.5, 0.5)
+                  fingers = { x1: x, y1: y, x2: 1.0 - x, y2: 1.0 - y };
                 }
-                realMultiTouchRef.current = false;
+                setFingerIndicators(fingers);
+                sendMultiTouch({ type: "move", ...fingers });
+                return;
+              }
+
+              moveTouchIndicator(x, y);
+              if (edgeGestureRef.current) {
+                sendTouch({ type: "move", x, y, edge: EDGE_BOTTOM });
+              } else {
+                handleTouch("move", e);
+              }
+            }}
+            onMouseUp={(e) => {
+              if (multiTouchActiveRef.current) {
+                const el = getViewElement();
+                if (el) {
+                  const rect = el.getBoundingClientRect();
+                  const x = (e.clientX - rect.left) / rect.width;
+                  const y = (e.clientY - rect.top) / rect.height;
+                  if (multiTouchShiftRef.current) {
+                    const off = panOffsetRef.current;
+                    sendMultiTouch({
+                      type: "end",
+                      x1: x,
+                      y1: y,
+                      x2: x + off.dx,
+                      y2: y + off.dy,
+                    });
+                  } else {
+                    sendMultiTouch({
+                      type: "end",
+                      x1: x,
+                      y1: y,
+                      x2: 1.0 - x,
+                      y2: 1.0 - y,
+                    });
+                  }
+                }
+                multiTouchActiveRef.current = false;
+                // Keep showing preview if alt is still held
+                if (!e.altKey) setFingerIndicators(null);
+                return;
+              }
+
+              hideTouchIndicator();
+              if (edgeGestureRef.current) {
+                const el = getViewElement();
+                if (el) {
+                  const rect = el.getBoundingClientRect();
+                  const x = (e.clientX - rect.left) / rect.width;
+                  const y = (e.clientY - rect.top) / rect.height;
+                  sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
+                }
+                edgeGestureRef.current = false;
+                return;
+              }
+              handleTouch("end", e);
+            }}
+            onMouseLeave={(e) => {
+              if (multiTouchActiveRef.current) {
+                if (fingerIndicators) {
+                  sendMultiTouch({ type: "end", ...fingerIndicators });
+                }
                 multiTouchActiveRef.current = false;
                 setFingerIndicators(null);
+                return;
               }
-              return;
-            }
 
-            const touch = e.changedTouches[0];
-            if (!touch) return;
-            const x = (touch.clientX - rect.left) / rect.width;
-            const y = (touch.clientY - rect.top) / rect.height;
-            hideTouchIndicator();
-            if (edgeGestureRef.current) {
-              sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
-              edgeGestureRef.current = false;
-            } else {
-              sendTouch({ type: "end", x, y });
-            }
-          }}
-        />
-        {/* Single-touch indicator (hidden by default, shown via ref) */}
-        <div
-          ref={touchIndicatorRef}
-          data-testid="touch-indicator"
-          style={{
-            position: "absolute",
-            display: "none",
-            width: 24,
-            height: 24,
-            borderRadius: "50%",
-            background: "rgba(59,130,246,0.5)",
-            boxShadow: "0 0 8px rgba(59,130,246,0.3)",
-            transform: "translate(-50%, -50%)",
-            pointerEvents: "none",
-          }}
-        />
-        {/* Multi-touch finger indicators */}
-        {fingerIndicators && (
-          <>
-            <div
-              data-testid="finger-dot"
-              style={fingerDotStyle(fingerIndicators.x1, fingerIndicators.y1)}
-            />
-            <div
-              data-testid="finger-dot"
-              style={fingerDotStyle(fingerIndicators.x2, fingerIndicators.y2)}
-            />
-          </>
-        )}
-        {!connected && !error && (
-          <div style={{...overlayStyle, ...(imageStyle || {})}}>
-            <span style={{ color: "#888", fontSize: 14 }}>Connecting...</span>
-          </div>
-        )}
-        {error && (
-          <div style={overlayStyle}>
-            <span
-              style={{
-                color: "#f44",
-                fontSize: 14,
-                padding: 20,
-                textAlign: "center",
-              }}
-            >
-              {error}
-            </span>
-          </div>
-        )}
-        {showSlowOverlay && (
-          <div style={slowOverlayStyle}>
-            <span style={{ color: "#fbbf24", fontSize: 13, fontFamily: "monospace" }}>
-              Slow connection
-            </span>
-          </div>
-        )}
+              hideTouchIndicator();
+              if (edgeGestureRef.current) {
+                const el = getViewElement();
+                if (el) {
+                  const rect = el.getBoundingClientRect();
+                  const x = (e.clientX - rect.left) / rect.width;
+                  const y = (e.clientY - rect.top) / rect.height;
+                  sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
+                }
+                edgeGestureRef.current = false;
+                return;
+              }
+              if (e.buttons > 0) handleTouch("end", e);
+              setFingerIndicators(null);
+            }}
+            onTouchStart={(e) => {
+              e.preventDefault();
+              const el = getViewElement();
+              if (!el) return;
+              const rect = el.getBoundingClientRect();
+
+              if (e.touches.length >= 2) {
+                // Two fingers down — start multi-touch
+                hideTouchIndicator();
+                const t1 = e.touches[0];
+                const t2 = e.touches[1];
+                const fingers = {
+                  x1: (t1.clientX - rect.left) / rect.width,
+                  y1: (t1.clientY - rect.top) / rect.height,
+                  x2: (t2.clientX - rect.left) / rect.width,
+                  y2: (t2.clientY - rect.top) / rect.height,
+                };
+                // If a single-touch gesture was already in progress, end it first
+                if (!realMultiTouchRef.current && !edgeGestureRef.current) {
+                  sendTouch({ type: "end", x: fingers.x1, y: fingers.y1 });
+                }
+                realMultiTouchRef.current = true;
+                multiTouchActiveRef.current = true;
+                edgeGestureRef.current = false;
+                setFingerIndicators(fingers);
+                sendMultiTouch({ type: "begin", ...fingers });
+                return;
+              }
+
+              const touch = e.touches[0];
+              if (!touch) return;
+              const x = (touch.clientX - rect.left) / rect.width;
+              const y = (touch.clientY - rect.top) / rect.height;
+              showTouchIndicator(x, y);
+              if (y > 0.88) {
+                edgeGestureRef.current = true;
+                sendTouch({ type: "begin", x, y, edge: EDGE_BOTTOM });
+              } else {
+                edgeGestureRef.current = false;
+                sendTouch({ type: "begin", x, y });
+              }
+            }}
+            onTouchMove={(e) => {
+              e.preventDefault();
+              const el = getViewElement();
+              if (!el) return;
+              const rect = el.getBoundingClientRect();
+
+              if (realMultiTouchRef.current && e.touches.length >= 2) {
+                const t1 = e.touches[0];
+                const t2 = e.touches[1];
+                const fingers = {
+                  x1: (t1.clientX - rect.left) / rect.width,
+                  y1: (t1.clientY - rect.top) / rect.height,
+                  x2: (t2.clientX - rect.left) / rect.width,
+                  y2: (t2.clientY - rect.top) / rect.height,
+                };
+                setFingerIndicators(fingers);
+                sendMultiTouch({ type: "move", ...fingers });
+                return;
+              }
+
+              const touch = e.touches[0];
+              if (!touch) return;
+              const x = (touch.clientX - rect.left) / rect.width;
+              const y = (touch.clientY - rect.top) / rect.height;
+              moveTouchIndicator(x, y);
+              if (edgeGestureRef.current) {
+                sendTouch({ type: "move", x, y, edge: EDGE_BOTTOM });
+              } else {
+                sendTouch({ type: "move", x, y });
+              }
+            }}
+            onTouchEnd={(e) => {
+              e.preventDefault();
+              const el = getViewElement();
+              if (!el) return;
+              const rect = el.getBoundingClientRect();
+
+              if (realMultiTouchRef.current) {
+                // End multi-touch when all fingers lift (touches.length is remaining fingers)
+                if (e.touches.length < 2) {
+                  const t1 = e.changedTouches[0];
+                  // Use last known indicator positions as fallback for the second finger
+                  const last = fingerIndicators;
+                  if (t1 && last) {
+                    sendMultiTouch({
+                      type: "end",
+                      x1: (t1.clientX - rect.left) / rect.width,
+                      y1: (t1.clientY - rect.top) / rect.height,
+                      x2: last.x2,
+                      y2: last.y2,
+                    });
+                  } else if (last) {
+                    sendMultiTouch({ type: "end", ...last });
+                  }
+                  realMultiTouchRef.current = false;
+                  multiTouchActiveRef.current = false;
+                  setFingerIndicators(null);
+                }
+                return;
+              }
+
+              const touch = e.changedTouches[0];
+              if (!touch) return;
+              const x = (touch.clientX - rect.left) / rect.width;
+              const y = (touch.clientY - rect.top) / rect.height;
+              hideTouchIndicator();
+              if (edgeGestureRef.current) {
+                sendTouch({ type: "end", x, y, edge: EDGE_BOTTOM });
+                edgeGestureRef.current = false;
+              } else {
+                sendTouch({ type: "end", x, y });
+              }
+            }}
+          />
+          {/* Single-touch indicator (hidden by default, shown via ref) */}
+          <div
+            ref={touchIndicatorRef}
+            data-testid="touch-indicator"
+            style={{
+              position: "absolute",
+              display: "none",
+              width: 24,
+              height: 24,
+              borderRadius: "50%",
+              background: "rgba(59,130,246,0.5)",
+              boxShadow: "0 0 8px rgba(59,130,246,0.3)",
+              transform: "translate(-50%, -50%)",
+              pointerEvents: "none",
+            }}
+          />
+          {/* Multi-touch finger indicators */}
+          {fingerIndicators && (
+            <>
+              <div
+                data-testid="finger-dot"
+                style={fingerDotStyle(fingerIndicators.x1, fingerIndicators.y1)}
+              />
+              <div
+                data-testid="finger-dot"
+                style={fingerDotStyle(fingerIndicators.x2, fingerIndicators.y2)}
+              />
+            </>
+          )}
+          {!connected && !error && (
+            <div style={{ ...overlayStyle, ...(imageStyle || {}) }}>
+              <span style={{ color: "#888", fontSize: 14 }}>Connecting...</span>
+            </div>
+          )}
+          {error && (
+            <div style={overlayStyle}>
+              <span
+                style={{
+                  color: "#f44",
+                  fontSize: 14,
+                  padding: 20,
+                  textAlign: "center",
+                }}
+              >
+                {error}
+              </span>
+            </div>
+          )}
+          {showSlowOverlay && (
+            <div style={slowOverlayStyle}>
+              <span style={{ color: "#fbbf24", fontSize: 13, fontFamily: "monospace" }}>
+                Slow connection
+              </span>
+            </div>
+          )}
         </div>
       </div>
       {!hideControls && (
