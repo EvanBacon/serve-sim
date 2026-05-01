@@ -1879,9 +1879,6 @@ function App() {
           trigger={<SimulatorToolbar.Title />}
         />
         <SimulatorToolbar.Actions>
-          <SimulatorToolbar.HomeButton
-            onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-          />
           {currentApp?.isReactNative && (
             <SimulatorToolbar.Button
               aria-label="Reload React Native bundle"
@@ -1894,6 +1891,9 @@ function App() {
               </svg>
             </SimulatorToolbar.Button>
           )}
+          <SimulatorToolbar.HomeButton
+            onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
+          />
           <SimulatorToolbar.Button
             aria-label={axOverlayEnabled ? "Hide accessibility overlay" : "Show accessibility overlay"}
             aria-pressed={axOverlayEnabled}
