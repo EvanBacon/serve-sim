@@ -1,5 +1,14 @@
 import { createRoot } from "react-dom/client";
-import { useEffect, useState, useCallback, useRef, type CSSProperties, type DragEvent, type ReactNode } from "react";
+import type { AxElement, AxRect, AxSnapshot } from "../ax-types";
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  type CSSProperties,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 import {
   SimulatorView,
   screenBorderRadius,
@@ -158,8 +167,44 @@ declare global {
       port: number;
       device: string;
       logsEndpoint?: string;
+      axEndpoint?: string;
     };
   }
+}
+
+const AXE_INSTALL_URL = "https://github.com/cameroncooke/AXe";
+
+function isAxeUnavailable(snapshot: AxSnapshot | null) {
+  return snapshot?.errors?.some((error) => error.includes("AXe is not installed")) ?? false;
+}
+
+function useAxSnapshot(endpoint?: string) {
+  const [snapshot, setSnapshot] = useState<AxSnapshot | null>(null);
+  const [status, setStatus] = useState("AX waiting");
+
+  useEffect(() => {
+    if (!endpoint) return;
+    const source = new EventSource(endpoint);
+    source.onmessage = (event) => {
+      try {
+        const next = JSON.parse(event.data) as AxSnapshot;
+        setSnapshot(next);
+        setStatus(
+          isAxeUnavailable(next)
+            ? "AX unavailable: install AXe"
+            : `${next.elements.length} AX elements`,
+        );
+      } catch {
+        setStatus("AX parse error");
+      }
+    };
+    source.addEventListener("error", () => {
+      setStatus("AX reconnecting");
+    });
+    return () => source.close();
+  }, [endpoint]);
+
+  return { snapshot, status };
 }
 
 // ─── Exec / devices ───
@@ -1130,16 +1175,246 @@ function PermBtn({
   );
 }
 
+function AxDomOverlay({
+  snapshot,
+  enabled,
+  highlightedKey,
+  onHighlight,
+}: {
+  snapshot: AxSnapshot | null;
+  enabled: boolean;
+  highlightedKey: string | null;
+  onHighlight: (key: string | null) => void;
+}) {
+  if (!snapshot?.screen.width || !snapshot?.screen.height) return null;
+
+  return (
+    <div
+      aria-label="Simulator accessibility targets"
+      style={axStyles.targets}
+    >
+      {snapshot.elements.map((element, index) => {
+        const key = axElementKey(element);
+        const axNode = axNodeForElement(element, index, snapshot);
+        const visibleFrame = clampAxFrameForScreen(element.frame, snapshot.screen);
+        if (!visibleFrame) return null;
+        const summary = axElementSummary(axNode);
+        const highlighted = key === highlightedKey;
+        const visible = enabled || highlighted;
+        return (
+          <button
+            key={key}
+            type="button"
+            data-testid="sim-ax-target"
+            data-ax-key={key}
+            data-ax-id={axNode.id}
+            data-ax-path={axNode.path}
+            data-ax-label={axNode.label}
+            data-ax-value={axNode.value}
+            data-ax-role={axNode.role}
+            data-ax-type={axNode.type}
+            data-ax-enabled={String(axNode.enabled)}
+            data-ax-frame={axFrameString(axNode.frame)}
+            data-ax-frame-x={String(axNode.frame.x)}
+            data-ax-frame-y={String(axNode.frame.y)}
+            data-ax-frame-width={String(axNode.frame.width)}
+            data-ax-frame-height={String(axNode.frame.height)}
+            aria-label={`Tap ${axNode.label}`}
+            aria-description={summary}
+            aria-hidden={!enabled}
+            disabled={!enabled}
+            tabIndex={enabled ? 0 : -1}
+            onFocus={() => onHighlight(key)}
+            onBlur={() => onHighlight(null)}
+            style={{
+              ...axStyles.target,
+              left: `${(visibleFrame.x / snapshot.screen.width) * 100}%`,
+              top: `${(visibleFrame.y / snapshot.screen.height) * 100}%`,
+              width: `${(visibleFrame.width / snapshot.screen.width) * 100}%`,
+              height: `${(visibleFrame.height / snapshot.screen.height) * 100}%`,
+              borderColor: highlighted ? "#fbbf24" : visible ? "#34d399" : "transparent",
+              background: highlighted
+                ? "rgba(245,158,11,0.28)"
+                : visible
+                  ? "rgba(16,185,129,0.12)"
+                  : "transparent",
+            }}
+          >
+            <span style={axStyles.hiddenMetadata}>{summary}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function AxTreeTool({
+  snapshot,
+  overlayEnabled,
+  highlightedKey,
+  onToggleOverlay,
+  onHighlight,
+}: {
+  snapshot: AxSnapshot | null;
+  overlayEnabled: boolean;
+  highlightedKey: string | null;
+  onToggleOverlay: () => void;
+  onHighlight: (key: string | null) => void;
+}) {
+  const elements = snapshot?.elements.slice(0, 40) ?? [];
+  const axeUnavailable = isAxeUnavailable(snapshot);
+  const error = snapshot?.errors?.[0] ?? null;
+  return (
+    <div style={{ ...panelStyles.section, padding: "8px 12px" }}>
+      <div style={axStyles.panelHeader}>
+        <span style={{ ...panelStyles.sectionTitle, margin: 0 }}>AX Tree</span>
+        <button
+          type="button"
+          onClick={onToggleOverlay}
+          aria-pressed={overlayEnabled}
+          style={axStyles.overlayToggle}
+        >
+          {overlayEnabled ? "Overlay on" : "Overlay off"}
+        </button>
+      </div>
+      {axeUnavailable ? (
+        <div style={{ ...panelStyles.empty, padding: 12 }}>
+          AX unavailable:{" "}
+          <a
+            href={AXE_INSTALL_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={axStyles.emptyLink}
+          >
+            install AXe
+          </a>
+        </div>
+      ) : elements.length === 0 ? (
+        <div style={{ ...panelStyles.empty, padding: 12 }}>
+          {error ?? "Waiting for accessibility data…"}
+        </div>
+      ) : (
+        <div style={axStyles.list} role="list">
+          {elements.map((element, index) => {
+            const key = axElementKey(element);
+            const active = key === highlightedKey;
+            const axNode = axNodeForElement(element, index, snapshot!);
+            const size = `${Math.round(element.frame.width)}x${Math.round(element.frame.height)}`;
+            const itemTitle = [
+              axNode.label,
+              axNode.role || axNode.type || "element",
+              size,
+            ].filter(Boolean).join(" · ");
+            return (
+              <div
+                key={key}
+                role="listitem"
+                tabIndex={0}
+                data-ax-key={key}
+                title={itemTitle}
+                onMouseEnter={() => onHighlight(key)}
+                onMouseLeave={() => onHighlight(null)}
+                onFocus={() => onHighlight(key)}
+                onBlur={() => onHighlight(null)}
+                style={{
+                  ...axStyles.listItem,
+                  ...(active ? axStyles.listItemActive : {}),
+                }}
+              >
+                <span style={axStyles.itemText}>
+                  <span style={axStyles.itemLabel}>{element.label || element.role || "Unlabeled"}</span>
+                  <span style={axStyles.itemMeta}>{element.role || element.type || "element"}</span>
+                </span>
+                <code style={axStyles.itemSize}>{size}</code>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function axNodeForElement(element: AxElement, index: number, snapshot: AxSnapshot) {
+  const label = element.label || element.role || `element ${index + 1}`;
+  const role = element.role || element.type;
+  return {
+    id: element.id,
+    path: element.path,
+    label,
+    value: element.value,
+    role,
+    type: element.type,
+    enabled: element.enabled,
+    frame: element.frame,
+    screen: snapshot.screen,
+  };
+}
+
+function clampAxFrameForScreen(
+  frame: AxRect,
+  screen: { width: number; height: number },
+): AxRect | null {
+  const x = Math.max(0, frame.x);
+  const y = Math.max(0, frame.y);
+  const right = Math.min(screen.width, frame.x + frame.width);
+  const bottom = Math.min(screen.height, frame.y + frame.height);
+  const width = Math.max(0, right - x);
+  const height = Math.max(0, bottom - y);
+  return width > 0 && height > 0 ? { x, y, width, height } : null;
+}
+
+function axElementKey(element: AxElement) {
+  const frame = element.frame;
+  return [
+    element.path,
+    element.label,
+    element.role,
+    element.type,
+    frame.x,
+    frame.y,
+    frame.width,
+    frame.height,
+  ].join("|");
+}
+
+function axElementSummary(axNode: ReturnType<typeof axNodeForElement>) {
+  const parts = [
+    `AX label: ${axNode.label || "Unlabeled"}`,
+    axNode.role ? `role: ${axNode.role}` : "",
+    axNode.type ? `type: ${axNode.type}` : "",
+    axNode.value ? `value: ${axNode.value}` : "",
+    axNode.id ? `id: ${axNode.id}` : "",
+    `path: ${axNode.path}`,
+    `frame: ${axFrameString(axNode.frame)}`,
+  ];
+  return parts.filter(Boolean).join("; ");
+}
+
+function axFrameString(frame: AxRect) {
+  return `${frame.x},${frame.y} ${frame.width}x${frame.height}`;
+}
+
 function ToolsPanel({
   open,
   onClose,
   udid,
   currentApp,
+  axSnapshot,
+  axOverlayEnabled,
+  highlightedAxKey,
+  onToggleAxOverlay,
+  onHighlightAx,
 }: {
   open: boolean;
   onClose: () => void;
   udid: string;
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
+  axSnapshot: AxSnapshot | null;
+  axOverlayEnabled: boolean;
+  highlightedAxKey: string | null;
+  onToggleAxOverlay: () => void;
+  onHighlightAx: (key: string | null) => void;
 }) {
   return (
     <aside
@@ -1162,6 +1437,13 @@ function ToolsPanel({
       </header>
 
       <div style={panelStyles.body}>
+        <AxTreeTool
+          snapshot={axSnapshot}
+          overlayEnabled={axOverlayEnabled}
+          highlightedKey={highlightedAxKey}
+          onToggleOverlay={onToggleAxOverlay}
+          onHighlight={onHighlightAx}
+        />
         <AppDetectionTool udid={udid} currentApp={currentApp} />
         <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
       </div>
@@ -1193,6 +1475,9 @@ function App() {
   const [devicesError, setDevicesError] = useState<string | null>(null);
   const [stoppingUdids, setStoppingUdids] = useState<Set<string>>(new Set());
   const [switching, setSwitching] = useState(false);
+  const [axOverlayEnabled, setAxOverlayEnabled] = useState(true);
+  const [highlightedAxKey, setHighlightedAxKey] = useState<string | null>(null);
+  const { snapshot: axSnapshot, status: axStatus } = useAxSnapshot(config?.axEndpoint);
 
   const fetchDevices = useCallback(async () => {
     setDevicesLoading(true);
@@ -1395,6 +1680,42 @@ function App() {
   const pressedKeysRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
+    if (!axOverlayEnabled) setHighlightedAxKey(null);
+  }, [axOverlayEnabled]);
+
+  const highlightAxElementAtClientPoint = useCallback((clientX: number, clientY: number) => {
+    if (!axOverlayEnabled || !axSnapshot?.screen.width || !axSnapshot.screen.height) return;
+    const rect = simContainerRef.current?.getBoundingClientRect();
+    if (!rect?.width || !rect.height) return;
+
+    const x = ((clientX - rect.left) / rect.width) * axSnapshot.screen.width;
+    const y = ((clientY - rect.top) / rect.height) * axSnapshot.screen.height;
+    if (x < 0 || y < 0 || x > axSnapshot.screen.width || y > axSnapshot.screen.height) {
+      setHighlightedAxKey((current) => (current === null ? current : null));
+      return;
+    }
+
+    let nextKey: string | null = null;
+    let nextArea = Number.POSITIVE_INFINITY;
+    axSnapshot.elements.forEach((element, index) => {
+      const frame = element.frame;
+      const contains =
+        x >= frame.x &&
+        y >= frame.y &&
+        x <= frame.x + frame.width &&
+        y <= frame.y + frame.height;
+      if (!contains) return;
+
+      const area = frame.width * frame.height;
+      if (area >= nextArea) return;
+      nextArea = area;
+      nextKey = axElementKey(element);
+    });
+
+    setHighlightedAxKey((current) => (current === nextKey ? current : nextKey));
+  }, [axOverlayEnabled, axSnapshot]);
+
+  useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
       const inside = !!simContainerRef.current?.contains(e.target as Node);
       setSimFocused(inside);
@@ -1548,6 +1869,14 @@ function App() {
           trigger={<SimulatorToolbar.Title />}
         />
         <SimulatorToolbar.Actions>
+          <SimulatorToolbar.Button
+            aria-label={axOverlayEnabled ? "Hide accessibility overlay" : "Show accessibility overlay"}
+            aria-pressed={axOverlayEnabled}
+            title={axStatus}
+            onClick={() => setAxOverlayEnabled((enabled) => !enabled)}
+          >
+            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.02em" }}>AX</span>
+          </SimulatorToolbar.Button>
           {currentApp?.isReactNative && (
             <SimulatorToolbar.Button
               aria-label="Reload React Native bundle"
@@ -1585,6 +1914,10 @@ function App() {
           position: "relative",
         }}
         {...mediaDrop.dropZoneProps}
+        onMouseMove={(event) => highlightAxElementAtClientPoint(event.clientX, event.clientY)}
+        onMouseLeave={() => {
+          if (axOverlayEnabled) setHighlightedAxKey(null);
+        }}
       >
         <SimulatorView
           url={config.url}
@@ -1601,6 +1934,12 @@ function App() {
           subscribeFrame={mjpeg.subscribeFrame}
           streamFrame={mjpeg.frame}
           streamConfig={mjpeg.config}
+        />
+        <AxDomOverlay
+          snapshot={axSnapshot}
+          enabled={axOverlayEnabled}
+          highlightedKey={highlightedAxKey}
+          onHighlight={setHighlightedAxKey}
         />
         {mediaDrop.isDragOver && (
           <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>
@@ -1655,6 +1994,11 @@ function App() {
         onClose={() => setPanelOpen(false)}
         udid={config.device}
         currentApp={currentApp}
+        axSnapshot={axSnapshot}
+        axOverlayEnabled={axOverlayEnabled}
+        highlightedAxKey={highlightedAxKey}
+        onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+        onHighlightAx={setHighlightedAxKey}
       />
 
       {/* Status bar */}
@@ -2060,6 +2404,109 @@ const panelStyles: Record<string, CSSProperties> = {
     color: "#fff",
     cursor: "pointer",
     padding: 0,
+  },
+};
+
+const axStyles: Record<string, CSSProperties> = {
+  targets: {
+    position: "absolute",
+    inset: 0,
+    overflow: "hidden",
+    pointerEvents: "none",
+    zIndex: 10,
+  },
+  target: {
+    position: "absolute",
+    minWidth: 1,
+    minHeight: 1,
+    padding: 0,
+    border: "1px solid #34d399",
+    borderRadius: 3,
+  },
+  hiddenMetadata: {
+    position: "absolute",
+    width: 1,
+    height: 1,
+    margin: -1,
+    padding: 0,
+    overflow: "hidden",
+    clip: "rect(0 0 0 0)",
+    clipPath: "inset(50%)",
+    whiteSpace: "nowrap",
+  },
+  panelHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  overlayToggle: {
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 5,
+    background: "transparent",
+    color: "rgba(255,255,255,0.7)",
+    cursor: "pointer",
+    fontSize: 10,
+    padding: "3px 7px",
+  },
+  emptyLink: {
+    color: "#a5b4fc",
+    textDecoration: "none",
+  },
+  list: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    marginTop: 8,
+    padding: "8px 0",
+    maxHeight: 260,
+    overflowY: "auto",
+    scrollbarWidth: "thin",
+  },
+  listItem: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    borderRadius: 6,
+    padding: "4px 2px",
+    minWidth: 0,
+  },
+  listItemActive: {
+    background: "rgba(255,255,255,0.06)",
+  },
+  itemText: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    flex: 1,
+    minWidth: 0,
+  },
+  itemLabel: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    color: "#eee",
+    fontSize: 12,
+    fontWeight: 500,
+  },
+  itemMeta: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    color: "rgba(255,255,255,0.45)",
+    fontFamily: "ui-monospace, monospace",
+    fontSize: 10,
+  },
+  itemSize: {
+    flexShrink: 0,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 6,
+    color: "rgba(255,255,255,0.55)",
+    fontFamily: "ui-monospace, monospace",
+    fontSize: 10,
+    padding: "3px 6px",
   },
 };
 

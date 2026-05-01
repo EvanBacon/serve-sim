@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, existsSync, unlinkSync, watch } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { createAxStreamerCache } from "./src/ax";
 
 const RN_BUNDLE_IDS = new Set<string>([
   "host.exp.Exponent",
@@ -44,6 +45,7 @@ const PORT = Number(process.env.PORT) || 3200;
 const STATE_DIR = join(tmpdir(), "serve-sim");
 const CLIENT_DIR = resolve(import.meta.dir, "src/client");
 const CLIENT_ENTRY = resolve(CLIENT_DIR, "client.tsx");
+const axStreamerCache = createAxStreamerCache();
 
 // ─── Serve-sim state ───
 
@@ -168,7 +170,11 @@ function buildHtml(): string {
   const states = readServeSimStates();
   const state = states[0] ?? null;
   const configScript = state
-    ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({ ...state, logsEndpoint: "/logs" })}</script>`
+    ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({
+        ...state,
+        logsEndpoint: "/logs",
+        axEndpoint: "/ax",
+      })}</script>`
     : "";
 
   return `<!doctype html>
@@ -223,6 +229,33 @@ Bun.serve({
       const states = readServeSimStates();
       return Response.json(states[0] ?? null, {
         headers: { "Cache-Control": "no-store" },
+      });
+    }
+
+    if (url.pathname === "/ax") {
+      const states = readServeSimStates();
+      if (states.length === 0) {
+        return new Response("No serve-sim device", { status: 404 });
+      }
+      const ax = axStreamerCache.get(states[0].device);
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(":\n\n");
+          const removeClient = ax.addClient({
+            write(chunk: string) {
+              controller.enqueue(chunk);
+            },
+          });
+          req.signal.addEventListener("abort", removeClient);
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+        },
       });
     }
 
