@@ -1183,14 +1183,12 @@ function PermBtn({
 
 function AxDomOverlay({
   snapshot,
-  enabled,
   highlightedKey,
   selectedKey,
   onHighlight,
   onSelect,
 }: {
   snapshot: AxSnapshot | null;
-  enabled: boolean;
   highlightedKey: string | null;
   selectedKey: string | null;
   onHighlight: (key: string | null) => void;
@@ -1211,7 +1209,6 @@ function AxDomOverlay({
         const summary = axElementSummary(axNode);
         const highlighted = key === highlightedKey;
         const selected = key === selectedKey;
-        const visible = enabled || highlighted;
         return (
           <button
             key={key}
@@ -1226,16 +1223,9 @@ function AxDomOverlay({
             data-ax-type={axNode.type}
             data-ax-enabled={String(axNode.enabled)}
             data-ax-frame={axFrameString(axNode.frame)}
-            data-ax-frame-x={String(axNode.frame.x)}
-            data-ax-frame-y={String(axNode.frame.y)}
-            data-ax-frame-width={String(axNode.frame.width)}
-            data-ax-frame-height={String(axNode.frame.height)}
             data-ax-selected={String(selected)}
             aria-label={`Select ${axNode.label}`}
             aria-description={summary}
-            aria-hidden={!enabled}
-            disabled={!enabled}
-            tabIndex={enabled ? 0 : -1}
             onClick={() => onSelect(key)}
             onFocus={() => onHighlight(key)}
             onBlur={() => onHighlight(null)}
@@ -1251,9 +1241,7 @@ function AxDomOverlay({
                 ? "rgba(96,165,250,0.24)"
                 : highlighted
                 ? "rgba(245,158,11,0.28)"
-                : visible
-                  ? "rgba(16,185,129,0.12)"
-                  : "transparent",
+                : "rgba(16,185,129,0.12)",
             }}
           >
             <span style={axStyles.hiddenMetadata}>{summary}</span>
@@ -1300,8 +1288,6 @@ function AxTreeTool({
           AX unavailable:{" "}
           <a
             href={AXE_INSTALL_URL}
-            target="_blank"
-            rel="noreferrer"
             style={axStyles.emptyLink}
           >
             install AXe
@@ -1980,7 +1966,6 @@ function App() {
         {axOverlayEnabled && (
           <AxDomOverlay
             snapshot={axSnapshot}
-            enabled={axOverlayEnabled}
             highlightedKey={highlightedAxKey}
             selectedKey={selectedAxKey}
             onHighlight={setHighlightedAxKey}
