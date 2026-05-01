@@ -8,7 +8,6 @@ import {
   useRef,
   type CSSProperties,
   type DragEvent,
-  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
@@ -19,8 +18,6 @@ import {
   getDeviceType,
   type DeviceType,
 } from "serve-sim-client/simulator";
-
-const EDGE_BOTTOM = 3;
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
@@ -1182,16 +1179,11 @@ function AxDomOverlay({
   enabled,
   highlightedKey,
   onHighlight,
-  onPointerTouch,
 }: {
   snapshot: AxSnapshot | null;
   enabled: boolean;
   highlightedKey: string | null;
   onHighlight: (key: string | null) => void;
-  onPointerTouch: (
-    type: "begin" | "move" | "end",
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ) => void;
 }) {
   if (!snapshot?.screen.width || !snapshot?.screen.height) return null;
 
@@ -1233,32 +1225,12 @@ function AxDomOverlay({
             tabIndex={enabled ? 0 : -1}
             onFocus={() => onHighlight(key)}
             onBlur={() => onHighlight(null)}
-            onPointerDown={(event) => {
-              event.currentTarget.setPointerCapture(event.pointerId);
-              onPointerTouch("begin", event);
-            }}
-            onPointerMove={(event) => {
-              if (event.buttons !== 0) onPointerTouch("move", event);
-            }}
-            onPointerUp={(event) => {
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-              onPointerTouch("end", event);
-            }}
-            onPointerCancel={(event) => {
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-              onPointerTouch("end", event);
-            }}
             style={{
               ...axStyles.target,
               left: `${(visibleFrame.x / snapshot.screen.width) * 100}%`,
               top: `${(visibleFrame.y / snapshot.screen.height) * 100}%`,
               width: `${(visibleFrame.width / snapshot.screen.width) * 100}%`,
               height: `${(visibleFrame.height / snapshot.screen.height) * 100}%`,
-              pointerEvents: enabled ? "auto" : "none",
               borderColor: highlighted ? "#fbbf24" : visible ? "#34d399" : "transparent",
               background: highlighted
                 ? "rgba(245,158,11,0.28)"
@@ -1701,79 +1673,14 @@ function App() {
   // it, so the user can interact with toolbar dropdowns, devtools, etc.
   // without their typing leaking into the simulator.
   const simContainerRef = useRef<HTMLDivElement | null>(null);
-  const activeAxPointerRef = useRef<number | null>(null);
-  const activeAxEdgeGestureRef = useRef(false);
-  const activeAxMultiTouchRef = useRef(false);
-  const activeAxMultiTouchShiftRef = useRef(false);
-  const activeAxPanOffsetRef = useRef({ dx: 0, dy: 0 });
   const [simFocused, setSimFocused] = useState(true);
   const simFocusedRef = useRef(true);
   simFocusedRef.current = simFocused;
   const pressedKeysRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
-    if (!axOverlayEnabled) {
-      setHighlightedAxKey(null);
-      activeAxPointerRef.current = null;
-      activeAxEdgeGestureRef.current = false;
-      activeAxMultiTouchRef.current = false;
-    }
+    if (!axOverlayEnabled) setHighlightedAxKey(null);
   }, [axOverlayEnabled]);
-
-  const handleAxPointerTouch = useCallback((
-    type: "begin" | "move" | "end",
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ) => {
-    if (!axOverlayEnabled) return;
-    if (type === "begin") {
-      activeAxPointerRef.current = event.pointerId;
-    } else if (activeAxPointerRef.current !== event.pointerId) {
-      return;
-    }
-
-    const rect = simContainerRef.current?.getBoundingClientRect();
-    if (!rect?.width || !rect.height) {
-      if (type === "end") activeAxPointerRef.current = null;
-      return;
-    }
-
-    const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-
-    if (type === "begin" && event.altKey) {
-      activeAxMultiTouchRef.current = true;
-      activeAxMultiTouchShiftRef.current = event.shiftKey;
-      activeAxPanOffsetRef.current = { dx: 1 - x - x, dy: 1 - y - y };
-      onStreamMultiTouch({ type: "begin", x1: x, y1: y, x2: 1 - x, y2: 1 - y });
-      return;
-    }
-
-    if (activeAxMultiTouchRef.current) {
-      const offset = activeAxPanOffsetRef.current;
-      const fingers = activeAxMultiTouchShiftRef.current
-        ? { x1: x, y1: y, x2: x + offset.dx, y2: y + offset.dy }
-        : { x1: x, y1: y, x2: 1 - x, y2: 1 - y };
-      onStreamMultiTouch({ type, ...fingers });
-      if (type === "end") {
-        activeAxPointerRef.current = null;
-        activeAxMultiTouchRef.current = false;
-      }
-      return;
-    }
-
-    if (type === "begin") activeAxEdgeGestureRef.current = y > 0.88;
-    onStreamTouch({
-      type,
-      x,
-      y,
-      ...(activeAxEdgeGestureRef.current ? { edge: EDGE_BOTTOM } : {}),
-    });
-
-    if (type === "end") {
-      activeAxPointerRef.current = null;
-      activeAxEdgeGestureRef.current = false;
-    }
-  }, [axOverlayEnabled, onStreamMultiTouch, onStreamTouch]);
 
   const highlightAxElementAtClientPoint = useCallback((clientX: number, clientY: number) => {
     if (!axOverlayEnabled || !axSnapshot?.screen.width || !axSnapshot.screen.height) return;
@@ -2050,7 +1957,6 @@ function App() {
           enabled={axOverlayEnabled}
           highlightedKey={highlightedAxKey}
           onHighlight={setHighlightedAxKey}
-          onPointerTouch={handleAxPointerTouch}
         />
         {mediaDrop.isDragOver && (
           <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>
