@@ -1474,6 +1474,7 @@ function App() {
   const [stoppingUdids, setStoppingUdids] = useState<Set<string>>(new Set());
   const [switching, setSwitching] = useState(false);
   const [axOverlayEnabled, setAxOverlayEnabled] = useState(true);
+  const [axButtonHovered, setAxButtonHovered] = useState(false);
   const [highlightedAxKey, setHighlightedAxKey] = useState<string | null>(null);
   const { snapshot: axSnapshot, status: axStatus } = useAxSnapshot(config?.axEndpoint);
 
@@ -1867,14 +1868,9 @@ function App() {
           trigger={<SimulatorToolbar.Title />}
         />
         <SimulatorToolbar.Actions>
-          <SimulatorToolbar.Button
-            aria-label={axOverlayEnabled ? "Hide accessibility overlay" : "Show accessibility overlay"}
-            aria-pressed={axOverlayEnabled}
-            title={axStatus}
-            onClick={() => setAxOverlayEnabled((enabled) => !enabled)}
-          >
-            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.02em" }}>AX</span>
-          </SimulatorToolbar.Button>
+          <SimulatorToolbar.HomeButton
+            onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
+          />
           {currentApp?.isReactNative && (
             <SimulatorToolbar.Button
               aria-label="Reload React Native bundle"
@@ -1887,9 +1883,30 @@ function App() {
               </svg>
             </SimulatorToolbar.Button>
           )}
-          <SimulatorToolbar.HomeButton
-            onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-          />
+          <SimulatorToolbar.Button
+            aria-label={axOverlayEnabled ? "Hide accessibility overlay" : "Show accessibility overlay"}
+            aria-pressed={axOverlayEnabled}
+            title={axStatus}
+            onClick={() => setAxOverlayEnabled((enabled) => !enabled)}
+            onMouseEnter={() => setAxButtonHovered(true)}
+            onMouseLeave={() => setAxButtonHovered(false)}
+            style={
+              axOverlayEnabled && streaming
+                ? {
+                    ...axStyles.toolbarButtonActive,
+                    ...(axButtonHovered ? axStyles.toolbarButtonActiveHover : {}),
+                  }
+                : undefined
+            }
+          >
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 8V5a2 2 0 0 1 2-2h3" />
+              <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+              <path d="M21 16v3a2 2 0 0 1-2 2h-3" />
+              <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+              <circle cx="12" cy="12" r="3.5" />
+            </svg>
+          </SimulatorToolbar.Button>
         </SimulatorToolbar.Actions>
       </SimulatorToolbar>
       <div
@@ -2452,6 +2469,13 @@ const axStyles: Record<string, CSSProperties> = {
   emptyLink: {
     color: "#a5b4fc",
     textDecoration: "none",
+  },
+  toolbarButtonActive: {
+    background: "rgba(255,255,255,0.08)",
+    color: "rgba(255,255,255,0.95)",
+  },
+  toolbarButtonActiveHover: {
+    background: "rgba(255,255,255,0.12)",
   },
   list: {
     display: "flex",
