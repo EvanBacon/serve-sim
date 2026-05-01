@@ -179,10 +179,17 @@ function isAxeUnavailable(snapshot: AxSnapshot | null) {
 
 function useAxSnapshot(endpoint?: string) {
   const [snapshot, setSnapshot] = useState<AxSnapshot | null>(null);
-  const [status, setStatus] = useState("AX waiting");
+  const [status, setStatus] = useState("AX off");
 
   useEffect(() => {
-    if (!endpoint) return;
+    if (!endpoint) {
+      setSnapshot(null);
+      setStatus("AX off");
+      return;
+    }
+
+    setSnapshot(null);
+    setStatus("AX waiting");
     const source = new EventSource(endpoint);
     source.onmessage = (event) => {
       try {
@@ -1178,12 +1185,16 @@ function AxDomOverlay({
   snapshot,
   enabled,
   highlightedKey,
+  selectedKey,
   onHighlight,
+  onSelect,
 }: {
   snapshot: AxSnapshot | null;
   enabled: boolean;
   highlightedKey: string | null;
+  selectedKey: string | null;
   onHighlight: (key: string | null) => void;
+  onSelect: (key: string) => void;
 }) {
   if (!snapshot?.screen.width || !snapshot?.screen.height) return null;
 
@@ -1199,6 +1210,7 @@ function AxDomOverlay({
         if (!visibleFrame) return null;
         const summary = axElementSummary(axNode);
         const highlighted = key === highlightedKey;
+        const selected = key === selectedKey;
         const visible = enabled || highlighted;
         return (
           <button
@@ -1218,11 +1230,13 @@ function AxDomOverlay({
             data-ax-frame-y={String(axNode.frame.y)}
             data-ax-frame-width={String(axNode.frame.width)}
             data-ax-frame-height={String(axNode.frame.height)}
-            aria-label={`Tap ${axNode.label}`}
+            data-ax-selected={String(selected)}
+            aria-label={`Select ${axNode.label}`}
             aria-description={summary}
             aria-hidden={!enabled}
             disabled={!enabled}
             tabIndex={enabled ? 0 : -1}
+            onClick={() => onSelect(key)}
             onFocus={() => onHighlight(key)}
             onBlur={() => onHighlight(null)}
             style={{
@@ -1231,8 +1245,11 @@ function AxDomOverlay({
               top: `${(visibleFrame.y / snapshot.screen.height) * 100}%`,
               width: `${(visibleFrame.width / snapshot.screen.width) * 100}%`,
               height: `${(visibleFrame.height / snapshot.screen.height) * 100}%`,
-              borderColor: highlighted ? "#fbbf24" : visible ? "#34d399" : "transparent",
-              background: highlighted
+              pointerEvents: "auto",
+              borderColor: selected ? "#60a5fa" : highlighted ? "#fbbf24" : "#34d399",
+              background: selected
+                ? "rgba(96,165,250,0.24)"
+                : highlighted
                 ? "rgba(245,158,11,0.28)"
                 : visible
                   ? "rgba(16,185,129,0.12)"
@@ -1273,10 +1290,12 @@ function AxTreeTool({
           aria-pressed={overlayEnabled}
           style={axStyles.overlayToggle}
         >
-          {overlayEnabled ? "Overlay on" : "Overlay off"}
+          {overlayEnabled ? "Overlay on" : "Enable overlay"}
         </button>
       </div>
-      {axeUnavailable ? (
+      {!overlayEnabled ? (
+        null
+      ) : axeUnavailable ? (
         <div style={{ ...panelStyles.empty, padding: 12 }}>
           AX unavailable:{" "}
           <a
@@ -1473,10 +1492,13 @@ function App() {
   const [devicesError, setDevicesError] = useState<string | null>(null);
   const [stoppingUdids, setStoppingUdids] = useState<Set<string>>(new Set());
   const [switching, setSwitching] = useState(false);
-  const [axOverlayEnabled, setAxOverlayEnabled] = useState(true);
+  const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
   const [axButtonHovered, setAxButtonHovered] = useState(false);
   const [highlightedAxKey, setHighlightedAxKey] = useState<string | null>(null);
-  const { snapshot: axSnapshot, status: axStatus } = useAxSnapshot(config?.axEndpoint);
+  const [selectedAxKey, setSelectedAxKey] = useState<string | null>(null);
+  const { snapshot: axSnapshot, status: axStatus } = useAxSnapshot(
+    axOverlayEnabled ? config?.axEndpoint : undefined,
+  );
 
   const fetchDevices = useCallback(async () => {
     setDevicesLoading(true);
@@ -1679,7 +1701,10 @@ function App() {
   const pressedKeysRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
-    if (!axOverlayEnabled) setHighlightedAxKey(null);
+    if (!axOverlayEnabled) {
+      setHighlightedAxKey(null);
+      setSelectedAxKey(null);
+    }
   }, [axOverlayEnabled]);
 
   const highlightAxElementAtClientPoint = useCallback((clientX: number, clientY: number) => {
@@ -1952,12 +1977,16 @@ function App() {
           streamFrame={mjpeg.frame}
           streamConfig={mjpeg.config}
         />
-        <AxDomOverlay
-          snapshot={axSnapshot}
-          enabled={axOverlayEnabled}
-          highlightedKey={highlightedAxKey}
-          onHighlight={setHighlightedAxKey}
-        />
+        {axOverlayEnabled && (
+          <AxDomOverlay
+            snapshot={axSnapshot}
+            enabled={axOverlayEnabled}
+            highlightedKey={highlightedAxKey}
+            selectedKey={selectedAxKey}
+            onHighlight={setHighlightedAxKey}
+            onSelect={setSelectedAxKey}
+          />
+        )}
         {mediaDrop.isDragOver && (
           <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
