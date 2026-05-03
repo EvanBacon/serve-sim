@@ -18,7 +18,7 @@ import {
  * Chrome doesn't support multipart/x-mixed-replace in <img> tags,
  * so we manually read the stream and extract JPEG boundaries.
  */
-function useMjpegStream(streamUrl: string | null) {
+function useMjpegStream(streamUrl: string | null, configUrl: string | null) {
   const [config, setConfig] = useState<StreamConfig | null>(null);
   const subscribersRef = useRef<Set<(blobUrl: string) => void>>(new Set());
 
@@ -31,13 +31,12 @@ function useMjpegStream(streamUrl: string | null) {
   );
 
   useEffect(() => {
-    if (!streamUrl) return;
+    if (!streamUrl || !configUrl) return;
     const controller = new AbortController();
     let stopped = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Poll config for screen dimensions + requested orientation.
-    const baseUrl = streamUrl.replace(/\/stream\.mjpeg$/, "");
     const applyConfig = (c: StreamConfig) => {
       if (c.width <= 0 || c.height <= 0) return;
       setConfig((prev) =>
@@ -50,7 +49,7 @@ function useMjpegStream(streamUrl: string | null) {
       );
     };
     const fetchConfig = () => {
-      fetch(`${baseUrl}/config`, { signal: controller.signal })
+      fetch(configUrl, { signal: controller.signal })
         .then((r) => r.json())
         .then(applyConfig)
         .catch(() => {});
@@ -145,7 +144,7 @@ function useMjpegStream(streamUrl: string | null) {
       controller.abort();
       clearInterval(configInterval);
     };
-  }, [streamUrl]);
+  }, [streamUrl, configUrl]);
 
   return { subscribeFrame, frame: null, config };
 }
@@ -188,24 +187,58 @@ function hidUsageForCode(code: string): number | null {
 
 // ─── Types ───
 
+interface SimPreviewState {
+  pid: number;
+  port: number;
+  device: string;
+  url: string;
+  streamUrl: string;
+  wsUrl: string;
+}
+
+interface SimPreviewConfig {
+  basePath: string;
+  endpoints: {
+    api: string;
+    exec: string;
+    logs?: string;
+    appState?: string;
+  };
+  state?: SimPreviewState;
+  helper?: {
+    url: string;
+    stream: string;
+    ws: string;
+    config: string;
+  };
+}
+
 declare global {
   interface Window {
-    __SIM_PREVIEW__?: {
-      url: string;
-      streamUrl: string;
-      wsUrl: string;
-      port: number;
-      device: string;
-      basePath: string;
-      logsEndpoint?: string;
-      appStateEndpoint?: string;
-    };
+    __SIM_PREVIEW__?: SimPreviewConfig;
   }
 }
 
-function simEndpoint(path: string): string {
-  const basePath = window.__SIM_PREVIEW__?.basePath ?? "/";
+function defaultBasePath(): string {
+  const path = window.location.pathname.replace(/\/+$/, "");
+  return path || "/";
+}
+
+function endpointPath(basePath: string, path: string): string {
   return basePath === "/" ? `/${path}` : `${basePath}/${path}`;
+}
+
+function previewEndpoint(name: keyof SimPreviewConfig["endpoints"]): string {
+  const preview = window.__SIM_PREVIEW__;
+  const endpoint = preview?.endpoints[name];
+  if (endpoint) return endpoint;
+  return endpointPath(preview?.basePath ?? defaultBasePath(), name === "appState" ? "appstate" : name);
+}
+
+function endpointWithDevice(endpoint: string, device: string): string {
+  const url = new URL(endpoint, window.location.href);
+  url.searchParams.set("device", device);
+  return url.toString();
 }
 
 // ─── Exec / devices ───
@@ -213,7 +246,7 @@ function simEndpoint(path: string): string {
 interface ExecResult { stdout: string; stderr: string; exitCode: number }
 
 async function execOnHost(command: string): Promise<ExecResult> {
-  const res = await fetch(simEndpoint("exec"), {
+  const res = await fetch(previewEndpoint("exec"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command }),
@@ -1012,10 +1045,9 @@ function AppPermissionsTool({
 
 // ─── Empty state: pick a simulator to boot ───
 //
-// When no serve-sim helper is running, the middleware has no state file to
-// inject and `window.__SIM_PREVIEW__` is undefined. Instead of telling the
-// user to drop into a terminal, list available simulators inline and let
-// them boot one + start `serve-sim --detach` from the browser.
+// When no serve-sim helper is running, the middleware still injects its host
+// endpoints. List available simulators inline and let the user boot one +
+// start `serve-sim --detach` from the browser.
 
 function BootEmptyState({
   devices,
@@ -1047,7 +1079,7 @@ function BootEmptyState({
       // race where the user sees the empty state again because we reloaded
       // before serve-sim wrote its server-*.json.
       const deadline = Date.now() + 15_000;
-      const apiUrl = `${simEndpoint("api")}?device=${encodeURIComponent(d.udid)}`;
+      const apiUrl = endpointWithDevice(previewEndpoint("api"), d.udid);
       while (Date.now() < deadline) {
         try {
           const r = await fetch(apiUrl, { cache: "no-store" });
@@ -1261,8 +1293,8 @@ function App() {
 
   // Stream simctl logs into the browser console with colors + grouping
   useEffect(() => {
-    if (!config?.logsEndpoint) return;
-    const es = new EventSource(config.logsEndpoint);
+    if (!config?.endpoints.logs) return;
+    const es = new EventSource(config.endpoints.logs);
 
     const procColors = new Map<string, string>();
     const palette = [
@@ -1327,9 +1359,9 @@ function App() {
       if (groupOpen) console.groupEnd();
       es.close();
     };
-  }, [config?.logsEndpoint]);
+  }, [config?.endpoints.logs]);
 
-  if (!config) {
+  if (!config?.state || !config.helper) {
     return (
       <BootEmptyState
         devices={devices}
@@ -1340,7 +1372,8 @@ function App() {
     );
   }
 
-  const selectedDevice = devices.find((d) => d.udid === config.device) ?? null;
+  const { state, helper } = config;
+  const selectedDevice = devices.find((d) => d.udid === state.device) ?? null;
 
   useEffect(() => {
     document.title = selectedDevice?.name
@@ -1351,7 +1384,7 @@ function App() {
   const deviceType: DeviceType = getDeviceType(selectedDevice?.name);
 
   // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
-  const mjpeg = useMjpegStream(config.streamUrl);
+  const mjpeg = useMjpegStream(helper.stream, helper.config);
   const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
   const activeStreamConfig = liveStreamConfig ?? mjpeg.config ?? fallbackScreenSize(deviceType, selectedDevice?.name);
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
@@ -1374,7 +1407,7 @@ function App() {
     };
 
     const connect = () => {
-      const ws = new WebSocket(config.wsUrl);
+      const ws = new WebSocket(helper.ws);
       ws.binaryType = "arraybuffer";
       currentWs = ws;
       wsRef.current = ws;
@@ -1395,7 +1428,7 @@ function App() {
       if (wsRef.current === currentWs) wsRef.current = null;
       currentWs?.close();
     };
-  }, [config.wsUrl]);
+  }, [helper.ws]);
 
   const sendWs = useCallback((tag: number, payload: object) => {
     const ws = wsRef.current;
@@ -1426,7 +1459,7 @@ function App() {
 
   useEffect(() => {
     setLiveStreamConfig(null);
-  }, [config.streamUrl]);
+  }, [helper.stream]);
 
   useEffect(() => {
     const confirmedConfig = mjpeg.config;
@@ -1461,7 +1494,7 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
-    const es = new EventSource(config.appStateEndpoint ?? simEndpoint("appstate"));
+    const es = new EventSource(config.endpoints.appState ?? previewEndpoint("appState"));
     let timer: ReturnType<typeof setTimeout> | null = null;
     es.onmessage = (e) => {
       try {
@@ -1474,7 +1507,7 @@ function App() {
       } catch {}
     };
     return () => { if (timer) clearTimeout(timer); es.close(); };
-  }, [config.appStateEndpoint]);
+  }, [config.endpoints.appState]);
 
   // Cmd+R to reload the RN/Expo bundle. RCTKeyCommands on iOS listens for
   // this combo and triggers DevSupport reload. We hold Meta, tap R, release.
@@ -1539,9 +1572,9 @@ function App() {
         e.preventDefault();
         if (type === "down" && !e.repeat) {
           // simctl has no toggle; query current, invert, set.
-          execOnHost(`xcrun simctl ui ${config.device} appearance`).then((r) => {
+          execOnHost(`xcrun simctl ui ${state.device} appearance`).then((r) => {
             const next = r.stdout.trim() === "dark" ? "light" : "dark";
-            return execOnHost(`xcrun simctl ui ${config.device} appearance ${next}`);
+            return execOnHost(`xcrun simctl ui ${state.device} appearance ${next}`);
           }).catch(() => {});
         }
         return;
@@ -1563,10 +1596,10 @@ function App() {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device]);
+  }, [sendWs, state.device]);
 
   const switchToDevice = useCallback(async (d: SimDevice) => {
-    if (switching || d.udid === config.device) return;
+    if (switching || d.udid === state.device) return;
     setSwitching(true);
     // Ensure the target simulator is booted (serve-sim boots on --detach but
     // this keeps the flow snappy) and spin up a helper bound to it. Do not
@@ -1583,14 +1616,14 @@ function App() {
     } catch {
       setSwitching(false);
     }
-  }, [switching, config.device]);
+  }, [switching, state.device]);
 
   // Drag/drop images, videos, or .ipa files onto the simulator.
   // Media → Photos (addmedia); .ipa → install.
   const uploads = useUploadToasts();
   const mediaDrop = useMediaDrop({
     exec: execOnHost,
-    udid: config.device,
+    udid: state.device,
     enabled: streaming,
     onUploadStart: uploads.add,
     onUploadEnd: (id, ok, message) =>
@@ -1645,14 +1678,14 @@ function App() {
           exec={execOnHost}
           onRotate={rotateDevice}
           orientation={activeStreamConfig.orientation ?? null}
-          deviceUdid={config.device}
+          deviceUdid={state.device}
           deviceName={selectedDevice?.name ?? null}
           deviceRuntime={selectedDevice?.runtime ?? null}
           streaming={streaming}
         >
           <DevicePicker
             devices={devices}
-            selectedUdid={config.device}
+            selectedUdid={state.device}
             loading={devicesLoading}
             error={devicesError}
             stoppingUdids={stoppingUdids}
@@ -1692,7 +1725,7 @@ function App() {
           {...mediaDrop.dropZoneProps}
         >
           <SimulatorView
-            url={config.url}
+            url={helper.url}
             style={{ width: "100%", height: "100%", border: "none" }}
             imageStyle={{
               borderRadius: imgBorderRadius,
@@ -1759,7 +1792,7 @@ function App() {
       <ToolsPanel
         open={panelOpen}
         onClose={() => setPanelOpen(false)}
-        udid={config.device}
+        udid={state.device}
         currentApp={currentApp}
       />
 
