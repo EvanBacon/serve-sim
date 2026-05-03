@@ -8,6 +8,7 @@ export type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 const SNAPSHOT_TIMEOUT_MS = 3500;
 const MAX_ELEMENTS = 500;
 const POLL_INTERVAL_MS = 500;
+const MAX_POLL_INTERVAL_MS = 2000;
 const execFileAsync = promisify(execFile);
 
 interface RawAxeNode {
@@ -51,14 +52,16 @@ function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   const screen = chooseScreenFrame(roots);
   const elements: AxElement[] = [];
 
-  const visit = (node: RawAxeNode, path: number[]) => {
+  const visit = (node: RawAxeNode, path: string) => {
+    if (elements.length >= MAX_ELEMENTS) return;
+
     const frame = node.frame;
     const isScreenSized = sameRect(frame, screen);
 
-    if (!isScreenSized && elements.length < MAX_ELEMENTS) {
+    if (!isScreenSized) {
       elements.push({
-        id: node.AXUniqueId ?? path.join("."),
-        path: path.join("."),
+        id: node.AXUniqueId ?? path,
+        path,
         label: node.AXLabel ?? "",
         value: node.AXValue ?? "",
         role: node.role_description,
@@ -68,10 +71,14 @@ function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
       });
     }
 
-    node.children.forEach((child, index) => visit(child, [...path, index]));
+    for (let index = 0; index < node.children.length && elements.length < MAX_ELEMENTS; index++) {
+      visit(node.children[index], `${path}.${index}`);
+    }
   };
 
-  roots.forEach((root, index) => visit(root, [index]));
+  for (let index = 0; index < roots.length && elements.length < MAX_ELEMENTS; index++) {
+    visit(roots[index], String(index));
+  }
 
   return {
     screen: {
@@ -133,8 +140,8 @@ async function collectAxSnapshot(udid: string) {
   };
 }
 
-function writeSse(res: { write(chunk: string): void }, payload: unknown) {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+function sseMessage(payload: unknown) {
+  return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
 function createAxStreamer({
@@ -144,13 +151,14 @@ function createAxStreamer({
 }) {
   const clients = new Set<{ write(chunk: string): void }>();
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let latest: AxSnapshot | null = null;
+  let latestMessage: string | null = null;
+  let pollIntervalMs = POLL_INTERVAL_MS;
   let polling = false;
   let axeUnavailable = false;
 
   const schedule = () => {
     if (clients.size === 0 || timer || axeUnavailable) return;
-    timer = setTimeout(poll, POLL_INTERVAL_MS);
+    timer = setTimeout(poll, pollIntervalMs);
   };
 
   const poll = async () => {
@@ -162,9 +170,16 @@ function createAxStreamer({
 
     polling = true;
     try {
-      latest = await collectAxSnapshot(udid);
-      for (const client of clients) writeSse(client, latest);
-      axeUnavailable = isAxeUnavailableSnapshot(latest);
+      const next = await collectAxSnapshot(udid);
+      const nextMessage = sseMessage(next);
+      if (nextMessage !== latestMessage) {
+        for (const client of clients) client.write(nextMessage);
+        pollIntervalMs = POLL_INTERVAL_MS;
+      } else {
+        pollIntervalMs = Math.min(pollIntervalMs * 2, MAX_POLL_INTERVAL_MS);
+      }
+      latestMessage = nextMessage;
+      axeUnavailable = isAxeUnavailableSnapshot(next);
     } finally {
       polling = false;
       schedule();
@@ -174,7 +189,7 @@ function createAxStreamer({
   return {
     addClient(res: { write(chunk: string): void }) {
       clients.add(res);
-      if (latest) writeSse(res, latest);
+      if (latestMessage) res.write(latestMessage);
       if (!axeUnavailable) void poll();
       return () => {
         clients.delete(res);
