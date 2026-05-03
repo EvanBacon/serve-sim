@@ -190,6 +190,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         // and connects to the WS directly (WS has no CORS).
         const config = JSON.stringify({
           ...state,
+          basePath: base,
           logsEndpoint: endpoint(base, "/logs", state.device),
           appStateEndpoint: endpoint(base, "/appstate", state.device),
         });
