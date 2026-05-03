@@ -16,6 +16,23 @@ export interface ServeSimState {
   wsUrl: string;
 }
 
+export interface SimPreviewConfig {
+  basePath: string;
+  endpoints: {
+    api: string;
+    exec: string;
+    logs?: string;
+    appState?: string;
+  };
+  state?: ServeSimState;
+  helper?: {
+    url: string;
+    stream: string;
+    ws: string;
+    config: string;
+  };
+}
+
 // Known bundle IDs that are always React Native shells (used as a fallback
 // before the app-container path resolves, since simctl can lag after launch).
 const RN_BUNDLE_IDS = new Set<string>([
@@ -141,9 +158,36 @@ function queryDevice(rawUrl: string): string | null {
   return new URLSearchParams(rawUrl.slice(qIndex + 1)).get("device");
 }
 
-function endpoint(base: string, path: string, device: string): string {
+function endpoint(base: string, path: string, device?: string): string {
   const value = `${base}${path}`;
+  if (!device) return value;
   return `${value}?device=${encodeURIComponent(device)}`;
+}
+
+export function buildSimPreviewConfig(base: string, state: ServeSimState | null): SimPreviewConfig {
+  const config: SimPreviewConfig = {
+    basePath: base || "/",
+    endpoints: {
+      api: endpoint(base, "/api"),
+      exec: endpoint(base, "/exec"),
+    },
+  };
+  if (state) {
+    config.state = state;
+    config.helper = {
+      url: state.url,
+      stream: state.streamUrl,
+      ws: state.wsUrl,
+      config: `${state.url}/config`,
+    };
+    config.endpoints.logs = endpoint(base, "/logs", state.device);
+    config.endpoints.appState = endpoint(base, "/appstate", state.device);
+  }
+  return config;
+}
+
+function inlineJson(value: unknown): string {
+  return JSON.stringify(value)!.replace(/</g, "\\u003c");
 }
 
 let _html: string | null = null;
@@ -183,19 +227,8 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       const states = readServeSimStates();
       const state = selectServeSimState(states, selectedDevice);
       let html = loadHtml();
-
-      if (state) {
-        // Pass real serve-sim URLs directly. The client parses the MJPEG
-        // stream via fetch() (CORS is fine — serve-sim sends Access-Control-Allow-Origin: *)
-        // and connects to the WS directly (WS has no CORS).
-        const config = JSON.stringify({
-          ...state,
-          logsEndpoint: endpoint(base, "/logs", state.device),
-          appStateEndpoint: endpoint(base, "/appstate", state.device),
-        });
-        const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
-        html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
-      }
+      const configScript = `<script>window.__SIM_PREVIEW__=${inlineJson(buildSimPreviewConfig(base, state))}</script>`;
+      html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
 
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",

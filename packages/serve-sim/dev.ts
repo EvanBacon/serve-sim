@@ -45,6 +45,15 @@ const STATE_DIR = join(tmpdir(), "serve-sim");
 const CLIENT_DIR = resolve(import.meta.dir, "src/client");
 const CLIENT_ENTRY = resolve(CLIENT_DIR, "client.tsx");
 
+interface ServeSimState {
+  pid: number;
+  port: number;
+  device: string;
+  url: string;
+  streamUrl: string;
+  wsUrl: string;
+}
+
 // ─── Serve-sim state ───
 
 // Cache simctl's booted-device set briefly (1.5s). dev.ts calls
@@ -78,7 +87,7 @@ function getBootedUdids(): Set<string> | null {
   }
 }
 
-function readServeSimStates() {
+function readServeSimStates(): ServeSimState[] {
   let files: string[];
   try {
     files = readdirSync(STATE_DIR).filter(
@@ -88,7 +97,7 @@ function readServeSimStates() {
     return [];
   }
   const booted = getBootedUdids();
-  const states: any[] = [];
+  const states: ServeSimState[] = [];
   for (const f of files) {
     const path = join(STATE_DIR, f);
     try {
@@ -114,6 +123,16 @@ function readServeSimStates() {
     } catch {}
   }
   return states;
+}
+
+function selectServeSimState(
+  states: ServeSimState[],
+  device?: string | null,
+): ServeSimState | null {
+  if (device) {
+    return states.find((state) => state.device === device) ?? null;
+  }
+  return states[0] ?? null;
 }
 
 // ─── Client bundler with watch ───
@@ -164,12 +183,59 @@ watch(CLIENT_DIR, { recursive: true }, (_event, filename) => {
 
 // ─── HTML shell ───
 
-function buildHtml(): string {
+function endpoint(path: string): string {
+  return path;
+}
+
+function endpointForDevice(path: string, device: string): string {
+  return `${path}?device=${encodeURIComponent(device)}`;
+}
+
+function previewConfig(state: ServeSimState | null) {
+  const config: {
+    basePath: string;
+    endpoints: {
+      api: string;
+      exec: string;
+      logs?: string;
+      appState?: string;
+    };
+    state?: ServeSimState;
+    helper?: {
+      url: string;
+      stream: string;
+      ws: string;
+      config: string;
+    };
+  } = {
+    basePath: "/",
+    endpoints: {
+      api: endpoint("/api"),
+      exec: endpoint("/exec"),
+    },
+  };
+  if (state) {
+    config.state = state;
+    config.helper = {
+      url: state.url,
+      stream: state.streamUrl,
+      ws: state.wsUrl,
+      config: `${state.url}/config`,
+    };
+    config.endpoints.logs = endpointForDevice("/logs", state.device);
+    config.endpoints.appState = endpointForDevice("/appstate", state.device);
+  }
+  return config;
+}
+
+function inlineJson(value: unknown): string {
+  return JSON.stringify(value)!.replace(/</g, "\\u003c");
+}
+
+function buildHtml(device?: string | null): string {
   const states = readServeSimStates();
-  const state = states[0] ?? null;
-  const configScript = state
-    ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({ ...state, logsEndpoint: "/logs" })}</script>`
-    : "";
+  const state = selectServeSimState(states, device);
+  const configScript = `<script>window.__SIM_PREVIEW__=${inlineJson(previewConfig(state))}</script>`;
 
   return `<!doctype html>
 <html><head>
@@ -221,7 +287,8 @@ Bun.serve({
     // Serve-sim state API
     if (url.pathname === "/api") {
       const states = readServeSimStates();
-      return Response.json(states[0] ?? null, {
+      const state = selectServeSimState(states, url.searchParams.get("device"));
+      return Response.json(state, {
         headers: { "Cache-Control": "no-store" },
       });
     }
@@ -248,10 +315,11 @@ Bun.serve({
     // SSE logs
     if (url.pathname === "/logs") {
       const states = readServeSimStates();
-      if (states.length === 0) {
+      const state = selectServeSimState(states, url.searchParams.get("device"));
+      if (!state) {
         return new Response("No serve-sim device", { status: 404 });
       }
-      const udid = states[0].device;
+      const udid = state.device;
       const stream = new ReadableStream({
         start(controller) {
           const child: ChildProcess = spawn("xcrun", [
@@ -294,10 +362,11 @@ Bun.serve({
     // SSE foreground-app changes (filtered in the CLI; browser just listens).
     if (url.pathname === "/appstate") {
       const states = readServeSimStates();
-      if (states.length === 0) {
+      const state = selectServeSimState(states, url.searchParams.get("device"));
+      if (!state) {
         return new Response("No serve-sim device", { status: 404 });
       }
-      const udid = states[0].device;
+      const udid = state.device;
       const stream = new ReadableStream({
         start(controller) {
           const child: ChildProcess = spawn("xcrun", [
@@ -348,7 +417,7 @@ Bun.serve({
     }
 
     // Serve the HTML page (fresh on every request — picks up state + rebuild)
-    return new Response(buildHtml(), {
+    return new Response(buildHtml(url.searchParams.get("device")), {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
