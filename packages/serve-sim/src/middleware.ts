@@ -164,7 +164,7 @@ function endpoint(base: string, path: string, device?: string): string {
   return `${value}?device=${encodeURIComponent(device)}`;
 }
 
-function previewConfig(base: string, state: ServeSimState | null): SimPreviewConfig {
+export function buildSimPreviewConfig(base: string, state: ServeSimState | null): SimPreviewConfig {
   const config: SimPreviewConfig = {
     basePath: base || "/",
     endpoints: {
@@ -227,7 +227,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       const states = readServeSimStates();
       const state = selectServeSimState(states, selectedDevice);
       let html = loadHtml();
-      const configScript = `<script>window.__SIM_PREVIEW__=${inlineJson(previewConfig(base, state))}</script>`;
+      const configScript = `<script>window.__SIM_PREVIEW__=${inlineJson(buildSimPreviewConfig(base, state))}</script>`;
       html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
 
       res.writeHead(200, {
