@@ -219,20 +219,11 @@ declare global {
   }
 }
 
-function defaultBasePath(): string {
-  const path = window.location.pathname.replace(/\/+$/, "");
-  return path || "/";
-}
-
-function endpointPath(basePath: string, path: string): string {
-  return basePath === "/" ? `/${path}` : `${basePath}/${path}`;
-}
-
 function previewEndpoint(name: keyof SimPreviewConfig["endpoints"]): string {
   const preview = window.__SIM_PREVIEW__;
   const endpoint = preview?.endpoints[name];
   if (endpoint) return endpoint;
-  return endpointPath(preview?.basePath ?? defaultBasePath(), name === "appState" ? "appstate" : name);
+  throw new Error(`Endpoint "${name}" not found in preview config`);
 }
 
 function endpointWithDevice(endpoint: string, device: string): string {
@@ -1494,7 +1485,11 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
-    const es = new EventSource(config.endpoints.appState ?? previewEndpoint("appState"));
+    if (!config.endpoints.appState) {
+      console.warn("appState endpoint is not configured");
+      return;
+    }
+    const es = new EventSource(config.endpoints.appState);
     let timer: ReturnType<typeof setTimeout> | null = null;
     es.onmessage = (e) => {
       try {
