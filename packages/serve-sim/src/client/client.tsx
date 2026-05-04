@@ -210,11 +210,17 @@ declare global {
       wsUrl: string;
       port: number;
       device: string;
+      basePath: string;
       logsEndpoint?: string;
       axEndpoint?: string;
       appStateEndpoint?: string;
     };
   }
+}
+
+function simEndpoint(path: string): string {
+  const basePath = window.__SIM_PREVIEW__?.basePath ?? "/";
+  return basePath === "/" ? `/${path}` : `${basePath}/${path}`;
 }
 
 function isAxeUnavailable(snapshot: AxSnapshot | null) {
@@ -331,7 +337,7 @@ function AxStateProvider({
 interface ExecResult { stdout: string; stderr: string; exitCode: number }
 
 async function execOnHost(command: string): Promise<ExecResult> {
-  const res = await fetch("/exec", {
+  const res = await fetch(simEndpoint("exec"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command }),
@@ -1161,11 +1167,11 @@ function BootEmptyState({
       const detach = await execOnHost(`bunx serve-sim --detach ${d.udid}`);
       if (detach.exitCode !== 0) throw new Error(detach.stderr || "Failed to start serve-sim");
 
-      // Poll /api until the state file is picked up, then reload. Avoids a
+      // Poll the middleware API until the state file is picked up, then reload. Avoids a
       // race where the user sees the empty state again because we reloaded
       // before serve-sim wrote its server-*.json.
       const deadline = Date.now() + 15_000;
-      const apiUrl = `/api?device=${encodeURIComponent(d.udid)}`;
+      const apiUrl = `${simEndpoint("api")}?device=${encodeURIComponent(d.udid)}`;
       while (Date.now() < deadline) {
         try {
           const r = await fetch(apiUrl, { cache: "no-store" });
@@ -1875,7 +1881,7 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
-    const es = new EventSource(config.appStateEndpoint ?? "/appstate");
+    const es = new EventSource(config.appStateEndpoint ?? simEndpoint("appstate"));
     let timer: ReturnType<typeof setTimeout> | null = null;
     es.onmessage = (e) => {
       try {
