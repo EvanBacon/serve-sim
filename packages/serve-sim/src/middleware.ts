@@ -6,6 +6,7 @@ import { createAxStreamerCache } from "./ax";
 
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
+declare const __GRID_HTML_B64__: string;
 const STATE_DIR = join(tmpdir(), "serve-sim");
 
 export interface ServeSimState {
@@ -157,6 +158,81 @@ function loadHtml(): string {
   return _html;
 }
 
+let _gridHtml: string | null = null;
+function loadGridHtml(): string {
+  if (!_gridHtml) {
+    _gridHtml = Buffer.from(__GRID_HTML_B64__, "base64").toString("utf-8");
+  }
+  return _gridHtml;
+}
+
+interface SimctlDevice {
+  udid: string;
+  name: string;
+  state: string;
+  isAvailable?: boolean;
+  runtime: string;
+}
+
+function listAllSimulators(): SimctlDevice[] {
+  try {
+    const output = execSync("xcrun simctl list devices -j", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3_000,
+    });
+    const data = JSON.parse(output) as {
+      devices: Record<string, Array<Omit<SimctlDevice, "runtime">>>;
+    };
+    const out: SimctlDevice[] = [];
+    for (const [runtime, devices] of Object.entries(data.devices)) {
+      // Only iOS (skip watchOS / tvOS / visionOS for the grid MVP — the helper
+      // is iOS-focused and the bezel/touch model assumes a phone-shaped device).
+      if (!/SimRuntime\.iOS-/i.test(runtime)) continue;
+      for (const d of devices) {
+        if (d.isAvailable === false) continue;
+        out.push({ ...d, runtime: runtime.replace(/^.*SimRuntime\./, "") });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function deviceNameFor(udid: string): string | null {
+  return listAllSimulators().find((d) => d.udid === udid)?.name ?? null;
+}
+
+/**
+ * Locate the `serve-sim` CLI binary so the grid can spawn helpers via
+ * `serve-sim --detach <udid>`. Tries, in order:
+ *   1. argv[0] if it ends in `serve-sim` (we're running inside the
+ *      compiled standalone binary, which IS the CLI)
+ *   2. `serve-sim` on PATH (npm-installed / bun-installed CLI)
+ * Returns the resolved command + args ready for spawn.
+ */
+function resolveServeSimCommand(): { command: string; baseArgs: string[] } | null {
+  // 1. Compiled standalone binary: argv[0] is the serve-sim binary itself.
+  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
+    return { command: process.argv[0], baseArgs: [] };
+  }
+  // 2. Running the JS bundle directly: `node /path/to/serve-sim.js`.
+  if (process.argv[1] && /(^|\/)serve-sim\.js$/.test(process.argv[1])) {
+    return { command: process.argv[0]!, baseArgs: [process.argv[1]!] };
+  }
+  // 3. Global install: serve-sim is on PATH.
+  try {
+    const path = execSync("command -v serve-sim", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1_500,
+    }).trim();
+    if (path) return { command: path, baseArgs: [] };
+  } catch {}
+  return null;
+}
+
 export interface SimMiddlewareOptions {
   /** Base path to serve the preview at. Default: "/.sim" */
   basePath?: string;
@@ -208,6 +284,153 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "Cache-Control": "no-store",
       });
       res.end(html);
+      return;
+    }
+
+    // Grid HTML: multi-device dashboard showing every running helper.
+    if (url === base + "/grid" || url === base + "/grid/") {
+      let html = loadGridHtml();
+      const previewEndpoint = base === "" ? "/" : base;
+      const apiBase = (base === "" ? "" : base) + "/grid/api";
+      const config = JSON.stringify({
+        basePath: base,
+        apiEndpoint: apiBase,
+        startEndpoint: apiBase + "/start",
+        shutdownEndpoint: apiBase + "/shutdown",
+        previewEndpoint,
+      });
+      html = html.replace(
+        "<!--__SIM_GRID_CONFIG__-->",
+        `<script>window.__SIM_GRID__=${config}</script>`,
+      );
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      res.end(html);
+      return;
+    }
+
+    // Grid JSON: every iOS simulator, annotated with running helper info if any.
+    if (url === base + "/grid/api") {
+      const states = readServeSimStates();
+      const helperByUdid = new Map(states.map((s) => [s.device, s] as const));
+      const sims = listAllSimulators();
+      const devices = sims.map((d) => {
+        const helper = helperByUdid.get(d.udid);
+        return {
+          device: d.udid,
+          name: d.name,
+          runtime: d.runtime,
+          state: d.state,
+          helper: helper
+            ? {
+                port: helper.port,
+                url: helper.url,
+                streamUrl: helper.streamUrl,
+                wsUrl: helper.wsUrl,
+              }
+            : null,
+        };
+      });
+      // Stable order: helpers first, then booted, then shutdown; alpha within.
+      devices.sort((a, b) => {
+        const rank = (x: typeof a) =>
+          x.helper ? 0 : x.state === "Booted" ? 1 : 2;
+        return rank(a) - rank(b) || a.name.localeCompare(b.name);
+      });
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify({ devices }));
+      return;
+    }
+
+    // Shutdown a booted simulator. Any running helper for the device is reaped
+    // by readServeSimStates() on the next /grid/api poll (it kills helpers
+    // whose backing simulator is no longer in the booted set).
+    if (url === base + "/grid/api/shutdown" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer | string) => {
+        body += typeof chunk === "string" ? chunk : chunk.toString();
+      });
+      req.on("end", () => {
+        let udid = "";
+        try { udid = JSON.parse(body).udid ?? ""; } catch {}
+        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
+          return;
+        }
+        // Drop the snapshot so the next /grid/api call re-queries simctl
+        // and prunes any helper bound to this now-shutdown device.
+        bootedSnapshot = { at: 0, booted: null };
+        execFile("xcrun", ["simctl", "shutdown", udid], { timeout: 30_000 }, (err, _stdout, stderr) => {
+          if (err) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              ok: false,
+              error: stderr?.toString().trim() || err.message,
+            }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        });
+      });
+      return;
+    }
+
+    // Spawn a serve-sim helper (auto-boots if needed).
+    if (url === base + "/grid/api/start" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer | string) => {
+        body += typeof chunk === "string" ? chunk : chunk.toString();
+      });
+      req.on("end", () => {
+        let udid = "";
+        try { udid = JSON.parse(body).udid ?? ""; } catch {}
+        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
+          return;
+        }
+        const resolved = resolveServeSimCommand();
+        if (!resolved) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: false,
+            error: "serve-sim CLI not found in PATH. Install it (npm i -g serve-sim) and retry.",
+          }));
+          return;
+        }
+        const child = spawn(
+          resolved.command,
+          [...resolved.baseArgs, "--detach", udid],
+          { stdio: ["ignore", "pipe", "pipe"], detached: false },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
+        child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
+        const timer = setTimeout(() => {
+          try { child.kill("SIGTERM"); } catch {}
+        }, 60_000);
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, stdout: stdout.trim() }));
+          } else {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              ok: false,
+              error: stderr.trim() || stdout.trim() || `serve-sim exited with code ${code}`,
+            }));
+          }
+        });
+      });
       return;
     }
 
