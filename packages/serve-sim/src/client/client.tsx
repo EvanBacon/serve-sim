@@ -1347,7 +1347,8 @@ const AxTarget = memo(function AxTarget({
 
   const summary = axElementSummary(axNode);
   return (
-    <div
+    <button
+      type="button"
       data-ax-key={key}
       data-ax-id={axNode.id}
       data-ax-path={axNode.path}
@@ -1358,6 +1359,7 @@ const AxTarget = memo(function AxTarget({
       data-ax-enabled={String(axNode.enabled)}
       data-ax-frame={axFrameString(axNode.frame)}
       data-ax-selected={String(selected)}
+      aria-label={element.label || summary}
       title={summary}
       onClick={() => onSelect(key)}
       onMouseEnter={() => onHighlight(key)}
@@ -1400,7 +1402,6 @@ function AxDomOverlay() {
 
   return (
     <div
-      aria-hidden="true"
       style={axStyles.targets}
     >
       {snapshot.elements.map((element, index) => {
