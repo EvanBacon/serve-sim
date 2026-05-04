@@ -19,7 +19,7 @@ export async function isPortFree(port: number): Promise<boolean> {
     const srv = createNetServer();
     srv.once("error", () => resolve(false));
     srv.once("listening", () => srv.close(() => resolve(true)));
-    srv.listen(port);
+    srv.listen(port, "127.0.0.1");
   });
 }
 
@@ -63,7 +63,7 @@ export async function servePreview(opts: {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(opts.port);
+    server.listen(opts.port, "127.0.0.1");
   });
 
   return { stop: () => server.close() };

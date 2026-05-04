@@ -2,7 +2,7 @@
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
-import { homedir, networkInterfaces } from "os";
+import { homedir } from "os";
 import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
@@ -355,16 +355,6 @@ function bootDevice(udid: string): void {
       timeout: 3_000,
     });
   } catch {}
-}
-
-function getLocalNetworkIP(): string | null {
-  const interfaces = networkInterfaces();
-  for (const ifaces of Object.values(interfaces)) {
-    for (const iface of ifaces ?? []) {
-      if (iface.family === "IPv4" && !iface.internal) return iface.address;
-    }
-  }
-  return null;
 }
 
 async function findAvailablePort(start: number): Promise<number> {
@@ -1100,10 +1090,8 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
     process.exit(1);
   }
 
-  const networkIP = getLocalNetworkIP();
   console.log("");
-  console.log(`  - Local:   http://localhost:${boundPort}`);
-  if (networkIP) console.log(`  - Network: http://${networkIP}:${boundPort}`);
+  console.log(`  - Local:   http://127.0.0.1:${boundPort}`);
   console.log("");
 
   // Exit cleanly on Ctrl+C
