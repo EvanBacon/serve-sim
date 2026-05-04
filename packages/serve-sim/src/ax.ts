@@ -9,6 +9,7 @@ const SNAPSHOT_TIMEOUT_MS = 3500;
 const MAX_ELEMENTS = 500;
 const POLL_INTERVAL_MS = 500;
 const MAX_POLL_INTERVAL_MS = 2000;
+const UNAVAILABLE_RETRY_INTERVAL_MS = 15_000;
 const execFileAsync = promisify(execFile);
 
 interface RawAxeNode {
@@ -154,16 +155,15 @@ function createAxStreamer({
   let latestMessage: string | null = null;
   let pollIntervalMs = POLL_INTERVAL_MS;
   let polling = false;
-  let axeUnavailable = false;
 
   const schedule = () => {
-    if (clients.size === 0 || timer || axeUnavailable) return;
+    if (clients.size === 0 || timer) return;
     timer = setTimeout(poll, pollIntervalMs);
   };
 
   const poll = async () => {
     timer = null;
-    if (polling || clients.size === 0 || axeUnavailable) {
+    if (polling || clients.size === 0) {
       schedule();
       return;
     }
@@ -179,7 +179,12 @@ function createAxStreamer({
         pollIntervalMs = Math.min(pollIntervalMs * 2, MAX_POLL_INTERVAL_MS);
       }
       latestMessage = nextMessage;
-      axeUnavailable = isAxeUnavailableSnapshot(next);
+      // Back off aggressively while axe is missing so we don't spawn a
+      // subprocess every 2s, but keep polling so we recover automatically
+      // once the user installs it.
+      if (isAxeUnavailableSnapshot(next)) {
+        pollIntervalMs = UNAVAILABLE_RETRY_INTERVAL_MS;
+      }
     } finally {
       polling = false;
       schedule();
@@ -190,7 +195,7 @@ function createAxStreamer({
     addClient(res: { write(chunk: string): void }) {
       clients.add(res);
       if (latestMessage) res.write(latestMessage);
-      if (!axeUnavailable) void poll();
+      void poll();
       return () => {
         clients.delete(res);
         if (clients.size === 0 && timer) {

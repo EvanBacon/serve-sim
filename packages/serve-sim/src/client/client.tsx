@@ -1528,7 +1528,9 @@ function clampAxFrameForScreen(
 }
 
 function axElementKey(element: AxElement) {
-  return element.path;
+  // element.id is AXUniqueId when present, otherwise falls back to path.
+  // Prefer it over path so React keys and selection survive sibling reorders.
+  return element.id;
 }
 
 function axElementSummary(axNode: ReturnType<typeof axNodeForElement>) {
