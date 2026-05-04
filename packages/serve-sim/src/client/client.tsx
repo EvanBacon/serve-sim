@@ -1683,6 +1683,9 @@ const bootListStyle: CSSProperties = {
   fontSize: 13,
   color: "#eee",
   textAlign: "left",
+  maxHeight: "70vh",
+  overflowY: "auto",
+  minHeight: 0,
 };
 
 // ─── App ───
