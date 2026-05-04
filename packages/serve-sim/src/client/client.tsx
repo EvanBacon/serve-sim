@@ -1303,6 +1303,34 @@ function PermBtn({
   );
 }
 
+interface AxTargetProps {
+  element: AxElement;
+  index: number;
+  screen: { width: number; height: number };
+  highlighted: boolean;
+  selected: boolean;
+  onHighlight: (key: string | null) => void;
+  onSelect: (key: string | null) => void;
+}
+
+function axElementsEqual(a: AxElement, b: AxElement) {
+  if (a === b) return true;
+  if (
+    a.id !== b.id ||
+    a.path !== b.path ||
+    a.label !== b.label ||
+    a.value !== b.value ||
+    a.role !== b.role ||
+    a.type !== b.type ||
+    a.enabled !== b.enabled
+  ) return false;
+  const fa = a.frame, fb = b.frame;
+  return (
+    fa === fb ||
+    (fa.x === fb.x && fa.y === fb.y && fa.width === fb.width && fa.height === fb.height)
+  );
+}
+
 const AxTarget = memo(function AxTarget({
   element,
   index,
@@ -1311,15 +1339,7 @@ const AxTarget = memo(function AxTarget({
   selected,
   onHighlight,
   onSelect,
-}: {
-  element: AxElement;
-  index: number;
-  screen: { width: number; height: number };
-  highlighted: boolean;
-  selected: boolean;
-  onHighlight: (key: string | null) => void;
-  onSelect: (key: string | null) => void;
-}) {
+}: AxTargetProps) {
   const key = axElementKey(element);
   const axNode = axNodeForElement(element, index);
   const visibleFrame = clampAxFrameForScreen(element.frame, screen);
@@ -1357,7 +1377,15 @@ const AxTarget = memo(function AxTarget({
       }}
     />
   );
-});
+}, (prev, next) =>
+  prev.index === next.index &&
+  prev.highlighted === next.highlighted &&
+  prev.selected === next.selected &&
+  prev.onHighlight === next.onHighlight &&
+  prev.onSelect === next.onSelect &&
+  prev.screen.width === next.screen.width &&
+  prev.screen.height === next.screen.height &&
+  axElementsEqual(prev.element, next.element));
 
 function AxDomOverlay() {
   const { snapshot } = useAxSnapshotContext();
@@ -1436,7 +1464,11 @@ const AxTreeItem = memo(function AxTreeItem({
       <code style={axStyles.itemSize}>{size}</code>
     </div>
   );
-});
+}, (prev, next) =>
+  prev.index === next.index &&
+  prev.active === next.active &&
+  prev.onHighlight === next.onHighlight &&
+  axElementsEqual(prev.element, next.element));
 
 function AxTreeTool({
   overlayEnabled,
