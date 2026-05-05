@@ -2061,7 +2061,9 @@ function WebKitDevtoolsPanel({
   error: string | null;
   onRefresh: () => void;
 }) {
-  const selected = targets.find((target) => target.id === selectedTargetId) ?? targets[0] ?? null;
+  const selected = selectedTargetId
+    ? targets.find((target) => target.id === selectedTargetId) ?? null
+    : null;
 
   return (
     <aside
@@ -2264,7 +2266,10 @@ function App() {
   useEffect(() => {
     if (!devtoolsOpen) return;
     if (selectedDevtoolsTargetId && devtools.targets.some((target) => target.id === selectedDevtoolsTargetId)) return;
-    setSelectedDevtoolsTargetId(devtools.targets[0]?.id ?? null);
+    // Only auto-pick when there's no ambiguity (single inspectable target).
+    // Otherwise let the user choose explicitly so we don't surprise them by
+    // attaching to one app's webview when several are inspectable.
+    setSelectedDevtoolsTargetId(devtools.targets.length === 1 ? devtools.targets[0].id : null);
   }, [devtoolsOpen, devtools.targets, selectedDevtoolsTargetId]);
 
   useEffect(() => {
