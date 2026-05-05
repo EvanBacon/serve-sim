@@ -18,6 +18,7 @@ type WebKitBridgeTarget = {
   type: string;
   appName?: string;
   bundleId?: string;
+  inUseByOtherInspector?: boolean;
 };
 
 type WebKitBridge = {
@@ -238,6 +239,7 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
                 type: target.type || "page",
                 appName: target.appName,
                 bundleId: target.bundleId,
+                inUseByOtherInspector: !!target.inUseByOtherInspector,
               }));
           },
           highlightTarget: server.highlightTarget?.bind(server),

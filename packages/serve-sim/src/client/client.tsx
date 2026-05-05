@@ -346,6 +346,7 @@ interface WebKitDevtoolsTarget {
   bundleId?: string;
   webSocketDebuggerUrl: string;
   devtoolsFrontendUrl: string;
+  inUseByOtherInspector?: boolean;
 }
 
 interface WebKitDevtoolsResponse {
@@ -432,6 +433,82 @@ function collapseScreencastPane(iframe: HTMLIFrameElement) {
   tick();
 }
 
+// Group inspectable targets by their host application, the way Safari's
+// Develop menu lists pages under the app that owns them. Stable order:
+// groups appear in the order their first target was returned by the bridge.
+function groupTargetsByApp(targets: WebKitDevtoolsTarget[]): Array<{
+  key: string;
+  appName: string;
+  bundleId?: string;
+  targets: WebKitDevtoolsTarget[];
+}> {
+  const order: string[] = [];
+  const groups = new Map<string, { key: string; appName: string; bundleId?: string; targets: WebKitDevtoolsTarget[] }>();
+  for (const target of targets) {
+    const appName = target.appName || target.bundleId || "Unknown";
+    const key = target.bundleId || appName;
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, appName, bundleId: target.bundleId, targets: [] };
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.targets.push(target);
+  }
+  return order.map((key) => groups.get(key)!);
+}
+
+// Process-wide icon cache — keyed by udid:bundleId so a switch between
+// devices doesn't reuse stale art. Values are pending fetches OR resolved
+// data URLs (or null when no icon could be located).
+const appIconCache = new Map<string, Promise<string | null> | string | null>();
+
+function fetchAppIcon(udid: string, bundleId: string): Promise<string | null> {
+  const key = `${udid}:${bundleId}`;
+  const existing = appIconCache.get(key);
+  if (existing !== undefined) {
+    return Promise.resolve(existing as string | null | Promise<string | null>);
+  }
+  const pending = fetchAppDetails(execOnHost, udid, bundleId).then((d) => {
+    const url = d.iconDataUrl ?? null;
+    appIconCache.set(key, url);
+    return url;
+  }).catch(() => {
+    appIconCache.set(key, null);
+    return null;
+  });
+  appIconCache.set(key, pending);
+  return pending;
+}
+
+function useAppIcons(udid: string | null | undefined, bundleIds: string[]) {
+  const [icons, setIcons] = useState<Record<string, string | null>>({});
+  // Stable key so the effect re-runs only when the *set* of bundle ids changes.
+  const sig = bundleIds.slice().sort().join("|");
+  useEffect(() => {
+    if (!udid) return;
+    let cancelled = false;
+    for (const bundleId of bundleIds) {
+      if (!bundleId) continue;
+      const cacheKey = `${udid}:${bundleId}`;
+      const cached = appIconCache.get(cacheKey);
+      if (typeof cached === "string" || cached === null) {
+        setIcons((prev) => (prev[bundleId] === cached ? prev : { ...prev, [bundleId]: cached as string | null }));
+        continue;
+      }
+      void fetchAppIcon(udid, bundleId).then((url) => {
+        if (cancelled) return;
+        setIcons((prev) => ({ ...prev, [bundleId]: url }));
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [udid, sig]);
+  return icons;
+}
+
 // Fire-and-forget highlight nudge — mirrors Safari's Develop menu hover. The
 // caller doesn't await so cursor latency stays at zero; failures are silent.
 function postHighlightTarget(targetId: string, on: boolean) {
@@ -444,14 +521,19 @@ function postHighlightTarget(targetId: string, on: boolean) {
 }
 
 function WebKitTargetPicker({
+  udid,
   targets,
   selected,
   onSelectTarget,
 }: {
+  udid: string;
   targets: WebKitDevtoolsTarget[];
   selected: WebKitDevtoolsTarget | null;
   onSelectTarget: (id: string) => void;
 }) {
+  const groups = groupTargetsByApp(targets);
+  const bundleIds = groups.map((g) => g.bundleId).filter((id): id is string => !!id);
+  const icons = useAppIcons(udid, bundleIds);
   const [open, setOpen] = useState(false);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const hoveredRef = useRef<string | null>(null);
@@ -499,45 +581,68 @@ function WebKitTargetPicker({
       </button>
       {open && (
         <ul role="listbox" style={devtoolsStyles.pickerList}>
-          {targets.map((target) => {
-            const isSelected = selected?.id === target.id;
-            const title = (target.title || target.url || target.appName || "Untitled").slice(0, 90);
+          {groups.map((group) => {
+            const iconUrl = group.bundleId ? icons[group.bundleId] : null;
             return (
-              <li
-                key={target.id}
-                role="option"
-                aria-selected={isSelected}
-                tabIndex={0}
-                onMouseEnter={() => {
-                  if (hoveredRef.current && hoveredRef.current !== target.id) {
-                    postHighlightTarget(hoveredRef.current, false);
-                  }
-                  hoveredRef.current = target.id;
-                  setHoveredId(target.id);
-                  postHighlightTarget(target.id, true);
-                }}
-                onMouseLeave={() => {
-                  if (hoveredRef.current === target.id) {
-                    postHighlightTarget(target.id, false);
-                    hoveredRef.current = null;
-                  }
-                  setHoveredId((prev) => (prev === target.id ? null : prev));
-                }}
-                onClick={() => {
-                  onSelectTarget(target.id);
-                  setOpen(false);
-                }}
-                style={{
-                  ...devtoolsStyles.pickerItem,
-                  ...(isSelected ? devtoolsStyles.pickerItemSelected : null),
-                  ...(hoveredId === target.id ? devtoolsStyles.pickerItemHovered : null),
-                }}
-              >
-                <span style={devtoolsStyles.pickerItemTitle}>{title}</span>
-                {target.url && target.url !== "about:blank" && (
-                  <span style={devtoolsStyles.pickerItemUrl}>{target.url}</span>
+            <li key={group.key} style={devtoolsStyles.pickerGroup}>
+              <div style={devtoolsStyles.pickerGroupHeader}>
+                {iconUrl ? (
+                  <img src={iconUrl} alt="" style={devtoolsStyles.pickerGroupIconImg} />
+                ) : (
+                  <span style={devtoolsStyles.pickerGroupIconImg} aria-hidden="true" />
                 )}
-              </li>
+                <span style={devtoolsStyles.pickerGroupName}>{group.appName}</span>
+              </div>
+              <ul role="group" style={devtoolsStyles.pickerGroupList}>
+                {group.targets.map((target) => {
+                  const isSelected = selected?.id === target.id;
+                  const isDisabled = !!target.inUseByOtherInspector && !isSelected;
+                  const title = (target.title || target.url || target.appName || "Untitled").slice(0, 90);
+                  return (
+                    <li
+                      key={target.id}
+                      role="option"
+                      aria-selected={isSelected}
+                      aria-disabled={isDisabled}
+                      tabIndex={isDisabled ? -1 : 0}
+                      title={isDisabled ? "Already being inspected by another debugger" : undefined}
+                      onMouseEnter={() => {
+                        if (isDisabled) return;
+                        if (hoveredRef.current && hoveredRef.current !== target.id) {
+                          postHighlightTarget(hoveredRef.current, false);
+                        }
+                        hoveredRef.current = target.id;
+                        setHoveredId(target.id);
+                        postHighlightTarget(target.id, true);
+                      }}
+                      onMouseLeave={() => {
+                        if (hoveredRef.current === target.id) {
+                          postHighlightTarget(target.id, false);
+                          hoveredRef.current = null;
+                        }
+                        setHoveredId((prev) => (prev === target.id ? null : prev));
+                      }}
+                      onClick={() => {
+                        if (isDisabled) return;
+                        onSelectTarget(target.id);
+                        setOpen(false);
+                      }}
+                      style={{
+                        ...devtoolsStyles.pickerItem,
+                        ...(isSelected ? devtoolsStyles.pickerItemSelected : null),
+                        ...(hoveredId === target.id && !isDisabled ? devtoolsStyles.pickerItemHovered : null),
+                        ...(isDisabled ? devtoolsStyles.pickerItemDisabled : null),
+                      }}
+                    >
+                      <span style={devtoolsStyles.pickerItemTitle}>{title}</span>
+                      {target.url && target.url !== "about:blank" && (
+                        <span style={devtoolsStyles.pickerItemUrl}>{target.url}</span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </li>
             );
           })}
         </ul>
@@ -1876,6 +1981,7 @@ function ToolsPanel({
 function WebKitDevtoolsPanel({
   open,
   onClose,
+  udid,
   targets,
   selectedTargetId,
   onSelectTarget,
@@ -1886,6 +1992,7 @@ function WebKitDevtoolsPanel({
 }: {
   open: boolean;
   onClose: () => void;
+  udid: string;
   targets: WebKitDevtoolsTarget[];
   selectedTargetId: string | null;
   onSelectTarget: (id: string) => void;
@@ -1930,6 +2037,7 @@ function WebKitDevtoolsPanel({
       <div style={devtoolsStyles.targetBar}>
         {targets.length > 0 ? (
           <WebKitTargetPicker
+            udid={udid}
             targets={targets}
             selected={selected}
             onSelectTarget={onSelectTarget}
@@ -2554,6 +2662,7 @@ function App() {
       <WebKitDevtoolsPanel
         open={devtoolsOpen}
         onClose={() => setDevtoolsOpen(false)}
+        udid={config.device}
         targets={devtools.targets}
         selectedTargetId={selectedDevtoolsTargetId}
         onSelectTarget={setSelectedDevtoolsTargetId}
@@ -2841,7 +2950,6 @@ const devtoolsStyles: Record<string, CSSProperties> = {
     position: "absolute",
     top: "calc(100% + 4px)",
     left: 0,
-    right: 0,
     margin: 0,
     padding: 4,
     listStyle: "none",
@@ -2849,20 +2957,21 @@ const devtoolsStyles: Record<string, CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.12)",
     borderRadius: 8,
     boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-    maxHeight: 280,
+    minWidth: 220,
+    maxWidth: 360,
+    maxHeight: 320,
     overflowY: "auto",
     zIndex: 50,
   },
   pickerItem: {
     display: "flex",
     flexDirection: "column",
-    gap: 2,
-    padding: "6px 8px",
-    borderRadius: 5,
+    padding: "3px 8px",
+    borderRadius: 4,
     cursor: "pointer",
     color: "rgba(255,255,255,0.85)",
     fontSize: 12,
-    lineHeight: 1.3,
+    lineHeight: 1.35,
   },
   pickerItemSelected: {
     background: "rgba(255,255,255,0.06)",
@@ -2870,15 +2979,54 @@ const devtoolsStyles: Record<string, CSSProperties> = {
   pickerItemHovered: {
     background: "rgba(10,132,255,0.22)",
   },
+  pickerItemDisabled: {
+    opacity: 0.4,
+    cursor: "not-allowed",
+    fontStyle: "italic",
+  },
+  pickerGroup: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+  },
+  pickerGroupHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "4px 6px 2px",
+    fontSize: 12,
+    fontWeight: 600,
+    color: "rgba(255,255,255,0.92)",
+  },
+  pickerGroupIconImg: {
+    width: 16,
+    height: 16,
+    borderRadius: 3,
+    flexShrink: 0,
+    objectFit: "cover",
+  },
+  pickerGroupName: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  pickerGroupList: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+    paddingLeft: 26,
+  },
   pickerItemTitle: {
+    display: "block",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
   pickerItemUrl: {
+    display: "block",
     fontFamily: "ui-monospace, monospace",
-    fontSize: 11,
-    color: "rgba(255,255,255,0.45)",
+    fontSize: 10,
+    color: "rgba(255,255,255,0.42)",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
