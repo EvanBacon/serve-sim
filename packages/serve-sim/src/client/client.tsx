@@ -214,6 +214,7 @@ declare global {
       logsEndpoint?: string;
       axEndpoint?: string;
       appStateEndpoint?: string;
+      devtoolsEndpoint?: string;
     };
   }
 }
@@ -336,6 +337,24 @@ function AxStateProvider({
 
 interface ExecResult { stdout: string; stderr: string; exitCode: number }
 
+interface WebKitDevtoolsTarget {
+  id: string;
+  title: string;
+  url: string;
+  type: string;
+  appName?: string;
+  bundleId?: string;
+  webSocketDebuggerUrl: string;
+  devtoolsFrontendUrl: string;
+}
+
+interface WebKitDevtoolsResponse {
+  port: number;
+  cdpUrl: string;
+  targets: WebKitDevtoolsTarget[];
+  error?: string;
+}
+
 async function execOnHost(command: string): Promise<ExecResult> {
   const res = await fetch(simEndpoint("exec"), {
     method: "POST",
@@ -343,6 +362,39 @@ async function execOnHost(command: string): Promise<ExecResult> {
     body: JSON.stringify({ command }),
   });
   return res.json();
+}
+
+function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
+  const [targets, setTargets] = useState<WebKitDevtoolsTarget[]>([]);
+  const [cdpUrl, setCdpUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!endpoint) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(endpoint, { cache: "no-store" });
+      const json = (await res.json()) as WebKitDevtoolsResponse;
+      if (!res.ok || json.error) throw new Error(json.error || "Failed to list WebKit targets");
+      setTargets(json.targets ?? []);
+      setCdpUrl(json.cdpUrl ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start WebKit DevTools");
+    } finally {
+      setLoading(false);
+    }
+  }, [endpoint]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    void refresh();
+    const timer = setInterval(() => void refresh(), 2500);
+    return () => clearInterval(timer);
+  }, [enabled, refresh]);
+
+  return { targets, cdpUrl, error, loading, refresh };
 }
 
 interface SimDevice {
@@ -1672,6 +1724,101 @@ function ToolsPanel({
   );
 }
 
+function WebKitDevtoolsPanel({
+  open,
+  onClose,
+  targets,
+  selectedTargetId,
+  onSelectTarget,
+  cdpUrl,
+  loading,
+  error,
+  onRefresh,
+}: {
+  open: boolean;
+  onClose: () => void;
+  targets: WebKitDevtoolsTarget[];
+  selectedTargetId: string | null;
+  onSelectTarget: (id: string) => void;
+  cdpUrl: string | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const selected = targets.find((target) => target.id === selectedTargetId) ?? targets[0] ?? null;
+
+  return (
+    <aside
+      style={{
+        ...devtoolsStyles.panel,
+        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
+        opacity: open ? 1 : 0,
+        pointerEvents: open ? "auto" : "none",
+      }}
+      aria-hidden={!open}
+    >
+      <header style={devtoolsStyles.header}>
+        <div style={devtoolsStyles.titleGroup}>
+          <span style={devtoolsStyles.title}>WebKit DevTools</span>
+          {cdpUrl && <span style={devtoolsStyles.subtitle}>{cdpUrl}</span>}
+        </div>
+        <div style={devtoolsStyles.headerActions}>
+          <button onClick={onRefresh} style={devtoolsStyles.iconButton} aria-label="Refresh WebKit targets" title="Refresh targets">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 3.5-7.1" />
+              <polyline points="3 3 3 9 9 9" />
+            </svg>
+          </button>
+          <button onClick={onClose} style={devtoolsStyles.iconButton} aria-label="Close WebKit DevTools" title="Close">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div style={devtoolsStyles.targetBar}>
+        {targets.length > 0 ? (
+          <select
+            value={selected?.id ?? ""}
+            onChange={(event) => onSelectTarget(event.currentTarget.value)}
+            style={devtoolsStyles.select}
+            aria-label="WebKit target"
+          >
+            {targets.map((target) => (
+              <option key={target.id} value={target.id}>
+                {(target.title || target.url || target.appName || "Untitled").slice(0, 90)}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span style={devtoolsStyles.emptyTarget}>
+            {loading ? "Looking for Safari and inspectable webviews..." : "No inspectable Safari or WKWebView targets"}
+          </span>
+        )}
+      </div>
+
+      <div style={devtoolsStyles.frameWrap}>
+        {error ? (
+          <div style={devtoolsStyles.message}>{error}</div>
+        ) : selected ? (
+          <iframe
+            key={selected.id}
+            src={selected.devtoolsFrontendUrl}
+            title={`WebKit DevTools - ${selected.title || selected.url || selected.id}`}
+            style={devtoolsStyles.iframe}
+          />
+        ) : (
+          <div style={devtoolsStyles.message}>
+            Open Safari or an inspectable WKWebView in the simulator.
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 const bootListStyle: CSSProperties = {
   width: "100%",
   maxWidth: 360,
@@ -1700,6 +1847,8 @@ function App() {
   const [stoppingUdids, setStoppingUdids] = useState<Set<string>>(new Set());
   const [switching, setSwitching] = useState(false);
   const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
+  const [devtoolsOpen, setDevtoolsOpen] = useState(false);
+  const [selectedDevtoolsTargetId, setSelectedDevtoolsTargetId] = useState<string | null>(null);
 
   const fetchDevices = useCallback(async () => {
     setDevicesLoading(true);
@@ -1807,6 +1956,17 @@ function App() {
   }, [selectedDevice?.name]);
 
   const deviceType: DeviceType = getDeviceType(selectedDevice?.name);
+  const devtools = useWebKitDevtools(config.devtoolsEndpoint ?? simEndpoint("devtools"), devtoolsOpen);
+
+  useEffect(() => {
+    if (!devtoolsOpen) return;
+    if (selectedDevtoolsTargetId && devtools.targets.some((target) => target.id === selectedDevtoolsTargetId)) return;
+    setSelectedDevtoolsTargetId(devtools.targets[0]?.id ?? null);
+  }, [devtoolsOpen, devtools.targets, selectedDevtoolsTargetId]);
+
+  useEffect(() => {
+    setSelectedDevtoolsTargetId(null);
+  }, [config.device]);
 
   // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
   const mjpeg = useMjpegStream(config.streamUrl);
@@ -2079,9 +2239,10 @@ function App() {
   // When the tools panel is open and the viewport has room, shift the
   // simulator left so it stays centered in the visible (non-panel) area.
   // PANEL_WIDTH is the panel itself; +24 covers its right offset + a gap.
-  const PANEL_TOTAL = PANEL_WIDTH + 24;
+  const DEVTOOLS_TOTAL = DEVTOOLS_PANEL_WIDTH + 24;
+  const PANEL_TOTAL = (devtoolsOpen ? DEVTOOLS_TOTAL : panelOpen ? PANEL_WIDTH + 24 : 0);
   const shiftForPanel =
-    panelOpen && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
+    PANEL_TOTAL > 0 && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
       ? PANEL_TOTAL
       : 0;
 
@@ -2141,6 +2302,20 @@ function App() {
               streaming={streaming}
               onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
             />
+            <SimulatorToolbar.Button
+              aria-label="Open WebKit DevTools"
+              aria-pressed={devtoolsOpen}
+              title="WebKit DevTools"
+              onClick={() => {
+                setPanelOpen(false);
+                setDevtoolsOpen((open) => !open);
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="16 18 22 12 16 6" />
+                <polyline points="8 6 2 12 8 18" />
+              </svg>
+            </SimulatorToolbar.Button>
             <SimulatorToolbar.RotateButton title="Rotate device" />
           </SimulatorToolbar.Actions>
         </SimulatorToolbar>
@@ -2206,7 +2381,10 @@ function App() {
 
       {/* Tools panel toggle */}
       <button
-        onClick={() => setPanelOpen((o) => !o)}
+        onClick={() => {
+          setDevtoolsOpen(false);
+          setPanelOpen((o) => !o);
+        }}
         style={{
           ...panelStyles.toggle,
           opacity: panelOpen ? 0 : 1,
@@ -2228,6 +2406,18 @@ function App() {
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+      />
+
+      <WebKitDevtoolsPanel
+        open={devtoolsOpen}
+        onClose={() => setDevtoolsOpen(false)}
+        targets={devtools.targets}
+        selectedTargetId={selectedDevtoolsTargetId}
+        onSelectTarget={setSelectedDevtoolsTargetId}
+        cdpUrl={devtools.cdpUrl}
+        loading={devtools.loading}
+        error={devtools.error}
+        onRefresh={() => void devtools.refresh()}
       />
 
       {/* Status bar */}
@@ -2385,6 +2575,129 @@ const pickerGroupHeaderStyle: CSSProperties = {
 };
 
 const PANEL_WIDTH = 320;
+const DEVTOOLS_PANEL_WIDTH = 760;
+
+const devtoolsStyles: Record<string, CSSProperties> = {
+  panel: {
+    position: "fixed",
+    top: 12,
+    right: 12,
+    bottom: 12,
+    width: `min(${DEVTOOLS_PANEL_WIDTH}px, calc(100vw - 32px))`,
+    minWidth: 0,
+    background: "#111113",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 10,
+    color: "#eee",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    transition: "transform 0.25s ease, opacity 0.2s ease",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.6)",
+    fontFamily: "-apple-system, system-ui, sans-serif",
+    zIndex: 45,
+  },
+  header: {
+    height: 38,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: "0 8px 0 12px",
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+    flexShrink: 0,
+  },
+  titleGroup: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: 8,
+    minWidth: 0,
+  },
+  title: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: "rgba(255,255,255,0.82)",
+    whiteSpace: "nowrap",
+  },
+  subtitle: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.38)",
+    fontFamily: "ui-monospace, monospace",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  headerActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 4,
+    flexShrink: 0,
+  },
+  iconButton: {
+    width: 26,
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    color: "rgba(255,255,255,0.68)",
+    borderRadius: 5,
+    cursor: "pointer",
+    padding: 0,
+  },
+  targetBar: {
+    minHeight: 36,
+    display: "flex",
+    alignItems: "center",
+    padding: "6px 8px",
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+    flexShrink: 0,
+  },
+  select: {
+    width: "100%",
+    minWidth: 0,
+    height: 26,
+    background: "#1c1c1e",
+    color: "#eee",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 6,
+    fontSize: 12,
+    padding: "0 8px",
+    outline: "none",
+  },
+  emptyTarget: {
+    color: "rgba(255,255,255,0.48)",
+    fontSize: 12,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  frameWrap: {
+    flex: 1,
+    minHeight: 0,
+    background: "#fff",
+    position: "relative",
+  },
+  iframe: {
+    width: "100%",
+    height: "100%",
+    border: "none",
+    display: "block",
+    background: "#fff",
+  },
+  message: {
+    height: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    background: "#111113",
+    color: "rgba(255,255,255,0.58)",
+    textAlign: "center",
+    fontSize: 13,
+  },
+};
 
 const panelStyles: Record<string, CSSProperties> = {
   toggle: {
