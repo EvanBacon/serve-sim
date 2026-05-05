@@ -26,6 +26,13 @@ import {
   type SimulatorOrientation,
   type StreamConfig,
 } from "serve-sim-client/simulator";
+import {
+  AnnotationsProvider,
+  AnnotationsToolbarButtons,
+  AnnotationsPickerOverlay,
+  AnnotationsDropdown,
+  AnnotationsTool,
+} from "./annotations";
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
@@ -1630,6 +1637,8 @@ function ToolsPanel({
   currentApp,
   axOverlayEnabled,
   onToggleAxOverlay,
+  annotationsEnabled,
+  onToggleAnnotationsEnabled,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1637,9 +1646,30 @@ function ToolsPanel({
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
   axOverlayEnabled: boolean;
   onToggleAxOverlay: () => void;
+  annotationsEnabled: boolean;
+  onToggleAnnotationsEnabled: () => void;
 }) {
+  const { snapshot } = useAxSnapshotContext();
+  const axeUnavailable = isAxeUnavailable(snapshot);
+  const panelRef = useRef<HTMLElement | null>(null);
+
+  // Close on outside click. We listen on the document in capture so we run
+  // before any handler that might call stopPropagation (e.g. dropdowns).
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (panelRef.current?.contains(target)) return;
+      onClose();
+    };
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
+  }, [open, onClose]);
+
   return (
     <aside
+      ref={panelRef}
       style={{
         ...panelStyles.panel,
         transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
@@ -1663,6 +1693,11 @@ function ToolsPanel({
           <AxTreeTool
             overlayEnabled={axOverlayEnabled}
             onToggleOverlay={onToggleAxOverlay}
+          />
+          <AnnotationsTool
+            enabled={annotationsEnabled}
+            onToggleEnabled={onToggleAnnotationsEnabled}
+            axeUnavailable={axeUnavailable}
           />
           <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
@@ -1700,6 +1735,25 @@ function App() {
   const [stoppingUdids, setStoppingUdids] = useState<Set<string>>(new Set());
   const [switching, setSwitching] = useState(false);
   const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
+  const [annotationsEnabled, setAnnotationsEnabled] = useState(false);
+  const [annotationsPickerActive, setAnnotationsPickerActive] = useState(false);
+  const [annotationsDropdownOpen, setAnnotationsDropdownOpen] = useState(false);
+  const toggleAnnotationsEnabled = useCallback(() => {
+    setAnnotationsEnabled((prev) => {
+      const next = !prev;
+      if (!next) {
+        // Reset picker / dropdown when feature disables, so re-enabling
+        // starts clean.
+        setAnnotationsPickerActive(false);
+        setAnnotationsDropdownOpen(false);
+      } else {
+        // Close the Tools panel so the toolbar buttons that just appeared
+        // are visible — otherwise the change is hidden behind the panel.
+        setPanelOpen(false);
+      }
+      return next;
+    });
+  }, []);
 
   const fetchDevices = useCallback(async () => {
     setDevicesLoading(true);
@@ -1986,6 +2040,17 @@ function App() {
     // matches Simulator.app so muscle memory carries over.
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
+      // If the user is typing in a composer / annotation input, never hijack
+      // their keys — let the input receive them and React handle Enter/Escape.
+      const active = document.activeElement as HTMLElement | null;
+      if (
+        active &&
+        (active.tagName === "INPUT" ||
+          active.tagName === "TEXTAREA" ||
+          active.isContentEditable)
+      ) {
+        return;
+      }
       // Cmd+Shift+H → Home button (Simulator.app's shortcut).
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
         e.preventDefault();
@@ -2085,8 +2150,28 @@ function App() {
       ? PANEL_TOTAL
       : 0;
 
+  const annotationsDevice = useMemo(
+    () =>
+      config.device
+        ? { udid: config.device, name: selectedDevice?.name ?? "" }
+        : null,
+    [config.device, selectedDevice?.name],
+  );
+  const axEndpointActive =
+    axOverlayEnabled || (annotationsEnabled && annotationsPickerActive)
+      ? config?.axEndpoint
+      : undefined;
+
   return (
-    <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
+    <AxStateProvider endpoint={axEndpointActive}>
+    <AnnotationsProvider
+      basePath={config.basePath ?? "/"}
+      device={annotationsDevice}
+      pickerActive={annotationsPickerActive}
+      onPickerActiveChange={setAnnotationsPickerActive}
+      dropdownOpen={annotationsDropdownOpen}
+      onDropdownOpenChange={setAnnotationsDropdownOpen}
+    >
     <div
       style={{
         ...s.page,
@@ -2141,6 +2226,7 @@ function App() {
               streaming={streaming}
               onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
             />
+            {annotationsEnabled && <AnnotationsToolbarButtons />}
             <SimulatorToolbar.RotateButton title="Rotate device" />
           </SimulatorToolbar.Actions>
         </SimulatorToolbar>
@@ -2173,6 +2259,7 @@ function App() {
             onScreenConfigChange={onScreenConfigChange}
           />
           {axOverlayEnabled && <AxDomOverlay />}
+          {annotationsEnabled && <AnnotationsPickerLayer containerRef={simContainerRef} />}
           {mediaDrop.isDragOver && (
             <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -2228,6 +2315,8 @@ function App() {
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+        annotationsEnabled={annotationsEnabled}
+        onToggleAnnotationsEnabled={toggleAnnotationsEnabled}
       />
 
       {/* Status bar */}
@@ -2237,9 +2326,20 @@ function App() {
           {streaming ? "live" : "connecting"}
         </span>
       </div>
+      {annotationsEnabled && <AnnotationsDropdown />}
     </div>
+    </AnnotationsProvider>
     </AxStateProvider>
   );
+}
+
+function AnnotationsPickerLayer({
+  containerRef,
+}: {
+  containerRef: React.MutableRefObject<HTMLDivElement | null>;
+}) {
+  const { snapshot } = useAxSnapshotContext();
+  return <AnnotationsPickerOverlay snapshot={snapshot} containerRef={containerRef} />;
 }
 
 // ─── Styles (before mount — Preact renders synchronously) ───

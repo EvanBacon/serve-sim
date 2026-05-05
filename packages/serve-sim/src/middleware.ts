@@ -1,8 +1,21 @@
-import { readdirSync, readFileSync, existsSync, unlinkSync } from "fs";
+import { readdirSync, readFileSync, existsSync, unlinkSync, statSync, createReadStream } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createAxStreamerCache } from "./ax";
+import {
+  createAnnotation,
+  deleteAllAnnotations,
+  deleteAnnotation,
+  getAnnotation,
+  listAnnotations,
+  resolveAnnotationAsset,
+  updateAnnotation,
+} from "./annotations";
+import type {
+  AnnotationCreateRequest,
+  AnnotationUpdateRequest,
+} from "./annotations-shared";
 
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
@@ -375,7 +388,176 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       return;
     }
 
+    // ─── Annotations API ───
+    if (url === base + "/api/annotations" || url.startsWith(base + "/api/annotations/")) {
+      handleAnnotationsRequest(req, res, base, selectedDevice);
+      return;
+    }
+
     // Not ours — pass through
     if (next) next();
   };
+}
+
+// ─── Annotations route handlers ───
+
+function readJsonBody(req: any): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    let size = 0;
+    const MAX = 16 * 1024 * 1024; // 16MB safety ceiling — crops are ~30KB each
+    req.on("data", (chunk: Buffer | string) => {
+      const piece = typeof chunk === "string" ? chunk : chunk.toString();
+      size += piece.length;
+      if (size > MAX) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      body += piece;
+    });
+    req.on("end", () => {
+      if (!body) return resolve({});
+      try {
+        resolve(JSON.parse(body));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function jsonResponse(res: any, status: number, body: unknown) {
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(JSON.stringify(body));
+}
+
+function pickAnnotationDevice(req: any, fallback: string | null): string | null {
+  const rawUrl: string = req.url ?? "";
+  const qIndex = rawUrl.indexOf("?");
+  if (qIndex !== -1) {
+    const device = new URLSearchParams(rawUrl.slice(qIndex + 1)).get("device");
+    if (device) return device;
+  }
+  if (fallback) return fallback;
+  // Last resort: pick the first running serve-sim helper.
+  const states = readServeSimStates();
+  return states[0]?.device ?? null;
+}
+
+function handleAnnotationsRequest(
+  req: any,
+  res: any,
+  base: string,
+  selectedDevice: string | null,
+): void {
+  const rawUrl: string = req.url ?? "";
+  const qIndex = rawUrl.indexOf("?");
+  const path = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
+  const after = path.slice((base + "/api/annotations").length);
+  const method: string = req.method ?? "GET";
+
+  if (method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    });
+    res.end();
+    return;
+  }
+
+  // Collection: /api/annotations
+  if (after === "" || after === "/") {
+    if (method === "GET") {
+      const udid = pickAnnotationDevice(req, selectedDevice);
+      if (!udid) return jsonResponse(res, 200, []);
+      return jsonResponse(res, 200, listAnnotations(udid));
+    }
+    if (method === "POST") {
+      readJsonBody(req)
+        .then((body) => {
+          const udid = pickAnnotationDevice(req, selectedDevice);
+          const create = body as AnnotationCreateRequest;
+          if (udid && !create?.device?.udid) {
+            create.device = {
+              udid,
+              name: create.device?.name ?? "",
+            };
+          }
+          if (!create?.device?.udid) {
+            return jsonResponse(res, 400, { error: "no device available" });
+          }
+          const result = createAnnotation(create);
+          if ("error" in result) return jsonResponse(res, 400, result);
+          jsonResponse(res, 201, result.annotation);
+        })
+        .catch((err) => jsonResponse(res, 400, { error: String(err?.message ?? err) }));
+      return;
+    }
+    if (method === "DELETE") {
+      const udid = pickAnnotationDevice(req, selectedDevice);
+      if (!udid) return jsonResponse(res, 404, { error: "no device" });
+      const removed = deleteAllAnnotations(udid);
+      return jsonResponse(res, 200, { removed });
+    }
+    res.writeHead(405); res.end(); return;
+  }
+
+  // Item: /api/annotations/{id} or /api/annotations/{id}/crop|frame
+  const itemMatch = /^\/([A-Za-z0-9_-]+)(?:\/(crop|frame))?$/.exec(after);
+  if (!itemMatch) {
+    res.writeHead(404); res.end("Not found"); return;
+  }
+  const id = itemMatch[1]!;
+  const sub = itemMatch[2];
+  const udid = pickAnnotationDevice(req, selectedDevice);
+  if (!udid) return jsonResponse(res, 404, { error: "no device" });
+
+  if (sub === "crop" || sub === "frame") {
+    if (method !== "GET") { res.writeHead(405); res.end(); return; }
+    const annotation = getAnnotation(udid, id);
+    if (!annotation) return jsonResponse(res, 404, { error: "not found" });
+    const relPath = sub === "crop" ? annotation.screenshotPath : annotation.fullFramePath;
+    if (!relPath) return jsonResponse(res, 404, { error: "asset missing" });
+    const abs = resolveAnnotationAsset(udid, relPath);
+    if (!abs) return jsonResponse(res, 404, { error: "file gone" });
+    let size = 0;
+    try { size = statSync(abs).size; } catch {}
+    res.writeHead(200, {
+      "Content-Type": "image/jpeg",
+      "Content-Length": String(size),
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    createReadStream(abs).pipe(res);
+    return;
+  }
+
+  if (method === "GET") {
+    const annotation = getAnnotation(udid, id);
+    if (!annotation) return jsonResponse(res, 404, { error: "not found" });
+    return jsonResponse(res, 200, annotation);
+  }
+  if (method === "PATCH") {
+    readJsonBody(req)
+      .then((body) => {
+        const updated = updateAnnotation(udid, id, body as AnnotationUpdateRequest);
+        if (!updated) return jsonResponse(res, 404, { error: "not found" });
+        jsonResponse(res, 200, updated);
+      })
+      .catch((err) => jsonResponse(res, 400, { error: String(err?.message ?? err) }));
+    return;
+  }
+  if (method === "DELETE") {
+    const ok = deleteAnnotation(udid, id);
+    if (!ok) return jsonResponse(res, 404, { error: "not found" });
+    return jsonResponse(res, 200, { id });
+  }
+  res.writeHead(405); res.end();
 }
