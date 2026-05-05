@@ -5,11 +5,25 @@
  *
  * Run: bun --watch dev.ts
  */
-import { readdirSync, readFileSync, existsSync, unlinkSync, watch } from "fs";
+import { readdirSync, readFileSync, existsSync, unlinkSync, watch, statSync, createReadStream } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { Readable } from "stream";
 import { createAxStreamerCache } from "./src/ax";
+import {
+  createAnnotation,
+  deleteAllAnnotations,
+  deleteAnnotation,
+  getAnnotation,
+  listAnnotations,
+  resolveAnnotationAsset,
+  updateAnnotation,
+} from "./src/annotations";
+import type {
+  AnnotationCreateRequest,
+  AnnotationUpdateRequest,
+} from "./src/annotations-shared";
 
 const RN_BUNDLE_IDS = new Set<string>([
   "host.exp.Exponent",
@@ -172,6 +186,7 @@ function buildHtml(): string {
   const configScript = state
     ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({
         ...state,
+        basePath: "/",
         logsEndpoint: "/logs",
         axEndpoint: "/ax",
       })}</script>`
@@ -379,6 +394,11 @@ Bun.serve({
       });
     }
 
+    // ─── Annotations API ───
+    if (url.pathname === "/api/annotations" || url.pathname.startsWith("/api/annotations/")) {
+      return handleAnnotationsBunRequest(req, url);
+    }
+
     // Serve the HTML page (fresh on every request — picks up state + rebuild)
     return new Response(buildHtml(), {
       headers: {
@@ -390,3 +410,112 @@ Bun.serve({
 });
 
 console.log(`\n  \x1b[36mserve-sim dev\x1b[0m  http://localhost:${PORT}\n`);
+
+// ─── Annotations route handler (Bun.serve flavor) ───
+
+const ANNOTATION_CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+function jsonRes(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      ...ANNOTATION_CORS,
+    },
+  });
+}
+
+function pickAnnotationDeviceForBun(url: URL): string | null {
+  const fromQuery = url.searchParams.get("device");
+  if (fromQuery) return fromQuery;
+  const states = readServeSimStates();
+  return states[0]?.device ?? null;
+}
+
+async function handleAnnotationsBunRequest(req: Request, url: URL): Promise<Response> {
+  const method = req.method;
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: ANNOTATION_CORS });
+  }
+
+  const after = url.pathname.slice("/api/annotations".length);
+
+  if (after === "" || after === "/") {
+    if (method === "GET") {
+      const udid = pickAnnotationDeviceForBun(url);
+      if (!udid) return jsonRes([]);
+      return jsonRes(listAnnotations(udid));
+    }
+    if (method === "POST") {
+      let body: AnnotationCreateRequest;
+      try { body = (await req.json()) as AnnotationCreateRequest; }
+      catch (err) { return jsonRes({ error: String((err as Error).message) }, 400); }
+      const udid = pickAnnotationDeviceForBun(url);
+      if (udid && !body?.device?.udid) {
+        body.device = { udid, name: body.device?.name ?? "" };
+      }
+      if (!body?.device?.udid) return jsonRes({ error: "no device available" }, 400);
+      const result = createAnnotation(body);
+      if ("error" in result) return jsonRes(result, 400);
+      return jsonRes(result.annotation, 201);
+    }
+    if (method === "DELETE") {
+      const udid = pickAnnotationDeviceForBun(url);
+      if (!udid) return jsonRes({ error: "no device" }, 404);
+      return jsonRes({ removed: deleteAllAnnotations(udid) });
+    }
+    return new Response(null, { status: 405, headers: ANNOTATION_CORS });
+  }
+
+  const itemMatch = /^\/([A-Za-z0-9_-]+)(?:\/(crop|frame))?$/.exec(after);
+  if (!itemMatch) return new Response("Not found", { status: 404, headers: ANNOTATION_CORS });
+  const id = itemMatch[1]!;
+  const sub = itemMatch[2];
+  const udid = pickAnnotationDeviceForBun(url);
+  if (!udid) return jsonRes({ error: "no device" }, 404);
+
+  if (sub === "crop" || sub === "frame") {
+    if (method !== "GET") return new Response(null, { status: 405, headers: ANNOTATION_CORS });
+    const annotation = getAnnotation(udid, id);
+    if (!annotation) return jsonRes({ error: "not found" }, 404);
+    const relPath = sub === "crop" ? annotation.screenshotPath : annotation.fullFramePath;
+    if (!relPath) return jsonRes({ error: "asset missing" }, 404);
+    const abs = resolveAnnotationAsset(udid, relPath);
+    if (!abs) return jsonRes({ error: "file gone" }, 404);
+    let size = "";
+    try { size = String(statSync(abs).size); } catch {}
+    return new Response(Readable.toWeb(createReadStream(abs)) as unknown as ReadableStream, {
+      headers: {
+        "Content-Type": "image/jpeg",
+        ...(size && { "Content-Length": size }),
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  if (method === "GET") {
+    const annotation = getAnnotation(udid, id);
+    if (!annotation) return jsonRes({ error: "not found" }, 404);
+    return jsonRes(annotation);
+  }
+  if (method === "PATCH") {
+    let patch: AnnotationUpdateRequest;
+    try { patch = (await req.json()) as AnnotationUpdateRequest; }
+    catch (err) { return jsonRes({ error: String((err as Error).message) }, 400); }
+    const updated = updateAnnotation(udid, id, patch);
+    if (!updated) return jsonRes({ error: "not found" }, 404);
+    return jsonRes(updated);
+  }
+  if (method === "DELETE") {
+    const ok = deleteAnnotation(udid, id);
+    if (!ok) return jsonRes({ error: "not found" }, 404);
+    return jsonRes({ id });
+  }
+  return new Response(null, { status: 405, headers: ANNOTATION_CORS });
+}

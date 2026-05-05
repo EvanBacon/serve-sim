@@ -27,6 +27,8 @@
     "dist/serve-sim.js",
     "dist/middleware.js",
     "dist/middleware.cjs",
+    "src/annotations-shared.ts",
+    "src/annotations.ts",
     "src/ax-shared.ts",
     "src/ax.ts",
     "src/middleware.ts",
