@@ -432,6 +432,117 @@ function collapseScreencastPane(iframe: HTMLIFrameElement) {
   tick();
 }
 
+// Fire-and-forget highlight nudge — mirrors Safari's Develop menu hover. The
+// caller doesn't await so cursor latency stays at zero; failures are silent.
+function postHighlightTarget(targetId: string, on: boolean) {
+  void fetch(simEndpoint("devtools/highlight"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetId, on }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function WebKitTargetPicker({
+  targets,
+  selected,
+  onSelectTarget,
+}: {
+  targets: WebKitDevtoolsTarget[];
+  selected: WebKitDevtoolsTarget | null;
+  onSelectTarget: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const hoveredRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Clicking outside closes the popover. Listening on document captures
+  // strays without forcing every row to swallow events.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  // Cancel any lingering highlight when the popover closes (or unmounts).
+  useEffect(() => {
+    if (open) return;
+    if (hoveredRef.current) {
+      postHighlightTarget(hoveredRef.current, false);
+      hoveredRef.current = null;
+    }
+  }, [open]);
+
+  const label = selected
+    ? (selected.title || selected.url || selected.appName || "Untitled").slice(0, 90)
+    : "Select target";
+
+  return (
+    <div ref={containerRef} style={devtoolsStyles.pickerWrap}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={devtoolsStyles.pickerButton}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="WebKit target"
+      >
+        <span style={devtoolsStyles.pickerLabel}>{label}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <ul role="listbox" style={devtoolsStyles.pickerList}>
+          {targets.map((target) => {
+            const isSelected = selected?.id === target.id;
+            const title = (target.title || target.url || target.appName || "Untitled").slice(0, 90);
+            return (
+              <li
+                key={target.id}
+                role="option"
+                aria-selected={isSelected}
+                tabIndex={0}
+                onMouseEnter={() => {
+                  if (hoveredRef.current && hoveredRef.current !== target.id) {
+                    postHighlightTarget(hoveredRef.current, false);
+                  }
+                  hoveredRef.current = target.id;
+                  postHighlightTarget(target.id, true);
+                }}
+                onMouseLeave={() => {
+                  if (hoveredRef.current === target.id) {
+                    postHighlightTarget(target.id, false);
+                    hoveredRef.current = null;
+                  }
+                }}
+                onClick={() => {
+                  onSelectTarget(target.id);
+                  setOpen(false);
+                }}
+                style={{
+                  ...devtoolsStyles.pickerItem,
+                  ...(isSelected ? devtoolsStyles.pickerItemSelected : null),
+                }}
+              >
+                <span style={devtoolsStyles.pickerItemTitle}>{title}</span>
+                {target.url && target.url !== "about:blank" && (
+                  <span style={devtoolsStyles.pickerItemUrl}>{target.url}</span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 interface SimDevice {
   udid: string;
   name: string;
@@ -1815,18 +1926,11 @@ function WebKitDevtoolsPanel({
 
       <div style={devtoolsStyles.targetBar}>
         {targets.length > 0 ? (
-          <select
-            value={selected?.id ?? ""}
-            onChange={(event) => onSelectTarget(event.currentTarget.value)}
-            style={devtoolsStyles.select}
-            aria-label="WebKit target"
-          >
-            {targets.map((target) => (
-              <option key={target.id} value={target.id}>
-                {(target.title || target.url || target.appName || "Untitled").slice(0, 90)}
-              </option>
-            ))}
-          </select>
+          <WebKitTargetPicker
+            targets={targets}
+            selected={selected}
+            onSelectTarget={onSelectTarget}
+          />
         ) : (
           <span style={devtoolsStyles.emptyTarget}>
             {loading ? "Looking for Safari and inspectable webviews..." : "No inspectable Safari or WKWebView targets"}
@@ -2701,6 +2805,77 @@ const devtoolsStyles: Record<string, CSSProperties> = {
     fontSize: 12,
     padding: "0 8px",
     outline: "none",
+  },
+  pickerWrap: {
+    position: "relative",
+    width: "100%",
+    minWidth: 0,
+  },
+  pickerButton: {
+    width: "100%",
+    minWidth: 0,
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    background: "#1c1c1e",
+    color: "#eee",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 6,
+    fontSize: 12,
+    padding: "0 8px",
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  pickerLabel: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
+  },
+  pickerList: {
+    position: "absolute",
+    top: "calc(100% + 4px)",
+    left: 0,
+    right: 0,
+    margin: 0,
+    padding: 4,
+    listStyle: "none",
+    background: "#1c1c1e",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 8,
+    boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+    maxHeight: 280,
+    overflowY: "auto",
+    zIndex: 50,
+  },
+  pickerItem: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    padding: "6px 8px",
+    borderRadius: 5,
+    cursor: "pointer",
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 12,
+    lineHeight: 1.3,
+  },
+  pickerItemSelected: {
+    background: "rgba(255,255,255,0.06)",
+  },
+  pickerItemTitle: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  pickerItemUrl: {
+    fontFamily: "ui-monospace, monospace",
+    fontSize: 11,
+    color: "rgba(255,255,255,0.45)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   emptyTarget: {
     color: "rgba(255,255,255,0.48)",

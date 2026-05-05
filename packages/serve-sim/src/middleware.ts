@@ -24,6 +24,7 @@ type WebKitBridge = {
   port: number;
   cdpUrl: string;
   listTargets(): Promise<WebKitBridgeTarget[]>;
+  highlightTarget?(targetId: string, on: boolean): Promise<void>;
 };
 
 export interface ServeSimState {
@@ -239,6 +240,7 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
                 bundleId: target.bundleId,
               }));
           },
+          highlightTarget: server.highlightTarget?.bind(server),
         };
       } catch (err: any) {
         if (err?.code === "EADDRINUSE") {
@@ -392,6 +394,39 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           }));
         }
       })();
+      return;
+    }
+
+    // POST /devtools/highlight — flash an inspectable target in the
+    // simulator the way Safari's Develop menu hover does. Body shape:
+    // { targetId: string, on: boolean }.
+    if (url === base + "/devtools/highlight" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const { targetId, on } = JSON.parse(body || "{}") as { targetId?: string; on?: boolean };
+          if (!targetId) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Missing targetId" }));
+            return;
+          }
+          const bridge = await ensureInspectWebKitBridge();
+          if (!bridge.highlightTarget) {
+            res.writeHead(501, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "highlightTarget not supported by inspect-webkit" }));
+            return;
+          }
+          await bridge.highlightTarget(targetId, !!on);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: err instanceof Error ? err.message : "Failed to highlight target",
+          }));
+        }
+      });
       return;
     }
 
