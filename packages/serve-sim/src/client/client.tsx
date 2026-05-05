@@ -513,6 +513,7 @@ function WebKitTargetPicker({
                     postHighlightTarget(hoveredRef.current, false);
                   }
                   hoveredRef.current = target.id;
+                  setHoveredId(target.id);
                   postHighlightTarget(target.id, true);
                 }}
                 onMouseLeave={() => {
@@ -520,6 +521,7 @@ function WebKitTargetPicker({
                     postHighlightTarget(target.id, false);
                     hoveredRef.current = null;
                   }
+                  setHoveredId((prev) => (prev === target.id ? null : prev));
                 }}
                 onClick={() => {
                   onSelectTarget(target.id);
@@ -528,6 +530,7 @@ function WebKitTargetPicker({
                 style={{
                   ...devtoolsStyles.pickerItem,
                   ...(isSelected ? devtoolsStyles.pickerItemSelected : null),
+                  ...(hoveredId === target.id ? devtoolsStyles.pickerItemHovered : null),
                 }}
               >
                 <span style={devtoolsStyles.pickerItemTitle}>{title}</span>
@@ -2863,6 +2866,9 @@ const devtoolsStyles: Record<string, CSSProperties> = {
   },
   pickerItemSelected: {
     background: "rgba(255,255,255,0.06)",
+  },
+  pickerItemHovered: {
+    background: "rgba(10,132,255,0.22)",
   },
   pickerItemTitle: {
     overflow: "hidden",
