@@ -22,6 +22,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
@@ -226,6 +227,30 @@ function isStatus(value: unknown): value is AnnotationStatus {
 function tryUnlink(path: string) {
   try {
     unlinkSync(path);
+  } catch {}
+}
+
+/**
+ * Wipe a device's annotation directory entirely — JSONL, crops, frames, and
+ * the directory itself. Used by `serve-sim --kill` so killing a helper also
+ * tears down its annotations, matching how the per-device `server-{udid}.json`
+ * state file is unlinked. Best-effort: silently no-ops if the dir doesn't
+ * exist.
+ */
+export function purgeAnnotations(udid: string): void {
+  if (!udid) return;
+  try {
+    rmSync(deviceDir(udid), { recursive: true, force: true });
+  } catch {}
+}
+
+/**
+ * Wipe the whole annotations root — every device's subtree. Used by
+ * `serve-sim --kill` (no udid) which kills every helper.
+ */
+export function purgeAllAnnotations(): void {
+  try {
+    rmSync(ROOT, { recursive: true, force: true });
   } catch {}
 }
 

@@ -16,6 +16,7 @@ const __dirname = dirnameOf(import.meta.url);
 // real file on disk; inside a compiled binary it points at bun's virtual FS
 // and we extract the bytes to a cached location on first use.
 import swiftHelperEmbeddedPath from "../bin/serve-sim-bin" with { type: "file" };
+import { purgeAnnotations, purgeAllAnnotations } from "./annotations";
 
 interface ServerState {
   pid: number;
@@ -804,15 +805,22 @@ function killStreams(deviceArg?: string) {
     const udid = resolveDevice(deviceArg);
     const state = readState(udid);
     if (!state) {
+      // No live helper, but annotations from a previous run might still be
+      // around — the user explicitly asked us to tear this device down.
+      purgeAnnotations(udid);
       console.log(JSON.stringify({ disconnected: true, device: udid }));
       return;
     }
     try { process.kill(state.pid, "SIGTERM"); } catch {}
     clearState(udid);
+    purgeAnnotations(state.device);
     console.log(JSON.stringify({ disconnected: true, device: state.device }));
   } else {
     const states = readAllStates();
     if (states.length === 0) {
+      // Same logic as the single-device branch — wipe leftover annotations
+      // even if no helper is running.
+      purgeAllAnnotations();
       console.log(JSON.stringify({ disconnected: true, devices: [] }));
       return;
     }
@@ -822,6 +830,7 @@ function killStreams(deviceArg?: string) {
       devices.push(state.device);
     }
     clearState();
+    purgeAllAnnotations();
     console.log(JSON.stringify({ disconnected: true, devices }));
   }
 }
