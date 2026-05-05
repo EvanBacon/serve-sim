@@ -228,6 +228,25 @@ function isAxeUnavailable(snapshot: AxSnapshot | null) {
   return snapshot?.errors?.includes(AXE_NOT_INSTALLED_ERROR) ?? false;
 }
 
+function ReloadIcon({ size = 18, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  );
+}
+
 function useAxSnapshot(endpoint?: string) {
   const [snapshot, setSnapshot] = useState<AxSnapshot | null>(null);
   const [status, setStatus] = useState("AX off");
@@ -520,16 +539,37 @@ function postHighlightTarget(targetId: string, on: boolean) {
   }).catch(() => {});
 }
 
+// Tell the bridge to drop any cached hover sessions for this picker. Called
+// on close / unmount / pagehide so we don't camp on a WIR slot the user no
+// longer cares about. `sendBeacon` survives pagehide where `fetch` may not.
+function postReleaseHighlights() {
+  const url = simEndpoint("devtools/release");
+  try {
+    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+      const blob = new Blob(["{}"], { type: "application/json" });
+      if (navigator.sendBeacon(url, blob)) return;
+    }
+  } catch {}
+  void fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+    keepalive: true,
+  }).catch(() => {});
+}
+
 function WebKitTargetPicker({
   udid,
   targets,
   selected,
   onSelectTarget,
+  onRefresh,
 }: {
   udid: string;
   targets: WebKitDevtoolsTarget[];
   selected: WebKitDevtoolsTarget | null;
   onSelectTarget: (id: string) => void;
+  onRefresh: () => void;
 }) {
   const groups = groupTargetsByApp(targets);
   const bundleIds = groups.map((g) => g.bundleId).filter((id): id is string => !!id);
@@ -552,13 +592,28 @@ function WebKitTargetPicker({
   }, [open]);
 
   // Cancel any lingering highlight when the popover closes (or unmounts).
+  // Also drop the underlying CDP sessions: hovering opens a debugger socket
+  // per target, and a hovered-but-never-selected page would otherwise stay
+  // on the WIR slot until the idle timer fires.
   useEffect(() => {
     if (open) return;
     if (hoveredRef.current) {
       postHighlightTarget(hoveredRef.current, false);
       hoveredRef.current = null;
     }
+    postReleaseHighlights();
   }, [open]);
+
+  // Best-effort cleanup if the page itself goes away (tab close, navigation).
+  useEffect(() => {
+    const onLeave = () => postReleaseHighlights();
+    window.addEventListener("pagehide", onLeave);
+    window.addEventListener("beforeunload", onLeave);
+    return () => {
+      window.removeEventListener("pagehide", onLeave);
+      window.removeEventListener("beforeunload", onLeave);
+    };
+  }, []);
 
   const label = selected
     ? (selected.title || selected.url || selected.appName || "Untitled").slice(0, 90)
@@ -568,7 +623,15 @@ function WebKitTargetPicker({
     <div ref={containerRef} style={devtoolsStyles.pickerWrap}>
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          setOpen((wasOpen) => {
+            // Revalidate the listing when the popover is about to open. The
+            // bridge polls in the background, but a fresh request makes sure
+            // newly-launched (or just-closed) pages show up immediately.
+            if (!wasOpen) onRefresh();
+            return !wasOpen;
+          });
+        }}
         style={devtoolsStyles.pickerButton}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -1410,10 +1473,7 @@ function AppPermissionsTool({
                   variant="reset"
                   title="Reset"
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 12a9 9 0 1 0 3.5-7.1" />
-                    <polyline points="3 3 3 9 9 9" />
-                  </svg>
+                  <ReloadIcon size={11} strokeWidth={2.4} />
                 </PermBtn>
               </div>
             </div>
@@ -2014,45 +2074,35 @@ function WebKitDevtoolsPanel({
       aria-hidden={!open}
     >
       <header style={devtoolsStyles.header}>
-        <div style={devtoolsStyles.titleGroup}>
-          <span style={devtoolsStyles.title}>WebKit DevTools</span>
-          {cdpUrl && <span style={devtoolsStyles.subtitle}>{cdpUrl}</span>}
-        </div>
-        <div style={devtoolsStyles.headerActions}>
-          <button onClick={onRefresh} style={devtoolsStyles.iconButton} aria-label="Refresh WebKit targets" title="Refresh targets">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 12a9 9 0 1 0 3.5-7.1" />
-              <polyline points="3 3 3 9 9 9" />
-            </svg>
-          </button>
-          <button onClick={onClose} style={devtoolsStyles.iconButton} aria-label="Close WebKit DevTools" title="Close">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <div style={devtoolsStyles.targetBar}>
         {targets.length > 0 ? (
           <WebKitTargetPicker
             udid={udid}
             targets={targets}
             selected={selected}
             onSelectTarget={onSelectTarget}
+            onRefresh={onRefresh}
           />
         ) : (
           <span style={devtoolsStyles.emptyTarget}>
             {loading ? "Looking for Safari and inspectable webviews..." : "No inspectable Safari or WKWebView targets"}
           </span>
         )}
-      </div>
+        <button onClick={onClose} style={devtoolsStyles.iconButton} aria-label="Close WebKit DevTools" title="Close">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </header>
 
       <div style={devtoolsStyles.frameWrap}>
         {error ? (
           <div style={devtoolsStyles.message}>{error}</div>
-        ) : selected ? (
+        ) : selected && open ? (
+          // Mount the iframe only while the panel is visible. Unmounting tears
+          // down the WebSocket so WIR releases the page; otherwise we'd hold
+          // the inspector connection forever and block other debuggers (Safari
+          // Develop menu, chrome://inspect, …) from attaching.
           <iframe
             key={selected.id}
             src={selected.devtoolsFrontendUrl}
@@ -2062,7 +2112,9 @@ function WebKitDevtoolsPanel({
           />
         ) : (
           <div style={devtoolsStyles.message}>
-            Open Safari or an inspectable WKWebView in the simulator.
+            {selected
+              ? "DevTools paused — open the panel to reattach."
+              : "Open Safari or an inspectable WKWebView in the simulator."}
           </div>
         )}
       </div>
@@ -2539,10 +2591,7 @@ function App() {
                 title="Reload (Cmd+R)"
                 onClick={() => void sendReactNativeReload()}
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 1 0 3.5-7.1" />
-                  <polyline points="3 3 3 9 9 9" />
-                </svg>
+                <ReloadIcon />
               </SimulatorToolbar.Button>
             )}
             <SimulatorToolbar.HomeButton
@@ -2553,20 +2602,6 @@ function App() {
               streaming={streaming}
               onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
             />
-            <SimulatorToolbar.Button
-              aria-label="Open WebKit DevTools"
-              aria-pressed={devtoolsOpen}
-              title="WebKit DevTools"
-              onClick={() => {
-                setPanelOpen(false);
-                setDevtoolsOpen((open) => !open);
-              }}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="16 18 22 12 16 6" />
-                <polyline points="8 6 2 12 8 18" />
-              </svg>
-            </SimulatorToolbar.Button>
             <SimulatorToolbar.RotateButton title="Rotate device" />
           </SimulatorToolbar.Actions>
         </SimulatorToolbar>
@@ -2630,25 +2665,49 @@ function App() {
         </div>
       )}
 
-      {/* Tools panel toggle */}
-      <button
-        onClick={() => {
-          setDevtoolsOpen(false);
-          setPanelOpen((o) => !o);
-        }}
+      {/* Right-edge sidebar rail. The Tools panel and the WebKit DevTools
+          panel each get their own toggle here; opening one closes the other.
+          The active toggle hides itself so the panel's own close button
+          remains the only control on screen. */}
+      <div
         style={{
-          ...panelStyles.toggle,
-          opacity: panelOpen ? 0 : 1,
-          pointerEvents: panelOpen ? "none" : "auto",
+          ...sidebarRailStyles.rail,
+          opacity: panelOpen || devtoolsOpen ? 0 : 1,
+          pointerEvents: panelOpen || devtoolsOpen ? "none" : "auto",
         }}
-        aria-label="Open tools panel"
-        title="Open tools"
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="4" width="18" height="16" rx="2.5" />
-          <line x1="15" y1="4" x2="15" y2="20" />
-        </svg>
-      </button>
+        <button
+          onClick={() => {
+            setDevtoolsOpen(false);
+            setPanelOpen((o) => !o);
+          }}
+          style={sidebarRailStyles.button}
+          aria-label="Open tools panel"
+          aria-pressed={panelOpen}
+          title="Tools"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="2.5" />
+            <line x1="15" y1="4" x2="15" y2="20" />
+          </svg>
+        </button>
+        <button
+          onClick={() => {
+            setPanelOpen(false);
+            setDevtoolsOpen((o) => !o);
+          }}
+          style={sidebarRailStyles.button}
+          aria-label="Open WebKit DevTools"
+          aria-pressed={devtoolsOpen}
+          title="WebKit DevTools"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+            <path d="M2 12h20" />
+          </svg>
+        </button>
+      </div>
 
       <ToolsPanel
         open={panelOpen}
@@ -2837,26 +2896,26 @@ const devtoolsStyles: Record<string, CSSProperties> = {
     bottom: 12,
     width: `min(${DEVTOOLS_PANEL_WIDTH}px, calc(100vw - 32px))`,
     minWidth: 0,
-    background: "#111113",
-    border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: 10,
+    background: "rgba(20,20,22,0.92)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 14,
     color: "#eee",
     display: "flex",
     flexDirection: "column",
     overflow: "hidden",
     transition: "transform 0.25s ease, opacity 0.2s ease",
-    boxShadow: "0 12px 40px rgba(0,0,0,0.6)",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
     fontFamily: "-apple-system, system-ui, sans-serif",
-    zIndex: 45,
+    zIndex: 35,
   },
   header: {
-    height: 38,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
-    padding: "0 8px 0 12px",
-    borderBottom: "1px solid rgba(255,255,255,0.08)",
+    padding: "6px 10px 6px 12px",
     flexShrink: 0,
   },
   titleGroup: {
@@ -2866,9 +2925,9 @@ const devtoolsStyles: Record<string, CSSProperties> = {
     minWidth: 0,
   },
   title: {
-    fontSize: 12,
-    fontWeight: 600,
-    color: "rgba(255,255,255,0.82)",
+    fontSize: 11,
+    fontWeight: 500,
+    color: "rgba(255,255,255,0.55)",
     whiteSpace: "nowrap",
   },
   subtitle: {
@@ -3061,6 +3120,38 @@ const devtoolsStyles: Record<string, CSSProperties> = {
     color: "rgba(255,255,255,0.58)",
     textAlign: "center",
     fontSize: 13,
+  },
+};
+
+const sidebarRailStyles: Record<string, CSSProperties> = {
+  rail: {
+    position: "fixed",
+    top: 12,
+    right: 12,
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    padding: 4,
+    background: "rgba(20,20,22,0.8)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 10,
+    backdropFilter: "blur(12px)",
+    WebkitBackdropFilter: "blur(12px)",
+    transition: "opacity 0.18s ease",
+    zIndex: 40,
+  },
+  button: {
+    width: 30,
+    height: 30,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    borderRadius: 6,
+    color: "rgba(255,255,255,0.7)",
+    cursor: "pointer",
+    transition: "background 0.15s ease, color 0.15s ease",
   },
 };
 

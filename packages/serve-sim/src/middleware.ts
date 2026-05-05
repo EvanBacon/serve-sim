@@ -26,6 +26,7 @@ type WebKitBridge = {
   cdpUrl: string;
   listTargets(): Promise<WebKitBridgeTarget[]>;
   highlightTarget?(targetId: string, on: boolean): Promise<void>;
+  releaseHighlight?(targetId?: string): void;
 };
 
 export interface ServeSimState {
@@ -243,6 +244,7 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
               }));
           },
           highlightTarget: server.highlightTarget?.bind(server),
+          releaseHighlight: server.releaseHighlight?.bind(server),
         };
       } catch (err: any) {
         if (err?.code === "EADDRINUSE") {
@@ -396,6 +398,29 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           }));
         }
       })();
+      return;
+    }
+
+    // POST /devtools/release — drop hover-highlight CDP sessions so we don't
+    // sit on a WIR slot when the picker is dismissed (or the tab is closed).
+    // Optional body { targetId } releases just one; empty body releases all.
+    if (url === base + "/devtools/release" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const parsed = body ? JSON.parse(body) as { targetId?: string } : {};
+          const bridge = await ensureInspectWebKitBridge();
+          bridge.releaseHighlight?.(parsed.targetId);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: err instanceof Error ? err.message : "Failed to release",
+          }));
+        }
+      });
       return;
     }
 
