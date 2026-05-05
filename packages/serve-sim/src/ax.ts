@@ -1,5 +1,4 @@
 import { execFile } from "child_process";
-import { promisify } from "util";
 import { AXE_NOT_INSTALLED_ERROR } from "./ax-shared";
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
@@ -10,7 +9,6 @@ const MAX_ELEMENTS = 500;
 const POLL_INTERVAL_MS = 500;
 const MAX_POLL_INTERVAL_MS = 2000;
 const UNAVAILABLE_RETRY_INTERVAL_MS = 15_000;
-const execFileAsync = promisify(execFile);
 
 interface RawAxeNode {
   AXUniqueId: string | null;
@@ -23,12 +21,34 @@ interface RawAxeNode {
   children: RawAxeNode[];
 }
 
-async function execFileText(command: string, args: string[]) {
-  const { stdout } = await execFileAsync(command, args, {
-    timeout: SNAPSHOT_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
+/**
+ * Run a binary and return its stdout as a string. Hand-rolled instead of
+ * `promisify(execFile)` because Bun's promisify wrapper drops stdout/stderr
+ * (returns undefined) — verified against Bun 1.1.x. This callback form works
+ * on both Node and Bun.
+ */
+function execFileText(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      {
+        timeout: SNAPSHOT_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+        encoding: "utf-8",
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const enriched = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+          enriched.stderr = typeof stderr === "string" ? stderr : stderr?.toString?.() ?? "";
+          enriched.stdout = typeof stdout === "string" ? stdout : stdout?.toString?.() ?? "";
+          reject(enriched);
+          return;
+        }
+        resolve(typeof stdout === "string" ? stdout : stdout?.toString?.() ?? "");
+      },
+    );
   });
-  return stdout.toString();
 }
 
 function chooseScreenFrame(roots: RawAxeNode[]) {
