@@ -1,0 +1,47 @@
+{
+  "name": "expo-serve-sim",
+  "version": "0.1.0",
+  "description": "Expo Metro integration for serve-sim.",
+  "type": "module",
+  "author": {
+    "name": "Evan Bacon",
+    "email": "baconbrix@gmail.com",
+    "url": "https://evanbacon.dev"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EvanBacon/serve-sim.git",
+    "directory": "packages/expo-serve-sim"
+  },
+  "homepage": "https://github.com/EvanBacon/serve-sim#readme",
+  "bugs": {
+    "url": "https://github.com/EvanBacon/serve-sim/issues"
+  },
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "src/index.ts",
+  "files": [
+    "dist/index.js",
+    "dist/index.cjs",
+    "src/index.ts",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --target bun --format esm --outfile dist/index.js --external serve-sim/middleware && bun build src/index.ts --target node --format cjs --outfile dist/index.cjs --external serve-sim/middleware"
+  },
+  "dependencies": {
+    "serve-sim": "^0.1.3"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

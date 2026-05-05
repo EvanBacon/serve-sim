@@ -95,31 +95,27 @@ Create a `.claude/launch.json` and define a server:
 
 Automatically start the serve-sim process with `npx expo start` and access the URL at `http://localhost:8081/.sim`.
 
-First, customize the `metro.config.js` file (`bunx expo customize`):
+Install the Expo integration package, customize `metro.config.js` (`bunx expo customize`), and wrap the config with `withSimServe`:
+
+```sh
+npm install --save-dev expo-serve-sim serve-sim
+```
 
 ```js
 // Learn more https://docs.expo.io/guides/customizing-metro
 const { getDefaultConfig } = require("expo/metro-config");
-const connect = require("connect");
-const { simMiddleware } = require("serve-sim/middleware");
+const { withSimServe } = require("expo-serve-sim");
 
 /** @type {import('expo/metro-config').MetroConfig} */
 const config = getDefaultConfig(__dirname);
 
-config.server = config.server || {};
-const originalEnhanceMiddleware = config.server.enhanceMiddleware;
-config.server.enhanceMiddleware = (metroMiddleware, server) => {
-  const middleware = originalEnhanceMiddleware
-    ? originalEnhanceMiddleware(metroMiddleware, server)
-    : metroMiddleware;
-  const app = connect();
-  app.use(simMiddleware({ basePath: "/.sim" }));
-  app.use(middleware);
-  return app;
-};
-
-module.exports = config;
+module.exports = withSimServe(config);
+// or: withSimServe(config, { basePath: "/.sim" })
 ```
+
+`withSimServe` accepts a Metro config and returns the same config with `server.enhanceMiddleware` patched to mount the preview. It composes with any existing `enhanceMiddleware` you've already set.
+
+Start the simulator stream separately with `npx serve-sim --detach`, then run `npx expo start` and open `http://localhost:8081/.sim`.
 
 ## Embed in your dev server
 
