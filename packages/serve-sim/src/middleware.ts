@@ -315,19 +315,6 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           };
           const contentType = upstream.headers.get("content-type");
           if (contentType) headers["Content-Type"] = contentType;
-          // Inject a one-time localStorage preset so the embedded DevTools
-          // boots with the screencast pane collapsed. WebKit doesn't supply
-          // a screencast feed, so the pane is dead space by default.
-          if (assetPath === "inspector.html" && contentType?.includes("text/html")) {
-            const html = await upstream.text();
-            const inject = `<script>try{if(!localStorage.getItem("serve-sim.devtools.bootstrapped")){localStorage.setItem("screencastEnabled","false");localStorage.setItem("serve-sim.devtools.bootstrapped","1")}}catch(e){}</script>`;
-            const patched = /<!DOCTYPE[^>]*>/i.test(html)
-              ? html.replace(/<!DOCTYPE[^>]*>/i, (m) => `${m}${inject}`)
-              : `${inject}${html}`;
-            res.writeHead(upstream.status, headers);
-            res.end(patched);
-            return;
-          }
           res.writeHead(upstream.status, headers);
           res.end(Buffer.from(await upstream.arrayBuffer()));
         } catch (err) {

@@ -397,6 +397,41 @@ function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
   return { targets, cdpUrl, error, loading, refresh };
 }
 
+// WebKit doesn't supply a screencast feed, so the embedded Chrome DevTools'
+// screencast pane is dead space. Click the "Toggle screencast" toolbar button
+// once the iframe loads to collapse it. The button lives inside DevTools'
+// shadow DOM, so we walk shadow roots to find it.
+function collapseScreencastPane(iframe: HTMLIFrameElement) {
+  const root = iframe.contentDocument;
+  if (!root) return;
+  const find = (): HTMLElement | null => {
+    const stack: ParentNode[] = [root];
+    while (stack.length) {
+      const node = stack.pop()!;
+      const candidates = node.querySelectorAll<HTMLElement>("[aria-label],[title]");
+      for (const el of candidates) {
+        const label = el.getAttribute("aria-label") || el.title || "";
+        if (/^toggle screencast$/i.test(label)) return el;
+      }
+      for (const el of node.querySelectorAll<HTMLElement>("*")) {
+        if (el.shadowRoot) stack.push(el.shadowRoot);
+      }
+    }
+    return null;
+  };
+  let attempts = 0;
+  const tick = () => {
+    attempts++;
+    const btn = find();
+    if (btn && btn.getAttribute("aria-pressed") !== "false") {
+      btn.click();
+      return;
+    }
+    if (attempts < 20) setTimeout(tick, 100);
+  };
+  tick();
+}
+
 interface SimDevice {
   udid: string;
   name: string;
@@ -1808,6 +1843,7 @@ function WebKitDevtoolsPanel({
             src={selected.devtoolsFrontendUrl}
             title={`WebKit DevTools - ${selected.title || selected.url || selected.id}`}
             style={devtoolsStyles.iframe}
+            onLoad={(event) => collapseScreencastPane(event.currentTarget)}
           />
         ) : (
           <div style={devtoolsStyles.message}>
