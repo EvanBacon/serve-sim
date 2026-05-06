@@ -84,15 +84,13 @@ function CapacityBanner({ report }: { report: MemoryReport | null }) {
   if (!report || report.totalBytes === 0) return null;
   const { estimatedAdditional, availableBytes, totalBytes, perSimAvgBytes, perSimSource, runningSimulators } = report;
   const usedFraction = Math.max(0, Math.min(1, 1 - availableBytes / totalBytes));
+  const capacity = runningSimulators + estimatedAdditional;
   const dotColor =
     estimatedAdditional === 0 ? "#e66" : estimatedAdditional <= 1 ? "#e9a13b" : "#3b3";
-  const label =
-    estimatedAdditional === 0
-      ? "0 more sims"
-      : `+${estimatedAdditional} sim${estimatedAdditional === 1 ? "" : "s"}`;
-  const tooltip = `${label} fit · ${formatBytes(availableBytes)} free of ${formatBytes(totalBytes)} · ${
+  const label = `${runningSimulators}/${capacity} sims`;
+  const tooltip = `${runningSimulators} running, ~${estimatedAdditional} more fit · ${formatBytes(availableBytes)} free of ${formatBytes(totalBytes)} · ${
     perSimSource === "measured"
-      ? `~${formatBytes(perSimAvgBytes)}/sim across ${runningSimulators} running`
+      ? `~${formatBytes(perSimAvgBytes)}/sim measured`
       : `~${formatBytes(perSimAvgBytes)}/sim (default estimate)`
   }`;
   return (
