@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { AXE_INSTALL_URL, AXE_NOT_INSTALLED_ERROR } from "../ax-shared";
 import type { AxElement, AxRect, AxSnapshot } from "../ax-shared";
+import { groupTargetsByApp } from "../devtools-targets";
 import {
   createContext,
   memo,
@@ -370,7 +371,6 @@ interface WebKitDevtoolsTarget {
 
 interface WebKitDevtoolsResponse {
   port: number;
-  cdpUrl: string;
   targets: WebKitDevtoolsTarget[];
   error?: string;
 }
@@ -386,7 +386,6 @@ async function execOnHost(command: string): Promise<ExecResult> {
 
 function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
   const [targets, setTargets] = useState<WebKitDevtoolsTarget[]>([]);
-  const [cdpUrl, setCdpUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -399,7 +398,6 @@ function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
       const json = (await res.json()) as WebKitDevtoolsResponse;
       if (!res.ok || json.error) throw new Error(json.error || "Failed to list WebKit targets");
       setTargets(json.targets ?? []);
-      setCdpUrl(json.cdpUrl ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start WebKit DevTools");
     } finally {
@@ -414,7 +412,7 @@ function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
     return () => clearInterval(timer);
   }, [enabled, refresh]);
 
-  return { targets, cdpUrl, error, loading, refresh };
+  return { targets, error, loading, refresh };
 }
 
 // WebKit doesn't supply a screencast feed, so the embedded Chrome DevTools'
@@ -452,30 +450,6 @@ function collapseScreencastPane(iframe: HTMLIFrameElement) {
   tick();
 }
 
-// Group inspectable targets by their host application, the way Safari's
-// Develop menu lists pages under the app that owns them. Stable order:
-// groups appear in the order their first target was returned by the bridge.
-function groupTargetsByApp(targets: WebKitDevtoolsTarget[]): Array<{
-  key: string;
-  appName: string;
-  bundleId?: string;
-  targets: WebKitDevtoolsTarget[];
-}> {
-  const order: string[] = [];
-  const groups = new Map<string, { key: string; appName: string; bundleId?: string; targets: WebKitDevtoolsTarget[] }>();
-  for (const target of targets) {
-    const appName = target.appName || target.bundleId || "Unknown";
-    const key = target.bundleId || appName;
-    let group = groups.get(key);
-    if (!group) {
-      group = { key, appName, bundleId: target.bundleId, targets: [] };
-      groups.set(key, group);
-      order.push(key);
-    }
-    group.targets.push(target);
-  }
-  return order.map((key) => groups.get(key)!);
-}
 
 // Process-wide icon cache — keyed by udid:bundleId so a switch between
 // devices doesn't reuse stale art. Values are pending fetches OR resolved
@@ -503,7 +477,8 @@ function fetchAppIcon(udid: string, bundleId: string): Promise<string | null> {
 function useAppIcons(udid: string | null | undefined, bundleIds: string[]) {
   const [icons, setIcons] = useState<Record<string, string | null>>({});
   // Stable key so the effect re-runs only when the *set* of bundle ids changes.
-  const sig = bundleIds.slice().sort().join("|");
+  // Memoize so the sort doesn't run on every render.
+  const sig = useMemo(() => bundleIds.slice().sort().join("|"), [bundleIds]);
   useEffect(() => {
     if (!udid) return;
     let cancelled = false;
@@ -2045,7 +2020,6 @@ function WebKitDevtoolsPanel({
   targets,
   selectedTargetId,
   onSelectTarget,
-  cdpUrl,
   loading,
   error,
   onRefresh,
@@ -2056,7 +2030,6 @@ function WebKitDevtoolsPanel({
   targets: WebKitDevtoolsTarget[];
   selectedTargetId: string | null;
   onSelectTarget: (id: string) => void;
-  cdpUrl: string | null;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
@@ -2730,7 +2703,6 @@ function App() {
         targets={devtools.targets}
         selectedTargetId={selectedDevtoolsTargetId}
         onSelectTarget={setSelectedDevtoolsTargetId}
-        cdpUrl={devtools.cdpUrl}
         loading={devtools.loading}
         error={devtools.error}
         onRefresh={() => void devtools.refresh()}

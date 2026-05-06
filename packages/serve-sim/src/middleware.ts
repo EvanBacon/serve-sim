@@ -18,6 +18,8 @@ type WebKitBridgeTarget = {
   type: string;
   appName?: string;
   bundleId?: string;
+  /** udid of the simulator hosting the target, when known. */
+  udid?: string;
   inUseByOtherInspector?: boolean;
 };
 
@@ -191,6 +193,10 @@ async function existingInspectWebKitBridge(port: number): Promise<WebKitBridge |
       port,
       cdpUrl,
       async listTargets() {
+        // Hitting the bridge over HTTP loses the rich fields available to
+        // an in-process consumer (appName, inUseByOtherInspector). The id
+        // shape `sim:<udid>:<appId>:<pageId>` and the description string
+        // `<deviceLabel> (<bundleId>)` are all we have here.
         const listRes = await fetch(`${cdpUrl}/json/list`);
         const targets = await listRes.json() as Array<{
           id: string;
@@ -201,13 +207,19 @@ async function existingInspectWebKitBridge(port: number): Promise<WebKitBridge |
         }>;
         return targets
           .filter((target) => target.id.startsWith("sim:"))
-          .map((target) => ({
-            id: target.id,
-            title: target.title || target.url || "Untitled",
-            url: /^https?:/i.test(target.url) ? target.url : "about:blank",
-            type: target.type || "page",
-            bundleId: target.description?.match(/\(([^)]+)\)/)?.[1],
-          }));
+          .map((target) => {
+            const idParts = target.id.split(":");
+            const udid = idParts[1];
+            const bundleId = target.description?.match(/\(([^)]+)\)/)?.[1];
+            return {
+              id: target.id,
+              title: target.title || target.url || "Untitled",
+              url: /^https?:/i.test(target.url) ? target.url : "about:blank",
+              type: target.type || "page",
+              udid,
+              bundleId,
+            };
+          });
       },
     };
   } catch {
@@ -216,7 +228,15 @@ async function existingInspectWebKitBridge(port: number): Promise<WebKitBridge |
 }
 
 async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
-  if (inspectWebKitBridge) return inspectWebKitBridge;
+  if (inspectWebKitBridge) {
+    try {
+      // Probe so a dead bridge gets retired instead of poisoning every call.
+      await (await inspectWebKitBridge).listTargets();
+      return inspectWebKitBridge;
+    } catch {
+      inspectWebKitBridge = null;
+    }
+  }
   inspectWebKitBridge = (async () => {
     const { startCdpServer } = await import("inspect-webkit");
     for (let port = INSPECT_WEBKIT_START_PORT; port < INSPECT_WEBKIT_START_PORT + 50; port++) {
@@ -240,6 +260,7 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
                 type: target.type || "page",
                 appName: target.appName,
                 bundleId: target.bundleId,
+                udid: target.source?.id,
                 inUseByOtherInspector: !!target.inUseByOtherInspector,
               }));
           },
@@ -263,10 +284,20 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
   return inspectWebKitBridge;
 }
 
-function devtoolsFrontendUrl(frontendBase: string, cdpPort: number, targetId: string): string {
+function devtoolsFrontendUrl(frontendBase: string, wsHost: string, targetId: string): string {
   const url = new URL(`${frontendBase}/inspector.html`, "http://serve-sim.local");
-  url.searchParams.set("ws", `127.0.0.1:${cdpPort}/devtools/page/${targetId}`);
+  url.searchParams.set("ws", `${wsHost}/devtools/page/${targetId}`);
   return `${url.pathname}${url.search}`;
+}
+
+// The inspect-webkit bridge binds to localhost only. When the preview is
+// loaded from a different hostname (e.g. another device on the LAN), strip
+// to the request's hostname-less form `localhost:<port>` so the iframe at
+// least tries the right port; document the limitation in the README.
+function bridgeWsHost(reqHost: string | undefined, bridgePort: number): string {
+  const hostname = (reqHost ?? "localhost").split(":")[0];
+  const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  return `${isLocal ? hostname : "localhost"}:${bridgePort}`;
 }
 
 let _html: string | null = null;
@@ -312,6 +343,12 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         const assetPath = url === devtoolsFrontendBase
           ? "inspector.html"
           : url.slice(devtoolsFrontendBase.length + 1);
+        // Reject path-traversal segments before they reach the upstream URL.
+        if (assetPath.split("/").some((seg) => seg === "..")) {
+          res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Invalid asset path");
+          return;
+        }
         try {
           const upstream = await fetch(
             `https://chrome-devtools-frontend.appspot.com/serve_rev/@${DEVTOOLS_FRONTEND_REV}/${assetPath}${qIndex === -1 ? "" : rawUrl.slice(qIndex)}`,
@@ -377,10 +414,19 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         try {
           const bridge = await ensureInspectWebKitBridge();
           const bridgeTargets = await bridge.listTargets();
-          const targets = bridgeTargets.map((target) => ({
+          const wsHost = bridgeWsHost(req.headers?.host, bridge.port);
+          // The bridge enumerates targets across every booted simulator.
+          // Filter to the device this preview is pinned to so the picker
+          // doesn't surface webviews that belong to a different sim.
+          const scoped = bridgeTargets.filter((target) =>
+            // If we couldn't resolve a udid (e.g. degraded HTTP path), keep
+            // the target rather than dropping it silently.
+            !target.udid || target.udid === state.device,
+          );
+          const targets = scoped.map((target) => ({
             ...target,
-            webSocketDebuggerUrl: `ws://localhost:${bridge.port}/devtools/page/${encodeURIComponent(target.id)}`,
-            devtoolsFrontendUrl: devtoolsFrontendUrl(devtoolsFrontendBase, bridge.port, target.id),
+            webSocketDebuggerUrl: `ws://${wsHost}/devtools/page/${encodeURIComponent(target.id)}`,
+            devtoolsFrontendUrl: devtoolsFrontendUrl(devtoolsFrontendBase, wsHost, target.id),
           }));
           res.writeHead(200, {
             "Content-Type": "application/json",
@@ -388,7 +434,6 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           });
           res.end(JSON.stringify({
             port: bridge.port,
-            cdpUrl: bridge.cdpUrl,
             targets,
           }));
         } catch (err) {
