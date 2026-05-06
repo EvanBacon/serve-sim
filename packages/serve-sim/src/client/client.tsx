@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { AXE_INSTALL_URL, AXE_NOT_INSTALLED_ERROR } from "../ax-shared";
 import type { AxElement, AxRect, AxSnapshot } from "../ax-shared";
+import { groupTargetsByApp } from "../devtools-targets";
 import {
   createContext,
   memo,
@@ -214,6 +215,7 @@ declare global {
       logsEndpoint?: string;
       axEndpoint?: string;
       appStateEndpoint?: string;
+      devtoolsEndpoint?: string;
     };
   }
 }
@@ -225,6 +227,25 @@ function simEndpoint(path: string): string {
 
 function isAxeUnavailable(snapshot: AxSnapshot | null) {
   return snapshot?.errors?.includes(AXE_NOT_INSTALLED_ERROR) ?? false;
+}
+
+function ReloadIcon({ size = 18, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  );
 }
 
 function useAxSnapshot(endpoint?: string) {
@@ -336,6 +357,24 @@ function AxStateProvider({
 
 interface ExecResult { stdout: string; stderr: string; exitCode: number }
 
+interface WebKitDevtoolsTarget {
+  id: string;
+  title: string;
+  url: string;
+  type: string;
+  appName?: string;
+  bundleId?: string;
+  webSocketDebuggerUrl: string;
+  devtoolsFrontendUrl: string;
+  inUseByOtherInspector?: boolean;
+}
+
+interface WebKitDevtoolsResponse {
+  port: number;
+  targets: WebKitDevtoolsTarget[];
+  error?: string;
+}
+
 async function execOnHost(command: string): Promise<ExecResult> {
   const res = await fetch(simEndpoint("exec"), {
     method: "POST",
@@ -343,6 +382,311 @@ async function execOnHost(command: string): Promise<ExecResult> {
     body: JSON.stringify({ command }),
   });
   return res.json();
+}
+
+function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
+  const [targets, setTargets] = useState<WebKitDevtoolsTarget[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!endpoint) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(endpoint, { cache: "no-store" });
+      const json = (await res.json()) as WebKitDevtoolsResponse;
+      if (!res.ok || json.error) throw new Error(json.error || "Failed to list WebKit targets");
+      setTargets(json.targets ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start WebKit DevTools");
+    } finally {
+      setLoading(false);
+    }
+  }, [endpoint]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    void refresh();
+    const timer = setInterval(() => void refresh(), 2500);
+    return () => clearInterval(timer);
+  }, [enabled, refresh]);
+
+  return { targets, error, loading, refresh };
+}
+
+// WebKit doesn't supply a screencast feed, so the embedded Chrome DevTools'
+// screencast pane is dead space. Click the "Toggle screencast" toolbar button
+// once the iframe loads to collapse it. The button lives inside DevTools'
+// shadow DOM, so we walk shadow roots to find it.
+function collapseScreencastPane(iframe: HTMLIFrameElement) {
+  const root = iframe.contentDocument;
+  if (!root) return;
+  const find = (): HTMLElement | null => {
+    const stack: ParentNode[] = [root];
+    while (stack.length) {
+      const node = stack.pop()!;
+      const candidates = node.querySelectorAll<HTMLElement>("[aria-label],[title]");
+      for (const el of candidates) {
+        const label = el.getAttribute("aria-label") || el.title || "";
+        if (/^toggle screencast$/i.test(label)) return el;
+      }
+      for (const el of node.querySelectorAll<HTMLElement>("*")) {
+        if (el.shadowRoot) stack.push(el.shadowRoot);
+      }
+    }
+    return null;
+  };
+  let attempts = 0;
+  const tick = () => {
+    attempts++;
+    const btn = find();
+    if (btn && btn.getAttribute("aria-pressed") !== "false") {
+      btn.click();
+      return;
+    }
+    if (attempts < 20) setTimeout(tick, 100);
+  };
+  tick();
+}
+
+
+// Process-wide icon cache — keyed by udid:bundleId so a switch between
+// devices doesn't reuse stale art. Values are pending fetches OR resolved
+// data URLs (or null when no icon could be located).
+const appIconCache = new Map<string, Promise<string | null> | string | null>();
+
+function fetchAppIcon(udid: string, bundleId: string): Promise<string | null> {
+  const key = `${udid}:${bundleId}`;
+  const existing = appIconCache.get(key);
+  if (existing !== undefined) {
+    return Promise.resolve(existing as string | null | Promise<string | null>);
+  }
+  const pending = fetchAppDetails(execOnHost, udid, bundleId).then((d) => {
+    const url = d.iconDataUrl ?? null;
+    appIconCache.set(key, url);
+    return url;
+  }).catch(() => {
+    appIconCache.set(key, null);
+    return null;
+  });
+  appIconCache.set(key, pending);
+  return pending;
+}
+
+function useAppIcons(udid: string | null | undefined, bundleIds: string[]) {
+  const [icons, setIcons] = useState<Record<string, string | null>>({});
+  // Stable key so the effect re-runs only when the *set* of bundle ids changes.
+  // Memoize so the sort doesn't run on every render.
+  const sig = useMemo(() => bundleIds.slice().sort().join("|"), [bundleIds]);
+  useEffect(() => {
+    if (!udid) return;
+    let cancelled = false;
+    for (const bundleId of bundleIds) {
+      if (!bundleId) continue;
+      const cacheKey = `${udid}:${bundleId}`;
+      const cached = appIconCache.get(cacheKey);
+      if (typeof cached === "string" || cached === null) {
+        setIcons((prev) => (prev[bundleId] === cached ? prev : { ...prev, [bundleId]: cached as string | null }));
+        continue;
+      }
+      void fetchAppIcon(udid, bundleId).then((url) => {
+        if (cancelled) return;
+        setIcons((prev) => ({ ...prev, [bundleId]: url }));
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [udid, sig]);
+  return icons;
+}
+
+// Fire-and-forget highlight nudge — mirrors Safari's Develop menu hover. The
+// caller doesn't await so cursor latency stays at zero; failures are silent.
+function postHighlightTarget(targetId: string, on: boolean) {
+  void fetch(simEndpoint("devtools/highlight"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetId, on }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+// Tell the bridge to drop any cached hover sessions for this picker. Called
+// on close / unmount / pagehide so we don't camp on a WIR slot the user no
+// longer cares about. `sendBeacon` survives pagehide where `fetch` may not.
+function postReleaseHighlights() {
+  const url = simEndpoint("devtools/release");
+  try {
+    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+      const blob = new Blob(["{}"], { type: "application/json" });
+      if (navigator.sendBeacon(url, blob)) return;
+    }
+  } catch {}
+  void fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function WebKitTargetPicker({
+  udid,
+  targets,
+  selected,
+  onSelectTarget,
+  onRefresh,
+}: {
+  udid: string;
+  targets: WebKitDevtoolsTarget[];
+  selected: WebKitDevtoolsTarget | null;
+  onSelectTarget: (id: string) => void;
+  onRefresh: () => void;
+}) {
+  const groups = groupTargetsByApp(targets);
+  const bundleIds = groups.map((g) => g.bundleId).filter((id): id is string => !!id);
+  const icons = useAppIcons(udid, bundleIds);
+  const [open, setOpen] = useState(false);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const hoveredRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Clicking outside closes the popover. Listening on document captures
+  // strays without forcing every row to swallow events.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  // Cancel any lingering highlight when the popover closes (or unmounts).
+  // Also drop the underlying CDP sessions: hovering opens a debugger socket
+  // per target, and a hovered-but-never-selected page would otherwise stay
+  // on the WIR slot until the idle timer fires.
+  useEffect(() => {
+    if (open) return;
+    if (hoveredRef.current) {
+      postHighlightTarget(hoveredRef.current, false);
+      hoveredRef.current = null;
+    }
+    postReleaseHighlights();
+  }, [open]);
+
+  // Best-effort cleanup if the page itself goes away (tab close, navigation).
+  useEffect(() => {
+    const onLeave = () => postReleaseHighlights();
+    window.addEventListener("pagehide", onLeave);
+    window.addEventListener("beforeunload", onLeave);
+    return () => {
+      window.removeEventListener("pagehide", onLeave);
+      window.removeEventListener("beforeunload", onLeave);
+    };
+  }, []);
+
+  const label = selected
+    ? (selected.title || selected.url || selected.appName || "Untitled").slice(0, 90)
+    : "Select target";
+
+  return (
+    <div ref={containerRef} style={devtoolsStyles.pickerWrap}>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen((wasOpen) => {
+            // Revalidate the listing when the popover is about to open. The
+            // bridge polls in the background, but a fresh request makes sure
+            // newly-launched (or just-closed) pages show up immediately.
+            if (!wasOpen) onRefresh();
+            return !wasOpen;
+          });
+        }}
+        style={devtoolsStyles.pickerButton}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="WebKit target"
+      >
+        <span style={devtoolsStyles.pickerLabel}>{label}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <ul role="listbox" style={devtoolsStyles.pickerList}>
+          {groups.map((group) => {
+            const iconUrl = group.bundleId ? icons[group.bundleId] : null;
+            return (
+            <li key={group.key} style={devtoolsStyles.pickerGroup}>
+              <div style={devtoolsStyles.pickerGroupHeader}>
+                {iconUrl ? (
+                  <img src={iconUrl} alt="" style={devtoolsStyles.pickerGroupIconImg} />
+                ) : (
+                  <span style={devtoolsStyles.pickerGroupIconImg} aria-hidden="true" />
+                )}
+                <span style={devtoolsStyles.pickerGroupName}>{group.appName}</span>
+              </div>
+              <ul role="group" style={devtoolsStyles.pickerGroupList}>
+                {group.targets.map((target) => {
+                  const isSelected = selected?.id === target.id;
+                  const isDisabled = !!target.inUseByOtherInspector && !isSelected;
+                  const title = (target.title || target.url || target.appName || "Untitled").slice(0, 90);
+                  return (
+                    <li
+                      key={target.id}
+                      role="option"
+                      aria-selected={isSelected}
+                      aria-disabled={isDisabled}
+                      tabIndex={isDisabled ? -1 : 0}
+                      title={isDisabled ? "Already being inspected by another debugger" : undefined}
+                      onMouseEnter={() => {
+                        if (isDisabled) return;
+                        if (hoveredRef.current && hoveredRef.current !== target.id) {
+                          postHighlightTarget(hoveredRef.current, false);
+                        }
+                        hoveredRef.current = target.id;
+                        setHoveredId(target.id);
+                        postHighlightTarget(target.id, true);
+                      }}
+                      onMouseLeave={() => {
+                        if (hoveredRef.current === target.id) {
+                          postHighlightTarget(target.id, false);
+                          hoveredRef.current = null;
+                        }
+                        setHoveredId((prev) => (prev === target.id ? null : prev));
+                      }}
+                      onClick={() => {
+                        if (isDisabled) return;
+                        onSelectTarget(target.id);
+                        setOpen(false);
+                      }}
+                      style={{
+                        ...devtoolsStyles.pickerItem,
+                        ...(isSelected ? devtoolsStyles.pickerItemSelected : null),
+                        ...(hoveredId === target.id && !isDisabled ? devtoolsStyles.pickerItemHovered : null),
+                        ...(isDisabled ? devtoolsStyles.pickerItemDisabled : null),
+                      }}
+                    >
+                      <span style={devtoolsStyles.pickerItemTitle}>{title}</span>
+                      {target.url && target.url !== "about:blank" && (
+                        <span style={devtoolsStyles.pickerItemUrl}>{target.url}</span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 interface SimDevice {
@@ -1104,10 +1448,7 @@ function AppPermissionsTool({
                   variant="reset"
                   title="Reset"
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 12a9 9 0 1 0 3.5-7.1" />
-                    <polyline points="3 3 3 9 9 9" />
-                  </svg>
+                  <ReloadIcon size={11} strokeWidth={2.4} />
                 </PermBtn>
               </div>
             </div>
@@ -1672,6 +2013,90 @@ function ToolsPanel({
   );
 }
 
+function WebKitDevtoolsPanel({
+  open,
+  onClose,
+  udid,
+  targets,
+  selectedTargetId,
+  onSelectTarget,
+  loading,
+  error,
+  onRefresh,
+}: {
+  open: boolean;
+  onClose: () => void;
+  udid: string;
+  targets: WebKitDevtoolsTarget[];
+  selectedTargetId: string | null;
+  onSelectTarget: (id: string) => void;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const selected = selectedTargetId
+    ? targets.find((target) => target.id === selectedTargetId) ?? null
+    : null;
+
+  return (
+    <aside
+      style={{
+        ...devtoolsStyles.panel,
+        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
+        opacity: open ? 1 : 0,
+        pointerEvents: open ? "auto" : "none",
+      }}
+      aria-hidden={!open}
+    >
+      <header style={devtoolsStyles.header}>
+        {targets.length > 0 ? (
+          <WebKitTargetPicker
+            udid={udid}
+            targets={targets}
+            selected={selected}
+            onSelectTarget={onSelectTarget}
+            onRefresh={onRefresh}
+          />
+        ) : (
+          <span style={devtoolsStyles.emptyTarget}>
+            {loading ? "Looking for Safari and inspectable webviews..." : "No inspectable Safari or WKWebView targets"}
+          </span>
+        )}
+        <button onClick={onClose} style={devtoolsStyles.iconButton} aria-label="Close WebKit DevTools" title="Close">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </header>
+
+      <div style={devtoolsStyles.frameWrap}>
+        {error ? (
+          <div style={devtoolsStyles.message}>{error}</div>
+        ) : selected && open ? (
+          // Mount the iframe only while the panel is visible. Unmounting tears
+          // down the WebSocket so WIR releases the page; otherwise we'd hold
+          // the inspector connection forever and block other debuggers (Safari
+          // Develop menu, chrome://inspect, …) from attaching.
+          <iframe
+            key={selected.id}
+            src={selected.devtoolsFrontendUrl}
+            title={`WebKit DevTools - ${selected.title || selected.url || selected.id}`}
+            style={devtoolsStyles.iframe}
+            onLoad={(event) => collapseScreencastPane(event.currentTarget)}
+          />
+        ) : (
+          <div style={devtoolsStyles.message}>
+            {selected
+              ? "DevTools paused — open the panel to reattach."
+              : "Open Safari or an inspectable WKWebView in the simulator."}
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 const bootListStyle: CSSProperties = {
   width: "100%",
   maxWidth: 360,
@@ -1700,6 +2125,8 @@ function App() {
   const [stoppingUdids, setStoppingUdids] = useState<Set<string>>(new Set());
   const [switching, setSwitching] = useState(false);
   const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
+  const [devtoolsOpen, setDevtoolsOpen] = useState(false);
+  const [selectedDevtoolsTargetId, setSelectedDevtoolsTargetId] = useState<string | null>(null);
 
   const fetchDevices = useCallback(async () => {
     setDevicesLoading(true);
@@ -1807,6 +2234,20 @@ function App() {
   }, [selectedDevice?.name]);
 
   const deviceType: DeviceType = getDeviceType(selectedDevice?.name);
+  const devtools = useWebKitDevtools(config.devtoolsEndpoint ?? simEndpoint("devtools"), devtoolsOpen);
+
+  useEffect(() => {
+    if (!devtoolsOpen) return;
+    if (selectedDevtoolsTargetId && devtools.targets.some((target) => target.id === selectedDevtoolsTargetId)) return;
+    // Only auto-pick when there's no ambiguity (single inspectable target).
+    // Otherwise let the user choose explicitly so we don't surprise them by
+    // attaching to one app's webview when several are inspectable.
+    setSelectedDevtoolsTargetId(devtools.targets.length === 1 ? devtools.targets[0].id : null);
+  }, [devtoolsOpen, devtools.targets, selectedDevtoolsTargetId]);
+
+  useEffect(() => {
+    setSelectedDevtoolsTargetId(null);
+  }, [config.device]);
 
   // Parse MJPEG stream into individual frames (Chrome doesn't support multipart/x-mixed-replace in <img>)
   const mjpeg = useMjpegStream(config.streamUrl);
@@ -2079,9 +2520,10 @@ function App() {
   // When the tools panel is open and the viewport has room, shift the
   // simulator left so it stays centered in the visible (non-panel) area.
   // PANEL_WIDTH is the panel itself; +24 covers its right offset + a gap.
-  const PANEL_TOTAL = PANEL_WIDTH + 24;
+  const DEVTOOLS_TOTAL = DEVTOOLS_PANEL_WIDTH + 24;
+  const PANEL_TOTAL = (devtoolsOpen ? DEVTOOLS_TOTAL : panelOpen ? PANEL_WIDTH + 24 : 0);
   const shiftForPanel =
-    panelOpen && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
+    PANEL_TOTAL > 0 && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
       ? PANEL_TOTAL
       : 0;
 
@@ -2127,10 +2569,7 @@ function App() {
                 title="Reload (Cmd+R)"
                 onClick={() => void sendReactNativeReload()}
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 1 0 3.5-7.1" />
-                  <polyline points="3 3 3 9 9 9" />
-                </svg>
+                <ReloadIcon />
               </SimulatorToolbar.Button>
             )}
             <SimulatorToolbar.HomeButton
@@ -2204,22 +2643,49 @@ function App() {
         </div>
       )}
 
-      {/* Tools panel toggle */}
-      <button
-        onClick={() => setPanelOpen((o) => !o)}
+      {/* Right-edge sidebar rail. The Tools panel and the WebKit DevTools
+          panel each get their own toggle here; opening one closes the other.
+          The active toggle hides itself so the panel's own close button
+          remains the only control on screen. */}
+      <div
         style={{
-          ...panelStyles.toggle,
-          opacity: panelOpen ? 0 : 1,
-          pointerEvents: panelOpen ? "none" : "auto",
+          ...sidebarRailStyles.rail,
+          opacity: panelOpen || devtoolsOpen ? 0 : 1,
+          pointerEvents: panelOpen || devtoolsOpen ? "none" : "auto",
         }}
-        aria-label="Open tools panel"
-        title="Open tools"
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="4" width="18" height="16" rx="2.5" />
-          <line x1="15" y1="4" x2="15" y2="20" />
-        </svg>
-      </button>
+        <button
+          onClick={() => {
+            setDevtoolsOpen(false);
+            setPanelOpen((o) => !o);
+          }}
+          style={sidebarRailStyles.button}
+          aria-label="Open tools panel"
+          aria-pressed={panelOpen}
+          title="Tools"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="2.5" />
+            <line x1="15" y1="4" x2="15" y2="20" />
+          </svg>
+        </button>
+        <button
+          onClick={() => {
+            setPanelOpen(false);
+            setDevtoolsOpen((o) => !o);
+          }}
+          style={sidebarRailStyles.button}
+          aria-label="Open WebKit DevTools"
+          aria-pressed={devtoolsOpen}
+          title="WebKit DevTools"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+            <path d="M2 12h20" />
+          </svg>
+        </button>
+      </div>
 
       <ToolsPanel
         open={panelOpen}
@@ -2228,6 +2694,18 @@ function App() {
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+      />
+
+      <WebKitDevtoolsPanel
+        open={devtoolsOpen}
+        onClose={() => setDevtoolsOpen(false)}
+        udid={config.device}
+        targets={devtools.targets}
+        selectedTargetId={selectedDevtoolsTargetId}
+        onSelectTarget={setSelectedDevtoolsTargetId}
+        loading={devtools.loading}
+        error={devtools.error}
+        onRefresh={() => void devtools.refresh()}
       />
 
       {/* Status bar */}
@@ -2385,6 +2863,274 @@ const pickerGroupHeaderStyle: CSSProperties = {
 };
 
 const PANEL_WIDTH = 320;
+const DEVTOOLS_PANEL_WIDTH = 760;
+
+const devtoolsStyles: Record<string, CSSProperties> = {
+  panel: {
+    position: "fixed",
+    top: 12,
+    right: 12,
+    bottom: 12,
+    width: `min(${DEVTOOLS_PANEL_WIDTH}px, calc(100vw - 32px))`,
+    minWidth: 0,
+    background: "rgba(20,20,22,0.92)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 14,
+    color: "#eee",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    transition: "transform 0.25s ease, opacity 0.2s ease",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    fontFamily: "-apple-system, system-ui, sans-serif",
+    zIndex: 35,
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: "6px 10px 6px 12px",
+    flexShrink: 0,
+  },
+  titleGroup: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: 8,
+    minWidth: 0,
+  },
+  title: {
+    fontSize: 11,
+    fontWeight: 500,
+    color: "rgba(255,255,255,0.55)",
+    whiteSpace: "nowrap",
+  },
+  subtitle: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.38)",
+    fontFamily: "ui-monospace, monospace",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  headerActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 4,
+    flexShrink: 0,
+  },
+  iconButton: {
+    width: 26,
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    color: "rgba(255,255,255,0.68)",
+    borderRadius: 5,
+    cursor: "pointer",
+    padding: 0,
+  },
+  targetBar: {
+    minHeight: 36,
+    display: "flex",
+    alignItems: "center",
+    padding: "6px 8px",
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+    flexShrink: 0,
+  },
+  select: {
+    width: "100%",
+    minWidth: 0,
+    height: 26,
+    background: "#1c1c1e",
+    color: "#eee",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 6,
+    fontSize: 12,
+    padding: "0 8px",
+    outline: "none",
+  },
+  pickerWrap: {
+    position: "relative",
+    width: "100%",
+    minWidth: 0,
+  },
+  pickerButton: {
+    width: "100%",
+    minWidth: 0,
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    background: "#1c1c1e",
+    color: "#eee",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 6,
+    fontSize: 12,
+    padding: "0 8px",
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  pickerLabel: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
+  },
+  pickerList: {
+    position: "absolute",
+    top: "calc(100% + 4px)",
+    left: 0,
+    margin: 0,
+    padding: 4,
+    listStyle: "none",
+    background: "#1c1c1e",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 8,
+    boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+    minWidth: 220,
+    maxWidth: 360,
+    maxHeight: 320,
+    overflowY: "auto",
+    zIndex: 50,
+  },
+  pickerItem: {
+    display: "flex",
+    flexDirection: "column",
+    padding: "3px 8px",
+    borderRadius: 4,
+    cursor: "pointer",
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 12,
+    lineHeight: 1.35,
+  },
+  pickerItemSelected: {
+    background: "rgba(255,255,255,0.06)",
+  },
+  pickerItemHovered: {
+    background: "rgba(10,132,255,0.22)",
+  },
+  pickerItemDisabled: {
+    opacity: 0.4,
+    cursor: "not-allowed",
+    fontStyle: "italic",
+  },
+  pickerGroup: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+  },
+  pickerGroupHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "4px 6px 2px",
+    fontSize: 12,
+    fontWeight: 600,
+    color: "rgba(255,255,255,0.92)",
+  },
+  pickerGroupIconImg: {
+    width: 16,
+    height: 16,
+    borderRadius: 3,
+    flexShrink: 0,
+    objectFit: "cover",
+  },
+  pickerGroupName: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  pickerGroupList: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+    paddingLeft: 26,
+  },
+  pickerItemTitle: {
+    display: "block",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  pickerItemUrl: {
+    display: "block",
+    fontFamily: "ui-monospace, monospace",
+    fontSize: 10,
+    color: "rgba(255,255,255,0.42)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  emptyTarget: {
+    color: "rgba(255,255,255,0.48)",
+    fontSize: 12,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  frameWrap: {
+    flex: 1,
+    minHeight: 0,
+    background: "#fff",
+    position: "relative",
+  },
+  iframe: {
+    width: "100%",
+    height: "100%",
+    border: "none",
+    display: "block",
+    background: "#fff",
+  },
+  message: {
+    height: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    background: "#111113",
+    color: "rgba(255,255,255,0.58)",
+    textAlign: "center",
+    fontSize: 13,
+  },
+};
+
+const sidebarRailStyles: Record<string, CSSProperties> = {
+  rail: {
+    position: "fixed",
+    top: 12,
+    right: 12,
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    padding: 4,
+    background: "rgba(20,20,22,0.8)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 10,
+    backdropFilter: "blur(12px)",
+    WebkitBackdropFilter: "blur(12px)",
+    transition: "opacity 0.18s ease",
+    zIndex: 40,
+  },
+  button: {
+    width: 30,
+    height: 30,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "none",
+    borderRadius: 6,
+    color: "rgba(255,255,255,0.7)",
+    cursor: "pointer",
+    transition: "background 0.15s ease, color 0.15s ease",
+  },
+};
 
 const panelStyles: Record<string, CSSProperties> = {
   toggle: {

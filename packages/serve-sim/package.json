@@ -56,5 +56,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "inspect-webkit": "^0.0.3"
   }
 }

@@ -93,7 +93,7 @@ const mwResult = await Bun.build({
   format: "esm",
   minify: true,
   outdir: distDir,
-  external: ["fs", "path", "os", "child_process", "url"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module"],
   define: PREVIEW_DEFINE,
 });
 if (!mwResult.success) {
@@ -119,7 +119,7 @@ const binJsResult = await Bun.build({
   minify: true,
   outdir: distDir,
   naming: "serve-sim.js",
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module"],
   define: PREVIEW_DEFINE,
 });
 if (!binJsResult.success) {
