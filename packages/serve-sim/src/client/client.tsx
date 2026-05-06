@@ -1971,6 +1971,8 @@ function ToolsPanel({
   currentApp,
   axOverlayEnabled,
   onToggleAxOverlay,
+  simulatorScale,
+  onSimulatorScaleChange,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1978,6 +1980,8 @@ function ToolsPanel({
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
   axOverlayEnabled: boolean;
   onToggleAxOverlay: () => void;
+  simulatorScale: number;
+  onSimulatorScaleChange: (scale: number) => void;
 }) {
   return (
     <aside
@@ -2005,11 +2009,62 @@ function ToolsPanel({
             overlayEnabled={axOverlayEnabled}
             onToggleOverlay={onToggleAxOverlay}
           />
+          <SimulatorScaleTool
+            scale={simulatorScale}
+            onScaleChange={onSimulatorScaleChange}
+          />
           <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
         </div>
       )}
     </aside>
+  );
+}
+
+function SimulatorScaleTool({
+  scale,
+  onScaleChange,
+}: {
+  scale: number;
+  onScaleChange: (scale: number) => void;
+}) {
+  const decreaseDisabled = scale <= SIMULATOR_SCALE_MIN;
+  const increaseDisabled = scale >= SIMULATOR_SCALE_MAX;
+
+  return (
+    <section style={panelStyles.section}>
+      <div style={panelStyles.scaleHeader}>
+        <span style={{ ...panelStyles.sectionTitle, margin: 0 }}>Scale</span>
+        <div style={panelStyles.scaleStepper}>
+          <button
+            type="button"
+            style={{
+              ...panelStyles.scaleStepButton,
+              borderRight: "1px solid rgba(255,255,255,0.08)",
+              ...(decreaseDisabled ? panelStyles.scaleStepButtonDisabled : {}),
+            }}
+            disabled={decreaseDisabled}
+            aria-label="Decrease simulator scale"
+            onClick={() => onScaleChange(clampSimulatorScale(scale - SIMULATOR_SCALE_STEP))}
+          >
+            −
+          </button>
+          <span style={panelStyles.scaleValue}>{formatSimulatorScale(scale)}</span>
+          <button
+            type="button"
+            style={{
+              ...panelStyles.scaleStepButton,
+              ...(increaseDisabled ? panelStyles.scaleStepButtonDisabled : {}),
+            }}
+            disabled={increaseDisabled}
+            aria-label="Increase simulator scale"
+            onClick={() => onScaleChange(clampSimulatorScale(scale + SIMULATOR_SCALE_STEP))}
+          >
+            +
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -2351,6 +2406,7 @@ function App() {
   // Without this, the reload button flickers while an RN app is still loading.
   const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean; pid?: number } | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [simulatorScale, setSimulatorScale] = useState(1);
   const [viewportWidth, setViewportWidth] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 0),
   );
@@ -2522,8 +2578,9 @@ function App() {
   // PANEL_WIDTH is the panel itself; +24 covers its right offset + a gap.
   const DEVTOOLS_TOTAL = DEVTOOLS_PANEL_WIDTH + 24;
   const PANEL_TOTAL = (devtoolsOpen ? DEVTOOLS_TOTAL : panelOpen ? PANEL_WIDTH + 24 : 0);
+  const scaledFrameMaxWidth = frameMaxWidth * simulatorScale;
   const shiftForPanel =
-    PANEL_TOTAL > 0 && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
+    PANEL_TOTAL > 0 && viewportWidth >= scaledFrameMaxWidth + PANEL_TOTAL + 64
       ? PANEL_TOTAL
       : 0;
 
@@ -2539,7 +2596,7 @@ function App() {
       <div
         style={{
           ...s.simulatorStack,
-          maxWidth: frameMaxWidth,
+          width: scaledFrameMaxWidth,
         }}
       >
         <SimulatorToolbar
@@ -2586,9 +2643,8 @@ function App() {
         <div
           ref={simContainerRef}
           style={{
-            maxWidth: frameMaxWidth,
+            width: scaledFrameMaxWidth,
             maxHeight: "100%",
-            width: "100%",
             aspectRatio: frameAspectRatio,
             position: "relative",
           }}
@@ -2694,6 +2750,8 @@ function App() {
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+        simulatorScale={simulatorScale}
+        onSimulatorScaleChange={(scale) => setSimulatorScale(clampSimulatorScale(scale))}
       />
 
       <WebKitDevtoolsPanel
@@ -2734,9 +2792,8 @@ const s: Record<string, CSSProperties> = {
     flexDirection: "column",
     alignItems: "center",
     gap: 12,
-    width: "100%",
     minWidth: 0,
-    transition: "max-width 0.25s ease",
+    transition: "width 0.2s ease",
   },
   bar: {
     display: "flex", alignItems: "center", gap: 10,
@@ -2864,6 +2921,18 @@ const pickerGroupHeaderStyle: CSSProperties = {
 
 const PANEL_WIDTH = 320;
 const DEVTOOLS_PANEL_WIDTH = 760;
+const SIMULATOR_SCALE_MIN = 0.5;
+const SIMULATOR_SCALE_MAX = 3;
+const SIMULATOR_SCALE_STEP = 0.5;
+
+function clampSimulatorScale(value: number) {
+  const stepped = Math.round(value / SIMULATOR_SCALE_STEP) * SIMULATOR_SCALE_STEP;
+  return Math.min(SIMULATOR_SCALE_MAX, Math.max(SIMULATOR_SCALE_MIN, stepped));
+}
+
+function formatSimulatorScale(value: number) {
+  return Number.isInteger(value) ? `${value}x` : `${value.toFixed(1)}x`;
+}
 
 const devtoolsStyles: Record<string, CSSProperties> = {
   panel: {
@@ -3202,6 +3271,42 @@ const panelStyles: Record<string, CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.08)",
     borderRadius: 10,
     padding: 12,
+  },
+  scaleHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  scaleStepper: {
+    display: "grid",
+    gridTemplateColumns: "28px 46px 28px",
+    alignItems: "center",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 7,
+    overflow: "hidden",
+    background: "rgba(255,255,255,0.03)",
+  },
+  scaleStepButton: {
+    height: 26,
+    border: "none",
+    background: "transparent",
+    color: "rgba(255,255,255,0.82)",
+    cursor: "pointer",
+    fontSize: 16,
+    lineHeight: 1,
+  },
+  scaleStepButtonDisabled: {
+    color: "rgba(255,255,255,0.24)",
+    cursor: "not-allowed",
+  },
+  scaleValue: {
+    fontSize: 12,
+    fontFamily: "ui-monospace, monospace",
+    fontWeight: 600,
+    textAlign: "center",
+    color: "#eee",
+    borderRight: "1px solid rgba(255,255,255,0.08)",
   },
   empty: {
     background: "#1c1c1e",
