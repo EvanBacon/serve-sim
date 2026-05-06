@@ -84,47 +84,62 @@ function CapacityBanner({ report }: { report: MemoryReport | null }) {
   if (!report || report.totalBytes === 0) return null;
   const { estimatedAdditional, availableBytes, totalBytes, perSimAvgBytes, perSimSource, runningSimulators } = report;
   const usedFraction = Math.max(0, Math.min(1, 1 - availableBytes / totalBytes));
-  const headlineColor =
-    estimatedAdditional === 0 ? "#e66" : estimatedAdditional <= 1 ? "#e9a13b" : "#9c9";
-  const headline =
+  const dotColor =
+    estimatedAdditional === 0 ? "#e66" : estimatedAdditional <= 1 ? "#e9a13b" : "#3b3";
+  const label =
     estimatedAdditional === 0
-      ? "No room for another simulator"
-      : `~${estimatedAdditional} more simulator${estimatedAdditional === 1 ? "" : "s"} fit in memory`;
-  const detail = `${formatBytes(availableBytes)} free of ${formatBytes(totalBytes)} · ${
+      ? "0 more sims"
+      : `+${estimatedAdditional} sim${estimatedAdditional === 1 ? "" : "s"}`;
+  const tooltip = `${label} fit · ${formatBytes(availableBytes)} free of ${formatBytes(totalBytes)} · ${
     perSimSource === "measured"
       ? `~${formatBytes(perSimAvgBytes)}/sim across ${runningSimulators} running`
       : `~${formatBytes(perSimAvgBytes)}/sim (default estimate)`
   }`;
   return (
     <div
+      title={tooltip}
       style={{
-        display: "flex",
-        flexDirection: "column",
+        display: "inline-flex",
+        alignItems: "center",
         gap: 6,
-        padding: "10px 16px",
-        margin: "16px 16px 0",
-        borderRadius: 10,
+        padding: "3px 8px",
+        margin: "8px 12px 0",
+        alignSelf: "flex-end",
+        borderRadius: 999,
         background: "#101010",
         border: "1px solid #222",
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontSize: 11,
+        color: "#bbb",
+        lineHeight: 1,
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
-        <span style={{ color: headlineColor, fontSize: 13, fontWeight: 600 }}>{headline}</span>
-        <span style={{ color: "#888", fontSize: 11 }}>{detail}</span>
-      </div>
-      <div
+      <span
         style={{
-          height: 4,
-          width: "100%",
+          width: 6,
+          height: 6,
+          borderRadius: 3,
+          background: dotColor,
+          flex: "0 0 auto",
+        }}
+      />
+      <span>{label}</span>
+      <span style={{ color: "#666" }}>·</span>
+      <span style={{ color: "#888" }}>{formatBytes(availableBytes)} free</span>
+      <span
+        aria-hidden
+        style={{
+          marginLeft: 2,
+          width: 28,
+          height: 3,
           background: "#1c1c1c",
           borderRadius: 2,
           overflow: "hidden",
         }}
-        title={`${(usedFraction * 100).toFixed(0)}% used`}
       >
-        <div
+        <span
           style={{
+            display: "block",
             width: `${(usedFraction * 100).toFixed(1)}%`,
             height: "100%",
             background:
@@ -132,7 +147,7 @@ function CapacityBanner({ report }: { report: MemoryReport | null }) {
             transition: "width 300ms ease, background 300ms ease",
           }}
         />
-      </div>
+      </span>
     </div>
   );
 }
