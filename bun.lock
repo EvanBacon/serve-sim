@@ -7,9 +7,12 @@
     },
     "packages/serve-sim": {
       "name": "serve-sim",
-      "version": "0.0.9",
+      "version": "0.1.13",
       "bin": {
         "serve-sim": "dist/serve-sim.js",
+      },
+      "dependencies": {
+        "inspect-webkit": "^0.0.3",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -118,6 +121,8 @@
     "inherits": ["inherits@2.0.4", "", {}, "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="],
 
     "ini": ["ini@6.0.0", "", {}, "sha512-IBTdIkzZNOpqm7q3dRqJvMaldXjDHWkEDfrwGEQTs5eaQMWV+djAhR+wahyNNMAa+qpbDUhBMVt4ZKNwpPm7xQ=="],
+
+    "inspect-webkit": ["inspect-webkit@0.0.3", "", { "peerDependencies": { "typescript": "^5" }, "bin": { "inspect-webkit": "dist/cli.js" } }, "sha512-UCU5yjLiWyZxYh9pbZ41dz5fVMDqpluunkPersmi7bhiLCSZifATXSrISopRArafSVX3RcN6hGvRfV5BAyOpjw=="],
 
     "just-bash": ["just-bash@2.14.3", "", { "dependencies": { "diff": "^8.0.2", "fast-xml-parser": "5.3.3", "file-type": "^21.2.0", "ini": "^6.0.0", "minimatch": "^10.1.1", "modern-tar": "^0.7.3", "papaparse": "^5.5.3", "quickjs-emscripten": "^0.32.0", "re2js": "^1.2.1", "seek-bzip": "^2.0.0", "smol-toml": "^1.6.0", "sprintf-js": "^1.1.3", "sql.js": "^1.13.0", "turndown": "^7.2.2", "yaml": "^2.8.2" }, "optionalDependencies": { "@mongodb-js/zstd": "^7.0.0", "node-liblzma": "^2.0.3" }, "bin": { "just-bash": "dist/bin/just-bash.js", "just-bash-shell": "dist/bin/shell/shell.js" } }, "sha512-uCFlAvBsGHVUukerfso8ZvJ66IJqe0HUR9Yr4pf4bkkWjBZAWlsxMAeg1WD2B6h6n7Sd0dQ7vbJDABybJB0/rA=="],
 

@@ -21,7 +21,17 @@ interface GridConfig {
   apiEndpoint: string;
   startEndpoint: string;
   shutdownEndpoint: string;
+  memoryEndpoint: string;
   previewEndpoint: string;
+}
+
+interface MemoryReport {
+  totalBytes: number;
+  availableBytes: number;
+  runningSimulators: number;
+  perSimAvgBytes: number;
+  perSimSource: "measured" | "estimated";
+  estimatedAdditional: number;
 }
 
 declare global {
@@ -35,8 +45,97 @@ const config: GridConfig = window.__SIM_GRID__ ?? {
   apiEndpoint: "/grid/api",
   startEndpoint: "/grid/api/start",
   shutdownEndpoint: "/grid/api/shutdown",
+  memoryEndpoint: "/grid/api/memory",
   previewEndpoint: "/",
 };
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const gb = n / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`;
+  const mb = n / (1024 * 1024);
+  return `${mb.toFixed(0)} MB`;
+}
+
+function useMemory() {
+  const [report, setReport] = useState<MemoryReport | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(config.memoryEndpoint, { cache: "no-store" });
+        const json = (await res.json()) as MemoryReport;
+        if (!cancelled) setReport(json);
+      } catch {
+        // leave previous report visible on transient failures
+      }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+  return report;
+}
+
+function CapacityBanner({ report }: { report: MemoryReport | null }) {
+  if (!report || report.totalBytes === 0) return null;
+  const { estimatedAdditional, availableBytes, totalBytes, perSimAvgBytes, perSimSource, runningSimulators } = report;
+  const usedFraction = Math.max(0, Math.min(1, 1 - availableBytes / totalBytes));
+  const headlineColor =
+    estimatedAdditional === 0 ? "#e66" : estimatedAdditional <= 1 ? "#e9a13b" : "#9c9";
+  const headline =
+    estimatedAdditional === 0
+      ? "No room for another simulator"
+      : `~${estimatedAdditional} more simulator${estimatedAdditional === 1 ? "" : "s"} fit in memory`;
+  const detail = `${formatBytes(availableBytes)} free of ${formatBytes(totalBytes)} · ${
+    perSimSource === "measured"
+      ? `~${formatBytes(perSimAvgBytes)}/sim across ${runningSimulators} running`
+      : `~${formatBytes(perSimAvgBytes)}/sim (default estimate)`
+  }`;
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        padding: "10px 16px",
+        margin: "16px 16px 0",
+        borderRadius: 10,
+        background: "#101010",
+        border: "1px solid #222",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+        <span style={{ color: headlineColor, fontSize: 13, fontWeight: 600 }}>{headline}</span>
+        <span style={{ color: "#888", fontSize: 11 }}>{detail}</span>
+      </div>
+      <div
+        style={{
+          height: 4,
+          width: "100%",
+          background: "#1c1c1c",
+          borderRadius: 2,
+          overflow: "hidden",
+        }}
+        title={`${(usedFraction * 100).toFixed(0)}% used`}
+      >
+        <div
+          style={{
+            width: `${(usedFraction * 100).toFixed(1)}%`,
+            height: "100%",
+            background:
+              usedFraction > 0.9 ? "#e66" : usedFraction > 0.75 ? "#e9a13b" : "#3b3",
+            transition: "width 300ms ease, background 300ms ease",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
 
 function previewHrefFor(udid: string): string {
   const sep = config.previewEndpoint.includes("?") ? "&" : "?";
@@ -317,6 +416,7 @@ const HOVER_CSS = `
 
 function App() {
   const { devices, refresh } = useDevices();
+  const memory = useMemory();
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [shuttingDown, setShuttingDown] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<Record<string, string | null>>({});
@@ -376,12 +476,22 @@ function App() {
       <style>{HOVER_CSS}</style>
       <div
         style={{
+          display: "flex",
+          flexDirection: "column",
+          height: "100%",
+          minHeight: 0,
+        }}
+      >
+      <CapacityBanner report={memory} />
+      <div
+        style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
           gridAutoRows: "minmax(420px, auto)",
           gap: 16,
           padding: 16,
-          height: "100%",
+          flex: 1,
+          minHeight: 0,
           overflow: "auto",
         }}
       >
@@ -405,6 +515,7 @@ function App() {
             />
           ),
         )}
+      </div>
       </div>
     </>
   );

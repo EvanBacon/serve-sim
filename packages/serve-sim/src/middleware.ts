@@ -2,12 +2,35 @@ import { readdirSync, readFileSync, existsSync, unlinkSync } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
+import { createServer as createNetServer } from "net";
 import { createAxStreamerCache } from "./ax";
 
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
 declare const __GRID_HTML_B64__: string;
 const STATE_DIR = join(tmpdir(), "serve-sim");
+const DEVTOOLS_FRONTEND_REV = "854a02be78c7ffea104cb523636efa991bef5c5b";
+const INSPECT_WEBKIT_START_PORT = 9222;
+
+type WebKitBridgeTarget = {
+  id: string;
+  title: string;
+  url: string;
+  type: string;
+  appName?: string;
+  bundleId?: string;
+  /** udid of the simulator hosting the target, when known. */
+  udid?: string;
+  inUseByOtherInspector?: boolean;
+};
+
+type WebKitBridge = {
+  port: number;
+  cdpUrl: string;
+  listTargets(): Promise<WebKitBridgeTarget[]>;
+  highlightTarget?(targetId: string, on: boolean): Promise<void>;
+  releaseHighlight?(targetId?: string): void;
+};
 
 export interface ServeSimState {
   pid: number;
@@ -19,6 +42,7 @@ export interface ServeSimState {
 }
 
 const axStreamerCache = createAxStreamerCache();
+let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
 // Known bundle IDs that are always React Native shells (used as a fallback
 // before the app-container path resolves, since simctl can lag after launch).
@@ -150,6 +174,139 @@ function endpoint(base: string, path: string, device: string): string {
   return `${value}?device=${encodeURIComponent(device)}`;
 }
 
+async function isLocalPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createNetServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => server.close(() => resolve(true)));
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+async function existingInspectWebKitBridge(port: number): Promise<WebKitBridge | null> {
+  const cdpUrl = `http://127.0.0.1:${port}`;
+  try {
+    const versionRes = await fetch(`${cdpUrl}/json/version`);
+    if (!versionRes.ok) return null;
+    const version = await versionRes.json() as { Browser?: string };
+    if (version.Browser !== "Safari/inspect-webkit") return null;
+    return {
+      port,
+      cdpUrl,
+      async listTargets() {
+        // Hitting the bridge over HTTP loses the rich fields available to
+        // an in-process consumer (appName, inUseByOtherInspector). The id
+        // shape `sim:<udid>:<appId>:<pageId>` and the description string
+        // `<deviceLabel> (<bundleId>)` are all we have here.
+        const listRes = await fetch(`${cdpUrl}/json/list`);
+        const targets = await listRes.json() as Array<{
+          id: string;
+          title: string;
+          url: string;
+          type: string;
+          description?: string;
+        }>;
+        return targets
+          .filter((target) => target.id.startsWith("sim:"))
+          .map((target) => {
+            const idParts = target.id.split(":");
+            const udid = idParts[1];
+            const bundleId = target.description?.match(/\(([^)]+)\)/)?.[1];
+            return {
+              id: target.id,
+              title: target.title || target.url || "Untitled",
+              url: /^https?:/i.test(target.url) ? target.url : "about:blank",
+              type: target.type || "page",
+              udid,
+              bundleId,
+            };
+          });
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
+  if (inspectWebKitBridge) {
+    try {
+      // Probe so a dead bridge gets retired instead of poisoning every call.
+      await (await inspectWebKitBridge).listTargets();
+      return inspectWebKitBridge;
+    } catch {
+      inspectWebKitBridge = null;
+    }
+  }
+  inspectWebKitBridge = (async () => {
+    const { startCdpServer } = await import("inspect-webkit");
+    for (let port = INSPECT_WEBKIT_START_PORT; port < INSPECT_WEBKIT_START_PORT + 50; port++) {
+      if (!(await isLocalPortFree(port))) {
+        const existing = await existingInspectWebKitBridge(port);
+        if (existing) return existing;
+        continue;
+      }
+      try {
+        // Bind explicitly to IPv4 127.0.0.1 to match what bridgeWsHost emits
+        // (and what the DevTools frontend CSP whitelists). `localhost` resolves
+        // to ::1 first on some setups, which would leave the iframe's
+        // ws://127.0.0.1:9222 connection refused.
+        const server = await startCdpServer({ host: "127.0.0.1", port });
+        return {
+          port,
+          cdpUrl: `http://127.0.0.1:${port}`,
+          async listTargets() {
+            return server.getTargets()
+              .filter((target: any) => target.source?.kind === "simulator")
+              .map((target: any) => ({
+                id: target.targetId,
+                title: target.title || target.appName || target.url || "Untitled",
+                url: /^https?:/i.test(target.url) ? target.url : "about:blank",
+                type: target.type || "page",
+                appName: target.appName,
+                bundleId: target.bundleId,
+                udid: target.source?.id,
+                inUseByOtherInspector: !!target.inUseByOtherInspector,
+              }));
+          },
+          highlightTarget: server.highlightTarget?.bind(server),
+          releaseHighlight: server.releaseHighlight?.bind(server),
+        };
+      } catch (err: any) {
+        if (err?.code === "EADDRINUSE") {
+          const existing = await existingInspectWebKitBridge(port);
+          if (existing) return existing;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error(`No available inspect-webkit port found in ${INSPECT_WEBKIT_START_PORT}-${INSPECT_WEBKIT_START_PORT + 49}`);
+  })().catch((err) => {
+    inspectWebKitBridge = null;
+    throw err;
+  });
+  return inspectWebKitBridge;
+}
+
+function devtoolsFrontendUrl(frontendBase: string, wsHost: string, targetId: string): string {
+  const url = new URL(`${frontendBase}/inspector.html`, "http://serve-sim.local");
+  url.searchParams.set("ws", `${wsHost}/devtools/page/${targetId}`);
+  return `${url.pathname}${url.search}`;
+}
+
+// The inspect-webkit bridge binds locally. Always emit `127.0.0.1` rather
+// than `localhost` for the iframe's WS URL: the chrome-devtools-frontend
+// inspector.html ships a CSP whose connect-src only whitelists
+// `ws://127.0.0.1:*` (plus `'self'`, which doesn't cover the bridge's
+// different port). A `ws://localhost:9222/...` connection from the iframe
+// gets CSP-blocked and surfaces as "WebSocket disconnected."
+// Non-local hostnames fall back to 127.0.0.1 since the bridge isn't
+// reachable from off-host anyway.
+function bridgeWsHost(_reqHost: string | undefined, bridgePort: number): string {
+  return `127.0.0.1:${bridgePort}`;
+}
+
 let _html: string | null = null;
 function loadHtml(): string {
   if (!_html) {
@@ -202,6 +359,119 @@ function listAllSimulators(): SimctlDevice[] {
 
 function deviceNameFor(udid: string): string | null {
   return listAllSimulators().find((d) => d.udid === udid)?.name ?? null;
+}
+
+// Default per-simulator footprint when we have no running sim to measure
+// from — a fresh booted iOS sim with one app launched typically sits in
+// the 1.2–1.8 GB range. Used as a fallback only.
+const DEFAULT_PER_SIM_BYTES = 1.5 * 1024 * 1024 * 1024;
+
+interface MemoryReport {
+  totalBytes: number;
+  availableBytes: number;
+  runningSimulators: number;
+  perSimAvgBytes: number;
+  perSimSource: "measured" | "estimated";
+  estimatedAdditional: number;
+}
+
+function readSystemMemory(): { totalBytes: number; availableBytes: number } {
+  try {
+    const totalBytes = Number(
+      execSync("sysctl -n hw.memsize", {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1500,
+      }).trim(),
+    );
+    const pageSize = Number(
+      execSync("sysctl -n hw.pagesize", {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1500,
+      }).trim(),
+    );
+    const vmStat = execSync("vm_stat", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1500,
+    });
+    const pages = (re: RegExp) => {
+      const m = vmStat.match(re);
+      return m ? Number(m[1]) : 0;
+    };
+    // "Available" mirrors what Activity Monitor treats as reclaimable: free
+    // + inactive + speculative pages. Excludes wired and active.
+    const availablePages =
+      pages(/Pages free:\s+(\d+)/) +
+      pages(/Pages inactive:\s+(\d+)/) +
+      pages(/Pages speculative:\s+(\d+)/);
+    return {
+      totalBytes: Number.isFinite(totalBytes) ? totalBytes : 0,
+      availableBytes: availablePages * (Number.isFinite(pageSize) ? pageSize : 4096),
+    };
+  } catch {
+    return { totalBytes: 0, availableBytes: 0 };
+  }
+}
+
+// Sum RSS across every process whose argv path includes a CoreSimulator
+// device directory. Groups by UDID so we get a real per-sim footprint that
+// covers launchd_sim plus all child processes the runtime spawns.
+function readSimulatorMemoryUsage(): { perUdid: Record<string, number>; totalBytes: number } {
+  try {
+    const output = execSync("ps -axo rss=,args=", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const perUdid: Record<string, number> = {};
+    let totalBytes = 0;
+    const re = /\/Devices\/([0-9A-F-]{36})\//i;
+    for (const raw of output.split("\n")) {
+      const line = raw.trimStart();
+      if (!line) continue;
+      const m = re.exec(line);
+      if (!m) continue;
+      const rssKb = Number(line.split(/\s+/, 1)[0]);
+      if (!Number.isFinite(rssKb)) continue;
+      const bytes = rssKb * 1024;
+      const udid = m[1].toUpperCase();
+      perUdid[udid] = (perUdid[udid] ?? 0) + bytes;
+      totalBytes += bytes;
+    }
+    return { perUdid, totalBytes };
+  } catch {
+    return { perUdid: {}, totalBytes: 0 };
+  }
+}
+
+function buildMemoryReport(): MemoryReport {
+  const { totalBytes, availableBytes } = readSystemMemory();
+  const usage = readSimulatorMemoryUsage();
+  const runningSimulators = Object.keys(usage.perUdid).length;
+  const measuredAvg = runningSimulators > 0
+    ? usage.totalBytes / runningSimulators
+    : 0;
+  // Below ~256MB, the measurement is almost certainly catching a sim mid-boot
+  // before its app processes are resident — fall back to the default so we
+  // don't over-promise capacity.
+  const perSimSource: MemoryReport["perSimSource"] =
+    measuredAvg >= 256 * 1024 * 1024 ? "measured" : "estimated";
+  const perSimAvgBytes =
+    perSimSource === "measured" ? measuredAvg : DEFAULT_PER_SIM_BYTES;
+  const estimatedAdditional = perSimAvgBytes > 0
+    ? Math.max(0, Math.floor(availableBytes / perSimAvgBytes))
+    : 0;
+  return {
+    totalBytes,
+    availableBytes,
+    runningSimulators,
+    perSimAvgBytes,
+    perSimSource,
+    estimatedAdditional,
+  };
 }
 
 /**
@@ -257,6 +527,41 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     const qIndex = rawUrl.indexOf("?");
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
     const selectedDevice = queryDevice(rawUrl) ?? options?.device ?? null;
+    const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
+
+    // Same-origin proxy for Chrome DevTools frontend assets. Loading the
+    // appspot-hosted frontend directly works as a top-level tab, but is flaky
+    // inside embedded browser iframes. Serving it from the preview origin keeps
+    // the frontend's relative assets and CSP on the local page.
+    if (url === devtoolsFrontendBase || url.startsWith(`${devtoolsFrontendBase}/`)) {
+      (async () => {
+        const assetPath = url === devtoolsFrontendBase
+          ? "inspector.html"
+          : url.slice(devtoolsFrontendBase.length + 1);
+        // Reject path-traversal segments before they reach the upstream URL.
+        if (assetPath.split("/").some((seg) => seg === "..")) {
+          res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Invalid asset path");
+          return;
+        }
+        try {
+          const upstream = await fetch(
+            `https://chrome-devtools-frontend.appspot.com/serve_rev/@${DEVTOOLS_FRONTEND_REV}/${assetPath}${qIndex === -1 ? "" : rawUrl.slice(qIndex)}`,
+          );
+          const headers: Record<string, string> = {
+            "Cache-Control": "public, max-age=604800",
+          };
+          const contentType = upstream.headers.get("content-type");
+          if (contentType) headers["Content-Type"] = contentType;
+          res.writeHead(upstream.status, headers);
+          res.end(Buffer.from(await upstream.arrayBuffer()));
+        } catch (err) {
+          res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end(err instanceof Error ? err.message : "Failed to load DevTools frontend");
+        }
+      })();
+      return;
+    }
 
     // Serve the preview page
     if (url === base || url === base + "/") {
@@ -274,6 +579,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           logsEndpoint: endpoint(base, "/logs", state.device),
           appStateEndpoint: endpoint(base, "/appstate", state.device),
           axEndpoint: endpoint(base, "/ax", state.device),
+          devtoolsEndpoint: endpoint(base, "/devtools", state.device),
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
@@ -297,6 +603,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         apiEndpoint: apiBase,
         startEndpoint: apiBase + "/start",
         shutdownEndpoint: apiBase + "/shutdown",
+        memoryEndpoint: apiBase + "/memory",
         previewEndpoint,
       });
       html = html.replace(
@@ -308,6 +615,16 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "Cache-Control": "no-store",
       });
       res.end(html);
+      return;
+    }
+
+    // Memory capacity estimate: how much room is left to boot more sims.
+    if (url === base + "/grid/api/memory") {
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify(buildMemoryReport()));
       return;
     }
 
@@ -430,6 +747,106 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
             }));
           }
         });
+      });
+      return;
+    }
+
+    // JSON API: start the inspect-webkit CDP bridge and list WebKit targets
+    // for the selected simulator. The bridge itself serves /json/list and
+    // /devtools/page/:id on localhost; the preview adds iframe-safe frontend
+    // URLs so the browser UI can embed Chrome DevTools.
+    if (url === base + "/devtools") {
+      (async () => {
+        const states = readServeSimStates();
+        const state = selectServeSimState(states, selectedDevice);
+        if (!state) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "No serve-sim device" }));
+          return;
+        }
+        try {
+          const bridge = await ensureInspectWebKitBridge();
+          const bridgeTargets = await bridge.listTargets();
+          const wsHost = bridgeWsHost(req.headers?.host, bridge.port);
+          // inspect-webkit@0.0.3 only exposes `sim:<webinspectord-pid>` for
+          // simulator targets, which can't be reconciled against a sim UDID.
+          // Surface every booted sim's targets (Safari Develop-menu behavior)
+          // until inspect-webkit grows a real UDID we can filter on.
+          const targets = bridgeTargets.map((target) => ({
+            ...target,
+            webSocketDebuggerUrl: `ws://${wsHost}/devtools/page/${encodeURIComponent(target.id)}`,
+            devtoolsFrontendUrl: devtoolsFrontendUrl(devtoolsFrontendBase, wsHost, target.id),
+          }));
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+          });
+          res.end(JSON.stringify({
+            port: bridge.port,
+            targets,
+          }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: err instanceof Error ? err.message : "Failed to start inspect-webkit",
+          }));
+        }
+      })();
+      return;
+    }
+
+    // POST /devtools/release — drop hover-highlight CDP sessions so we don't
+    // sit on a WIR slot when the picker is dismissed (or the tab is closed).
+    // Optional body { targetId } releases just one; empty body releases all.
+    if (url === base + "/devtools/release" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const parsed = body ? JSON.parse(body) as { targetId?: string } : {};
+          const bridge = await ensureInspectWebKitBridge();
+          bridge.releaseHighlight?.(parsed.targetId);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: err instanceof Error ? err.message : "Failed to release",
+          }));
+        }
+      });
+      return;
+    }
+
+    // POST /devtools/highlight — flash an inspectable target in the
+    // simulator the way Safari's Develop menu hover does. Body shape:
+    // { targetId: string, on: boolean }.
+    if (url === base + "/devtools/highlight" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const { targetId, on } = JSON.parse(body || "{}") as { targetId?: string; on?: boolean };
+          if (!targetId) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Missing targetId" }));
+            return;
+          }
+          const bridge = await ensureInspectWebKitBridge();
+          if (!bridge.highlightTarget) {
+            res.writeHead(501, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "highlightTarget not supported by inspect-webkit" }));
+            return;
+          }
+          await bridge.highlightTarget(targetId, !!on);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: err instanceof Error ? err.message : "Failed to highlight target",
+          }));
+        }
       });
       return;
     }
