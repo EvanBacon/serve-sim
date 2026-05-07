@@ -13,6 +13,7 @@ import {
   useRef,
   type CSSProperties,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
@@ -1958,6 +1959,149 @@ function AxToolbarButton({
   );
 }
 
+// Persists a width to localStorage and exposes a pointer-driven resize handler.
+// The panels live at the right edge, so dragging the handle leftwards grows
+// the panel — the delta is `startX - clientX`.
+function useResizableWidth(
+  storageKey: string,
+  defaultWidth: number,
+  min: number,
+  max: number,
+) {
+  const clamp = useCallback(
+    (w: number) => Math.max(min, Math.min(max, w)),
+    [min, max],
+  );
+  const [width, setWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return defaultWidth;
+    const raw = window.localStorage.getItem(storageKey);
+    const parsed = raw != null ? Number(raw) : NaN;
+    return Number.isFinite(parsed) ? clamp(parsed) : defaultWidth;
+  });
+  // Re-clamp if the viewport shrinks below the saved width.
+  const effectiveMax = typeof window !== "undefined"
+    ? Math.min(max, window.innerWidth - 32)
+    : max;
+  const effectiveWidth = Math.max(min, Math.min(effectiveMax, width));
+
+  const onPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = effectiveWidth;
+      const target = e.currentTarget;
+      target.setPointerCapture(e.pointerId);
+      const move = (ev: PointerEvent) => {
+        const next = clamp(startWidth + (startX - ev.clientX));
+        setWidth(next);
+      };
+      const up = (ev: PointerEvent) => {
+        target.releasePointerCapture(ev.pointerId);
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", up);
+        target.removeEventListener("pointercancel", up);
+        try {
+          window.localStorage.setItem(storageKey, String(clamp(startWidth + (startX - ev.clientX))));
+        } catch {}
+      };
+      target.addEventListener("pointermove", move);
+      target.addEventListener("pointerup", up);
+      target.addEventListener("pointercancel", up);
+    },
+    [clamp, effectiveWidth, storageKey],
+  );
+
+  return { width: effectiveWidth, onPointerDown };
+}
+
+// Rendered as a fixed-positioned sibling of the panel, so the grabber can
+// straddle the panel's left border without being clipped by overflow:hidden.
+// The panel's own 1px border serves as the "line" — we just brighten it and
+// add a centered pill on hover/drag.
+function ResizeHandle({
+  panelWidth,
+  visible,
+  onPointerDown,
+  ariaLabel,
+}: {
+  panelWidth: number;
+  visible: boolean;
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  ariaLabel: string;
+}) {
+  const [hover, setHover] = useState(false);
+  const [active, setActive] = useState(false);
+  const hot = hover || active;
+  // Panel sits at right:12 with the given width — its left border is at
+  // right:(12 + panelWidth - 1). Centering the 16px hit target there:
+  const handleRight = 12 + panelWidth - 9;
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={ariaLabel}
+      aria-hidden={!visible}
+      onPointerDown={(e) => {
+        setActive(true);
+        onPointerDown(e);
+      }}
+      onPointerUp={() => setActive(false)}
+      onPointerCancel={() => setActive(false)}
+      onPointerEnter={() => setHover(true)}
+      onPointerLeave={() => setHover(false)}
+      style={{
+        position: "fixed",
+        top: 12,
+        bottom: 12,
+        right: handleRight,
+        width: 16,
+        cursor: "col-resize",
+        zIndex: 36,
+        touchAction: "none",
+        pointerEvents: visible ? "auto" : "none",
+        opacity: visible ? 1 : 0,
+        transition: "opacity 0.2s ease",
+      }}
+    >
+      {/* Subtle hairline accent that brightens the panel's existing border
+          while the edge is hot. Tapers at top/bottom. */}
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          bottom: 0,
+          left: "50%",
+          width: 1,
+          transform: "translateX(-0.5px)",
+          background:
+            "linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,0.28) 30%, rgba(255,255,255,0.28) 70%, rgba(255,255,255,0) 100%)",
+          opacity: hot ? 1 : 0,
+          transition: "opacity 0.15s ease",
+          pointerEvents: "none",
+        }}
+      />
+      {/* Centered pill grabber, straddling the panel's left border. */}
+      <div
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          width: 4,
+          height: 28,
+          borderRadius: 2,
+          transform: "translate(-50%, -50%)",
+          // Opaque so the hairline doesn't show through.
+          background: active ? "#9a9a9e" : "#6e6e72",
+          zIndex: 1,
+          opacity: hot ? 1 : 0,
+          transition: "opacity 0.15s ease, background 0.15s ease",
+          pointerEvents: "none",
+        }}
+      />
+    </div>
+  );
+}
+
 function ToolsPanel({
   open,
   onClose,
@@ -1965,6 +2109,7 @@ function ToolsPanel({
   currentApp,
   axOverlayEnabled,
   onToggleAxOverlay,
+  width,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1972,11 +2117,13 @@ function ToolsPanel({
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
   axOverlayEnabled: boolean;
   onToggleAxOverlay: () => void;
+  width: number;
 }) {
   return (
     <aside
       style={{
         ...panelStyles.panel,
+        width,
         transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
         opacity: open ? 1 : 0,
         pointerEvents: open ? "auto" : "none",
@@ -2017,6 +2164,7 @@ function WebKitDevtoolsPanel({
   loading,
   error,
   onRefresh,
+  width,
 }: {
   open: boolean;
   onClose: () => void;
@@ -2027,6 +2175,7 @@ function WebKitDevtoolsPanel({
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+  width: number;
 }) {
   const selected = selectedTargetId
     ? targets.find((target) => target.id === selectedTargetId) ?? null
@@ -2036,6 +2185,7 @@ function WebKitDevtoolsPanel({
     <aside
       style={{
         ...devtoolsStyles.panel,
+        width,
         transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
         opacity: open ? 1 : 0,
         pointerEvents: open ? "auto" : "none",
@@ -2345,6 +2495,18 @@ function App() {
   // Without this, the reload button flickers while an RN app is still loading.
   const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean; pid?: number } | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const { width: toolsPanelWidth, onPointerDown: onToolsResize } = useResizableWidth(
+    "serve-sim:tools-panel-width",
+    PANEL_WIDTH,
+    240,
+    720,
+  );
+  const { width: devtoolsPanelWidth, onPointerDown: onDevtoolsResize } = useResizableWidth(
+    "serve-sim:devtools-panel-width",
+    DEVTOOLS_PANEL_WIDTH,
+    420,
+    1400,
+  );
   const [viewportWidth, setViewportWidth] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 0),
   );
@@ -2513,9 +2675,8 @@ function App() {
 
   // When the tools panel is open and the viewport has room, shift the
   // simulator left so it stays centered in the visible (non-panel) area.
-  // PANEL_WIDTH is the panel itself; +24 covers its right offset + a gap.
-  const DEVTOOLS_TOTAL = DEVTOOLS_PANEL_WIDTH + 24;
-  const PANEL_TOTAL = (devtoolsOpen ? DEVTOOLS_TOTAL : panelOpen ? PANEL_WIDTH + 24 : 0);
+  // The panel widths are user-resizable; +24 covers the right offset + a gap.
+  const PANEL_TOTAL = (devtoolsOpen ? devtoolsPanelWidth + 24 : panelOpen ? toolsPanelWidth + 24 : 0);
   const shiftForPanel =
     PANEL_TOTAL > 0 && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
       ? PANEL_TOTAL
@@ -2688,6 +2849,13 @@ function App() {
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+        width={toolsPanelWidth}
+      />
+      <ResizeHandle
+        panelWidth={toolsPanelWidth}
+        visible={panelOpen}
+        onPointerDown={onToolsResize}
+        ariaLabel="Resize tools panel"
       />
 
       <WebKitDevtoolsPanel
@@ -2700,6 +2868,13 @@ function App() {
         loading={devtools.loading}
         error={devtools.error}
         onRefresh={() => void devtools.refresh()}
+        width={devtoolsPanelWidth}
+      />
+      <ResizeHandle
+        panelWidth={devtoolsPanelWidth}
+        visible={devtoolsOpen}
+        onPointerDown={onDevtoolsResize}
+        ariaLabel="Resize WebKit DevTools panel"
       />
 
       {/* Status bar */}
