@@ -2550,6 +2550,20 @@ function App() {
   // it, so the user can interact with toolbar dropdowns, devtools, etc.
   // without their typing leaking into the simulator.
   const simContainerRef = useRef<HTMLDivElement | null>(null);
+  // Track the device's actual rendered width. With `maxHeight: 100%` and a
+  // fixed aspect ratio, a short window can shrink the device below
+  // `frameMaxWidth`, so we can't use the max alone to detect panel collisions.
+  const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
+  useEffect(() => {
+    const el = simContainerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      setDeviceRenderedWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const [simFocused, setSimFocused] = useState(true);
   const simFocusedRef = useRef(true);
   simFocusedRef.current = simFocused;
@@ -2673,14 +2687,30 @@ function App() {
     }
   }, [fetchDevices]);
 
-  // When the tools panel is open and the viewport has room, shift the
-  // simulator left so it stays centered in the visible (non-panel) area.
-  // The panel widths are user-resizable; +24 covers the right offset + a gap.
-  const PANEL_TOTAL = (devtoolsOpen ? devtoolsPanelWidth + 24 : panelOpen ? toolsPanelWidth + 24 : 0);
-  const shiftForPanel =
-    PANEL_TOTAL > 0 && viewportWidth >= frameMaxWidth + PANEL_TOTAL + 64
-      ? PANEL_TOTAL
-      : 0;
+  // Only shift the simulator when the panel would otherwise collide with it.
+  // Plenty of room → no shift (device stays at viewport center).
+  // Encroaching → shift just enough to maintain a gap.
+  // Not enough room for both → fall back to no shift; the panel overlays.
+  const panelWidthPx = devtoolsOpen ? devtoolsPanelWidth : panelOpen ? toolsPanelWidth : 0;
+  const PANEL_RIGHT_OFFSET = 12;
+  const PANEL_GAP = 24;
+  const maxShift = panelWidthPx > 0 ? panelWidthPx + PANEL_GAP : 0;
+  let shiftForPanel = 0;
+  if (panelWidthPx > 0) {
+    const panelLeftEdge = viewportWidth - PANEL_RIGHT_OFFSET - panelWidthPx;
+    // Use the actually-rendered device width (clamped to the max) — it can
+    // be smaller than the max when the window is too short for full size.
+    const deviceWidth = deviceRenderedWidth > 0
+      ? Math.min(deviceRenderedWidth, frameMaxWidth)
+      : frameMaxWidth;
+    const deviceRightAtCenter = viewportWidth / 2 + deviceWidth / 2;
+    const overlap = deviceRightAtCenter - (panelLeftEdge - PANEL_GAP);
+    if (overlap > 0) {
+      // Shifting paddingRight by N moves the centered device left by N/2.
+      const shiftNeeded = 2 * overlap;
+      shiftForPanel = shiftNeeded <= maxShift ? shiftNeeded : 0;
+    }
+  }
 
   return (
     <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
