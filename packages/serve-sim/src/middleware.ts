@@ -532,7 +532,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "X-Accel-Buffering": "no",
       });
       res.write(":\n\n");
-      const ax = axStreamerCache.get(state.device);
+      const ax = axStreamerCache.get(state.device, state.port);
       const removeClient = ax.addClient(res);
       req.on("close", removeClient);
       return;

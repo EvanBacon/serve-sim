@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { AXE_INSTALL_URL, AXE_NOT_INSTALLED_ERROR } from "../ax-shared";
+import { AX_UNAVAILABLE_ERROR } from "../ax-shared";
 import type { AxElement, AxRect, AxSnapshot } from "../ax-shared";
 import { groupTargetsByApp } from "../devtools-targets";
 import {
@@ -226,7 +226,7 @@ function simEndpoint(path: string): string {
 }
 
 function isAxeUnavailable(snapshot: AxSnapshot | null) {
-  return snapshot?.errors?.includes(AXE_NOT_INSTALLED_ERROR) ?? false;
+  return snapshot?.errors?.includes(AX_UNAVAILABLE_ERROR) ?? false;
 }
 
 function ReloadIcon({ size = 18, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
@@ -268,7 +268,7 @@ function useAxSnapshot(endpoint?: string) {
         setSnapshot(next);
         setStatus(
           isAxeUnavailable(next)
-            ? "AX unavailable: install AXe"
+            ? "AX unavailable"
             : `${next.elements.length} AX elements`,
         );
       } catch {
@@ -1841,13 +1841,7 @@ function AxTreeTool({
         null
       ) : axeUnavailable ? (
         <div style={{ ...panelStyles.empty, padding: 12 }}>
-          AX unavailable:{" "}
-          <a
-            href={AXE_INSTALL_URL}
-            style={axStyles.emptyLink}
-          >
-            install AXe
-          </a>
+          AX unavailable on this simulator.
         </div>
       ) : elements.length === 0 ? (
         <div style={{ ...panelStyles.empty, padding: 12 }}>
@@ -3426,10 +3420,6 @@ const axStyles: Record<string, CSSProperties> = {
     cursor: "pointer",
     fontSize: 10,
     padding: "3px 7px",
-  },
-  emptyLink: {
-    color: "#a5b4fc",
-    textDecoration: "none",
   },
   toolbarButtonActive: {
     background: "rgba(255,255,255,0.08)",

@@ -1,5 +1,4 @@
-export const AXE_INSTALL_URL = "https://github.com/cameroncooke/AXe";
-export const AXE_NOT_INSTALLED_ERROR = `AXe is not installed. Install it from ${AXE_INSTALL_URL}.`;
+export const AX_UNAVAILABLE_ERROR = "Accessibility unavailable on this simulator.";
 
 export interface AxRect {
   x: number;

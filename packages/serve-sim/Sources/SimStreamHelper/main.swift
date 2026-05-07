@@ -31,7 +31,7 @@ print("[main] Starting serve-sim-bin")
 print("[main] Device UDID: \(deviceUDID)")
 print("[main] Port: \(port)")
 
-let httpServer = HTTPServer(port: port)
+let httpServer = HTTPServer(deviceUDID: deviceUDID, port: port)
 let frameCapture = FrameCapture()
 let videoEncoder = VideoEncoder(quality: 0.7)
 let hidInjector = HIDInjector()
