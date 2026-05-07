@@ -13,6 +13,8 @@ import {
   useRef,
   type CSSProperties,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
@@ -1971,8 +1973,6 @@ function ToolsPanel({
   currentApp,
   axOverlayEnabled,
   onToggleAxOverlay,
-  simulatorScale,
-  onSimulatorScaleChange,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1980,8 +1980,6 @@ function ToolsPanel({
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
   axOverlayEnabled: boolean;
   onToggleAxOverlay: () => void;
-  simulatorScale: number;
-  onSimulatorScaleChange: (scale: number) => void;
 }) {
   return (
     <aside
@@ -2009,62 +2007,11 @@ function ToolsPanel({
             overlayEnabled={axOverlayEnabled}
             onToggleOverlay={onToggleAxOverlay}
           />
-          <SimulatorScaleTool
-            scale={simulatorScale}
-            onScaleChange={onSimulatorScaleChange}
-          />
           <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
         </div>
       )}
     </aside>
-  );
-}
-
-function SimulatorScaleTool({
-  scale,
-  onScaleChange,
-}: {
-  scale: number;
-  onScaleChange: (scale: number) => void;
-}) {
-  const decreaseDisabled = scale <= SIMULATOR_SCALE_MIN;
-  const increaseDisabled = scale >= SIMULATOR_SCALE_MAX;
-
-  return (
-    <section style={panelStyles.section}>
-      <div style={panelStyles.scaleHeader}>
-        <span style={{ ...panelStyles.sectionTitle, margin: 0 }}>Scale</span>
-        <div style={panelStyles.scaleStepper}>
-          <button
-            type="button"
-            style={{
-              ...panelStyles.scaleStepButton,
-              borderRight: "1px solid rgba(255,255,255,0.08)",
-              ...(decreaseDisabled ? panelStyles.scaleStepButtonDisabled : {}),
-            }}
-            disabled={decreaseDisabled}
-            aria-label="Decrease simulator scale"
-            onClick={() => onScaleChange(clampSimulatorScale(scale - SIMULATOR_SCALE_STEP))}
-          >
-            −
-          </button>
-          <span style={panelStyles.scaleValue}>{formatSimulatorScale(scale)}</span>
-          <button
-            type="button"
-            style={{
-              ...panelStyles.scaleStepButton,
-              ...(increaseDisabled ? panelStyles.scaleStepButtonDisabled : {}),
-            }}
-            disabled={increaseDisabled}
-            aria-label="Increase simulator scale"
-            onClick={() => onScaleChange(clampSimulatorScale(scale + SIMULATOR_SCALE_STEP))}
-          >
-            +
-          </button>
-        </div>
-      </div>
-    </section>
   );
 }
 
@@ -2406,7 +2353,6 @@ function App() {
   // Without this, the reload button flickers while an RN app is still loading.
   const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean; pid?: number } | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
-  const [simulatorScale, setSimulatorScale] = useState(1);
   const [viewportWidth, setViewportWidth] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 0),
   );
@@ -2578,11 +2524,105 @@ function App() {
   // PANEL_WIDTH is the panel itself; +24 covers its right offset + a gap.
   const DEVTOOLS_TOTAL = DEVTOOLS_PANEL_WIDTH + 24;
   const PANEL_TOTAL = (devtoolsOpen ? DEVTOOLS_TOTAL : panelOpen ? PANEL_WIDTH + 24 : 0);
-  const scaledFrameMaxWidth = frameMaxWidth * simulatorScale;
+  const [simulatorFrameWidth, setSimulatorFrameWidth] = useState<number | null>(null);
+  const [resizingSimulator, setResizingSimulator] = useState(false);
+  const [resizeHandleHovered, setResizeHandleHovered] = useState(false);
+  const resizeStartRef = useRef<{ pointerId: number; startX: number; startY: number; startWidth: number } | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const simulatorWidth = clampSimulatorFrameWidth(
+    simulatorFrameWidth ?? frameMaxWidth,
+    frameMaxWidth,
+    viewportWidth,
+  );
   const shiftForPanel =
-    PANEL_TOTAL > 0 && viewportWidth >= scaledFrameMaxWidth + PANEL_TOTAL + 64
+    PANEL_TOTAL > 0 && viewportWidth >= simulatorWidth + PANEL_TOTAL + 64
       ? PANEL_TOTAL
       : 0;
+
+  useEffect(() => {
+    if (simulatorFrameWidth == null) return;
+    const next = clampSimulatorFrameWidth(simulatorFrameWidth, frameMaxWidth, viewportWidth);
+    if (next !== simulatorFrameWidth) setSimulatorFrameWidth(next);
+  }, [frameMaxWidth, viewportWidth, simulatorFrameWidth]);
+
+  useEffect(() => {
+    if (!resizingSimulator) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    const previousWebkitUserSelect = document.body.style.webkitUserSelect;
+    document.body.style.cursor = "nwse-resize";
+    document.body.style.userSelect = "none";
+    document.body.style.webkitUserSelect = "none";
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.webkitUserSelect = previousWebkitUserSelect;
+    };
+  }, [resizingSimulator]);
+
+  useEffect(() => {
+    return () => {
+      if (resizeFrameRef.current != null) cancelAnimationFrame(resizeFrameRef.current);
+    };
+  }, []);
+
+  const finishSimulatorResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = resizeStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    resizeStartRef.current = null;
+    if (resizeFrameRef.current != null) {
+      cancelAnimationFrame(resizeFrameRef.current);
+      resizeFrameRef.current = null;
+    }
+    setResizingSimulator(false);
+  }, []);
+
+  const onSimulatorResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeStartRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: simulatorWidth,
+    };
+    setSimFocused(false);
+    setResizingSimulator(true);
+  }, [simulatorWidth]);
+
+  const onSimulatorResizePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = resizeStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const deltaX = event.clientX - start.startX;
+    const deltaY = (event.clientY - start.startY) * frameAspectRatio;
+    const nextWidth = start.startWidth + (Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY);
+    const clampedWidth = clampSimulatorFrameWidth(nextWidth, frameMaxWidth, viewportWidth);
+    if (resizeFrameRef.current != null) cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      setSimulatorFrameWidth(clampedWidth);
+    });
+  }, [frameAspectRatio, frameMaxWidth, viewportWidth]);
+
+  const onSimulatorResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const direction = event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+        ? -1
+        : 0;
+    if (direction === 0) return;
+    event.preventDefault();
+    const step = event.shiftKey ? 80 : 24;
+    setSimulatorFrameWidth(clampSimulatorFrameWidth(simulatorWidth + (direction * step), frameMaxWidth, viewportWidth));
+  }, [frameMaxWidth, simulatorWidth, viewportWidth]);
 
   return (
     <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
@@ -2596,7 +2636,8 @@ function App() {
       <div
         style={{
           ...s.simulatorStack,
-          width: scaledFrameMaxWidth,
+          width: simulatorWidth,
+          transition: resizingSimulator ? "none" : s.simulatorStack.transition,
         }}
       >
         <SimulatorToolbar
@@ -2643,16 +2684,22 @@ function App() {
         <div
           ref={simContainerRef}
           style={{
-            width: scaledFrameMaxWidth,
+            width: simulatorWidth,
             maxHeight: "100%",
             aspectRatio: frameAspectRatio,
             position: "relative",
+            transition: resizingSimulator ? "none" : "width 0.18s cubic-bezier(0.2, 0, 0, 1)",
           }}
           {...mediaDrop.dropZoneProps}
         >
           <SimulatorView
             url={config.url}
-            style={{ width: "100%", height: "100%", border: "none" }}
+            style={{
+              width: "100%",
+              height: "100%",
+              border: "none",
+              pointerEvents: resizingSimulator ? "none" : undefined,
+            }}
             imageStyle={{
               borderRadius: imgBorderRadius,
               cornerShape: "superellipse(1.3)",
@@ -2678,6 +2725,32 @@ function App() {
               <span style={{ fontSize: 13, fontWeight: 500 }}>Drop media or .ipa</span>
             </div>
           )}
+          <div
+            role="separator"
+            aria-label="Resize simulator"
+            aria-orientation="vertical"
+            aria-valuemin={Math.round(SIMULATOR_RESIZE_MIN_WIDTH)}
+            aria-valuemax={Math.round(getSimulatorFrameMaxWidth(frameMaxWidth, viewportWidth))}
+            aria-valuenow={Math.round(simulatorWidth)}
+            tabIndex={0}
+            title="Drag to resize"
+            onPointerDown={onSimulatorResizePointerDown}
+            onPointerMove={onSimulatorResizePointerMove}
+            onPointerUp={finishSimulatorResize}
+            onPointerCancel={finishSimulatorResize}
+            onKeyDown={onSimulatorResizeKeyDown}
+            onPointerEnter={() => setResizeHandleHovered(true)}
+            onPointerLeave={() => setResizeHandleHovered(false)}
+            style={{
+              ...s.resizeHandle,
+              ...(resizeHandleHovered || resizingSimulator ? s.resizeHandleActive : {}),
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+              <path d="M9 13L13 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+              <path d="M5 13L13 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+            </svg>
+          </div>
         </div>
       </div>
 
@@ -2750,8 +2823,6 @@ function App() {
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
-        simulatorScale={simulatorScale}
-        onSimulatorScaleChange={(scale) => setSimulatorScale(clampSimulatorScale(scale))}
       />
 
       <WebKitDevtoolsPanel
@@ -2819,6 +2890,34 @@ const s: Record<string, CSSProperties> = {
     color: "#a5b4fc",
     pointerEvents: "none",
     zIndex: 20,
+  },
+  resizeHandle: {
+    position: "absolute",
+    right: -11,
+    bottom: -11,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "rgba(255,255,255,0.72)",
+    background: "rgba(28,28,30,0.62)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    boxShadow: "0 8px 24px rgba(0,0,0,0.32)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    cursor: "nwse-resize",
+    touchAction: "none",
+    opacity: 0.72,
+    transform: "scale(1)",
+    transition: "opacity 0.14s ease, transform 0.14s ease, background 0.14s ease",
+    zIndex: 25,
+  },
+  resizeHandleActive: {
+    opacity: 1,
+    transform: "scale(1.06)",
+    background: "rgba(44,44,46,0.82)",
   },
   toastStack: {
     position: "fixed",
@@ -2921,17 +3020,26 @@ const pickerGroupHeaderStyle: CSSProperties = {
 
 const PANEL_WIDTH = 320;
 const DEVTOOLS_PANEL_WIDTH = 760;
-const SIMULATOR_SCALE_MIN = 0.5;
-const SIMULATOR_SCALE_MAX = 3;
-const SIMULATOR_SCALE_STEP = 0.5;
+const SIMULATOR_RESIZE_MIN_WIDTH = 280;
+const SIMULATOR_RESIZE_MAX_SCALE = 3;
 
-function clampSimulatorScale(value: number) {
-  const stepped = Math.round(value / SIMULATOR_SCALE_STEP) * SIMULATOR_SCALE_STEP;
-  return Math.min(SIMULATOR_SCALE_MAX, Math.max(SIMULATOR_SCALE_MIN, stepped));
+function clampSimulatorFrameWidth(
+  value: number,
+  defaultWidth: number,
+  viewportWidth: number,
+) {
+  const maxWidth = getSimulatorFrameMaxWidth(defaultWidth, viewportWidth);
+  const minWidth = Math.min(SIMULATOR_RESIZE_MIN_WIDTH, maxWidth);
+  return Math.min(maxWidth, Math.max(minWidth, value));
 }
 
-function formatSimulatorScale(value: number) {
-  return Number.isInteger(value) ? `${value}x` : `${value.toFixed(1)}x`;
+function getSimulatorFrameMaxWidth(defaultWidth: number, viewportWidth: number) {
+  const scaledMaxWidth = defaultWidth * SIMULATOR_RESIZE_MAX_SCALE;
+  const viewportMaxWidth =
+    viewportWidth > 0
+      ? Math.max(SIMULATOR_RESIZE_MIN_WIDTH, viewportWidth - 48)
+      : scaledMaxWidth;
+  return Math.min(scaledMaxWidth, viewportMaxWidth);
 }
 
 const devtoolsStyles: Record<string, CSSProperties> = {
@@ -3271,42 +3379,6 @@ const panelStyles: Record<string, CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.08)",
     borderRadius: 10,
     padding: 12,
-  },
-  scaleHeader: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  scaleStepper: {
-    display: "grid",
-    gridTemplateColumns: "28px 46px 28px",
-    alignItems: "center",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 7,
-    overflow: "hidden",
-    background: "rgba(255,255,255,0.03)",
-  },
-  scaleStepButton: {
-    height: 26,
-    border: "none",
-    background: "transparent",
-    color: "rgba(255,255,255,0.82)",
-    cursor: "pointer",
-    fontSize: 16,
-    lineHeight: 1,
-  },
-  scaleStepButtonDisabled: {
-    color: "rgba(255,255,255,0.24)",
-    cursor: "not-allowed",
-  },
-  scaleValue: {
-    fontSize: 12,
-    fontFamily: "ui-monospace, monospace",
-    fontWeight: 600,
-    textAlign: "center",
-    color: "#eee",
-    borderRight: "1px solid rgba(255,255,255,0.08)",
   },
   empty: {
     background: "#1c1c1e",
