@@ -63,9 +63,6 @@ async function bundleBrowserClient(entry: string): Promise<string> {
 const clientJs = await bundleBrowserClient("src/client/client.tsx");
 console.log(`client bundle     ${kb(clientJs.length)}`);
 
-const gridJs = await bundleBrowserClient("src/client/grid.tsx");
-console.log(`grid bundle       ${kb(gridJs.length)}`);
-
 // ─── 2. Inline client into preview HTML, base64-encode for the define ────
 
 // Committed ICO copy of Simulator.app's AppIcon, inlined as a data URI so the
@@ -90,25 +87,8 @@ ${faviconTag}
 const htmlB64 = Buffer.from(html).toString("base64");
 console.log(`preview html      ${kb(html.length)}  (base64 ${kb(htmlB64.length)})`);
 
-const gridHtml = `<!doctype html>
-<html><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Simulator Grid</title>
-${faviconTag}
-<style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;height:100%;background:#0a0a0a;color:#eee;font-family:-apple-system,BlinkMacSystemFont,sans-serif}#root{height:100%}</style>
-</head><body>
-<div id="root"></div>
-<!--__SIM_GRID_CONFIG__-->
-<script type="module">${gridJs}</script>
-</body></html>`;
-
-const gridHtmlB64 = Buffer.from(gridHtml).toString("base64");
-console.log(`grid html         ${kb(gridHtml.length)}  (base64 ${kb(gridHtmlB64.length)})`);
-
 const PREVIEW_DEFINE = {
   __PREVIEW_HTML_B64__: JSON.stringify(htmlB64),
-  __GRID_HTML_B64__: JSON.stringify(gridHtmlB64),
 };
 
 // ─── 3. Middleware ESM (serve-sim/middleware) ─────────────────────────────
@@ -170,7 +150,6 @@ const compile = spawnSync(
     resolve(root, "src/index.ts"),
     "--outfile", resolve(distDir, "serve-sim"),
     "--define", `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
-    "--define", `__GRID_HTML_B64__=${JSON.stringify(gridHtmlB64)}`,
   ],
   { stdio: "inherit" },
 );

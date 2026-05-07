@@ -7,7 +7,6 @@ import { createAxStreamerCache } from "./ax";
 
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
-declare const __GRID_HTML_B64__: string;
 const STATE_DIR = join(tmpdir(), "serve-sim");
 const DEVTOOLS_FRONTEND_REV = "854a02be78c7ffea104cb523636efa991bef5c5b";
 const INSPECT_WEBKIT_START_PORT = 9222;
@@ -315,14 +314,6 @@ function loadHtml(): string {
   return _html;
 }
 
-let _gridHtml: string | null = null;
-function loadGridHtml(): string {
-  if (!_gridHtml) {
-    _gridHtml = Buffer.from(__GRID_HTML_B64__, "base64").toString("utf-8");
-  }
-  return _gridHtml;
-}
-
 interface SimctlDevice {
   udid: string;
   name: string;
@@ -573,6 +564,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         // Pass real serve-sim URLs directly. The client parses the MJPEG
         // stream via fetch() (CORS is fine — serve-sim sends Access-Control-Allow-Origin: *)
         // and connects to the WS directly (WS has no CORS).
+        const gridApiBase = (base === "" ? "" : base) + "/grid/api";
         const config = JSON.stringify({
           ...state,
           basePath: base,
@@ -580,36 +572,16 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           appStateEndpoint: endpoint(base, "/appstate", state.device),
           axEndpoint: endpoint(base, "/ax", state.device),
           devtoolsEndpoint: endpoint(base, "/devtools", state.device),
+          gridApiEndpoint: gridApiBase,
+          gridStartEndpoint: gridApiBase + "/start",
+          gridShutdownEndpoint: gridApiBase + "/shutdown",
+          gridMemoryEndpoint: gridApiBase + "/memory",
+          previewEndpoint: base === "" ? "/" : base,
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
       }
 
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store",
-      });
-      res.end(html);
-      return;
-    }
-
-    // Grid HTML: multi-device dashboard showing every running helper.
-    if (url === base + "/grid" || url === base + "/grid/") {
-      let html = loadGridHtml();
-      const previewEndpoint = base === "" ? "/" : base;
-      const apiBase = (base === "" ? "" : base) + "/grid/api";
-      const config = JSON.stringify({
-        basePath: base,
-        apiEndpoint: apiBase,
-        startEndpoint: apiBase + "/start",
-        shutdownEndpoint: apiBase + "/shutdown",
-        memoryEndpoint: apiBase + "/memory",
-        previewEndpoint,
-      });
-      html = html.replace(
-        "<!--__SIM_GRID_CONFIG__-->",
-        `<script>window.__SIM_GRID__=${config}</script>`,
-      );
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
@@ -650,12 +622,24 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
             : null,
         };
       });
-      // Stable order: helpers first, then booted, then shutdown; alpha within.
-      devices.sort((a, b) => {
-        const rank = (x: typeof a) =>
-          x.helper ? 0 : x.state === "Booted" ? 1 : 2;
-        return rank(a) - rank(b) || a.name.localeCompare(b.name);
-      });
+      // Stable order: family (iPhone, iPad, Watch, TV, Vision, other) →
+      // state (helper > booted > shutdown) → alpha. Keeps the most
+      // commonly used devices visible without scrolling.
+      const familyRank = (name: string): number => {
+        if (/iphone/i.test(name)) return 0;
+        if (/ipad/i.test(name)) return 1;
+        if (/watch/i.test(name)) return 2;
+        if (/(apple\s*tv|^tv\b)/i.test(name)) return 3;
+        if (/vision|reality/i.test(name)) return 4;
+        return 5;
+      };
+      const stateRank = (x: typeof devices[number]) =>
+        x.helper ? 0 : x.state === "Booted" ? 1 : 2;
+      devices.sort((a, b) =>
+        familyRank(a.name) - familyRank(b.name) ||
+        stateRank(a) - stateRank(b) ||
+        a.name.localeCompare(b.name),
+      );
       res.writeHead(200, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
