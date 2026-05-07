@@ -14,11 +14,13 @@ import {
   type CSSProperties,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
   SimulatorView,
+  displayStreamConfig,
   fallbackScreenSize,
   screenBorderRadius,
   SimulatorToolbar,
@@ -2258,6 +2260,10 @@ function App() {
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
   const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
   const frameAspectRatio = simulatorAspectRatio(activeStreamConfig);
+  const frameDisplayConfig = displayStreamConfig(activeStreamConfig);
+  const frameAspectRatioValue = frameDisplayConfig
+    ? frameDisplayConfig.width / frameDisplayConfig.height
+    : 1;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -2529,6 +2535,7 @@ function App() {
   const [resizeHandleHovered, setResizeHandleHovered] = useState(false);
   const resizeStartRef = useRef<{ pointerId: number; startX: number; startY: number; startWidth: number } | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
+  const stopMouseResizeRef = useRef<(() => void) | null>(null);
   const simulatorWidth = clampSimulatorFrameWidth(
     simulatorFrameWidth ?? frameMaxWidth,
     frameMaxWidth,
@@ -2563,8 +2570,18 @@ function App() {
   useEffect(() => {
     return () => {
       if (resizeFrameRef.current != null) cancelAnimationFrame(resizeFrameRef.current);
+      stopMouseResizeRef.current?.();
     };
   }, []);
+
+  const scheduleSimulatorFrameWidth = useCallback((nextWidth: number) => {
+    const clampedWidth = clampSimulatorFrameWidth(nextWidth, frameMaxWidth, viewportWidth);
+    if (resizeFrameRef.current != null) cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      setSimulatorFrameWidth(clampedWidth);
+    });
+  }, [frameMaxWidth, viewportWidth]);
 
   const finishSimulatorResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const start = resizeStartRef.current;
@@ -2582,35 +2599,67 @@ function App() {
     setResizingSimulator(false);
   }, []);
 
-  const onSimulatorResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
+  const startSimulatorResize = useCallback((pointerId: number, clientX: number, clientY: number) => {
     resizeStartRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
+      pointerId,
+      startX: clientX,
+      startY: clientY,
       startWidth: simulatorWidth,
     };
     setSimFocused(false);
     setResizingSimulator(true);
   }, [simulatorWidth]);
 
+  const moveSimulatorResize = useCallback((clientX: number, clientY: number) => {
+    const start = resizeStartRef.current;
+    if (!start) return;
+    const deltaX = clientX - start.startX;
+    const deltaY = (clientY - start.startY) * frameAspectRatioValue;
+    const nextWidth = start.startWidth + (Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY);
+    scheduleSimulatorFrameWidth(nextWidth);
+  }, [frameAspectRatioValue, scheduleSimulatorFrameWidth]);
+
+  const onSimulatorResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    startSimulatorResize(event.pointerId, event.clientX, event.clientY);
+  }, [startSimulatorResize]);
+
   const onSimulatorResizePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const start = resizeStartRef.current;
     if (!start || start.pointerId !== event.pointerId) return;
     event.preventDefault();
-    const deltaX = event.clientX - start.startX;
-    const deltaY = (event.clientY - start.startY) * frameAspectRatio;
-    const nextWidth = start.startWidth + (Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY);
-    const clampedWidth = clampSimulatorFrameWidth(nextWidth, frameMaxWidth, viewportWidth);
-    if (resizeFrameRef.current != null) cancelAnimationFrame(resizeFrameRef.current);
-    resizeFrameRef.current = requestAnimationFrame(() => {
-      resizeFrameRef.current = null;
-      setSimulatorFrameWidth(clampedWidth);
-    });
-  }, [frameAspectRatio, frameMaxWidth, viewportWidth]);
+    moveSimulatorResize(event.clientX, event.clientY);
+  }, [moveSimulatorResize]);
+
+  const onSimulatorResizeMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stopMouseResizeRef.current?.();
+    startSimulatorResize(-1, event.clientX, event.clientY);
+
+    const onMove = (moveEvent: MouseEvent) => {
+      moveEvent.preventDefault();
+      moveSimulatorResize(moveEvent.clientX, moveEvent.clientY);
+    };
+    const stop = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", stop);
+      resizeStartRef.current = null;
+      if (resizeFrameRef.current != null) {
+        cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+      stopMouseResizeRef.current = null;
+      setResizingSimulator(false);
+    };
+    stopMouseResizeRef.current = stop;
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", stop);
+  }, [moveSimulatorResize, startSimulatorResize]);
 
   const onSimulatorResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     const direction = event.key === "ArrowRight" || event.key === "ArrowDown"
@@ -2738,6 +2787,7 @@ function App() {
             onPointerMove={onSimulatorResizePointerMove}
             onPointerUp={finishSimulatorResize}
             onPointerCancel={finishSimulatorResize}
+            onMouseDown={onSimulatorResizeMouseDown}
             onKeyDown={onSimulatorResizeKeyDown}
             onPointerEnter={() => setResizeHandleHovered(true)}
             onPointerLeave={() => setResizeHandleHovered(false)}
