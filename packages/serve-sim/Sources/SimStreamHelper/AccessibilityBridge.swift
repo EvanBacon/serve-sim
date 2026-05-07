@@ -139,10 +139,99 @@ final class AccessibilityBridge: NSObject {
             rootTranslation.setValue(token, forKey: "bridgeDelegateToken")
         }
 
-        // axe emits a flat array (one element per app) at the root.
-        let root = serialize(element: rootElement, token: token)
+        // 1. Recursive walk from the application element, collecting the
+        //    frames we've covered. This catches everything iOS exposes via
+        //    standard accessibility-children traversal.
+        var coverage = AccessibilityCoverage()
+        var root = serialize(element: rootElement, token: token, coverage: &coverage)
+        let screenFrame: NSRect
+        if let app = rootElement as? NSAccessibilityElement {
+            screenFrame = app.accessibilityFrame()
+        } else {
+            screenFrame = .zero
+        }
+
+        // 2. Grid hit-test discovery: many iOS containers (UIScrollView,
+        //    UICollectionView, custom group elements) hide their AX
+        //    children from the recursive walk. We sample points across the
+        //    screen and ask the translator what's under each — anything
+        //    that's still a real accessibility element shows up here. Same
+        //    technique as idb's processRemoteContent path.
+        if screenFrame.width > 1, screenFrame.height > 1 {
+            var children = (root["children"] as? [[String: Any]]) ?? []
+            let discovered = discoverByGrid(token: token, bounds: screenFrame, coverage: &coverage)
+            children.append(contentsOf: discovered)
+            root["children"] = children
+        }
+
         let json: [Any] = [root]
         return try JSONSerialization.data(withJSONObject: json)
+    }
+
+    /// Sample a grid of screen points and ask the translator for the
+    /// element at each. Dedupes by frame against `coverage` and skips
+    /// points whose enclosing rect we've already cataloged — that lets
+    /// the cost scale with the number of *unique* elements rather than
+    /// the grid size. Caller owns the token.
+    private func discoverByGrid(token: String, bounds: CGRect, coverage: inout AccessibilityCoverage) -> [[String: Any]] {
+        guard let translator = translator else { return [] }
+
+        let pointSel = NSSelectorFromString("objectAtPoint:displayId:bridgeDelegateToken:")
+        typealias PointFunc = @convention(c) (AnyObject, Selector, CGPoint, UInt32, NSString) -> AnyObject?
+        guard let pointIMP = translator.method(for: pointSel) else { return [] }
+        let objectAtPoint = unsafeBitCast(pointIMP, to: PointFunc.self)
+
+        let macSel = NSSelectorFromString("macPlatformElementFromTranslation:")
+        typealias MacFunc = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
+        guard let macIMP = translator.method(for: macSel) else { return [] }
+        let toMacElement = unsafeBitCast(macIMP, to: MacFunc.self)
+
+        let step: CGFloat = 32
+        var pointBudget = 600  // safety cap for misbehaving sims
+        var discovered: [[String: Any]] = []
+
+        var y = bounds.minY + step / 2
+        while y < bounds.maxY, pointBudget > 0 {
+            var x = bounds.minX + step / 2
+            while x < bounds.maxX, pointBudget > 0 {
+                let point = CGPoint(x: x, y: y)
+                x += step
+
+                // Skip points already enclosed by a known element — this
+                // is the load-bearing optimization. Once a card's text
+                // element is cataloged, every other grid point that falls
+                // inside the same text frame avoids an XPC round-trip.
+                if coverage.contains(point) { continue }
+                pointBudget -= 1
+
+                guard let translation = objectAtPoint(translator, pointSel, point, 0, token as NSString) as? NSObject else {
+                    continue
+                }
+                translation.setValue(token, forKey: "bridgeDelegateToken")
+                guard let element = toMacElement(translator, macSel, translation) as? NSObject else {
+                    continue
+                }
+                if let t = element.value(forKey: "translation") as? NSObject {
+                    t.setValue(token, forKey: "bridgeDelegateToken")
+                }
+
+                // Read the frame once; serialize() will read it again for
+                // the dict, but the AXP element caches lazily so the cost
+                // collapses.
+                let frame: NSRect = (element as? NSAccessibilityElement)?.accessibilityFrame() ?? .zero
+                if coverage.contains(frame) { continue }
+                // The Application/window itself is too coarse to be
+                // useful — skip when the hit returns the screen.
+                if abs(frame.width - bounds.width) < 1,
+                   abs(frame.height - bounds.height) < 1 {
+                    coverage.insertContainer(frame)
+                    continue
+                }
+                discovered.append(serialize(element: element, token: token, coverage: &coverage))
+            }
+            y += step
+        }
+        return discovered
     }
 
     // MARK: - Token registry
@@ -167,7 +256,7 @@ final class AccessibilityBridge: NSObject {
     // axe's JSON keys, mirroring idb's FBAXKeys constants.
     private static let axPrefix = "AX"
 
-    private func serialize(element: NSObject, token: String) -> [String: Any] {
+    private func serialize(element: NSObject, token: String, coverage: inout AccessibilityCoverage) -> [String: Any] {
         // Token must be re-stamped on every element walked because the
         // framework creates fresh translation objects lazily as we touch
         // child collections.
@@ -223,8 +312,19 @@ final class AccessibilityBridge: NSObject {
         if let children {
             for child in children {
                 guard let childObj = child as? NSObject else { continue }
-                childDicts.append(serialize(element: childObj, token: token))
+                childDicts.append(serialize(element: childObj, token: token, coverage: &coverage))
             }
+        }
+
+        // Record this element. Only true leaves block the grid — anything
+        // that looks like a container (had walked children, or is just
+        // physically too large to be a single tappable element) stays
+        // probe-able so we can discover "remote" elements iOS hid under
+        // empty-children Groups (Nav bar / Tab Bar / scroll views).
+        if !childDicts.isEmpty || isLikelyContainer(frame: frame) {
+            coverage.insertContainer(frame)
+        } else {
+            coverage.insertLeaf(frame)
         }
         dict["children"] = childDicts
 
@@ -245,6 +345,15 @@ final class AccessibilityBridge: NSObject {
     private func boolValue(_ obj: NSObject, key: String) -> Bool? {
         if let n = obj.value(forKey: key) as? NSNumber { return n.boolValue }
         return nil
+    }
+
+    /// Heuristic: anything with a dimension >= 250pt is too big to be a
+    /// single tappable element, so we treat it as a container even when
+    /// it reports no AX children. Picks up the iOS pattern where a Group
+    /// (Nav bar, Tab Bar, scroll views) hides its content from the
+    /// recursive walk but exposes it to hit-testing.
+    private func isLikelyContainer(frame: NSRect) -> Bool {
+        return max(frame.width, frame.height) >= 250
     }
 
     // MARK: - AXPTranslationTokenDelegateHelper
@@ -323,5 +432,46 @@ final class AccessibilityBridge: NSObject {
             return nil
         }
         return cls.perform(NSSelectorFromString("emptyResponse"))?.takeUnretainedValue() as AnyObject?
+    }
+}
+
+/// Tracks which screen rects we've already cataloged so the grid walk
+/// can skip points covered by existing elements (avoiding redundant XPC
+/// round-trips) and skip elements we've already serialized (avoiding
+/// duplicate subtrees). Round to whole points — AX frames wobble a
+/// fractional pixel between fetches and we don't care.
+struct AccessibilityCoverage {
+    private var leafRects: [NSRect] = []
+    private var keys: Set<String> = []
+
+    /// Add a known-leaf rect — point-in-rect checks will skip XPC for any
+    /// grid point falling inside it.
+    mutating func insertLeaf(_ rect: NSRect) {
+        let key = Self.key(for: rect)
+        if keys.insert(key).inserted {
+            leafRects.append(rect)
+        }
+    }
+
+    /// Add a container rect for frame-dedup only. Containers don't block
+    /// grid probes — empty-children Groups (Nav bar, Tab Bar) are how iOS
+    /// hides "remote" content, so points inside them must still be sampled.
+    mutating func insertContainer(_ rect: NSRect) {
+        keys.insert(Self.key(for: rect))
+    }
+
+    func contains(_ rect: NSRect) -> Bool {
+        keys.contains(Self.key(for: rect))
+    }
+
+    func contains(_ point: CGPoint) -> Bool {
+        for r in leafRects where r.contains(point) {
+            return true
+        }
+        return false
+    }
+
+    private static func key(for rect: NSRect) -> String {
+        "\(Int(rect.origin.x.rounded())),\(Int(rect.origin.y.rounded())),\(Int(rect.size.width.rounded())),\(Int(rect.size.height.rounded()))"
     }
 }
