@@ -235,6 +235,10 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
     [_lock unlock];
     simcam_log(@"registered video data output delegate %@ (pos=%d)",
         delegate, (int)SimCamPositionOf(out));
+    // Auto-kick the pump: some frameworks (notably expo-camera) gate
+    // `session.startRunning()` behind `#if !targetEnvironment(simulator)`,
+    // so we'd never see startRunning. Start as soon as there's a consumer.
+    [self startPumpingIfNeeded];
 }
 
 - (void)removeOutput:(AVCaptureVideoDataOutput *)out {
@@ -265,6 +269,7 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
         }
     });
     simcam_log(@"hooked preview layer %p (mirror=%d)", layer, (int)mirror);
+    [self startPumpingIfNeeded];
 }
 
 - (void)pushFrameToLayers:(CVPixelBufferRef)pb {
