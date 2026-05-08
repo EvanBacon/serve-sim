@@ -1047,6 +1047,162 @@ async function memoryWarning(args: string[]) {
   });
 }
 
+// ─── Camera injection ───
+
+/**
+ * Resolve the path to the SimCameraInjector dylib. The dev/source layout
+ * places it under packages/serve-sim/dist/simcam/; the published npm tarball
+ * ships the same file at <package>/dist/simcam/.
+ */
+function locateCameraDylib(): string | null {
+  const candidates = [
+    join(__dirname, "..", "dist", "simcam", "libSimCameraInjector.dylib"),
+    join(__dirname, "simcam", "libSimCameraInjector.dylib"),
+    join(__dirname, "..", "Sources", "SimCameraInjector", "build",
+         "libSimCameraInjector.dylib"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return resolve(p);
+  }
+  return null;
+}
+
+function buildCameraDylib(): string {
+  const buildScript = join(__dirname, "..", "Sources", "SimCameraInjector", "build.sh");
+  if (!existsSync(buildScript)) {
+    throw new Error(
+      "SimCameraInjector source not found — this build of serve-sim does not " +
+      "include camera support sources. Reinstall from a recent release.",
+    );
+  }
+  console.error("[serve-sim] building libSimCameraInjector.dylib (one-time)…");
+  execSync(`bash "${buildScript}"`, { stdio: "inherit" });
+  const out = locateCameraDylib();
+  if (!out) throw new Error("Build succeeded but dylib not found.");
+  return out;
+}
+
+/**
+ * `serve-sim camera <bundle-id> [-d udid] [--image <path>] [--build]`
+ *
+ * Launches an iOS simulator app with the SimCameraInjector dylib loaded via
+ * DYLD_INSERT_LIBRARIES. The injected dylib swizzles AVFoundation so
+ * AVCaptureDevice / AVCaptureSession / AVCaptureVideoPreviewLayer surface
+ * a synthetic camera feed sourced from the supplied image (or a built-in
+ * gradient placeholder when omitted).
+ */
+async function camera(args: string[]) {
+  let deviceArg: string | undefined;
+  let imagePath: string | undefined;
+  let forceBuild = false;
+  let quiet = false;
+  const filtered: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--device" || a === "-d") { deviceArg = args[++i]; continue; }
+    if (a === "--image" || a === "-i") { imagePath = args[++i]; continue; }
+    if (a === "--build") { forceBuild = true; continue; }
+    if (a === "--quiet" || a === "-q") { quiet = true; continue; }
+    if (a === "--help" || a === "-h") {
+      console.log(`Usage: serve-sim camera <bundle-id> [-d udid] [--image <path>] [--build]
+
+Launches the simulator app with a synthetic camera feed injected. Apps using
+AVCaptureDevice / AVCaptureSession / AVCaptureVideoPreviewLayer will see the
+supplied image as the camera. No build-time changes are required in the app.
+
+Options:
+  -d, --device <udid|name>   Target a specific simulator (default: booted)
+  -i, --image <path>         PNG/JPEG to use as the feed (default: gradient)
+      --build                Rebuild libSimCameraInjector.dylib first
+  -q, --quiet                JSON-only output
+
+Examples:
+  serve-sim camera com.acme.MyApp
+  serve-sim camera com.acme.MyApp --image ~/Pictures/face.png
+  serve-sim camera com.acme.MyApp -d "iPhone 16 Pro" -i scene.jpg`);
+      return;
+    }
+    filtered.push(a!);
+  }
+
+  const bundleId = filtered[0];
+  if (!bundleId) {
+    console.error("Usage: serve-sim camera <bundle-id> [--image <path>] [-d udid]");
+    process.exit(1);
+  }
+
+  const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+  if (!udid) {
+    console.error("No booted simulator. Boot one or pass -d <udid|name>.");
+    process.exit(1);
+  }
+
+  let dylib = forceBuild ? null : locateCameraDylib();
+  if (!dylib) {
+    try { dylib = buildCameraDylib(); }
+    catch (e: any) {
+      console.error(`Failed to obtain camera dylib: ${e?.message ?? e}`);
+      process.exit(1);
+    }
+  }
+
+  if (imagePath) {
+    imagePath = resolve(imagePath);
+    if (!existsSync(imagePath)) {
+      console.error(`Image not found: ${imagePath}`);
+      process.exit(1);
+    }
+  }
+
+  // Best-effort: grant camera privacy. Harmless if the app hasn't requested it.
+  try {
+    execSync(`xcrun simctl privacy "${udid}" grant camera "${bundleId}"`, {
+      stdio: "ignore",
+    });
+  } catch {}
+
+  // Terminate any running instance so the dylib gets injected on next launch.
+  try {
+    execSync(`xcrun simctl terminate "${udid}" "${bundleId}"`, { stdio: "ignore" });
+  } catch {}
+
+  const env = {
+    ...process.env,
+    SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: dylib,
+    ...(imagePath ? { SIMCTL_CHILD_SIMCAM_IMAGE_PATH: imagePath } : {}),
+  };
+
+  let stdoutBuf = "";
+  try {
+    stdoutBuf = execSync(`xcrun simctl launch "${udid}" "${bundleId}"`, {
+      env,
+      encoding: "utf-8",
+    });
+  } catch (e: any) {
+    console.error(`simctl launch failed: ${e?.stderr ?? e?.message ?? e}`);
+    process.exit(1);
+  }
+
+  // simctl prints "<bundle-id>: <pid>"
+  const pidMatch = stdoutBuf.trim().match(/:\s*(\d+)\s*$/);
+  const pid = pidMatch ? Number(pidMatch[1]) : null;
+
+  const result = {
+    udid,
+    bundleId,
+    pid,
+    dylib,
+    image: imagePath ?? null,
+  };
+  if (quiet) {
+    console.log(JSON.stringify(result));
+  } else {
+    console.log(`📷 Injected camera into ${bundleId} (pid ${pid ?? "?"}) on ${udid}`);
+    console.log(`   dylib: ${dylib}`);
+    console.log(`   image: ${imagePath ?? "<built-in gradient>"}`);
+  }
+}
+
 // ─── Serve preview ───
 
 async function serve(servePort: number, devices: string[], portExplicit: boolean) {
@@ -1132,6 +1288,9 @@ Usage:
                                         Toggle a CoreAnimation debug render flag
                                         (blended|copies|misaligned|offscreen|slow-animations)
   serve-sim memory-warning [-d udid]    Simulate a memory warning on the device
+  serve-sim camera <bundle-id> [-d udid] [--image <path>] [--build]
+                                        Inject a synthetic camera feed and
+                                        launch the app (no build-time changes)
 
 Options:
   -p, --port <port>   Starting port (preview default: 3200, stream default: 3100)
@@ -1176,6 +1335,10 @@ if (argv[0] === "ca-debug") {
 }
 if (argv[0] === "memory-warning") {
   await memoryWarning(argv.slice(1));
+  process.exit(0);
+}
+if (argv[0] === "camera") {
+  await camera(argv.slice(1));
   process.exit(0);
 }
 // Parse flags and positional args

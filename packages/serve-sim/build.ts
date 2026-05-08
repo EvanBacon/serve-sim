@@ -150,4 +150,22 @@ const compile = spawnSync(
 if (compile.status !== 0) process.exit(compile.status ?? 1);
 console.log("dist/serve-sim      (compiled binary)");
 
+// ─── 6. SimCameraInjector dylib (iphonesimulator camera-feed injector) ────
+// Built into dist/simcam/ so it ships with the npm tarball alongside the
+// JS bin. The CLI's `camera` verb resolves the path via locateCameraDylib().
+
+const camBuild = spawnSync(
+  "bash",
+  [
+    resolve(root, "Sources/SimCameraInjector/build.sh"),
+    resolve(distDir, "simcam"),
+  ],
+  { stdio: "inherit" },
+);
+if (camBuild.status !== 0) {
+  console.error("SimCameraInjector dylib build failed.");
+  process.exit(camBuild.status ?? 1);
+}
+console.log("dist/simcam/libSimCameraInjector.dylib");
+
 console.log("Done.");
