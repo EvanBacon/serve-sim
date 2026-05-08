@@ -237,7 +237,7 @@ Bun.serve({
       if (states.length === 0) {
         return new Response("No serve-sim device", { status: 404 });
       }
-      const ax = axStreamerCache.get(states[0].device);
+      const ax = axStreamerCache.get(states[0].device, states[0].port);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue(":\n\n");

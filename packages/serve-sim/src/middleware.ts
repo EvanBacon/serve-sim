@@ -178,12 +178,12 @@ async function isLocalPortFree(port: number): Promise<boolean> {
     const server = createNetServer();
     server.once("error", () => resolve(false));
     server.once("listening", () => server.close(() => resolve(true)));
-    server.listen(port, "localhost");
+    server.listen(port, "127.0.0.1");
   });
 }
 
 async function existingInspectWebKitBridge(port: number): Promise<WebKitBridge | null> {
-  const cdpUrl = `http://localhost:${port}`;
+  const cdpUrl = `http://127.0.0.1:${port}`;
   try {
     const versionRes = await fetch(`${cdpUrl}/json/version`);
     if (!versionRes.ok) return null;
@@ -246,10 +246,14 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
         continue;
       }
       try {
-        const server = await startCdpServer({ host: "localhost", port });
+        // Bind explicitly to IPv4 127.0.0.1 to match what bridgeWsHost emits
+        // (and what the DevTools frontend CSP whitelists). `localhost` resolves
+        // to ::1 first on some setups, which would leave the iframe's
+        // ws://127.0.0.1:9222 connection refused.
+        const server = await startCdpServer({ host: "127.0.0.1", port });
         return {
           port,
-          cdpUrl: `http://localhost:${port}`,
+          cdpUrl: `http://127.0.0.1:${port}`,
           async listTargets() {
             return server.getTargets()
               .filter((target: any) => target.source?.kind === "simulator")
@@ -290,14 +294,16 @@ function devtoolsFrontendUrl(frontendBase: string, wsHost: string, targetId: str
   return `${url.pathname}${url.search}`;
 }
 
-// The inspect-webkit bridge binds to localhost only. When the preview is
-// loaded from a different hostname (e.g. another device on the LAN), strip
-// to the request's hostname-less form `localhost:<port>` so the iframe at
-// least tries the right port; document the limitation in the README.
-function bridgeWsHost(reqHost: string | undefined, bridgePort: number): string {
-  const hostname = (reqHost ?? "localhost").split(":")[0];
-  const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  return `${isLocal ? hostname : "localhost"}:${bridgePort}`;
+// The inspect-webkit bridge binds locally. Always emit `127.0.0.1` rather
+// than `localhost` for the iframe's WS URL: the chrome-devtools-frontend
+// inspector.html ships a CSP whose connect-src only whitelists
+// `ws://127.0.0.1:*` (plus `'self'`, which doesn't cover the bridge's
+// different port). A `ws://localhost:9222/...` connection from the iframe
+// gets CSP-blocked and surfaces as "WebSocket disconnected."
+// Non-local hostnames fall back to 127.0.0.1 since the bridge isn't
+// reachable from off-host anyway.
+function bridgeWsHost(_reqHost: string | undefined, bridgePort: number): string {
+  return `127.0.0.1:${bridgePort}`;
 }
 
 let _html: string | null = null;
@@ -415,15 +421,11 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           const bridge = await ensureInspectWebKitBridge();
           const bridgeTargets = await bridge.listTargets();
           const wsHost = bridgeWsHost(req.headers?.host, bridge.port);
-          // The bridge enumerates targets across every booted simulator.
-          // Filter to the device this preview is pinned to so the picker
-          // doesn't surface webviews that belong to a different sim.
-          const scoped = bridgeTargets.filter((target) =>
-            // If we couldn't resolve a udid (e.g. degraded HTTP path), keep
-            // the target rather than dropping it silently.
-            !target.udid || target.udid === state.device,
-          );
-          const targets = scoped.map((target) => ({
+          // inspect-webkit@0.0.3 only exposes `sim:<webinspectord-pid>` for
+          // simulator targets, which can't be reconciled against a sim UDID.
+          // Surface every booted sim's targets (Safari Develop-menu behavior)
+          // until inspect-webkit grows a real UDID we can filter on.
+          const targets = bridgeTargets.map((target) => ({
             ...target,
             webSocketDebuggerUrl: `ws://${wsHost}/devtools/page/${encodeURIComponent(target.id)}`,
             devtoolsFrontendUrl: devtoolsFrontendUrl(devtoolsFrontendBase, wsHost, target.id),
@@ -530,7 +532,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "X-Accel-Buffering": "no",
       });
       res.write(":\n\n");
-      const ax = axStreamerCache.get(state.device);
+      const ax = axStreamerCache.get(state.device, state.port);
       const removeClient = ax.addClient(res);
       req.on("close", removeClient);
       return;

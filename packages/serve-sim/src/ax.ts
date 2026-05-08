@@ -1,6 +1,4 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { AXE_NOT_INSTALLED_ERROR } from "./ax-shared";
+import { AX_UNAVAILABLE_ERROR } from "./ax-shared";
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
 export type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
@@ -10,7 +8,6 @@ const MAX_ELEMENTS = 500;
 const POLL_INTERVAL_MS = 500;
 const MAX_POLL_INTERVAL_MS = 2000;
 const UNAVAILABLE_RETRY_INTERVAL_MS = 15_000;
-const execFileAsync = promisify(execFile);
 
 interface RawAxeNode {
   AXUniqueId: string | null;
@@ -21,14 +18,6 @@ interface RawAxeNode {
   role_description: string;
   type: string;
   children: RawAxeNode[];
-}
-
-async function execFileText(command: string, args: string[]) {
-  const { stdout } = await execFileAsync(command, args, {
-    timeout: SNAPSHOT_TIMEOUT_MS,
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  return stdout.toString();
 }
 
 function chooseScreenFrame(roots: RawAxeNode[]) {
@@ -90,17 +79,32 @@ function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   };
 }
 
-async function snapshotWithAxe(udid: string) {
-  const output = await execFileText("axe", ["describe-ui", "--udid", udid]);
-  return normalizeAxTree(JSON.parse(output) as RawAxeNode[]);
+async function snapshotFromHelper(port: number): Promise<AxSnapshot> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/ax`, { signal: controller.signal });
+    if (res.status === 503) {
+      // Helper is up but the simulator can't satisfy accessibility right
+      // now (framework missing, SpringBoard restarting, etc). Surface as
+      // the standard "unavailable" error so the streamer backs off.
+      return {
+        screen: { width: 1, height: 1 },
+        elements: [],
+        errors: [AX_UNAVAILABLE_ERROR],
+      };
+    }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    }
+    return normalizeAxTree(await res.json() as RawAxeNode[]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-function isAxeNotInstalledError(error: unknown) {
-  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
-}
-
-function isAxeUnavailableSnapshot(snapshot: AxSnapshot | null) {
-  return snapshot?.errors?.includes(AXE_NOT_INSTALLED_ERROR) ?? false;
+function isAxUnavailableSnapshot(snapshot: AxSnapshot | null) {
+  return snapshot?.errors?.includes(AX_UNAVAILABLE_ERROR) ?? false;
 }
 
 function isUsableAxSnapshot(snapshot: AxSnapshot) {
@@ -111,14 +115,15 @@ function isUsableAxSnapshot(snapshot: AxSnapshot) {
   );
 }
 
-async function collectAxSnapshot(udid: string) {
+async function collectAxSnapshot(port: number) {
   const errors: string[] = [];
 
   try {
-    const snapshot = await snapshotWithAxe(udid);
+    const snapshot = await snapshotFromHelper(port);
+    if (snapshot.errors?.length) return snapshot;
     if (!isUsableAxSnapshot(snapshot)) {
       throw new Error(
-        `axe returned ${snapshot.elements.length} elements in ${snapshot.screen.width}x${snapshot.screen.height} AX space`,
+        `helper returned ${snapshot.elements.length} elements in ${snapshot.screen.width}x${snapshot.screen.height} AX space`,
       );
     }
     return {
@@ -126,12 +131,18 @@ async function collectAxSnapshot(udid: string) {
       errors,
     };
   } catch (error) {
-    const err = error as Error & { stderr?: string };
-    errors.push(
-      isAxeNotInstalledError(error)
-        ? AXE_NOT_INSTALLED_ERROR
-        : err.stderr || err.message || String(error),
-    );
+    const err = error as Error & { cause?: { code?: string }; code?: string };
+    const code = err.cause?.code ?? err.code;
+    const message = err.message || String(error);
+    // Helper not yet up (or just restarted). Node sets cause.code; Bun/undici
+    // surface it as a free-text "Unable to connect" message. Either way,
+    // treat as unavailable so the SSE consumer renders a friendly state
+    // rather than churning per-poll error stacks.
+    const isConnectFailure =
+      code === "ECONNREFUSED" ||
+      code === "ECONNRESET" ||
+      /unable to connect|fetch failed|ECONNREFUSED/i.test(message);
+    errors.push(isConnectFailure ? AX_UNAVAILABLE_ERROR : message);
   }
 
   return {
@@ -145,16 +156,18 @@ function sseMessage(payload: unknown) {
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
-function createAxStreamer({
-  udid,
-}: {
-  udid: string;
-}) {
+interface AxStreamer {
+  addClient(res: { write(chunk: string): void }): () => void;
+  setPort(port: number): void;
+}
+
+function createAxStreamer({ port }: { port: number }): AxStreamer {
   const clients = new Set<{ write(chunk: string): void }>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let latestMessage: string | null = null;
   let pollIntervalMs = POLL_INTERVAL_MS;
   let polling = false;
+  let currentPort = port;
 
   const schedule = () => {
     if (clients.size === 0 || timer) return;
@@ -170,7 +183,7 @@ function createAxStreamer({
 
     polling = true;
     try {
-      const next = await collectAxSnapshot(udid);
+      const next = await collectAxSnapshot(currentPort);
       const nextMessage = sseMessage(next);
       if (nextMessage !== latestMessage) {
         for (const client of clients) client.write(nextMessage);
@@ -179,10 +192,10 @@ function createAxStreamer({
         pollIntervalMs = Math.min(pollIntervalMs * 2, MAX_POLL_INTERVAL_MS);
       }
       latestMessage = nextMessage;
-      // Back off aggressively while axe is missing so we don't spawn a
-      // subprocess every 2s, but keep polling so we recover automatically
-      // once the user installs it.
-      if (isAxeUnavailableSnapshot(next)) {
+      // If the helper says AX is unavailable (framework missing, sim
+      // booting), keep polling but back off so we recover automatically
+      // without spamming requests.
+      if (isAxUnavailableSnapshot(next)) {
         pollIntervalMs = UNAVAILABLE_RETRY_INTERVAL_MS;
       }
     } finally {
@@ -192,7 +205,20 @@ function createAxStreamer({
   };
 
   return {
-    addClient(res: { write(chunk: string): void }) {
+    setPort(nextPort: number) {
+      if (nextPort === currentPort) return;
+      currentPort = nextPort;
+      latestMessage = null;
+      // Avoid sitting on the unavailable-backoff interval (15s) when the
+      // helper has just come up on a new port.
+      pollIntervalMs = POLL_INTERVAL_MS;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      void poll();
+    },
+    addClient(res) {
       clients.add(res);
       if (latestMessage) res.write(latestMessage);
       void poll();
@@ -208,14 +234,22 @@ function createAxStreamer({
 }
 
 export function createAxStreamerCache() {
-  const streamers = new Map<string, ReturnType<typeof createAxStreamer>>();
+  const streamers = new Map<string, AxStreamer>();
 
   return {
-    get(udid: string) {
+    /**
+     * Get (or create) a streamer for the given simulator. The port is
+     * the helper's HTTP port — if the helper restarts on a different
+     * port, pass the new value and the cached streamer will retarget.
+     */
+    get(udid: string, port: number) {
       const existing = streamers.get(udid);
-      if (existing) return existing;
+      if (existing) {
+        existing.setPort(port);
+        return existing;
+      }
 
-      const streamer = createAxStreamer({ udid });
+      const streamer = createAxStreamer({ port });
       streamers.set(udid, streamer);
       return streamer;
     },
