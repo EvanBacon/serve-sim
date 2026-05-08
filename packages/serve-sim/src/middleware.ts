@@ -646,6 +646,31 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       });
       res.write(":\n\n");
 
+      // Bootstrap: SpringBoard's log feed is edge-triggered, so a fresh
+      // subscriber would otherwise see nothing until the user re-foregrounds
+      // an app (the bug: tools couldn't reconnect after a page reload). Ask
+      // the helper's AX bridge for the current frontmost app via
+      // `proc_pidpath`+Info.plist resolution and emit it before tailing.
+      let lastBundle = "";
+      void (async () => {
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 1500);
+          const r = await fetch(`http://127.0.0.1:${state.port}/foreground`, { signal: ctrl.signal });
+          clearTimeout(timer);
+          if (!r.ok) return;
+          const info = await r.json() as { bundleId?: string; pid?: number };
+          if (!info.bundleId || !isUserFacingBundle(info.bundleId)) return;
+          if (res.writableEnded) return;
+          lastBundle = info.bundleId;
+          const isReactNative = await detectReactNative(udid, info.bundleId);
+          if (res.writableEnded) return;
+          res.write("data: " + JSON.stringify({ bundleId: info.bundleId, pid: info.pid, isReactNative }) + "\n\n");
+        } catch {
+          // Helper may be coming up — log tail will fill in once anything moves.
+        }
+      })();
+
       const child: ChildProcess = spawn("xcrun", [
         "simctl", "spawn", udid, "log", "stream",
         "--style", "ndjson",
@@ -656,7 +681,6 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
 
       // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
       const FG_RE = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/;
-      let lastBundle = "";
       let buf = "";
       child.stdout!.on("data", (chunk: Buffer) => {
         buf += chunk.toString();
