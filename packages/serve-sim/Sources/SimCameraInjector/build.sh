@@ -20,6 +20,7 @@ xcrun --sdk iphonesimulator clang \
     -framework Foundation \
     -framework UIKit \
     -framework AVFoundation \
+    -framework CoreImage \
     -framework CoreMedia \
     -framework CoreVideo \
     -framework CoreGraphics \

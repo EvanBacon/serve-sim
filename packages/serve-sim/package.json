@@ -28,13 +28,17 @@
     "dist/middleware.js",
     "dist/middleware.cjs",
     "dist/simcam/libSimCameraInjector.dylib",
+    "dist/simcam/serve-sim-camera-helper",
     "src/ax-shared.ts",
     "src/ax.ts",
     "src/middleware.ts",
     "src/state.ts",
     "bin/serve-sim-bin",
     "Sources/SimCameraInjector/SimCameraInjector.m",
-    "Sources/SimCameraInjector/build.sh"
+    "Sources/SimCameraInjector/include/SimCamShared.h",
+    "Sources/SimCameraInjector/build.sh",
+    "Sources/SimCameraHelper/main.m",
+    "Sources/SimCameraHelper/build.sh"
   ],
   "exports": {
     "./middleware": {

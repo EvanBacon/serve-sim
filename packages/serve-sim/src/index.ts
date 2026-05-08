@@ -1082,6 +1082,97 @@ function buildCameraDylib(): string {
   return out;
 }
 
+function locateCameraHelper(): string | null {
+  const candidates = [
+    join(__dirname, "..", "dist", "simcam", "serve-sim-camera-helper"),
+    join(__dirname, "simcam", "serve-sim-camera-helper"),
+  ];
+  for (const p of candidates) if (existsSync(p)) return resolve(p);
+  return null;
+}
+
+function buildCameraHelper(): string {
+  const buildScript = join(__dirname, "..", "Sources", "SimCameraHelper", "build.sh");
+  if (!existsSync(buildScript)) {
+    throw new Error(
+      "SimCameraHelper source not found — webcam support requires building " +
+      "from a checkout that includes Sources/SimCameraHelper.",
+    );
+  }
+  console.error("[serve-sim] building serve-sim-camera-helper (one-time)…");
+  execSync(`bash "${buildScript}"`, { stdio: "inherit" });
+  const out = locateCameraHelper();
+  if (!out) throw new Error("Build succeeded but helper binary not found.");
+  return out;
+}
+
+const SIMCAM_STATE_DIR = join(STATE_DIR, "simcam");
+
+function shmNameForUdid(udid: string): string {
+  // POSIX shm names on macOS have a 31-char limit. Hash the UDID short.
+  const short = createHash("sha1").update(udid).digest("hex").slice(0, 8);
+  return `/serve-sim-cam-${short}`;
+}
+
+function helperPidFile(udid: string): string {
+  return join(SIMCAM_STATE_DIR, `${udid}.pid`);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function stopExistingHelper(udid: string) {
+  const pf = helperPidFile(udid);
+  if (!existsSync(pf)) return;
+  const pid = Number(readFileSync(pf, "utf-8").trim());
+  if (Number.isFinite(pid) && isProcessAlive(pid)) {
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    // Give it a moment to clean up the shm region.
+    const start = Date.now();
+    while (isProcessAlive(pid) && Date.now() - start < 1500) sleepSync(50);
+  }
+  try { unlinkSync(pf); } catch {}
+}
+
+function spawnCameraHelper(args: {
+  udid: string;
+  helperBin: string;
+  shmName: string;
+  device?: string;
+  width?: number;
+  height?: number;
+}): number {
+  if (!existsSync(SIMCAM_STATE_DIR)) mkdirSync(SIMCAM_STATE_DIR, { recursive: true });
+  const logPath = join(SIMCAM_STATE_DIR, `${args.udid}.log`);
+  const out = openSync(logPath, "a");
+  const argv = ["--shm", args.shmName];
+  if (args.device) argv.push("--device", args.device);
+  if (args.width) argv.push("--width", String(args.width));
+  if (args.height) argv.push("--height", String(args.height));
+  const child = nodeSpawn(args.helperBin, argv, {
+    detached: true,
+    stdio: ["ignore", out, out],
+  });
+  child.unref();
+  closeSync(out);
+  if (!child.pid) throw new Error("failed to spawn camera helper");
+  writeFileSync(helperPidFile(args.udid), String(child.pid));
+  // Wait briefly until the helper has populated the shm header (proves it's healthy).
+  const start = Date.now();
+  while (Date.now() - start < 3000) {
+    if (!isProcessAlive(child.pid)) {
+      throw new Error(
+        `camera helper exited early — see log at ${logPath}`,
+      );
+    }
+    // Helper unlinks any prior region and re-creates it; just wait a tick.
+    sleepSync(100);
+    if (Date.now() - start > 600) break;
+  }
+  return child.pid;
+}
+
 /**
  * `serve-sim camera <bundle-id> [-d udid] [--image <path>] [--build]`
  *
@@ -1094,6 +1185,9 @@ function buildCameraDylib(): string {
 async function camera(args: string[]) {
   let deviceArg: string | undefined;
   let imagePath: string | undefined;
+  let webcam: string | true | undefined;
+  let stopWebcam = false;
+  let listWebcams = false;
   let forceBuild = false;
   let quiet = false;
   const filtered: string[] = [];
@@ -1101,28 +1195,61 @@ async function camera(args: string[]) {
     const a = args[i];
     if (a === "--device" || a === "-d") { deviceArg = args[++i]; continue; }
     if (a === "--image" || a === "-i") { imagePath = args[++i]; continue; }
+    if (a === "--webcam") {
+      const next = args[i + 1];
+      if (next && !next.startsWith("-")) { webcam = next; i++; }
+      else { webcam = true; }
+      continue;
+    }
+    if (a === "--list-webcams") { listWebcams = true; continue; }
+    if (a === "--stop-webcam") { stopWebcam = true; continue; }
     if (a === "--build") { forceBuild = true; continue; }
     if (a === "--quiet" || a === "-q") { quiet = true; continue; }
     if (a === "--help" || a === "-h") {
-      console.log(`Usage: serve-sim camera <bundle-id> [-d udid] [--image <path>] [--build]
+      console.log(`Usage: serve-sim camera <bundle-id> [-d udid] [source-options] [--build]
+       serve-sim camera --list-webcams
+       serve-sim camera --stop-webcam [-d udid]
 
 Launches the simulator app with a synthetic camera feed injected. Apps using
 AVCaptureDevice / AVCaptureSession / AVCaptureVideoPreviewLayer will see the
-supplied image as the camera. No build-time changes are required in the app.
+selected source as the camera. No build-time changes are required in the app.
 
-Options:
+Source options (pick one):
+  -i, --image <path>         PNG/JPEG to use as a static feed
+      --webcam [name]        Live host webcam (default: built-in front camera)
+
+Other:
   -d, --device <udid|name>   Target a specific simulator (default: booted)
-  -i, --image <path>         PNG/JPEG to use as the feed (default: gradient)
-      --build                Rebuild libSimCameraInjector.dylib first
+      --build                Rebuild dylib + helper from source
+      --list-webcams         List host camera devices (with --webcam values)
+      --stop-webcam          Stop the running webcam helper for the device
   -q, --quiet                JSON-only output
 
 Examples:
-  serve-sim camera com.acme.MyApp
+  serve-sim camera com.acme.MyApp                            # placeholder gradient
   serve-sim camera com.acme.MyApp --image ~/Pictures/face.png
-  serve-sim camera com.acme.MyApp -d "iPhone 16 Pro" -i scene.jpg`);
+  serve-sim camera com.acme.MyApp --webcam                   # default webcam
+  serve-sim camera com.acme.MyApp --webcam "MacBook Pro Camera"
+  serve-sim camera --list-webcams
+  serve-sim camera --stop-webcam`);
       return;
     }
     filtered.push(a!);
+  }
+
+  if (listWebcams) {
+    const helper = locateCameraHelper() ?? buildCameraHelper();
+    execSync(`"${helper}" --list`, { stdio: "inherit" });
+    return;
+  }
+
+  if (stopWebcam) {
+    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    if (!udid) { console.error("No booted simulator."); process.exit(1); }
+    stopExistingHelper(udid);
+    if (quiet) console.log(JSON.stringify({ udid, stopped: true }));
+    else console.log(`Stopped webcam helper for ${udid}`);
+    return;
   }
 
   const bundleId = filtered[0];
@@ -1146,12 +1273,31 @@ Examples:
     }
   }
 
+  if (imagePath && webcam) {
+    console.error("Pick one source: --image or --webcam, not both.");
+    process.exit(1);
+  }
+
   if (imagePath) {
     imagePath = resolve(imagePath);
     if (!existsSync(imagePath)) {
       console.error(`Image not found: ${imagePath}`);
       process.exit(1);
     }
+  }
+
+  let shmName: string | undefined;
+  let helperPid: number | undefined;
+  if (webcam) {
+    const helper = locateCameraHelper() ?? buildCameraHelper();
+    stopExistingHelper(udid);
+    shmName = shmNameForUdid(udid);
+    helperPid = spawnCameraHelper({
+      udid,
+      helperBin: helper,
+      shmName,
+      device: typeof webcam === "string" ? webcam : undefined,
+    });
   }
 
   // Best-effort: grant camera privacy. Harmless if the app hasn't requested it.
@@ -1170,6 +1316,7 @@ Examples:
     ...process.env,
     SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: dylib,
     ...(imagePath ? { SIMCTL_CHILD_SIMCAM_IMAGE_PATH: imagePath } : {}),
+    ...(shmName ? { SIMCTL_CHILD_SIMCAM_SHM_NAME: shmName } : {}),
   };
 
   let stdoutBuf = "";
@@ -1187,19 +1334,29 @@ Examples:
   const pidMatch = stdoutBuf.trim().match(/:\s*(\d+)\s*$/);
   const pid = pidMatch ? Number(pidMatch[1]) : null;
 
+  const source = webcam
+    ? `webcam${typeof webcam === "string" ? `:${webcam}` : ""}`
+    : imagePath
+      ? `image:${imagePath}`
+      : "gradient";
   const result = {
     udid,
     bundleId,
     pid,
     dylib,
+    source,
     image: imagePath ?? null,
+    webcam: webcam ?? null,
+    shm: shmName ?? null,
+    helperPid: helperPid ?? null,
   };
   if (quiet) {
     console.log(JSON.stringify(result));
   } else {
     console.log(`📷 Injected camera into ${bundleId} (pid ${pid ?? "?"}) on ${udid}`);
+    console.log(`   source: ${source}`);
+    if (helperPid) console.log(`   webcam helper pid: ${helperPid}  (shm ${shmName})`);
     console.log(`   dylib: ${dylib}`);
-    console.log(`   image: ${imagePath ?? "<built-in gradient>"}`);
   }
 }
 
