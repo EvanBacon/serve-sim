@@ -1190,6 +1190,7 @@ async function camera(args: string[]) {
   let listWebcams = false;
   let forceBuild = false;
   let quiet = false;
+  let mirror: "auto" | "on" | "off" = "auto";
   const filtered: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -1205,6 +1206,16 @@ async function camera(args: string[]) {
     if (a === "--stop-webcam") { stopWebcam = true; continue; }
     if (a === "--build") { forceBuild = true; continue; }
     if (a === "--quiet" || a === "-q") { quiet = true; continue; }
+    if (a === "--mirror") {
+      const next = args[i + 1];
+      if (next === "on" || next === "off" || next === "auto") {
+        mirror = next; i++;
+      } else {
+        mirror = "on";
+      }
+      continue;
+    }
+    if (a === "--no-mirror") { mirror = "off"; continue; }
     if (a === "--help" || a === "-h") {
       console.log(`Usage: serve-sim camera <bundle-id> [-d udid] [source-options] [--build]
        serve-sim camera --list-webcams
@@ -1220,6 +1231,10 @@ Source options (pick one):
 
 Other:
   -d, --device <udid|name>   Target a specific simulator (default: booted)
+      --mirror [on|off|auto] Override preview mirroring (default: auto =
+                             front mirrored, back not). Data-output buffers
+                             are never auto-mirrored, matching AVF defaults.
+      --no-mirror            Shortcut for --mirror off
       --build                Rebuild dylib + helper from source
       --list-webcams         List host camera devices (with --webcam values)
       --stop-webcam          Stop the running webcam helper for the device
@@ -1317,6 +1332,7 @@ Examples:
     SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: dylib,
     ...(imagePath ? { SIMCTL_CHILD_SIMCAM_IMAGE_PATH: imagePath } : {}),
     ...(shmName ? { SIMCTL_CHILD_SIMCAM_SHM_NAME: shmName } : {}),
+    ...(mirror !== "auto" ? { SIMCTL_CHILD_SIMCAM_MIRROR_MODE: mirror } : {}),
   };
 
   let stdoutBuf = "";
@@ -1349,6 +1365,7 @@ Examples:
     webcam: webcam ?? null,
     shm: shmName ?? null,
     helperPid: helperPid ?? null,
+    mirror,
   };
   if (quiet) {
     console.log(JSON.stringify(result));

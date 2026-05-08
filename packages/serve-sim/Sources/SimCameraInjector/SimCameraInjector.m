@@ -176,9 +176,21 @@ static AVCaptureDevicePosition SimCamPositionOf(id obj) {
 static void SimCamSetPosition(id obj, AVCaptureDevicePosition p) {
     objc_setAssociatedObject(obj, &kSimCamPositionKey, @(p), OBJC_ASSOCIATION_RETAIN);
 }
+// SIMCAM_MIRROR_MODE = "auto" (default), "on", "off". Override applies to
+// preview layer transform; data-output buffers are never auto-mirrored
+// because AVCaptureConnection.isVideoMirroring defaults to NO on real HW.
+typedef NS_ENUM(NSInteger, SimCamMirrorMode) {
+    SimCamMirrorAuto = 0,
+    SimCamMirrorForceOn,
+    SimCamMirrorForceOff,
+};
+static SimCamMirrorMode gMirrorMode = SimCamMirrorAuto;
+
 static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
-    // Front camera: mirror, matching AVCaptureVideoPreviewLayer's default
-    // automaticallyAdjustsVideoMirroring=YES behavior on real hardware.
+    if (gMirrorMode == SimCamMirrorForceOn) return YES;
+    if (gMirrorMode == SimCamMirrorForceOff) return NO;
+    // Auto: front camera mirrors (matches AVCaptureVideoPreviewLayer's default
+    // automaticallyAdjustsVideoMirroring=YES on real hardware), back doesn't.
     return p == AVCaptureDevicePositionFront;
 }
 
@@ -832,10 +844,25 @@ static void OpenShmIfRequested(void) {
                shmName, hdr->width, hdr->height, (unsigned long long)st.st_size);
 }
 
+static void ReadMirrorMode(void) {
+    const char *m = getenv("SIMCAM_MIRROR_MODE");
+    if (!m) return;
+    if (!strcasecmp(m, "on") || !strcmp(m, "1") || !strcasecmp(m, "true")) {
+        gMirrorMode = SimCamMirrorForceOn;
+        simcam_log(@"mirror mode forced ON");
+    } else if (!strcasecmp(m, "off") || !strcmp(m, "0") || !strcasecmp(m, "false")) {
+        gMirrorMode = SimCamMirrorForceOff;
+        simcam_log(@"mirror mode forced OFF");
+    } else if (!strcasecmp(m, "auto")) {
+        gMirrorMode = SimCamMirrorAuto;
+    }
+}
+
 __attribute__((constructor))
 static void SimCamInit(void) {
     @autoreleasepool {
         simcam_log(@"loaded into pid %d", getpid());
+        ReadMirrorMode();
         OpenShmIfRequested();
         if (!gShmHeader) LoadSourceImage();
         InstallSwizzles();
