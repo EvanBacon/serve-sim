@@ -292,10 +292,15 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
 }
 
 - (CVPixelBufferRef)newPixelBufferFromShm CF_RETURNS_RETAINED {
+    return [self newPixelBufferFromShmForceFresh:NO];
+}
+
+- (CVPixelBufferRef)newPixelBufferFromShmForceFresh:(BOOL)force CF_RETURNS_RETAINED {
     if (!gShmHeader || !gShmPixels) return NULL;
     if (gShmHeader->magic != SIMCAM_SHM_MAGIC) return NULL;
     uint64_t seqA = gShmHeader->frameSeq;
-    if (seqA == 0 || seqA == gLastSeenSeq) return NULL; // no new frame
+    if (seqA == 0) return NULL;
+    if (!force && seqA == gLastSeenSeq) return NULL; // no new frame
     uint32_t w = gShmHeader->width;
     uint32_t h = gShmHeader->height;
     uint32_t bpr = gShmHeader->bytesPerRow;
@@ -318,12 +323,20 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
 
     atomic_thread_fence(memory_order_acquire);
     uint64_t seqB = gShmHeader->frameSeq;
-    if (seqA != seqB) {
+    if (!force && seqA != seqB) {
         // Tear: writer updated mid-copy. Drop this frame; we'll catch the next one.
         CVPixelBufferRelease(pb);
         return NULL;
     }
     gLastSeenSeq = seqA;
+    return pb;
+}
+
+// Latest frame from whichever source is active, ignoring per-frame dedup.
+// Used for one-shot consumers like AVCapturePhotoOutput.capturePhoto.
+- (CVPixelBufferRef)currentPixelBuffer CF_RETURNS_RETAINED {
+    CVPixelBufferRef pb = [self newPixelBufferFromShmForceFresh:YES];
+    if (!pb) pb = [self newPixelBufferFromImage];
     return pb;
 }
 
@@ -616,6 +629,88 @@ static char kSimCamSessionRunningKey;
 }
 @end
 
+#pragma mark - AVCapturePhotoOutput swizzle
+
+// AVCapturePhoto subclass that returns app-injected pixel data when asked
+// for its file/CGImage representations. We bypass AVCapturePhoto's private
+// init (similar to our fake AVCaptureDeviceInput) and override only the
+// accessors that real consumers actually call.
+@interface SimCamFakePhoto : AVCapturePhoto
+@end
+@implementation SimCamFakePhoto {
+    NSData *_jpegData;
+    CGImageRef _cgImage; // owned
+    NSDictionary *_metadata;
+}
+// Bypass AVCapturePhoto's class-cluster placeholder. Default +allocWithZone:
+// hands back a private subclass instance that requires AVCapturePhoto's real
+// init to populate ivars; we only need the obj-c isa to dispatch to our
+// overrides, so allocate raw memory typed to our class instead.
++ (instancetype)allocWithZone:(NSZone *)zone {
+    return class_createInstance([SimCamFakePhoto class], 0);
+}
++ (instancetype)photoFromImage:(CGImageRef)cgImage jpegQuality:(CGFloat)q {
+    if (!cgImage) return nil;
+    // AVCapturePhoto declares -init as NS_UNAVAILABLE so we can't call it,
+    // but +alloc -> class_createInstance gives us a fully-formed instance
+    // with our isa already set; no init call is needed.
+    SimCamFakePhoto *p = [SimCamFakePhoto alloc];
+    if (p) {
+        p->_cgImage = CGImageRetain(cgImage);
+        UIImage *ui = [UIImage imageWithCGImage:cgImage];
+        p->_jpegData = UIImageJPEGRepresentation(ui, q);
+        p->_metadata = @{};
+    }
+    return p;
+}
+- (NSData *)fileDataRepresentation { return _jpegData; }
+- (NSData *)fileDataRepresentationWithCustomizer:(id)c { return _jpegData; }
+- (NSData *)fileDataRepresentationWithReplacementMetadata:(NSDictionary *)m
+                            replacementEmbeddedThumbnailPhotoFormat:(NSDictionary *)t
+                            replacementEmbeddedThumbnailPixelBuffer:(CVPixelBufferRef)pb
+                                       replacementDepthData:(id)d { return _jpegData; }
+- (CGImageRef)CGImageRepresentation { return _cgImage; }
+- (CGImageRef)previewCGImageRepresentation { return _cgImage; }
+- (NSDictionary *)metadata { return _metadata; }
+- (CVPixelBufferRef)pixelBuffer { return NULL; }
+- (NSInteger)photoCount { return 1; }
+- (NSInteger)sequenceCount { return 1; }
+- (CMTime)timestamp { return CMTimeMake(0, 30); }
+- (BOOL)isRawPhoto { return NO; }
+- (void)dealloc { if (_cgImage) CGImageRelease(_cgImage); }
+@end
+
+@interface AVCapturePhotoOutput (SimCam)
+@end
+@implementation AVCapturePhotoOutput (SimCam)
+- (void)simcam_capturePhotoWithSettings:(AVCapturePhotoSettings *)settings
+                               delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    if (!delegate) return;
+    SimCamRegistry *reg = [SimCamRegistry shared];
+    CVPixelBufferRef pb = [reg currentPixelBuffer];
+    CGImageRef cg = NULL;
+    if (pb) {
+        CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];
+        static CIContext *ctx = nil; static dispatch_once_t once;
+        dispatch_once(&once, ^{ ctx = [CIContext contextWithOptions:nil]; });
+        cg = [ctx createCGImage:ci fromRect:ci.extent];
+        CVPixelBufferRelease(pb);
+    }
+    SimCamFakePhoto *photo = [SimCamFakePhoto photoFromImage:cg jpegQuality:0.92];
+    if (cg) CGImageRelease(cg);
+    AVCaptureDevicePosition p = SimCamPositionOf(self);
+    if (p == 0) p = AVCaptureDevicePositionFront;
+    simcam_log(@"capturePhoto intercepted (pos=%d, jpeg=%lu bytes)",
+        (int)p, (unsigned long)photo.fileDataRepresentation.length);
+    AVCapturePhotoOutput *output = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([delegate respondsToSelector:@selector(captureOutput:didFinishProcessingPhoto:error:)]) {
+            [delegate captureOutput:output didFinishProcessingPhoto:photo error:nil];
+        }
+    });
+}
+@end
+
 #pragma mark - Image loading
 
 static void LoadSourceImage(void) {
@@ -695,6 +790,11 @@ static void InstallSwizzles(void) {
 
     Class pl = [AVCaptureVideoPreviewLayer class];
     SwizzleInstanceMethod(pl, @selector(setSession:), @selector(simcam_setSession:));
+
+    Class photoOut = [AVCapturePhotoOutput class];
+    SwizzleInstanceMethod(photoOut,
+        @selector(capturePhotoWithSettings:delegate:),
+        @selector(simcam_capturePhotoWithSettings:delegate:));
 }
 
 static void OpenShmIfRequested(void) {
