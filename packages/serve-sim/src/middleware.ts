@@ -68,6 +68,13 @@ function isUserFacingBundle(bundleId: string): boolean {
   return !NON_UI_BUNDLE_RE.test(bundleId);
 }
 
+export function parseForegroundAppLogMessage(message: string): { bundleId: string; pid: number } | null {
+  // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
+  const match = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/.exec(message);
+  if (!match) return null;
+  return { bundleId: match[1]!, pid: parseInt(match[2]!, 10) };
+}
+
 function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
   if (RN_BUNDLE_IDS.has(bundleId)) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -83,6 +90,84 @@ function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
         resolve(false);
       });
   });
+}
+
+type InstalledApp = {
+  CFBundleDisplayName?: string;
+  CFBundleExecutable?: string;
+  CFBundleIdentifier?: string;
+  CFBundleName?: string;
+};
+
+function normalizeAppName(name: string): string {
+  return name.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+export function matchInstalledAppByDisplayName(
+  apps: Record<string, InstalledApp>,
+  displayName: string,
+): string | null {
+  const wanted = normalizeAppName(displayName);
+  if (!wanted) return null;
+
+  for (const [bundleId, app] of Object.entries(apps)) {
+    const names = [
+      app.CFBundleDisplayName,
+      app.CFBundleName,
+      app.CFBundleExecutable,
+    ].filter((value): value is string => typeof value === "string");
+    if (names.some((name) => normalizeAppName(name) === wanted)) {
+      return app.CFBundleIdentifier || bundleId;
+    }
+  }
+  return null;
+}
+
+function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function installedAppsForDevice(udid: string): Promise<Record<string, InstalledApp>> {
+  return new Promise((resolve) => {
+    exec(
+      `xcrun simctl listapps ${shellQuote(udid)} | plutil -convert json -o - -`,
+      { timeout: 3_000 },
+      (err, stdout) => {
+        if (err || !stdout) return resolve({});
+        try {
+          resolve(JSON.parse(stdout) as Record<string, InstalledApp>);
+        } catch {
+          resolve({});
+        }
+      },
+    );
+  });
+}
+
+async function detectCurrentForegroundApp(
+  udid: string,
+  stateUrl: string,
+): Promise<{ bundleId: string; isReactNative: boolean } | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  try {
+    const res = await fetch(`${stateUrl}/ax`, { signal: controller.signal });
+    if (!res.ok) return null;
+    const tree = await res.json() as Array<{ AXLabel?: unknown }>;
+    const displayName = tree?.[0]?.AXLabel;
+    if (typeof displayName !== "string") return null;
+
+    const bundleId = matchInstalledAppByDisplayName(
+      await installedAppsForDevice(udid),
+      displayName,
+    );
+    if (!bundleId || !isUserFacingBundle(bundleId)) return null;
+    return { bundleId, isReactNative: await detectReactNative(udid, bundleId) };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Cache simctl's booted-device set briefly so per-request cost stays bounded.
@@ -637,9 +722,24 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
       ], { stdio: ["ignore", "pipe", "ignore"] });
 
-      // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
-      const FG_RE = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/;
       let lastBundle = "";
+      let closed = false;
+      const emitApp = async (bundleId: string, pid?: number) => {
+        if (!isUserFacingBundle(bundleId)) return;
+        if (bundleId === lastBundle) return;
+        lastBundle = bundleId;
+        const isReactNative = await detectReactNative(udid, bundleId);
+        if (!closed) {
+          res.write("data: " + JSON.stringify({ bundleId, pid, isReactNative }) + "\n\n");
+        }
+      };
+
+      detectCurrentForegroundApp(udid, state.url).then((app) => {
+        if (!app || closed || app.bundleId === lastBundle) return;
+        lastBundle = app.bundleId;
+        res.write("data: " + JSON.stringify(app) + "\n\n");
+      });
+
       let buf = "";
       child.stdout!.on("data", (chunk: Buffer) => {
         buf += chunk.toString();
@@ -650,21 +750,17 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           if (!line) continue;
           let msg: string;
           try { msg = JSON.parse(line).eventMessage ?? ""; } catch { continue; }
-          const m = FG_RE.exec(msg);
-          if (!m) continue;
-          const bundleId = m[1]!;
-          const pid = parseInt(m[2]!, 10);
-          if (!isUserFacingBundle(bundleId)) continue;
-          if (bundleId === lastBundle) continue;
-          lastBundle = bundleId;
-          detectReactNative(udid, bundleId).then((isReactNative) => {
-            res.write("data: " + JSON.stringify({ bundleId, pid, isReactNative }) + "\n\n");
-          });
+          const event = parseForegroundAppLogMessage(msg);
+          if (!event) continue;
+          emitApp(event.bundleId, event.pid);
         }
       });
 
       child.on("close", () => res.end());
-      req.on("close", () => child.kill());
+      req.on("close", () => {
+        closed = true;
+        child.kill();
+      });
       return;
     }
 
