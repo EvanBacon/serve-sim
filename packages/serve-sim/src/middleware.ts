@@ -307,6 +307,19 @@ function bridgeWsHost(_reqHost: string | undefined, bridgePort: number): string 
 }
 
 let _html: string | null = null;
+/**
+ * Best-effort absolute path to the running serve-sim entry script. Used so
+ * the in-page Camera tool can `node <path> camera ...` regardless of PATH.
+ * Falls back to the literal `serve-sim` if we can't determine a usable path.
+ */
+function serveSimBinPath(): string {
+  try {
+    const argv = process.argv;
+    if (argv[1] && existsSync(argv[1])) return argv[1];
+  } catch {}
+  return "serve-sim";
+}
+
 function loadHtml(): string {
   if (!_html) {
     _html = Buffer.from(__PREVIEW_HTML_B64__, "base64").toString("utf-8");
@@ -391,6 +404,10 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           appStateEndpoint: endpoint(base, "/appstate", state.device),
           axEndpoint: endpoint(base, "/ax", state.device),
           devtoolsEndpoint: endpoint(base, "/devtools", state.device),
+          // Forward the absolute path of the running serve-sim entry script
+          // so the in-page Camera tool can shell out via `node <bin> camera`
+          // without depending on `serve-sim` being on PATH.
+          serveSimBin: serveSimBinPath(),
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);

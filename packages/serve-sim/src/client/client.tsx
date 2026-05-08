@@ -217,6 +217,7 @@ declare global {
       axEndpoint?: string;
       appStateEndpoint?: string;
       devtoolsEndpoint?: string;
+      serveSimBin?: string;
     };
   }
 }
@@ -2102,6 +2103,346 @@ function ResizeHandle({
   );
 }
 
+type CamSource = "gradient" | "image" | "webcam";
+type CamMirror = "auto" | "on" | "off";
+
+interface CamWebcam { id: string; name: string }
+
+function CameraTool({
+  udid,
+  bundleId,
+}: {
+  udid: string;
+  bundleId: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const [source, setSource] = useState<CamSource>("webcam");
+  const [imagePath, setImagePath] = useState<string>("");
+  const [webcams, setWebcams] = useState<CamWebcam[]>([]);
+  const [webcamLoading, setWebcamLoading] = useState(false);
+  const [webcamId, setWebcamId] = useState<string>("");
+  const [mirror, setMirror] = useState<CamMirror>("auto");
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+
+  const cliPrefix = useMemo(() => {
+    const bin = window.__SIM_PREVIEW__?.serveSimBin;
+    if (!bin) return "serve-sim";
+    return /\.js$/.test(bin) ? `node ${shellEscape(bin)}` : shellEscape(bin);
+  }, []);
+
+  // Lazy-load webcam list on first expand.
+  const refreshWebcams = useCallback(async () => {
+    setWebcamLoading(true);
+    setError(null);
+    try {
+      const res = await execOnHost(`${cliPrefix} camera --list-webcams`);
+      if (res.exitCode !== 0) {
+        setError(res.stderr.trim() || `--list-webcams failed (${res.exitCode})`);
+        return;
+      }
+      const list: CamWebcam[] = res.stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const tab = line.indexOf("\t");
+          if (tab < 0) return { id: line, name: line };
+          return { id: line.slice(0, tab), name: line.slice(tab + 1) };
+        });
+      setWebcams(list);
+      if (list.length > 0 && !webcamId) setWebcamId(list[0]!.id);
+    } finally {
+      setWebcamLoading(false);
+    }
+  }, [webcamId]);
+
+  useEffect(() => {
+    if (open && webcams.length === 0 && !webcamLoading) refreshWebcams();
+  }, [open, webcams.length, webcamLoading, refreshWebcams]);
+
+  const inject = useCallback(async () => {
+    if (!bundleId) return;
+    setPending("inject");
+    setError(null);
+    setStatus(null);
+    try {
+      const flags: string[] = ["camera", shellEscape(bundleId), "-d", udid, "--quiet"];
+      if (source === "image") {
+        if (!imagePath.trim()) {
+          setError("Image path is required for the image source.");
+          return;
+        }
+        flags.push("--image", shellEscape(imagePath.trim()));
+      } else if (source === "webcam") {
+        if (webcamId) flags.push("--webcam", shellEscape(webcamId));
+        else flags.push("--webcam");
+      }
+      // gradient uses no source flag — dylib falls back to its built-in placeholder.
+      if (mirror !== "auto") flags.push(`--mirror`, mirror);
+      const res = await execOnHost(`${cliPrefix} ${flags.join(" ")}`);
+      if (res.exitCode !== 0) {
+        setError(res.stderr.trim() || res.stdout.trim() || `inject failed (${res.exitCode})`);
+        return;
+      }
+      try {
+        const json = JSON.parse(res.stdout.trim()) as {
+          source?: string; pid?: number; helperPid?: number;
+        };
+        const pidStr = json.pid ? ` pid ${json.pid}` : "";
+        const helper = json.helperPid ? `, webcam helper pid ${json.helperPid}` : "";
+        setStatus(`Injected ${json.source ?? source}${pidStr}${helper}`);
+      } catch {
+        setStatus(res.stdout.trim() || "Injected.");
+      }
+    } finally {
+      setPending(null);
+    }
+  }, [bundleId, udid, source, imagePath, webcamId, mirror]);
+
+  const stopWebcam = useCallback(async () => {
+    setPending("stop");
+    setError(null);
+    try {
+      const res = await execOnHost(`${cliPrefix} camera --stop-webcam -d ${udid}`);
+      if (res.exitCode !== 0) {
+        setError(res.stderr.trim() || `stop-webcam failed (${res.exitCode})`);
+        return;
+      }
+      setStatus("Webcam helper stopped.");
+    } finally {
+      setPending(null);
+    }
+  }, [udid]);
+
+  return (
+    <div style={{ ...panelStyles.section, padding: "8px 12px" }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={panelStyles.permsToggle}
+        aria-expanded={open}
+      >
+        <span style={{ ...panelStyles.sectionTitle, margin: 0 }}>Camera</span>
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            transform: open ? "rotate(90deg)" : "rotate(0deg)",
+            transition: "transform 0.15s",
+            flexShrink: 0,
+          }}
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
+
+      {open && (
+        <div style={cameraToolStyles.body}>
+          {!bundleId && (
+            <div style={cameraToolStyles.hint}>
+              Bring an app to the foreground to enable injection.
+            </div>
+          )}
+
+          <div style={cameraToolStyles.row}>
+            <span style={cameraToolStyles.label}>Source</span>
+            <div style={cameraToolStyles.seg} role="group" aria-label="Camera source">
+              {(["gradient", "image", "webcam"] as CamSource[]).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setSource(s)}
+                  style={{
+                    ...cameraToolStyles.segBtn,
+                    ...(source === s ? cameraToolStyles.segBtnActive : null),
+                  }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {source === "image" && (
+            <div style={cameraToolStyles.row}>
+              <span style={cameraToolStyles.label}>Path</span>
+              <input
+                type="text"
+                value={imagePath}
+                placeholder="/path/to/image.png"
+                onInput={(e) => setImagePath((e.target as HTMLInputElement).value)}
+                style={cameraToolStyles.input}
+              />
+            </div>
+          )}
+
+          {source === "webcam" && (
+            <div style={cameraToolStyles.row}>
+              <span style={cameraToolStyles.label}>Device</span>
+              <select
+                value={webcamId}
+                onChange={(e) => setWebcamId((e.target as HTMLSelectElement).value)}
+                style={cameraToolStyles.select}
+                disabled={webcamLoading || webcams.length === 0}
+              >
+                {webcamLoading && <option>loading…</option>}
+                {!webcamLoading && webcams.length === 0 && <option>(no cameras)</option>}
+                {webcams.map((w) => (
+                  <option key={w.id} value={w.id}>{w.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={refreshWebcams}
+                style={cameraToolStyles.iconBtn}
+                aria-label="Refresh camera list"
+                title="Refresh"
+                disabled={webcamLoading}
+              >↻</button>
+            </div>
+          )}
+
+          <div style={cameraToolStyles.row}>
+            <span style={cameraToolStyles.label}>Mirror</span>
+            <div style={cameraToolStyles.seg} role="group" aria-label="Mirror">
+              {(["auto", "on", "off"] as CamMirror[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMirror(m)}
+                  style={{
+                    ...cameraToolStyles.segBtn,
+                    ...(mirror === m ? cameraToolStyles.segBtnActive : null),
+                  }}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={cameraToolStyles.actions}>
+            <button
+              onClick={inject}
+              disabled={!bundleId || pending === "inject"}
+              style={{ ...cameraToolStyles.primaryBtn, opacity: !bundleId ? 0.5 : 1 }}
+            >
+              {pending === "inject" ? "Injecting…" : "Inject + relaunch"}
+            </button>
+            {source === "webcam" && (
+              <button
+                onClick={stopWebcam}
+                disabled={pending === "stop"}
+                style={cameraToolStyles.secondaryBtn}
+                title="Stop webcam helper"
+              >
+                {pending === "stop" ? "Stopping…" : "Stop webcam"}
+              </button>
+            )}
+          </div>
+
+          {status && <div style={cameraToolStyles.status}>{status}</div>}
+          {error && <div style={panelStyles.error}>{error}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const cameraToolStyles: Record<string, CSSProperties> = {
+  body: { display: "flex", flexDirection: "column", gap: 10, marginTop: 10 },
+  hint: { fontSize: 11, color: "rgba(255,255,255,0.45)" },
+  row: { display: "flex", alignItems: "center", gap: 8 },
+  label: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.55)",
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    width: 56,
+    flexShrink: 0,
+  },
+  seg: {
+    display: "flex",
+    background: "#0e0e10",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 8,
+    padding: 2,
+    gap: 2,
+    flex: 1,
+  },
+  segBtn: {
+    flex: 1,
+    background: "transparent",
+    border: "none",
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 11,
+    padding: "5px 6px",
+    borderRadius: 6,
+    cursor: "pointer",
+    textTransform: "capitalize",
+  },
+  segBtnActive: { background: "rgba(255,255,255,0.12)", color: "#fff" },
+  input: {
+    flex: 1,
+    background: "#0e0e10",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 8,
+    color: "#eee",
+    padding: "6px 8px",
+    fontSize: 12,
+    fontFamily: "ui-monospace, monospace",
+  },
+  select: {
+    flex: 1,
+    background: "#0e0e10",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 8,
+    color: "#eee",
+    padding: "6px 8px",
+    fontSize: 12,
+  },
+  iconBtn: {
+    background: "#0e0e10",
+    border: "1px solid rgba(255,255,255,0.08)",
+    color: "#ccc",
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    cursor: "pointer",
+    fontSize: 14,
+  },
+  actions: { display: "flex", gap: 8, marginTop: 4 },
+  primaryBtn: {
+    flex: 1,
+    background: "#0a84ff",
+    border: "none",
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: 600,
+    padding: "8px 10px",
+    borderRadius: 8,
+    cursor: "pointer",
+  },
+  secondaryBtn: {
+    background: "#1c1c1e",
+    border: "1px solid rgba(255,255,255,0.12)",
+    color: "#eee",
+    fontSize: 12,
+    padding: "8px 10px",
+    borderRadius: 8,
+    cursor: "pointer",
+  },
+  status: {
+    fontSize: 11,
+    color: "rgba(255,255,255,0.55)",
+    fontFamily: "ui-monospace, monospace",
+  },
+};
+
 function ToolsPanel({
   open,
   onClose,
@@ -2148,6 +2489,7 @@ function ToolsPanel({
           />
           <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
+          <CameraTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
         </div>
       )}
     </aside>
