@@ -46,6 +46,8 @@ enum AccessibilityError: Error, LocalizedError {
 /// through the matching device.
 final class AccessibilityBridge: NSObject {
     static let shared = AccessibilityBridge()
+    private static let maxSerializedElements = 500
+    private static let maxSerializationDepth = 80
 
     private let queue = DispatchQueue(label: "serve-sim.ax.bridge", qos: .userInitiated)
     private let lock = NSLock()
@@ -143,7 +145,18 @@ final class AccessibilityBridge: NSObject {
         //    frames we've covered. This catches everything iOS exposes via
         //    standard accessibility-children traversal.
         var coverage = AccessibilityCoverage()
-        var root = serialize(element: rootElement, token: token, coverage: &coverage)
+        var visited = Set<ObjectIdentifier>()
+        var remainingElements = Self.maxSerializedElements
+        guard var root = serialize(
+            element: rootElement,
+            token: token,
+            coverage: &coverage,
+            visited: &visited,
+            remainingElements: &remainingElements,
+            depth: 0
+        ) else {
+            throw AccessibilityError.noFrontmostApplication
+        }
         let screenFrame: NSRect
         if let app = rootElement as? NSAccessibilityElement {
             screenFrame = app.accessibilityFrame()
@@ -159,7 +172,13 @@ final class AccessibilityBridge: NSObject {
         //    technique as idb's processRemoteContent path.
         if screenFrame.width > 1, screenFrame.height > 1 {
             var children = (root["children"] as? [[String: Any]]) ?? []
-            let discovered = discoverByGrid(token: token, bounds: screenFrame, coverage: &coverage)
+            let discovered = discoverByGrid(
+                token: token,
+                bounds: screenFrame,
+                coverage: &coverage,
+                visited: &visited,
+                remainingElements: &remainingElements
+            )
             children.append(contentsOf: discovered)
             root["children"] = children
         }
@@ -173,7 +192,13 @@ final class AccessibilityBridge: NSObject {
     /// points whose enclosing rect we've already cataloged — that lets
     /// the cost scale with the number of *unique* elements rather than
     /// the grid size. Caller owns the token.
-    private func discoverByGrid(token: String, bounds: CGRect, coverage: inout AccessibilityCoverage) -> [[String: Any]] {
+    private func discoverByGrid(
+        token: String,
+        bounds: CGRect,
+        coverage: inout AccessibilityCoverage,
+        visited: inout Set<ObjectIdentifier>,
+        remainingElements: inout Int
+    ) -> [[String: Any]] {
         guard let translator = translator else { return [] }
 
         let pointSel = NSSelectorFromString("objectAtPoint:displayId:bridgeDelegateToken:")
@@ -191,9 +216,9 @@ final class AccessibilityBridge: NSObject {
         var discovered: [[String: Any]] = []
 
         var y = bounds.minY + step / 2
-        while y < bounds.maxY, pointBudget > 0 {
+        while y < bounds.maxY, pointBudget > 0, remainingElements > 0 {
             var x = bounds.minX + step / 2
-            while x < bounds.maxX, pointBudget > 0 {
+            while x < bounds.maxX, pointBudget > 0, remainingElements > 0 {
                 let point = CGPoint(x: x, y: y)
                 x += step
 
@@ -227,7 +252,16 @@ final class AccessibilityBridge: NSObject {
                     coverage.insertContainer(frame)
                     continue
                 }
-                discovered.append(serialize(element: element, token: token, coverage: &coverage))
+                if let serialized = serialize(
+                    element: element,
+                    token: token,
+                    coverage: &coverage,
+                    visited: &visited,
+                    remainingElements: &remainingElements,
+                    depth: 0
+                ) {
+                    discovered.append(serialized)
+                }
             }
             y += step
         }
@@ -256,7 +290,22 @@ final class AccessibilityBridge: NSObject {
     // axe's JSON keys, mirroring idb's FBAXKeys constants.
     private static let axPrefix = "AX"
 
-    private func serialize(element: NSObject, token: String, coverage: inout AccessibilityCoverage) -> [String: Any] {
+    private func serialize(
+        element: NSObject,
+        token: String,
+        coverage: inout AccessibilityCoverage,
+        visited: inout Set<ObjectIdentifier>,
+        remainingElements: inout Int,
+        depth: Int
+    ) -> [String: Any]? {
+        guard remainingElements > 0, depth <= Self.maxSerializationDepth else {
+            return nil
+        }
+        guard visited.insert(ObjectIdentifier(element)).inserted else {
+            return nil
+        }
+        remainingElements -= 1
+
         // Token must be re-stamped on every element walked because the
         // framework creates fresh translation objects lazily as we touch
         // child collections.
@@ -311,8 +360,18 @@ final class AccessibilityBridge: NSObject {
         }
         if let children {
             for child in children {
+                guard remainingElements > 0 else { break }
                 guard let childObj = child as? NSObject else { continue }
-                childDicts.append(serialize(element: childObj, token: token, coverage: &coverage))
+                if let childDict = serialize(
+                    element: childObj,
+                    token: token,
+                    coverage: &coverage,
+                    visited: &visited,
+                    remainingElements: &remainingElements,
+                    depth: depth + 1
+                ) {
+                    childDicts.append(childDict)
+                }
             }
         }
 
