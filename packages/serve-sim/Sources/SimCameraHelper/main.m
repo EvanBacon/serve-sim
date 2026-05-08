@@ -59,6 +59,11 @@ static uint64_t MachAbsToNs(uint64_t t) {
 
 static void HandleSig(int sig) { (void)sig; gShouldExit = 1; }
 
+// Forward decls — definitions live near OpenShm so the control-socket
+// handler (which sits earlier in this file post-refactor) can call them.
+static uint8_t ParseMirrorCode(NSString *mode);
+static NSString *MirrorName(uint8_t code);
+
 // Publish a fully-prepared BGRA frame (gWidth x gHeight, packed at gWidth*4
 // bytes per row) to the shm region. Writers MUST go through this so seq/ts
 // stay coherent for the dylib's tear-detection check.
@@ -120,22 +125,86 @@ didOutputSampleBuffer:(CMSampleBufferRef)sb
 
 static SimCamWebcamWriter *gWebcamWriter = nil;
 
-#pragma mark Placeholder source
+#pragma mark Placeholder source — Remotion-style "blueprint" grid
 
-static void HSVtoRGBA(double h, double s, double v, CGFloat *o) {
-    double r=0,g=0,b=0;
-    int i = (int)(h*6) % 6;
-    double f = h*6 - (int)(h*6);
-    double p = v*(1-s), q = v*(1-f*s), t2 = v*(1-(1-f)*s);
-    switch (i) {
-        case 0: r=v; g=t2; b=p; break;
-        case 1: r=q; g=v;  b=p; break;
-        case 2: r=p; g=v;  b=t2; break;
-        case 3: r=p; g=q;  b=v; break;
-        case 4: r=t2;g=p;  b=v; break;
-        default:r=v; g=p;  b=q;
+// Visual parity with apps/editor/src/backgrounds/BlueprintBackground.tsx in
+// the device-frames repo: a fixed #019EFF→#0168D4 vertical gradient, a major
+// grid every 120px with minor subdivisions every 24px, and tiny animated
+// cross markers at major intersections that rotate + scale-pulse. All of the
+// static layers (gradient + grid) are rasterized once into a CGImage and
+// blitted each frame; only the crosses are redrawn live.
+
+#define BP_GRID_MAJOR        120.0
+#define BP_GRID_MINOR_DIV    5
+#define BP_CROSS_SIZE        7.0
+#define BP_CROSS_STROKE      4.0
+
+static CGImageRef gBPBackground = NULL;   // cached gradient + grid
+static uint32_t   gBPCachedW = 0;
+static uint32_t   gBPCachedH = 0;
+
+// Match the JS seededRandom in BlueprintBackground.tsx so cross timings line
+// up with the Remotion reference. (The original is `sin(seed*438.8) * K`
+// since 127.1+311.7 = 438.8 and both factors multiply the same `seed`.)
+static inline double BPSeededRandom(double seed) {
+    double x = sin(seed * 438.8) * 43758.5453;
+    return x - floor(x);
+}
+
+static CGImageRef BuildBlueprintBackground(uint32_t w, uint32_t h) {
+    size_t bpr = (size_t)w * 4;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, bpr, cs,
+        kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+    if (!ctx) { CGColorSpaceRelease(cs); return NULL; }
+
+    // Vertical gradient #019EFF → #0168D4.
+    CGFloat colors[8] = {
+        0x01/255.0, 0x9E/255.0, 0xFF/255.0, 1.0,
+        0x01/255.0, 0x68/255.0, 0xD4/255.0, 1.0,
+    };
+    CGGradientRef grad = CGGradientCreateWithColorComponents(cs, colors,
+        (CGFloat[]){0, 1}, 2);
+    CGContextDrawLinearGradient(ctx, grad,
+        CGPointMake(w/2.0, h), CGPointMake(w/2.0, 0), 0);
+    CGGradientRelease(grad);
+
+    double minor = BP_GRID_MAJOR / (double)BP_GRID_MINOR_DIV;
+
+    // Minor grid: stroke 0.5, white α=0.08.
+    CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.08);
+    CGContextSetLineWidth(ctx, 0.5);
+    CGContextBeginPath(ctx);
+    for (double y = 0; y <= h + minor; y += minor) {
+        if (fmod(y, BP_GRID_MAJOR) == 0) continue;
+        CGContextMoveToPoint(ctx, 0, y);
+        CGContextAddLineToPoint(ctx, w, y);
     }
-    o[0]=r; o[1]=g; o[2]=b; o[3]=1;
+    for (double x = 0; x <= w + minor; x += minor) {
+        if (fmod(x, BP_GRID_MAJOR) == 0) continue;
+        CGContextMoveToPoint(ctx, x, 0);
+        CGContextAddLineToPoint(ctx, x, h);
+    }
+    CGContextStrokePath(ctx);
+
+    // Major grid: stroke 1.5, white α=0.15.
+    CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.15);
+    CGContextSetLineWidth(ctx, 1.5);
+    CGContextBeginPath(ctx);
+    for (double y = 0; y <= h + BP_GRID_MAJOR; y += BP_GRID_MAJOR) {
+        CGContextMoveToPoint(ctx, 0, y);
+        CGContextAddLineToPoint(ctx, w, y);
+    }
+    for (double x = 0; x <= w + BP_GRID_MAJOR; x += BP_GRID_MAJOR) {
+        CGContextMoveToPoint(ctx, x, 0);
+        CGContextAddLineToPoint(ctx, x, h);
+    }
+    CGContextStrokePath(ctx);
+
+    CGImageRef img = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    CGColorSpaceRelease(cs);
+    return img;
 }
 
 static void RenderPlaceholderFrame(uint8_t *out, uint64_t frameIdx) {
@@ -146,53 +215,52 @@ static void RenderPlaceholderFrame(uint8_t *out, uint64_t frameIdx) {
     CGColorSpaceRelease(cs);
     if (!ctx) return;
 
-    // Time-varying gradient for motion. Hue rotates ~10s/cycle.
-    double t = (double)frameIdx / 30.0;
-    double phase = fmod(t * 0.1, 1.0);
-    CGFloat colors[8];
-    HSVtoRGBA(phase,                 0.55, 0.85, &colors[0]);
-    HSVtoRGBA(fmod(phase + 0.5, 1.0), 0.55, 0.85, &colors[4]);
-    CGGradientRef g = CGGradientCreateWithColorComponents(
-        CGBitmapContextGetColorSpace(ctx), colors, (CGFloat[]){0,1}, 2);
-    CGContextDrawLinearGradient(ctx, g, CGPointZero,
-        CGPointMake(gWidth, gHeight), 0);
-    CGGradientRelease(g);
+    // Cached static background (gradient + grid). Rebuild on dimension change.
+    if (!gBPBackground || gBPCachedW != gWidth || gBPCachedH != gHeight) {
+        if (gBPBackground) CGImageRelease(gBPBackground);
+        gBPBackground = BuildBlueprintBackground(gWidth, gHeight);
+        gBPCachedW = gWidth;
+        gBPCachedH = gHeight;
+    }
+    if (gBPBackground) {
+        CGContextDrawImage(ctx, CGRectMake(0, 0, gWidth, gHeight), gBPBackground);
+    }
 
-    // Crosshairs
-    CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.18);
-    CGContextSetLineWidth(ctx, 1);
-    CGContextMoveToPoint(ctx, gWidth/2.0, 0);
-    CGContextAddLineToPoint(ctx, gWidth/2.0, gHeight);
-    CGContextMoveToPoint(ctx, 0, gHeight/2.0);
-    CGContextAddLineToPoint(ctx, gWidth, gHeight/2.0);
-    CGContextStrokePath(ctx);
+    // Cross markers at every interior major intersection. Loops every 30s.
+    double t = fmod((double)frameIdx / 30.0, 30.0);
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextSetLineWidth(ctx, BP_CROSS_STROKE);
 
-    // Bouncing dot — a quick "is this live?" tell.
-    double bx = (sin(t * 1.7) * 0.5 + 0.5) * (gWidth - 80) + 40;
-    double by = (cos(t * 1.3) * 0.5 + 0.5) * (gHeight - 80) + 40;
-    CGContextSetRGBFillColor(ctx, 1, 1, 1, 0.9);
-    CGContextFillEllipseInRect(ctx, CGRectMake(bx-12, by-12, 24, 24));
+    int seed = 0;
+    for (double cy = BP_GRID_MAJOR; cy < gHeight; cy += BP_GRID_MAJOR) {
+        for (double cx = BP_GRID_MAJOR; cx < gWidth; cx += BP_GRID_MAJOR) {
+            double offset      = BPSeededRandom(seed)     * M_PI * 2.0;
+            double speed       = 0.15 + BPSeededRandom(seed + 1) * 0.20;
+            double scaleSpeed  = 0.07 + BPSeededRandom(seed + 2) * 0.12;
+            double scalePhase  = t * scaleSpeed + BPSeededRandom(seed + 3) * M_PI * 2.0;
+            seed++;
 
-    // Frame counter / clock.
-    CFStringRef txt = CFStringCreateWithFormat(NULL, NULL,
-        CFSTR("serve-sim placeholder · frame %llu · %.1fs"),
-        (unsigned long long)frameIdx, t);
-    CFRange r = { 0, CFStringGetLength(txt) };
-    CFMutableAttributedStringRef attr = CFAttributedStringCreateMutable(NULL, 0);
-    CFAttributedStringReplaceString(attr, CFRangeMake(0, 0), txt);
-    CTFontRef font = CTFontCreateWithName(CFSTR("Menlo-Bold"), 28, NULL);
-    CFAttributedStringSetAttribute(attr, r, kCTFontAttributeName, font);
-    CGFloat white[] = {1, 1, 1, 0.9};
-    CGColorRef c = CGColorCreate(CGBitmapContextGetColorSpace(ctx), white);
-    CFAttributedStringSetAttribute(attr, r, kCTForegroundColorAttributeName, c);
-    CGColorRelease(c);
-    CTLineRef line = CTLineCreateWithAttributedString(attr);
-    CGContextSetTextPosition(ctx, 32, 32);
-    CTLineDraw(line, ctx);
-    CFRelease(line);
-    CFRelease(attr);
-    CFRelease(font);
-    CFRelease(txt);
+            double raw = sin(scalePhase * M_PI * 2.0);
+            double scale = raw > 0 ? raw : 0;        // half the cycle hidden
+            if (scale <= 0.001) continue;             // skip invisible draws
+
+            double rotation = (t * speed + offset) * M_PI * 2.0;
+            double s = BP_CROSS_SIZE * scale;
+            double opacity = 0.3 + 0.5 * scale;
+
+            CGContextSaveGState(ctx);
+            CGContextTranslateCTM(ctx, cx, cy);
+            CGContextRotateCTM(ctx, rotation);
+            CGContextSetRGBStrokeColor(ctx, 1, 1, 1, 0.7 * opacity);
+            CGContextBeginPath(ctx);
+            CGContextMoveToPoint(ctx, -s, 0);
+            CGContextAddLineToPoint(ctx, s, 0);
+            CGContextMoveToPoint(ctx, 0, -s);
+            CGContextAddLineToPoint(ctx, 0, s);
+            CGContextStrokePath(ctx);
+            CGContextRestoreGState(ctx);
+        }
+    }
 
     CGContextRelease(ctx);
 }
@@ -409,6 +477,19 @@ static void HandleControlLine(int fd, NSString *line) {
         write(fd, r.bytes, r.length);
         return;
     }
+    if ([action isEqualToString:@"setMirror"]) {
+        NSString *mode = cmd[@"mode"] ?: @"auto";
+        uint8_t code = ParseMirrorCode(mode);
+        if (code == 0xFE) {
+            NSData *r = EncodeReply(@{ @"ok": @NO, @"error": @"unknown mirror mode" });
+            write(fd, r.bytes, r.length);
+            return;
+        }
+        if (gHeader) gHeader->mirrorMode = code;
+        NSData *r = EncodeReply(@{ @"ok": @YES, @"mirror": MirrorName(code) });
+        write(fd, r.bytes, r.length);
+        return;
+    }
     NSData *r = EncodeReply(@{ @"ok": @NO, @"error": @"unknown action" });
     write(fd, r.bytes, r.length);
 }
@@ -495,7 +576,25 @@ static int OpenShm(const char *name, size_t size) {
     gHeader->pixelFormat = SIMCAM_PIXEL_BGRA;
     gHeader->bytesPerRow = gWidth * 4;
     gHeader->pixelByteSize = (uint64_t)gWidth * gHeight * 4;
+    gHeader->mirrorMode = SIMCAM_MIRROR_UNSET; // dylib falls back to env
     return fd;
+}
+
+static uint8_t ParseMirrorCode(NSString *mode) {
+    if ([mode isEqualToString:@"on"])    return SIMCAM_MIRROR_ON;
+    if ([mode isEqualToString:@"off"])   return SIMCAM_MIRROR_OFF;
+    if ([mode isEqualToString:@"auto"])  return SIMCAM_MIRROR_AUTO;
+    if ([mode isEqualToString:@"unset"]) return SIMCAM_MIRROR_UNSET;
+    return 0xFE; // sentinel for "invalid"
+}
+static NSString *MirrorName(uint8_t code) {
+    switch (code) {
+        case SIMCAM_MIRROR_ON:    return @"on";
+        case SIMCAM_MIRROR_OFF:   return @"off";
+        case SIMCAM_MIRROR_AUTO:  return @"auto";
+        case SIMCAM_MIRROR_UNSET: return @"unset";
+        default:                  return @"?";
+    }
 }
 
 int main(int argc, const char *argv[]) {

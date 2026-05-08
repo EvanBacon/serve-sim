@@ -2263,6 +2263,33 @@ function CameraTool({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSwapKey]);
 
+  // Mirror is its own control channel — toggling the seg after inject
+  // pushes through the helper's setMirror so the dylib re-applies the
+  // preview transform without relaunching the app.
+  useEffect(() => {
+    if (!injected) return;
+    let cancelled = false;
+    void (async () => {
+      setPending("mirror");
+      setError(null);
+      try {
+        const res = await execOnHost(
+          `${cliPrefix} camera mirror ${mirror} -d ${udid} --quiet`,
+        );
+        if (cancelled) return;
+        if (res.exitCode !== 0) {
+          setError(res.stderr.trim() || res.stdout.trim() || `mirror failed (${res.exitCode})`);
+          return;
+        }
+        setStatus(`Mirror → ${mirror}`);
+      } finally {
+        if (!cancelled) setPending(null);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mirror]);
+
   const stopWebcam = useCallback(async () => {
     setPending("stop");
     setError(null);

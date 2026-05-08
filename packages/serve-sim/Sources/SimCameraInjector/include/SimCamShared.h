@@ -22,6 +22,14 @@
 #define SIMCAM_DEFAULT_WIDTH  1280u
 #define SIMCAM_DEFAULT_HEIGHT 720u
 
+// Mirror mode codes for SimCamShmHeader.mirrorMode.
+// "Unset" lets the dylib fall back to its env-var configuration (back-compat
+// with hosts that don't write the byte).
+#define SIMCAM_MIRROR_UNSET   0xFF
+#define SIMCAM_MIRROR_AUTO    0
+#define SIMCAM_MIRROR_ON      1
+#define SIMCAM_MIRROR_OFF     2
+
 // Header is 64 bytes — keeps pixel data 16-byte aligned.
 typedef struct __attribute__((packed)) {
     uint32_t magic;        // SIMCAM_SHM_MAGIC
@@ -33,7 +41,8 @@ typedef struct __attribute__((packed)) {
     uint64_t pixelByteSize;
     uint64_t frameSeq;     // written LAST; readers check tearing via re-read
     uint64_t timestampNs;  // mach_absolute_time-based, host monotonic
-    uint8_t  reserved[16];
+    uint8_t  mirrorMode;   // SIMCAM_MIRROR_*; UNSET = ignore (use env)
+    uint8_t  reserved[15];
 } SimCamShmHeader;
 
 _Static_assert(sizeof(SimCamShmHeader) == 64, "SimCamShmHeader must be 64 bytes");

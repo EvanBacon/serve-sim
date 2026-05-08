@@ -1315,6 +1315,7 @@ async function camera(args: string[]) {
     if (a === "--help" || a === "-h") {
       console.log(`Usage: serve-sim camera <bundle-id> [-d udid] [source-options] [--build]
        serve-sim camera switch <placeholder|webcam|image> [arg] [-d udid]
+       serve-sim camera mirror <auto|on|off> [-d udid]
        serve-sim camera --list-webcams
        serve-sim camera --stop-webcam [-d udid]
 
@@ -1366,6 +1367,35 @@ Examples:
     stopExistingHelper(udid);
     if (quiet) console.log(JSON.stringify({ udid, stopped: true }));
     else console.log(`Stopped camera helper for ${udid}`);
+    return;
+  }
+
+  // `serve-sim camera mirror <auto|on|off> [-d udid]`
+  // Hot-swap the preview-layer mirror mode without touching the app.
+  if (filtered[0] === "mirror") {
+    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    if (!udid) { console.error("No booted simulator."); process.exit(1); }
+    const mode = filtered[1];
+    if (mode !== "auto" && mode !== "on" && mode !== "off") {
+      console.error("Usage: serve-sim camera mirror <auto|on|off> [-d udid]");
+      process.exit(1);
+    }
+    if (!isHelperAlive(udid)) {
+      console.error("camera helper not running for this device — run `serve-sim camera <bundle-id>` first.");
+      process.exit(1);
+    }
+    try {
+      const reply = await sendHelperCommand(udid, { action: "setMirror", mode });
+      if (!reply.ok) {
+        console.error(`mirror failed: ${reply.error ?? "?"}`);
+        process.exit(1);
+      }
+      if (quiet) console.log(JSON.stringify({ udid, mirror: mode, ok: true }));
+      else console.log(`📷 Mirror → ${mode} on ${udid}`);
+    } catch (e: any) {
+      console.error(`mirror failed: ${e?.message ?? e}`);
+      process.exit(1);
+    }
     return;
   }
 
@@ -1440,6 +1470,15 @@ Examples:
   const helperRes = await ensureHelperWithSource({ udid, source, forceBuild });
   const shmName = helperRes.shmName;
   const helperPid = helperRes.helperPid;
+
+  // Mirror lives in the shm header so it can hot-swap. Push every time —
+  // the dylib watches the byte each frame and re-applies the layer
+  // transform when it differs from the last seen value.
+  if (mirror !== "auto" || !helperRes.relaunched) {
+    try {
+      await sendHelperCommand(udid, { action: "setMirror", mode: mirror });
+    } catch {} // non-fatal; dylib falls back to env or default
+  }
 
   // If we hot-swapped, don't relaunch the app.
   if (!helperRes.relaunched) {

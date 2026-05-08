@@ -203,6 +203,7 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
             queue:(dispatch_queue_t)queue;
 - (void)removeOutput:(AVCaptureVideoDataOutput *)out;
 - (void)addPreviewLayer:(AVCaptureVideoPreviewLayer *)layer;
+- (void)reapplyMirrorToLayers;   // re-evaluate every known layer's transform
 - (void)startPumpingIfNeeded;
 - (void)stopPumping;
 @end
@@ -282,6 +283,23 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
     });
     simcam_log(@"hooked preview layer %p (mirror=%d)", layer, (int)mirror);
     [self startPumpingIfNeeded];
+}
+
+- (void)reapplyMirrorToLayers {
+    NSArray *layerSnapshot;
+    [_lock lock]; layerSnapshot = _layers.allObjects; [_lock unlock];
+    if (layerSnapshot.count == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Disable implicit animations so the flip is instantaneous.
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        for (AVCaptureVideoPreviewLayer *l in layerSnapshot) {
+            BOOL m = SimCamShouldMirror(SimCamPositionOf(l));
+            l.transform = m ? CATransform3DMakeScale(-1.f, 1.f, 1.f)
+                            : CATransform3DIdentity;
+        }
+        [CATransaction commit];
+    });
 }
 
 - (void)pushFrameToLayers:(CVPixelBufferRef)pb {
@@ -406,8 +424,28 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
     dispatch_source_set_timer(_timer, dispatch_time(DISPATCH_TIME_NOW, 0), intervalNs, intervalNs / 10);
     __weak __typeof(self) weakSelf = self;
     __block int64_t frameIdx = 0;
+    __block uint8_t lastMirrorByte = SIMCAM_MIRROR_UNSET;
     dispatch_source_set_event_handler(_timer, ^{
         __strong __typeof(weakSelf) self = weakSelf; if (!self) return;
+        // Watch the mirror byte the helper writes to the shm header. When
+        // it changes (and isn't the UNSET sentinel), update gMirrorMode
+        // and re-evaluate every known preview layer's transform.
+        if (gShmHeader) {
+            uint8_t m = gShmHeader->mirrorMode;
+            if (m != lastMirrorByte) {
+                lastMirrorByte = m;
+                if (m != SIMCAM_MIRROR_UNSET) {
+                    SimCamMirrorMode prev = gMirrorMode;
+                    if (m == SIMCAM_MIRROR_ON)       gMirrorMode = SimCamMirrorForceOn;
+                    else if (m == SIMCAM_MIRROR_OFF) gMirrorMode = SimCamMirrorForceOff;
+                    else                              gMirrorMode = SimCamMirrorAuto;
+                    if (prev != gMirrorMode) {
+                        simcam_log(@"mirror mode → %d (from shm)", (int)gMirrorMode);
+                        [self reapplyMirrorToLayers];
+                    }
+                }
+            }
+        }
         CMTime pts = CMTimeMake(frameIdx++, (int32_t)kFrameRate);
         CMSampleBufferRef sb = [self newSampleBufferAtTime:pts];
         if (!sb) return;
