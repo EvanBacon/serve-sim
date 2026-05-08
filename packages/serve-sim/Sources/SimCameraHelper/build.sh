@@ -16,6 +16,10 @@ xcrun --sdk macosx clang \
     -framework AVFoundation \
     -framework CoreMedia \
     -framework CoreVideo \
+    -framework CoreGraphics \
+    -framework CoreImage \
+    -framework CoreText \
+    -framework ImageIO \
     -framework Accelerate \
     -O2 \
     -o "$BIN" \

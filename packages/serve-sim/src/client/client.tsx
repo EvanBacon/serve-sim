@@ -2103,7 +2103,7 @@ function ResizeHandle({
   );
 }
 
-type CamSource = "gradient" | "image" | "webcam";
+type CamSource = "placeholder" | "image" | "webcam";
 type CamMirror = "auto" | "on" | "off";
 
 interface CamWebcam { id: string; name: string }
@@ -2116,7 +2116,7 @@ function CameraTool({
   bundleId: string | null;
 }) {
   const [open, setOpen] = useState(false);
-  const [source, setSource] = useState<CamSource>("webcam");
+  const [source, setSource] = useState<CamSource>("placeholder");
   const [imagePath, setImagePath] = useState<string>("");
   const [webcams, setWebcams] = useState<CamWebcam[]>([]);
   const [webcamLoading, setWebcamLoading] = useState(false);
@@ -2125,6 +2125,9 @@ function CameraTool({
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  // Set after a successful inject so subsequent source changes hot-swap
+  // through `camera switch` instead of relaunching the simulator app.
+  const [injected, setInjected] = useState(false);
 
   const cliPrefix = useMemo(() => {
     const bin = window.__SIM_PREVIEW__?.serveSimBin;
@@ -2162,6 +2165,37 @@ function CameraTool({
     if (open && webcams.length === 0 && !webcamLoading) refreshWebcams();
   }, [open, webcams.length, webcamLoading, refreshWebcams]);
 
+  // Push the currently-selected source through `camera switch` (no relaunch).
+  // Returns true if the helper acknowledged.
+  const pushSwitch = useCallback(async (
+    nextSource: CamSource,
+    nextWebcamId: string,
+    nextImagePath: string,
+  ): Promise<boolean> => {
+    const argv = ["camera", "switch", nextSource];
+    if (nextSource === "webcam" && nextWebcamId) argv.push(shellEscape(nextWebcamId));
+    if (nextSource === "image") {
+      if (!nextImagePath.trim()) {
+        setError("Image path is required for the image source.");
+        return false;
+      }
+      argv.push(shellEscape(nextImagePath.trim()));
+    }
+    argv.push("-d", udid, "--quiet");
+    const res = await execOnHost(`${cliPrefix} ${argv.join(" ")}`);
+    if (res.exitCode !== 0) {
+      setError(res.stderr.trim() || res.stdout.trim() || `switch failed (${res.exitCode})`);
+      return false;
+    }
+    try {
+      const json = JSON.parse(res.stdout.trim()) as { source?: string; arg?: string };
+      setStatus(`Switched → ${json.source ?? nextSource}${json.arg ? ` (${json.arg})` : ""}`);
+    } catch {
+      setStatus(`Switched → ${nextSource}`);
+    }
+    return true;
+  }, [udid, cliPrefix]);
+
   const inject = useCallback(async () => {
     if (!bundleId) return;
     setPending("inject");
@@ -2179,7 +2213,7 @@ function CameraTool({
         if (webcamId) flags.push("--webcam", shellEscape(webcamId));
         else flags.push("--webcam");
       }
-      // gradient uses no source flag — dylib falls back to its built-in placeholder.
+      // placeholder uses no source flag — the helper defaults to it.
       if (mirror !== "auto") flags.push(`--mirror`, mirror);
       const res = await execOnHost(`${cliPrefix} ${flags.join(" ")}`);
       if (res.exitCode !== 0) {
@@ -2188,18 +2222,46 @@ function CameraTool({
       }
       try {
         const json = JSON.parse(res.stdout.trim()) as {
-          source?: string; pid?: number; helperPid?: number;
+          source?: string; pid?: number; helperPid?: number; hotSwapped?: boolean;
         };
+        const verb = json.hotSwapped ? "Hot-swapped" : "Injected";
         const pidStr = json.pid ? ` pid ${json.pid}` : "";
-        const helper = json.helperPid ? `, webcam helper pid ${json.helperPid}` : "";
-        setStatus(`Injected ${json.source ?? source}${pidStr}${helper}`);
+        const helper = json.helperPid ? `, helper pid ${json.helperPid}` : "";
+        setStatus(`${verb} ${json.source ?? source}${pidStr}${helper}`);
+        setInjected(true);
       } catch {
         setStatus(res.stdout.trim() || "Injected.");
+        setInjected(true);
       }
     } finally {
       setPending(null);
     }
-  }, [bundleId, udid, source, imagePath, webcamId, mirror]);
+  }, [bundleId, udid, source, imagePath, webcamId, mirror, cliPrefix]);
+
+  // Auto hot-swap when the user changes source/webcam after the first inject.
+  // Skip the very first run (no helper yet) and the image source until the
+  // user has typed a path.
+  const autoSwapKey = injected
+    ? `${source}::${source === "webcam" ? webcamId : ""}::${source === "image" ? imagePath : ""}`
+    : null;
+  useEffect(() => {
+    if (!injected) return;
+    if (source === "image" && !imagePath.trim()) return;
+    if (source === "webcam" && !webcamId) return;
+    let cancelled = false;
+    void (async () => {
+      setPending("switch");
+      setError(null);
+      try {
+        if (cancelled) return;
+        await pushSwitch(source, webcamId, imagePath);
+      } finally {
+        if (!cancelled) setPending(null);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSwapKey]);
 
   const stopWebcam = useCallback(async () => {
     setPending("stop");
@@ -2210,11 +2272,12 @@ function CameraTool({
         setError(res.stderr.trim() || `stop-webcam failed (${res.exitCode})`);
         return;
       }
-      setStatus("Webcam helper stopped.");
+      setStatus("Camera helper stopped.");
+      setInjected(false);
     } finally {
       setPending(null);
     }
-  }, [udid]);
+  }, [udid, cliPrefix]);
 
   return (
     <div style={{ ...panelStyles.section, padding: "8px 12px" }}>
@@ -2254,7 +2317,7 @@ function CameraTool({
           <div style={cameraToolStyles.row}>
             <span style={cameraToolStyles.label}>Source</span>
             <div style={cameraToolStyles.seg} role="group" aria-label="Camera source">
-              {(["gradient", "image", "webcam"] as CamSource[]).map((s) => (
+              {(["placeholder", "image", "webcam"] as CamSource[]).map((s) => (
                 <button
                   key={s}
                   onClick={() => setSource(s)}
@@ -2328,21 +2391,24 @@ function CameraTool({
           <div style={cameraToolStyles.actions}>
             <button
               onClick={inject}
-              disabled={!bundleId || pending === "inject"}
+              disabled={!bundleId || pending !== null}
               style={{ ...cameraToolStyles.primaryBtn, opacity: !bundleId ? 0.5 : 1 }}
+              title={injected
+                ? "Re-launch the app with the dylib (e.g. after a mirror change)"
+                : "Spawn the helper and launch the app with the dylib"}
             >
-              {pending === "inject" ? "Injecting…" : "Inject + relaunch"}
+              {pending === "inject" ? "Injecting…" :
+                pending === "switch" ? "Switching…" :
+                injected ? "Relaunch" : "Inject + relaunch"}
             </button>
-            {source === "webcam" && (
-              <button
-                onClick={stopWebcam}
-                disabled={pending === "stop"}
-                style={cameraToolStyles.secondaryBtn}
-                title="Stop webcam helper"
-              >
-                {pending === "stop" ? "Stopping…" : "Stop webcam"}
-              </button>
-            )}
+            <button
+              onClick={stopWebcam}
+              disabled={pending !== null}
+              style={cameraToolStyles.secondaryBtn}
+              title="Stop the camera helper for this device"
+            >
+              {pending === "stop" ? "Stopping…" : "Stop helper"}
+            </button>
           </div>
 
           {status && <div style={cameraToolStyles.status}>{status}</div>}
