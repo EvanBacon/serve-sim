@@ -7,13 +7,15 @@ final class HTTPServer {
     let clientManager = ClientManager()
     private let server = HttpServer()
     private let port: UInt16
+    private let deviceUDID: String
     private let corsHeaders = [
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
     ]
 
-    init(port: UInt16 = 3100) {
+    init(deviceUDID: String, port: UInt16 = 3100) {
+        self.deviceUDID = deviceUDID
         self.port = port
     }
 
@@ -88,6 +90,37 @@ final class HTTPServer {
         // Health endpoint
         server["/health"] = { [weak self] _ in
             return self?.jsonResponse(["status": "ok"]) ?? .internalServerError
+        }
+
+        // Accessibility tree (replaces a global `axe describe-ui` install).
+        // Returns axe's flat-array JSON shape so the Node-side normalizer
+        // in src/ax.ts works unchanged.
+        server["/ax"] = { [weak self] _ in
+            guard let self else { return .internalServerError }
+            do {
+                let data = try AccessibilityBridge.shared.describeUI(udid: self.deviceUDID)
+                var headers = self.corsHeaders
+                headers["Content-Type"] = "application/json"
+                headers["Cache-Control"] = "no-cache, no-store"
+                headers["Content-Length"] = "\(data.count)"
+                return .raw(200, "OK", headers) { writer in
+                    try? writer.write(data)
+                }
+            } catch {
+                let payload: [String: Any] = [
+                    "error": "ax_unavailable",
+                    "message": error.localizedDescription,
+                ]
+                guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+                    return .internalServerError
+                }
+                var headers = self.corsHeaders
+                headers["Content-Type"] = "application/json"
+                headers["Content-Length"] = "\(body.count)"
+                return .raw(503, "Service Unavailable", headers) { writer in
+                    try? writer.write(body)
+                }
+            }
         }
 
         // CORS preflight

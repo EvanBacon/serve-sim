@@ -85,7 +85,7 @@ Create a `.claude/launch.json` and define a server:
       "name": "ios",
       "runtimeExecutable": "npx",
       "runtimeArgs": ["serve-sim"],
-      "port": 3200,
+      "url": "http://localhost:8081/.sim"
     }
   ]
 }
