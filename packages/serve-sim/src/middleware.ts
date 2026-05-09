@@ -800,9 +800,15 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         let stderr = "";
         child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
         child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
+        // A cold iOS simulator can take 60-90s to reach `bootstatus -b`
+        // readiness; the prior 60s ceiling was killing serve-sim mid-boot
+        // and the helper never got a chance to spawn, so the click ended
+        // with an error and no state file. 3 minutes is a comfortable
+        // upper bound that covers slow first-boots without leaving a
+        // wedged child around indefinitely.
         const timer = setTimeout(() => {
           try { child.kill("SIGTERM"); } catch {}
-        }, 60_000);
+        }, 180_000);
         child.on("close", (code) => {
           clearTimeout(timer);
           if (code === 0) {

@@ -231,7 +231,13 @@ declare global {
 }
 
 function simEndpoint(path: string): string {
-  const basePath = window.__SIM_PREVIEW__?.basePath ?? "/";
+  // When __SIM_PREVIEW__ is injected we have the canonical base path. Without
+  // it (BootEmptyState — no helper running yet) the page is still being served
+  // at the middleware's mount point, so derive the base from the current URL.
+  // Otherwise the empty-state polls (e.g. /api, /exec) would hit the wrong
+  // path under any mount other than "/", and auto-switch after boot fails.
+  const configured = window.__SIM_PREVIEW__?.basePath;
+  const basePath = configured ?? (window.location.pathname.replace(/\/+$/, "") || "/");
   return basePath === "/" ? `/${path}` : `${basePath}/${path}`;
 }
 
@@ -1511,30 +1517,59 @@ function BootEmptyState({
     setStartingUdid(d.udid);
     setStartError(null);
     try {
-      if (d.state !== "Booted") {
-        const boot = await execOnHost(`xcrun simctl boot ${d.udid}`);
-        if (boot.exitCode !== 0) throw new Error(boot.stderr || "Failed to boot simulator");
-      }
-      const detach = await execOnHost(`bunx serve-sim --detach ${d.udid}`);
-      if (detach.exitCode !== 0) throw new Error(detach.stderr || "Failed to start serve-sim");
-
-      // Poll the middleware API until the state file is picked up, then reload. Avoids a
-      // race where the user sees the empty state again because we reloaded
-      // before serve-sim wrote its server-*.json.
-      const deadline = Date.now() + 15_000;
+      // Single round-trip: the middleware's grid/start endpoint resolves the
+      // serve-sim binary itself (no `bunx` lookup) and `serve-sim --detach`
+      // already boots the device + waits for readiness, so the prior
+      // explicit `xcrun simctl boot` was redundant and just added latency.
+      // We also poll the API in parallel with the start request so as soon
+      // as the helper writes its state file we can navigate — no need to
+      // wait for the start request to fully return.
       const apiUrl = `${simEndpoint("api")}?device=${encodeURIComponent(d.udid)}`;
-      while (Date.now() < deadline) {
-        try {
-          const r = await fetch(apiUrl, { cache: "no-store" });
-          if (r.ok && (await r.json())) {
-            const nextUrl = new URL(window.location.href);
-            nextUrl.searchParams.set("device", d.udid);
-            window.location.assign(nextUrl.toString());
-            return;
+      const navigateWhenReady = (async () => {
+        // Generous deadline: a cold simulator can take 30-60s to reach
+        // bootstatus, plus a few seconds for the helper to start capturing.
+        const deadline = Date.now() + 90_000;
+        while (Date.now() < deadline) {
+          try {
+            const r = await fetch(apiUrl, { cache: "no-store" });
+            if (r.ok && (await r.json())) {
+              const nextUrl = new URL(window.location.href);
+              nextUrl.searchParams.set("device", d.udid);
+              window.location.assign(nextUrl.toString());
+              return true;
+            }
+          } catch {}
+          await new Promise((res) => setTimeout(res, 400));
+        }
+        return false;
+      })();
+
+      const startUrl = simEndpoint("grid/api/start");
+      const startReq = fetch(startUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ udid: d.udid }),
+      })
+        .then(async (res) => {
+          const json = await res.json().catch(() => ({} as any));
+          if (!res.ok || !json.ok) {
+            throw new Error(json.error ?? `HTTP ${res.status}`);
           }
-        } catch {}
-        await new Promise((res) => setTimeout(res, 400));
-      }
+        });
+
+      // If the start request fails we want to surface that, but if the
+      // navigate-when-ready arm wins (the helper appeared) we don't care
+      // about the start response.
+      const navigated = await Promise.race([
+        navigateWhenReady,
+        startReq.then(() => "started" as const),
+      ]);
+
+      if (navigated === true) return;
+      // start request resolved before the API saw the state file — keep
+      // waiting for it to appear.
+      const ready = await navigateWhenReady;
+      if (ready) return;
       throw new Error("serve-sim started but no stream state appeared");
     } catch (err) {
       setStartError(err instanceof Error ? err.message : "Failed to start stream");
