@@ -28,6 +28,7 @@ import {
   type SimulatorOrientation,
   type StreamConfig,
 } from "serve-sim-client/simulator";
+import { LocationEmulationTool } from "./LocationEmulationTool";
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
@@ -2148,6 +2149,7 @@ function ToolsPanel({
           />
           <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
+          <LocationEmulationTool udid={udid} exec={execOnHost} />
         </div>
       )}
     </aside>
