@@ -31,32 +31,36 @@ function kb(n: number): string {
 
 // ─── 1. Bundle the browser client (React aliased to Preact) ───────────────
 
-const clientResult = await Bun.build({
-  entrypoints: [resolve(root, "src/client/client.tsx")],
-  minify: true,
-  target: "browser",
-  format: "esm",
-  define: { "process.env.NODE_ENV": '"production"' },
-  plugins: [{
-    name: "preact-alias",
-    setup(build) {
-      const preactCompat = resolve(root, "node_modules/preact/compat/dist/compat.module.js");
-      const preactCompatClient = resolve(root, "node_modules/preact/compat/client.mjs");
-      const preactJsxRuntime = resolve(root, "node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js");
-      build.onResolve({ filter: /^react-dom\/client$/ }, () => ({ path: preactCompatClient }));
-      build.onResolve({ filter: /^react(-dom)?$/ }, () => ({ path: preactCompat }));
-      build.onResolve({ filter: /^react\/jsx(-dev)?-runtime$/ }, () => ({ path: preactJsxRuntime }));
-    },
-  }],
-});
+const preactPlugin = {
+  name: "preact-alias",
+  setup(build: any) {
+    const preactCompat = resolve(root, "node_modules/preact/compat/dist/compat.module.js");
+    const preactCompatClient = resolve(root, "node_modules/preact/compat/client.mjs");
+    const preactJsxRuntime = resolve(root, "node_modules/preact/jsx-runtime/dist/jsxRuntime.module.js");
+    build.onResolve({ filter: /^react-dom\/client$/ }, () => ({ path: preactCompatClient }));
+    build.onResolve({ filter: /^react(-dom)?$/ }, () => ({ path: preactCompat }));
+    build.onResolve({ filter: /^react\/jsx(-dev)?-runtime$/ }, () => ({ path: preactJsxRuntime }));
+  },
+};
 
-if (!clientResult.success) {
-  console.error("Client build failed:");
-  for (const log of clientResult.logs) console.error(log);
-  process.exit(1);
+async function bundleBrowserClient(entry: string): Promise<string> {
+  const result = await Bun.build({
+    entrypoints: [resolve(root, entry)],
+    minify: true,
+    target: "browser",
+    format: "esm",
+    define: { "process.env.NODE_ENV": '"production"' },
+    plugins: [preactPlugin],
+  });
+  if (!result.success) {
+    console.error(`Build failed for ${entry}:`);
+    for (const log of result.logs) console.error(log);
+    process.exit(1);
+  }
+  return (await result.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
 }
 
-const clientJs = (await clientResult.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
+const clientJs = await bundleBrowserClient("src/client/client.tsx");
 console.log(`client bundle     ${kb(clientJs.length)}`);
 
 // ─── 2. Inline client into preview HTML, base64-encode for the define ────
@@ -83,7 +87,9 @@ ${faviconTag}
 const htmlB64 = Buffer.from(html).toString("base64");
 console.log(`preview html      ${kb(html.length)}  (base64 ${kb(htmlB64.length)})`);
 
-const PREVIEW_DEFINE = { __PREVIEW_HTML_B64__: JSON.stringify(htmlB64) };
+const PREVIEW_DEFINE = {
+  __PREVIEW_HTML_B64__: JSON.stringify(htmlB64),
+};
 
 // ─── 3. Middleware ESM (serve-sim/middleware) ─────────────────────────────
 

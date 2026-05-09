@@ -68,6 +68,13 @@ function isUserFacingBundle(bundleId: string): boolean {
   return !NON_UI_BUNDLE_RE.test(bundleId);
 }
 
+export function parseForegroundAppLogMessage(message: string): { bundleId: string; pid: number } | null {
+  // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
+  const match = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/.exec(message);
+  if (!match) return null;
+  return { bundleId: match[1]!, pid: parseInt(match[2]!, 10) };
+}
+
 function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
   if (RN_BUNDLE_IDS.has(bundleId)) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -83,6 +90,84 @@ function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
         resolve(false);
       });
   });
+}
+
+type InstalledApp = {
+  CFBundleDisplayName?: string;
+  CFBundleExecutable?: string;
+  CFBundleIdentifier?: string;
+  CFBundleName?: string;
+};
+
+function normalizeAppName(name: string): string {
+  return name.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+export function matchInstalledAppByDisplayName(
+  apps: Record<string, InstalledApp>,
+  displayName: string,
+): string | null {
+  const wanted = normalizeAppName(displayName);
+  if (!wanted) return null;
+
+  for (const [bundleId, app] of Object.entries(apps)) {
+    const names = [
+      app.CFBundleDisplayName,
+      app.CFBundleName,
+      app.CFBundleExecutable,
+    ].filter((value): value is string => typeof value === "string");
+    if (names.some((name) => normalizeAppName(name) === wanted)) {
+      return app.CFBundleIdentifier || bundleId;
+    }
+  }
+  return null;
+}
+
+function shellQuote(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function installedAppsForDevice(udid: string): Promise<Record<string, InstalledApp>> {
+  return new Promise((resolve) => {
+    exec(
+      `xcrun simctl listapps ${shellQuote(udid)} | plutil -convert json -o - -`,
+      { timeout: 3_000 },
+      (err, stdout) => {
+        if (err || !stdout) return resolve({});
+        try {
+          resolve(JSON.parse(stdout) as Record<string, InstalledApp>);
+        } catch {
+          resolve({});
+        }
+      },
+    );
+  });
+}
+
+async function detectCurrentForegroundApp(
+  udid: string,
+  stateUrl: string,
+): Promise<{ bundleId: string; isReactNative: boolean } | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  try {
+    const res = await fetch(`${stateUrl}/ax`, { signal: controller.signal });
+    if (!res.ok) return null;
+    const tree = await res.json() as Array<{ AXLabel?: unknown }>;
+    const displayName = tree?.[0]?.AXLabel;
+    if (typeof displayName !== "string") return null;
+
+    const bundleId = matchInstalledAppByDisplayName(
+      await installedAppsForDevice(udid),
+      displayName,
+    );
+    if (!bundleId || !isUserFacingBundle(bundleId)) return null;
+    return { bundleId, isReactNative: await detectReactNative(udid, bundleId) };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Cache simctl's booted-device set briefly so per-request cost stays bounded.
@@ -327,6 +412,186 @@ function loadHtml(): string {
   return _html;
 }
 
+interface SimctlDevice {
+  udid: string;
+  name: string;
+  state: string;
+  isAvailable?: boolean;
+  runtime: string;
+}
+
+function listAllSimulators(): SimctlDevice[] {
+  try {
+    const output = execSync("xcrun simctl list devices -j", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3_000,
+    });
+    const data = JSON.parse(output) as {
+      devices: Record<string, Array<Omit<SimctlDevice, "runtime">>>;
+    };
+    const out: SimctlDevice[] = [];
+    for (const [runtime, devices] of Object.entries(data.devices)) {
+      // Only iOS (skip watchOS / tvOS / visionOS for the grid MVP — the helper
+      // is iOS-focused and the bezel/touch model assumes a phone-shaped device).
+      if (!/SimRuntime\.iOS-/i.test(runtime)) continue;
+      for (const d of devices) {
+        if (d.isAvailable === false) continue;
+        out.push({ ...d, runtime: runtime.replace(/^.*SimRuntime\./, "") });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function deviceNameFor(udid: string): string | null {
+  return listAllSimulators().find((d) => d.udid === udid)?.name ?? null;
+}
+
+// Default per-simulator footprint when we have no running sim to measure
+// from — a fresh booted iOS sim with one app launched typically sits in
+// the 1.2–1.8 GB range. Used as a fallback only.
+const DEFAULT_PER_SIM_BYTES = 1.5 * 1024 * 1024 * 1024;
+
+interface MemoryReport {
+  totalBytes: number;
+  availableBytes: number;
+  runningSimulators: number;
+  perSimAvgBytes: number;
+  perSimSource: "measured" | "estimated";
+  estimatedAdditional: number;
+}
+
+function readSystemMemory(): { totalBytes: number; availableBytes: number } {
+  try {
+    const totalBytes = Number(
+      execSync("sysctl -n hw.memsize", {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1500,
+      }).trim(),
+    );
+    const pageSize = Number(
+      execSync("sysctl -n hw.pagesize", {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1500,
+      }).trim(),
+    );
+    const vmStat = execSync("vm_stat", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1500,
+    });
+    const pages = (re: RegExp) => {
+      const m = vmStat.match(re);
+      return m ? Number(m[1]) : 0;
+    };
+    // "Available" mirrors what Activity Monitor treats as reclaimable: free
+    // + inactive + speculative pages. Excludes wired and active.
+    const availablePages =
+      pages(/Pages free:\s+(\d+)/) +
+      pages(/Pages inactive:\s+(\d+)/) +
+      pages(/Pages speculative:\s+(\d+)/);
+    return {
+      totalBytes: Number.isFinite(totalBytes) ? totalBytes : 0,
+      availableBytes: availablePages * (Number.isFinite(pageSize) ? pageSize : 4096),
+    };
+  } catch {
+    return { totalBytes: 0, availableBytes: 0 };
+  }
+}
+
+// Sum RSS across every process whose argv path includes a CoreSimulator
+// device directory. Groups by UDID so we get a real per-sim footprint that
+// covers launchd_sim plus all child processes the runtime spawns.
+function readSimulatorMemoryUsage(): { perUdid: Record<string, number>; totalBytes: number } {
+  try {
+    const output = execSync("ps -axo rss=,args=", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const perUdid: Record<string, number> = {};
+    let totalBytes = 0;
+    const re = /\/Devices\/([0-9A-F-]{36})\//i;
+    for (const raw of output.split("\n")) {
+      const line = raw.trimStart();
+      if (!line) continue;
+      const m = re.exec(line);
+      if (!m) continue;
+      const rssKb = Number(line.split(/\s+/, 1)[0]);
+      if (!Number.isFinite(rssKb)) continue;
+      const bytes = rssKb * 1024;
+      const udid = m[1].toUpperCase();
+      perUdid[udid] = (perUdid[udid] ?? 0) + bytes;
+      totalBytes += bytes;
+    }
+    return { perUdid, totalBytes };
+  } catch {
+    return { perUdid: {}, totalBytes: 0 };
+  }
+}
+
+function buildMemoryReport(): MemoryReport {
+  const { totalBytes, availableBytes } = readSystemMemory();
+  const usage = readSimulatorMemoryUsage();
+  const runningSimulators = Object.keys(usage.perUdid).length;
+  const measuredAvg = runningSimulators > 0
+    ? usage.totalBytes / runningSimulators
+    : 0;
+  // Below ~256MB, the measurement is almost certainly catching a sim mid-boot
+  // before its app processes are resident — fall back to the default so we
+  // don't over-promise capacity.
+  const perSimSource: MemoryReport["perSimSource"] =
+    measuredAvg >= 256 * 1024 * 1024 ? "measured" : "estimated";
+  const perSimAvgBytes =
+    perSimSource === "measured" ? measuredAvg : DEFAULT_PER_SIM_BYTES;
+  const estimatedAdditional = perSimAvgBytes > 0
+    ? Math.max(0, Math.floor(availableBytes / perSimAvgBytes))
+    : 0;
+  return {
+    totalBytes,
+    availableBytes,
+    runningSimulators,
+    perSimAvgBytes,
+    perSimSource,
+    estimatedAdditional,
+  };
+}
+
+/**
+ * Locate the `serve-sim` CLI binary so the grid can spawn helpers via
+ * `serve-sim --detach <udid>`. Tries, in order:
+ *   1. argv[0] if it ends in `serve-sim` (we're running inside the
+ *      compiled standalone binary, which IS the CLI)
+ *   2. `serve-sim` on PATH (npm-installed / bun-installed CLI)
+ * Returns the resolved command + args ready for spawn.
+ */
+function resolveServeSimCommand(): { command: string; baseArgs: string[] } | null {
+  // 1. Compiled standalone binary: argv[0] is the serve-sim binary itself.
+  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
+    return { command: process.argv[0], baseArgs: [] };
+  }
+  // 2. Running the JS bundle directly: `node /path/to/serve-sim.js`.
+  if (process.argv[1] && /(^|\/)serve-sim\.js$/.test(process.argv[1])) {
+    return { command: process.argv[0]!, baseArgs: [process.argv[1]!] };
+  }
+  // 3. Global install: serve-sim is on PATH.
+  try {
+    const path = execSync("command -v serve-sim", {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1_500,
+    }).trim();
+    if (path) return { command: path, baseArgs: [] };
+  } catch {}
+  return null;
+}
+
 export interface SimMiddlewareOptions {
   /** Base path to serve the preview at. Default: "/.sim" */
   basePath?: string;
@@ -397,6 +662,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         // Pass real serve-sim URLs directly. The client parses the MJPEG
         // stream via fetch() (CORS is fine — serve-sim sends Access-Control-Allow-Origin: *)
         // and connects to the WS directly (WS has no CORS).
+        const gridApiBase = (base === "" ? "" : base) + "/grid/api";
         const config = JSON.stringify({
           ...state,
           basePath: base,
@@ -408,6 +674,11 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           // so the in-page Camera tool can shell out via `node <bin> camera`
           // without depending on `serve-sim` being on PATH.
           serveSimBin: serveSimBinPath(),
+          gridApiEndpoint: gridApiBase,
+          gridStartEndpoint: gridApiBase + "/start",
+          gridShutdownEndpoint: gridApiBase + "/shutdown",
+          gridMemoryEndpoint: gridApiBase + "/memory",
+          previewEndpoint: base === "" ? "/" : base,
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
@@ -418,6 +689,151 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "Cache-Control": "no-store",
       });
       res.end(html);
+      return;
+    }
+
+    // Memory capacity estimate: how much room is left to boot more sims.
+    if (url === base + "/grid/api/memory") {
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify(buildMemoryReport()));
+      return;
+    }
+
+    // Grid JSON: every iOS simulator, annotated with running helper info if any.
+    if (url === base + "/grid/api") {
+      const states = readServeSimStates();
+      const helperByUdid = new Map(states.map((s) => [s.device, s] as const));
+      const sims = listAllSimulators();
+      const devices = sims.map((d) => {
+        const helper = helperByUdid.get(d.udid);
+        return {
+          device: d.udid,
+          name: d.name,
+          runtime: d.runtime,
+          state: d.state,
+          helper: helper
+            ? {
+                port: helper.port,
+                url: helper.url,
+                streamUrl: helper.streamUrl,
+                wsUrl: helper.wsUrl,
+              }
+            : null,
+        };
+      });
+      // Stable order: family (iPhone, iPad, Watch, TV, Vision, other) →
+      // state (helper > booted > shutdown) → alpha. Keeps the most
+      // commonly used devices visible without scrolling.
+      const familyRank = (name: string): number => {
+        if (/iphone/i.test(name)) return 0;
+        if (/ipad/i.test(name)) return 1;
+        if (/watch/i.test(name)) return 2;
+        if (/(apple\s*tv|^tv\b)/i.test(name)) return 3;
+        if (/vision|reality/i.test(name)) return 4;
+        return 5;
+      };
+      const stateRank = (x: typeof devices[number]) =>
+        x.helper ? 0 : x.state === "Booted" ? 1 : 2;
+      devices.sort((a, b) =>
+        familyRank(a.name) - familyRank(b.name) ||
+        stateRank(a) - stateRank(b) ||
+        a.name.localeCompare(b.name),
+      );
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify({ devices }));
+      return;
+    }
+
+    // Shutdown a booted simulator. Any running helper for the device is reaped
+    // by readServeSimStates() on the next /grid/api poll (it kills helpers
+    // whose backing simulator is no longer in the booted set).
+    if (url === base + "/grid/api/shutdown" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer | string) => {
+        body += typeof chunk === "string" ? chunk : chunk.toString();
+      });
+      req.on("end", () => {
+        let udid = "";
+        try { udid = JSON.parse(body).udid ?? ""; } catch {}
+        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
+          return;
+        }
+        // Drop the snapshot so the next /grid/api call re-queries simctl
+        // and prunes any helper bound to this now-shutdown device.
+        bootedSnapshot = { at: 0, booted: null };
+        execFile("xcrun", ["simctl", "shutdown", udid], { timeout: 30_000 }, (err, _stdout, stderr) => {
+          if (err) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              ok: false,
+              error: stderr?.toString().trim() || err.message,
+            }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        });
+      });
+      return;
+    }
+
+    // Spawn a serve-sim helper (auto-boots if needed).
+    if (url === base + "/grid/api/start" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer | string) => {
+        body += typeof chunk === "string" ? chunk : chunk.toString();
+      });
+      req.on("end", () => {
+        let udid = "";
+        try { udid = JSON.parse(body).udid ?? ""; } catch {}
+        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
+          return;
+        }
+        const resolved = resolveServeSimCommand();
+        if (!resolved) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: false,
+            error: "serve-sim CLI not found in PATH. Install it (npm i -g serve-sim) and retry.",
+          }));
+          return;
+        }
+        const child = spawn(
+          resolved.command,
+          [...resolved.baseArgs, "--detach", udid],
+          { stdio: ["ignore", "pipe", "pipe"], detached: false },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
+        child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
+        const timer = setTimeout(() => {
+          try { child.kill("SIGTERM"); } catch {}
+        }, 60_000);
+        child.on("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, stdout: stdout.trim() }));
+          } else {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              ok: false,
+              error: stderr.trim() || stdout.trim() || `serve-sim exited with code ${code}`,
+            }));
+          }
+        });
+      });
       return;
     }
 
@@ -679,8 +1095,18 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
       ], { stdio: ["ignore", "pipe", "ignore"] });
 
-      // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
-      const FG_RE = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/;
+      let closed = false;
+      const emitApp = async (bundleId: string, pid?: number) => {
+        if (!isUserFacingBundle(bundleId)) return;
+        if (bundleId === lastBundle) return;
+        lastBundle = bundleId;
+        const isReactNative = await detectReactNative(udid, bundleId);
+        if (!closed) {
+          res.write("data: " + JSON.stringify({ bundleId, pid, isReactNative }) + "\n\n");
+        }
+      };
+
+
       let buf = "";
       child.stdout!.on("data", (chunk: Buffer) => {
         buf += chunk.toString();
@@ -691,21 +1117,17 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           if (!line) continue;
           let msg: string;
           try { msg = JSON.parse(line).eventMessage ?? ""; } catch { continue; }
-          const m = FG_RE.exec(msg);
-          if (!m) continue;
-          const bundleId = m[1]!;
-          const pid = parseInt(m[2]!, 10);
-          if (!isUserFacingBundle(bundleId)) continue;
-          if (bundleId === lastBundle) continue;
-          lastBundle = bundleId;
-          detectReactNative(udid, bundleId).then((isReactNative) => {
-            res.write("data: " + JSON.stringify({ bundleId, pid, isReactNative }) + "\n\n");
-          });
+          const event = parseForegroundAppLogMessage(msg);
+          if (!event) continue;
+          emitApp(event.bundleId, event.pid);
         }
       });
 
       child.on("close", () => res.end());
-      req.on("close", () => child.kill());
+      req.on("close", () => {
+        closed = true;
+        child.kill();
+      });
       return;
     }
 
