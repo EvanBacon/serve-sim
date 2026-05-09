@@ -31,6 +31,7 @@ import {
   type StreamConfig,
 } from "serve-sim-client/simulator";
 import { LocationEmulationTool } from "./LocationEmulationTool";
+import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "./Panel";
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
@@ -2454,29 +2455,15 @@ function GridPanel({
   );
 
   return (
-    <aside
-      style={{
-        ...gridStyles.panel,
-        width,
-        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
-        opacity: open ? 1 : 0,
-        pointerEvents: open ? "auto" : "none",
-      }}
-      aria-hidden={!open}
-    >
+    <Panel open={open} width={width}>
       <style>{GRID_HOVER_CSS}</style>
-      <header style={panelStyles.header}>
-        <span style={panelStyles.headerTitle}>Simulators</span>
+      <PanelHeader>
+        <PanelTitle>Simulators</PanelTitle>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <GridCapacityBanner report={memory} />
-          <button onClick={onClose} style={panelStyles.closeBtn} aria-label="Close panel">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
+          <PanelCloseButton onClick={onClose} />
         </div>
-      </header>
+      </PanelHeader>
       <div style={gridStyles.body}>
         {devices === null ? null : devices.length === 0 ? (
           <div style={gridStyles.empty}>No iOS simulators available.</div>
@@ -2496,7 +2483,7 @@ function GridPanel({
           ))
         )}
       </div>
-    </aside>
+    </Panel>
   );
 }
 
@@ -2526,25 +2513,11 @@ function ToolsPanel({
   width: number;
 }) {
   return (
-    <aside
-      style={{
-        ...panelStyles.panel,
-        width,
-        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
-        opacity: open ? 1 : 0,
-        pointerEvents: open ? "auto" : "none",
-      }}
-      aria-hidden={!open}
-    >
-      <header style={panelStyles.header}>
-        <span style={panelStyles.headerTitle}>Tools</span>
-        <button onClick={onClose} style={panelStyles.closeBtn} aria-label="Close panel">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-      </header>
+    <Panel open={open} width={width}>
+      <PanelHeader>
+        <PanelTitle>Tools</PanelTitle>
+        <PanelCloseButton onClick={onClose} />
+      </PanelHeader>
 
       {open && (
         <div style={panelStyles.body}>
@@ -2557,7 +2530,7 @@ function ToolsPanel({
           <LocationEmulationTool udid={udid} exec={execOnHost} />
         </div>
       )}
-    </aside>
+    </Panel>
   );
 }
 
@@ -2589,17 +2562,8 @@ function WebKitDevtoolsPanel({
     : null;
 
   return (
-    <aside
-      style={{
-        ...devtoolsStyles.panel,
-        width,
-        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
-        opacity: open ? 1 : 0,
-        pointerEvents: open ? "auto" : "none",
-      }}
-      aria-hidden={!open}
-    >
-      <header style={devtoolsStyles.header}>
+    <Panel open={open} width={width}>
+      <PanelHeader>
         {targets.length > 0 ? (
           <WebKitTargetPicker
             udid={udid}
@@ -2613,13 +2577,13 @@ function WebKitDevtoolsPanel({
             {loading ? "Looking for Safari and inspectable webviews..." : "No inspectable Safari or WKWebView targets"}
           </span>
         )}
-        <button onClick={onClose} style={devtoolsStyles.iconButton} aria-label="Close WebKit DevTools" title="Close">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-      </header>
+        <PanelCloseButton
+          onClick={onClose}
+          ariaLabel="Close WebKit DevTools"
+          title="Close"
+          iconSize={15}
+        />
+      </PanelHeader>
 
       <div style={devtoolsStyles.frameWrap}>
         {error ? (
@@ -2644,7 +2608,7 @@ function WebKitDevtoolsPanel({
           </div>
         )}
       </div>
-    </aside>
+    </Panel>
   );
 }
 
@@ -3823,35 +3787,6 @@ function getSimulatorFrameMaxWidth(
 }
 
 const devtoolsStyles: Record<string, CSSProperties> = {
-  panel: {
-    position: "fixed",
-    top: 12,
-    right: 12,
-    bottom: 12,
-    width: `min(${DEVTOOLS_PANEL_WIDTH}px, calc(100vw - 32px))`,
-    minWidth: 0,
-    background: "rgba(20,20,22,0.92)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 14,
-    color: "#eee",
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-    transition: "transform 0.25s ease, opacity 0.2s ease",
-    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    fontFamily: "-apple-system, system-ui, sans-serif",
-    zIndex: 35,
-  },
-  header: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    padding: "6px 10px 6px 12px",
-    flexShrink: 0,
-  },
   titleGroup: {
     display: "flex",
     alignItems: "baseline",
@@ -4058,27 +3993,6 @@ const devtoolsStyles: Record<string, CSSProperties> = {
 };
 
 const gridStyles: Record<string, CSSProperties> = {
-  panel: {
-    position: "fixed",
-    top: 12,
-    right: 12,
-    bottom: 12,
-    width: `min(${GRID_PANEL_WIDTH}px, calc(100vw - 32px))`,
-    minWidth: 0,
-    background: "rgba(20,20,22,0.92)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 14,
-    color: "#eee",
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-    transition: "transform 0.25s ease, opacity 0.2s ease",
-    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    fontFamily: "-apple-system, system-ui, sans-serif",
-    zIndex: 35,
-  },
   body: {
     flex: 1,
     minHeight: 0,
@@ -4256,44 +4170,6 @@ const panelStyles: Record<string, CSSProperties> = {
     cursor: "pointer",
     transition: "background 0.15s ease, color 0.15s ease",
     zIndex: 40,
-  },
-  panel: {
-    position: "fixed",
-    top: 12,
-    right: 12,
-    bottom: 12,
-    width: PANEL_WIDTH,
-    background: "rgba(20,20,22,0.92)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 14,
-    color: "#eee",
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-    transition: "transform 0.25s ease, opacity 0.2s ease",
-    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    fontFamily: "-apple-system, system-ui, sans-serif",
-    zIndex: 35,
-  },
-  header: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "6px 10px 6px 12px",
-  },
-  headerTitle: { fontSize: 11, fontWeight: 500, color: "rgba(255,255,255,0.55)" },
-  closeBtn: {
-    background: "transparent",
-    border: "none",
-    color: "#aaa",
-    cursor: "pointer",
-    padding: 4,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 4,
   },
   body: { padding: 14, overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 12 },
   sectionTitle: {
