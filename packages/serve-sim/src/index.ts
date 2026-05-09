@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
 import { join, resolve } from "path";
@@ -1220,16 +1220,75 @@ type CamSourceKind = "placeholder" | "webcam" | "image" | "video";
 
 interface ResolvedSource { kind: CamSourceKind; arg?: string }
 
-function resolveSourceArg(opts: {
-  image?: string;
-  webcam?: string | true;
-  video?: string;
-}): ResolvedSource {
-  if (opts.video) {
-    return { kind: "video", arg: resolve(opts.video) };
+// Tell image/video apart from a path. We sniff the file's magic bytes
+// rather than trusting the extension because:
+//   1) the file may have arrived via the in-page drop zone, where it
+//      lands at /tmp/<uuid> with no meaningful suffix; and
+//   2) callers pass real-world paths like .heic / .mov / .gif that
+//      shouldn't need a separate flag in the CLI surface.
+const VIDEO_EXTS = new Set([
+  "mp4", "m4v", "mov", "qt", "avi", "mkv", "webm", "mpg", "mpeg",
+  "3gp", "3g2", "ts", "wmv",
+]);
+const IMAGE_EXTS = new Set([
+  "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "bmp", "tif", "tiff",
+]);
+
+function detectMediaKind(filePath: string): "image" | "video" | null {
+  const ext = filePath.toLowerCase().split(".").pop() ?? "";
+  if (VIDEO_EXTS.has(ext)) return "video";
+  if (IMAGE_EXTS.has(ext)) return "image";
+
+  // Magic-byte sniff — covers files renamed without an extension, plus
+  // common containers we didn't enumerate above. Read a 16-byte header.
+  let header: Buffer;
+  try {
+    const fd = openSync(filePath, "r");
+    header = Buffer.alloc(16);
+    readSync(fd, header, 0, header.length, 0);
+    closeSync(fd);
+  } catch {
+    return null;
   }
-  if (opts.image) {
-    return { kind: "image", arg: resolve(opts.image) };
+
+  // ISO base media: bytes 4..8 are an "ftyp" box. Catches mp4/mov/m4v/3gp.
+  if (header.length >= 8 && header.slice(4, 8).toString("ascii") === "ftyp") {
+    return "video";
+  }
+  // RIFF (WebP / AVI). WEBP / AVI distinguishes via bytes 8..12.
+  if (header.slice(0, 4).toString("ascii") === "RIFF" && header.length >= 12) {
+    const tag = header.slice(8, 12).toString("ascii");
+    if (tag === "AVI ") return "video";
+    if (tag === "WEBP") return "image";
+  }
+  // Matroska / WebM EBML.
+  if (header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3) {
+    return "video";
+  }
+  // PNG.
+  if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47) {
+    return "image";
+  }
+  // JPEG.
+  if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) return "image";
+  // GIF.
+  if (header.slice(0, 6).toString("ascii").startsWith("GIF8")) return "image";
+  // BMP.
+  if (header[0] === 0x42 && header[1] === 0x4d) return "image";
+  return null;
+}
+
+function resolveSourceArg(opts: {
+  file?: string;
+  webcam?: string | true;
+}): ResolvedSource {
+  if (opts.file) {
+    const abs = resolve(opts.file);
+    const kind = detectMediaKind(abs);
+    if (!kind) {
+      throw new Error(`Could not detect image/video type for: ${abs}`);
+    }
+    return { kind, arg: abs };
   }
   if (opts.webcam) {
     return { kind: "webcam", arg: typeof opts.webcam === "string" ? opts.webcam : undefined };
@@ -1284,8 +1343,7 @@ async function ensureHelperWithSource(opts: {
  */
 async function camera(args: string[]) {
   let deviceArg: string | undefined;
-  let imagePath: string | undefined;
-  let videoPath: string | undefined;
+  let filePath: string | undefined;
   let webcam: string | true | undefined;
   let stopWebcam = false;
   let listWebcams = false;
@@ -1296,8 +1354,12 @@ async function camera(args: string[]) {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--device" || a === "-d") { deviceArg = args[++i]; continue; }
-    if (a === "--image" || a === "-i") { imagePath = args[++i]; continue; }
-    if (a === "--video") { videoPath = args[++i]; continue; }
+    if (a === "--file" || a === "-f" || a === "--image" || a === "-i" || a === "--video") {
+      // --image / --video are kept as silent aliases so existing scripts
+      // and the in-page client can land on `--file` without a flag day.
+      filePath = args[++i];
+      continue;
+    }
     if (a === "--webcam") {
       const next = args[i + 1];
       if (next && !next.startsWith("-")) { webcam = next; i++; }
@@ -1320,7 +1382,7 @@ async function camera(args: string[]) {
     if (a === "--no-mirror") { mirror = "off"; continue; }
     if (a === "--help" || a === "-h") {
       console.log(`Usage: serve-sim camera <bundle-id> [-d udid] [source-options] [--build]
-       serve-sim camera switch <placeholder|webcam|image> [arg] [-d udid]
+       serve-sim camera switch <placeholder|webcam|file> [arg] [-d udid]
        serve-sim camera mirror <auto|on|off> [-d udid]
        serve-sim camera --list-webcams
        serve-sim camera --stop-webcam [-d udid]
@@ -1333,8 +1395,7 @@ If the helper is already running for the device, source flags hot-swap
 the feed without relaunching the app.
 
 Source options (pick one; default is placeholder):
-  -i, --image <path>         PNG/JPEG to use as a static feed
-      --video <path>         Loop a video file (mp4/mov/etc.) at native FPS
+  -f, --file <path>          Image or video file (kind auto-detected)
       --webcam [name]        Live host webcam (default: built-in front camera)
 
 Other:
@@ -1352,9 +1413,11 @@ Examples:
   serve-sim camera com.acme.MyApp                            # placeholder feed
   serve-sim camera com.acme.MyApp --webcam                   # default webcam
   serve-sim camera com.acme.MyApp --webcam "MacBook Pro Camera"
-  serve-sim camera com.acme.MyApp --image ~/Pictures/face.png
+  serve-sim camera com.acme.MyApp --file ~/Pictures/face.png # static image
+  serve-sim camera com.acme.MyApp --file ~/Movies/loop.mp4   # looping video
   serve-sim camera switch webcam                             # hot-swap to webcam
   serve-sim camera switch placeholder                        # back to placeholder
+  serve-sim camera switch ~/Movies/loop.mp4                  # hot-swap to file
   serve-sim camera --list-webcams
   serve-sim camera --stop-webcam`);
       return;
@@ -1411,12 +1474,32 @@ Examples:
   if (filtered[0] === "switch") {
     const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
-    const wanted = filtered[1];
+    let wanted = filtered[1];
+    let arg: string | undefined = filtered[2];
+    // `camera switch /path/to/clip.mov` — sniff the file and pick the kind.
+    if (wanted && wanted !== "placeholder" && wanted !== "webcam"
+        && wanted !== "image" && wanted !== "video"
+        && wanted !== "file") {
+      const candidate = resolve(wanted);
+      if (existsSync(candidate)) { arg = candidate; wanted = "file"; }
+    }
+    if (wanted === "file") {
+      if (!arg) {
+        console.error("camera switch file <path>");
+        process.exit(1);
+      }
+      arg = resolve(arg);
+      const detected = detectMediaKind(arg);
+      if (!detected) {
+        console.error(`Could not detect image/video type for: ${arg}`);
+        process.exit(1);
+      }
+      wanted = detected;
+    }
     if (!wanted || (wanted !== "placeholder" && wanted !== "webcam" && wanted !== "image" && wanted !== "video")) {
-      console.error("Usage: serve-sim camera switch <placeholder|webcam|image|video> [arg] [-d udid]");
+      console.error("Usage: serve-sim camera switch <placeholder|webcam|file> [arg] [-d udid]");
       process.exit(1);
     }
-    let arg: string | undefined = filtered[2];
     if ((wanted === "image" || wanted === "video") && arg) arg = resolve(arg);
     if (!isHelperAlive(udid)) {
       console.error("camera helper not running for this device — run `serve-sim camera <bundle-id>` first.");
@@ -1486,30 +1569,28 @@ Examples:
     }
   }
 
-  const sourceFlagCount = [imagePath, webcam, videoPath].filter(Boolean).length;
-  if (sourceFlagCount > 1) {
-    console.error("Pick one source: --image, --video, or --webcam.");
+  if (filePath && webcam) {
+    console.error("Pick one source: --file or --webcam, not both.");
     process.exit(1);
   }
 
-  if (imagePath) {
-    imagePath = resolve(imagePath);
-    if (!existsSync(imagePath)) {
-      console.error(`Image not found: ${imagePath}`);
-      process.exit(1);
-    }
-  }
-  if (videoPath) {
-    videoPath = resolve(videoPath);
-    if (!existsSync(videoPath)) {
-      console.error(`Video not found: ${videoPath}`);
+  if (filePath) {
+    filePath = resolve(filePath);
+    if (!existsSync(filePath)) {
+      console.error(`File not found: ${filePath}`);
       process.exit(1);
     }
   }
 
   // Default source is the animated placeholder. The helper always runs so
   // the dylib reads from a single shm wire format regardless of source.
-  const source = resolveSourceArg({ image: imagePath, video: videoPath, webcam });
+  let source: ResolvedSource;
+  try {
+    source = resolveSourceArg({ file: filePath, webcam });
+  } catch (e: any) {
+    console.error(e?.message ?? String(e));
+    process.exit(1);
+  }
   const helperRes = await ensureHelperWithSource({ udid, source, forceBuild });
   const shmName = helperRes.shmName;
   const helperPid = helperRes.helperPid;

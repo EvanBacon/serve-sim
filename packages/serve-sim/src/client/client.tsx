@@ -2134,8 +2134,10 @@ function CameraPanel({
   width: number;
 }) {
   const [source, setSource] = useState<CamSource>("placeholder");
-  const [imagePath, setImagePath] = useState<string>("");
-  const [videoPath, setVideoPath] = useState<string>("");
+  // The CLI accepts a single `--file` flag and sniffs whether it's image
+  // or video, so the UI tracks one path. The detected kind comes back
+  // through helper status (`source: "image" | "video"`).
+  const [filePath, setFilePath] = useState<string>("");
   const [droppedFileName, setDroppedFileName] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCountRef = useRef(0);
@@ -2196,12 +2198,8 @@ function CameraPanel({
         if (reply.source === "placeholder" || reply.source === "webcam" || reply.source === "image" || reply.source === "video") {
           setSource(reply.source);
         }
-        if (reply.source === "image" && reply.arg) {
-          setImagePath(reply.arg);
-          setDroppedFileName(reply.arg.split("/").pop() ?? null);
-        }
-        if (reply.source === "video" && reply.arg) {
-          setVideoPath(reply.arg);
+        if ((reply.source === "image" || reply.source === "video") && reply.arg) {
+          setFilePath(reply.arg);
           setDroppedFileName(reply.arg.split("/").pop() ?? null);
         }
         if (reply.source === "webcam" && reply.arg) setWebcamId(reply.arg);
@@ -2254,24 +2252,19 @@ function CameraPanel({
   const pushSwitch = useCallback(async (
     nextSource: CamSource,
     nextWebcamId: string,
-    nextImagePath: string,
-    nextVideoPath: string,
+    nextFilePath: string,
   ): Promise<boolean> => {
-    const argv = ["camera", "switch", nextSource];
+    const isFile = nextSource === "image" || nextSource === "video";
+    // `camera switch file <path>` lets the CLI sniff and route to the
+    // right kind, so the UI doesn't have to know image vs video.
+    const argv = ["camera", "switch", isFile ? "file" : nextSource];
     if (nextSource === "webcam" && nextWebcamId) argv.push(shellEscape(nextWebcamId));
-    if (nextSource === "image") {
-      if (!nextImagePath.trim()) {
-        setError("Drop an image into the panel or pick another source.");
+    if (isFile) {
+      if (!nextFilePath.trim()) {
+        setError("Drop a file into the panel or pick another source.");
         return false;
       }
-      argv.push(shellEscape(nextImagePath.trim()));
-    }
-    if (nextSource === "video") {
-      if (!nextVideoPath.trim()) {
-        setError("Drop a video into the panel or pick another source.");
-        return false;
-      }
-      argv.push(shellEscape(nextVideoPath.trim()));
+      argv.push(shellEscape(nextFilePath.trim()));
     }
     argv.push("-d", udid, "--quiet");
     const res = await execOnHost(`${cliPrefix} ${argv.join(" ")}`);
@@ -2295,18 +2288,12 @@ function CameraPanel({
     setStatus(null);
     try {
       const flags: string[] = ["camera", shellEscape(bundleId), "-d", udid, "--quiet"];
-      if (source === "image") {
-        if (!imagePath.trim()) {
-          setError("Drop an image into the panel or pick another source.");
+      if (source === "image" || source === "video") {
+        if (!filePath.trim()) {
+          setError("Drop a file into the panel or pick another source.");
           return;
         }
-        flags.push("--image", shellEscape(imagePath.trim()));
-      } else if (source === "video") {
-        if (!videoPath.trim()) {
-          setError("Drop a video into the panel or pick another source.");
-          return;
-        }
-        flags.push("--video", shellEscape(videoPath.trim()));
+        flags.push("--file", shellEscape(filePath.trim()));
       } else if (source === "webcam") {
         if (webcamId) flags.push("--webcam", shellEscape(webcamId));
         else flags.push("--webcam");
@@ -2337,18 +2324,17 @@ function CameraPanel({
     } finally {
       setPending(null);
     }
-  }, [bundleId, udid, source, imagePath, videoPath, webcamId, mirror, cliPrefix]);
+  }, [bundleId, udid, source, filePath, webcamId, mirror, cliPrefix]);
 
   // Auto hot-swap when the user changes source/webcam after the first inject.
   // Skip the very first run (no helper yet) and the image source until the
   // user has typed a path.
   const autoSwapKey = injected
-    ? `${source}::${source === "webcam" ? webcamId : ""}::${source === "image" ? imagePath : ""}::${source === "video" ? videoPath : ""}`
+    ? `${source}::${source === "webcam" ? webcamId : ""}::${source === "image" || source === "video" ? filePath : ""}`
     : null;
   useEffect(() => {
     if (!injected) return;
-    if (source === "image" && !imagePath.trim()) return;
-    if (source === "video" && !videoPath.trim()) return;
+    if ((source === "image" || source === "video") && !filePath.trim()) return;
     if (source === "webcam" && !webcamId) return;
     if (skipNextAutoSwapRef.current) {
       skipNextAutoSwapRef.current = false;
@@ -2360,7 +2346,7 @@ function CameraPanel({
       setError(null);
       try {
         if (cancelled) return;
-        await pushSwitch(source, webcamId, imagePath, videoPath);
+        await pushSwitch(source, webcamId, filePath);
       } finally {
         if (!cancelled) setPending(null);
       }
@@ -2433,12 +2419,13 @@ function CameraPanel({
     setError(null);
     try {
       const ext = fileExtension(file);
-      const prefix = isVideo ? "serve-sim-camsrc-video" : "serve-sim-camsrc-image";
-      const tmpPath = await uploadFileToTmp(file, prefix, ext, execOnHost);
-      const nextSource: CamSource = isVideo ? "video" : "image";
+      const tmpPath = await uploadFileToTmp(file, "serve-sim-camsrc", ext, execOnHost);
+      // Source kind is initialized from the browser-side mime so the
+      // segmented behavior (looping vs static) lights up immediately;
+      // the helper status reply will confirm/correct it on the next push.
       setDroppedFileName(file.name);
-      setSource(nextSource);
-      if (isVideo) setVideoPath(tmpPath); else setImagePath(tmpPath);
+      setSource(isVideo ? "video" : "image");
+      setFilePath(tmpPath);
       setStatus(`Loaded ${file.name}`);
     } catch (e: any) {
       setError(e?.message ?? "Upload failed");
@@ -2459,8 +2446,7 @@ function CameraPanel({
   // Reset to the animated placeholder. Called by the drop zone's × button.
   const clearMedia = useCallback(() => {
     setSource("placeholder");
-    setImagePath("");
-    setVideoPath("");
+    setFilePath("");
     setDroppedFileName(null);
     setError(null);
   }, []);
@@ -2543,7 +2529,14 @@ function CameraPanel({
     >
       <header style={panelStyles.header}>
         <span style={panelStyles.headerTitle}>Camera</span>
-        <button onClick={onClose} style={panelStyles.closeBtn} aria-label="Close panel">
+        <button
+          onClick={onClose}
+          style={panelStyles.closeBtn}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+          aria-label="Close panel"
+          title="Close"
+        >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
@@ -2561,52 +2554,92 @@ function CameraPanel({
             onChange={onFilePicked as any}
           />
 
-          {/* Drop zone — click to open file picker; drag to drop. The "×"
-              in the corner clears whatever media is set and reverts to
-              the animated placeholder. */}
-          <div
-            onClick={(e) => {
-              if ((e.target as HTMLElement).closest("[data-clear-media]")) return;
-              openFilePicker();
-            }}
-            style={{
-              ...cameraPanelStyles.dropZone,
-              ...(isDragOver ? cameraPanelStyles.dropZoneActive : null),
-              cursor: uploading ? "progress" : "pointer",
-              position: "relative",
-            }}
-          >
-            {(source === "image" || source === "video") && droppedFileName && !uploading && (
-              <button
-                data-clear-media
-                onClick={(e) => { e.stopPropagation(); clearMedia(); }}
-                style={cameraPanelStyles.clearBtn}
-                aria-label="Clear media"
-                title="Clear → placeholder"
+          {/* Drop zone — its appearance reflects the active source:
+              placeholder = dashed empty state inviting a drop;
+              image/video = filled card with filename + clear ×;
+              webcam       = filled card with the camera name + clear ×.
+              Clicking the empty state opens the file picker. With media or
+              a webcam selected, the body is informational so the click
+              affordance is the explicit × button instead. */}
+          {(() => {
+            const isPlaceholder = source === "placeholder";
+            const showWebcam = source === "webcam";
+            const showFile = (source === "image" || source === "video") && !!droppedFileName;
+            const activeWebcamName = showWebcam
+              ? (webcams.find((w) => w.id === webcamId)?.name ?? webcamId ?? "Webcam")
+              : null;
+            return (
+              <div
+                onClick={(e) => {
+                  if (!isPlaceholder) return;
+                  if ((e.target as HTMLElement).closest("[data-clear-media]")) return;
+                  openFilePicker();
+                }}
+                onMouseEnter={(e) => {
+                  if (!isDragOver && isPlaceholder) e.currentTarget.style.borderColor = "rgba(255,255,255,0.3)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!isDragOver && isPlaceholder) e.currentTarget.style.borderColor = "rgba(255,255,255,0.15)";
+                }}
+                title={
+                  isPlaceholder
+                    ? "Click to select an image or video, or drop one here"
+                    : showWebcam
+                      ? `Source: ${activeWebcamName}`
+                      : `Source: ${droppedFileName ?? source}`
+                }
+                style={{
+                  ...cameraPanelStyles.dropZone,
+                  ...(isPlaceholder ? null : cameraPanelStyles.dropZoneFilled),
+                  ...(isDragOver ? cameraPanelStyles.dropZoneActive : null),
+                  cursor: uploading ? "progress" : isPlaceholder ? "pointer" : "default",
+                  position: "relative",
+                }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            )}
+                {!isPlaceholder && !uploading && (
+                  <button
+                    data-clear-media
+                    onClick={(e) => { e.stopPropagation(); clearMedia(); }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.16)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; }}
+                    style={cameraPanelStyles.clearBtn}
+                    aria-label="Clear source"
+                    title="Clear → placeholder"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                )}
 
-            {uploading ? (
-              <span style={cameraPanelStyles.dropHint}>Uploading…</span>
-            ) : droppedFileName && (source === "image" || source === "video") ? (
-              <>
-                <span style={cameraPanelStyles.dropFilename}>{droppedFileName}</span>
-                <span style={cameraPanelStyles.dropHint}>
-                  {source === "video" ? "Looping at native FPS" : "Static image"}
-                </span>
-              </>
-            ) : (
-              <>
-                <span style={cameraPanelStyles.dropTitle}>Select or drop media</span>
-                <span style={cameraPanelStyles.dropHint}>Image or video</span>
-              </>
-            )}
-          </div>
+                {uploading ? (
+                  <span style={cameraPanelStyles.dropHint}>Uploading…</span>
+                ) : showFile ? (
+                  <>
+                    <div style={cameraPanelStyles.sourceBadge}>
+                      {source === "video" ? "Video" : "Image"}
+                    </div>
+                    <span style={cameraPanelStyles.dropFilename}>{droppedFileName}</span>
+                    <span style={cameraPanelStyles.dropHint}>
+                      {source === "video" ? "Looping at native FPS" : "Static frame"}
+                    </span>
+                  </>
+                ) : showWebcam ? (
+                  <>
+                    <div style={cameraPanelStyles.sourceBadge}>Webcam</div>
+                    <span style={cameraPanelStyles.dropFilename}>{activeWebcamName}</span>
+                    <span style={cameraPanelStyles.dropHint}>Live host camera</span>
+                  </>
+                ) : (
+                  <>
+                    <span style={cameraPanelStyles.dropTitle}>Select or drop media</span>
+                    <span style={cameraPanelStyles.dropHint}>Image or video</span>
+                  </>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Control row: source popup, play/pause, mirror toggle. */}
           <div style={cameraPanelStyles.controls}>
@@ -2614,12 +2647,14 @@ function CameraPanel({
               <button
                 onClick={() => setSourceMenuOpen((o) => !o)}
                 style={cameraPanelStyles.iconButton}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#2a2a2e"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "#1c1c1e"; }}
                 aria-haspopup="menu"
                 aria-expanded={sourceMenuOpen}
                 title={
                   source === "webcam"
-                    ? `Source: webcam${webcamId ? ` (${webcams.find((w) => w.id === webcamId)?.name ?? webcamId})` : ""}`
-                    : `Source: ${source}`
+                    ? `Source: webcam${webcamId ? ` (${webcams.find((w) => w.id === webcamId)?.name ?? webcamId})` : ""} — click to change`
+                    : `Source: ${source} — click to pick media or webcam`
                 }
                 aria-label="Choose camera source"
               >
@@ -2639,6 +2674,9 @@ function CameraPanel({
                     role="menuitem"
                     style={cameraPanelStyles.menuItem}
                     onClick={() => { setSourceMenuOpen(false); openFilePicker(); }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                    title="Pick an image or video from disk"
                   >
                     Browse media…
                   </button>
@@ -2651,32 +2689,37 @@ function CameraPanel({
                       onClick={(e) => { e.stopPropagation(); void refreshWebcams(); }}
                       disabled={webcamLoading}
                       style={cameraPanelStyles.menuRefreshBtn}
+                      onMouseEnter={(e) => { if (!webcamLoading) e.currentTarget.style.background = "rgba(255,255,255,0.08)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                       aria-label="Refresh cameras"
-                      title="Refresh"
+                      title="Refresh cameras"
                     >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 12a9 9 0 1 1-3-6.7" />
-                        <polyline points="21 4 21 9 16 9" />
-                      </svg>
+                      <ReloadIcon size={13} strokeWidth={2} />
                     </button>
                   </div>
-                  {webcams.map((w) => (
-                    <button
-                      key={w.id}
-                      role="menuitem"
-                      style={{
-                        ...cameraPanelStyles.menuItem,
-                        ...(source === "webcam" && webcamId === w.id ? cameraPanelStyles.menuItemActive : null),
-                      }}
-                      onClick={() => {
-                        setWebcamId(w.id);
-                        setSource("webcam");
-                        setSourceMenuOpen(false);
-                      }}
-                    >
-                      {w.name}
-                    </button>
-                  ))}
+                  {webcams.map((w) => {
+                    const active = source === "webcam" && webcamId === w.id;
+                    return (
+                      <button
+                        key={w.id}
+                        role="menuitem"
+                        style={{
+                          ...cameraPanelStyles.menuItem,
+                          ...(active ? cameraPanelStyles.menuItemActive : null),
+                        }}
+                        onClick={() => {
+                          setWebcamId(w.id);
+                          setSource("webcam");
+                          setSourceMenuOpen(false);
+                        }}
+                        onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
+                        onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
+                        title={w.name}
+                      >
+                        {w.name}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -2689,11 +2732,13 @@ function CameraPanel({
                 ...(primary.kind === "stop" ? cameraPanelStyles.stopBtn : null),
                 opacity: primaryDisabled ? 0.5 : 1,
               }}
+              onMouseEnter={(e) => { if (!primaryDisabled) e.currentTarget.style.filter = "brightness(1.1)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
               title={
                 !bundleId ? "Bring an app to the foreground first" :
-                primary.kind === "stop" ? "Stop helper" :
-                primary.kind === "attach" ? `Inject ${bundleId}` :
-                "Play"
+                primary.kind === "stop" ? "Stop the camera helper" :
+                primary.kind === "attach" ? `Inject ${bundleId} so it joins the camera feed` :
+                "Start: inject the dylib and launch the foreground app with the chosen source"
               }
               aria-label={primary.kind === "stop" ? "Stop" : "Play"}
             >
@@ -2714,7 +2759,17 @@ function CameraPanel({
                 ...cameraPanelStyles.iconButton,
                 ...(mirror !== "auto" ? cameraPanelStyles.iconButtonActive : null),
               }}
-              title={`Mirror: ${mirror} (click to cycle)`}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = mirror !== "auto"
+                  ? "rgba(10,132,255,0.28)"
+                  : "#2a2a2e";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = mirror !== "auto"
+                  ? "rgba(10,132,255,0.18)"
+                  : "#1c1c1e";
+              }}
+              title={`Mirror: ${mirror} — click to cycle (auto → on → off)`}
               aria-label={`Mirror: ${mirror}`}
             >
               {/* Lucide flip-horizontal-2. The dashed central spine is part
@@ -2855,6 +2910,23 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
   dropZoneActive: {
     background: "rgba(10,132,255,0.08)",
     borderColor: "rgba(10,132,255,0.6)",
+  },
+  // Non-placeholder state: solid border + slightly lifted background so
+  // the zone reads as "media is set" rather than "drop here".
+  dropZoneFilled: {
+    background: "#141416",
+    border: "1px solid rgba(255,255,255,0.1)",
+  },
+  sourceBadge: {
+    fontSize: 9,
+    letterSpacing: "0.1em",
+    textTransform: "uppercase",
+    color: "rgba(255,255,255,0.55)",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    padding: "2px 7px",
+    borderRadius: 999,
+    marginBottom: 4,
   },
   dropTitle: { fontSize: 13, color: "#eee", fontWeight: 600 },
   dropHint: { fontSize: 11, color: "rgba(255,255,255,0.45)" },
