@@ -204,6 +204,7 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
 - (void)removeOutput:(AVCaptureVideoDataOutput *)out;
 - (void)addPreviewLayer:(AVCaptureVideoPreviewLayer *)layer;
 - (void)reapplyMirrorToLayers;   // re-evaluate every known layer's transform
+- (NSData *)currentSnapshotJPEGAtQuality:(CGFloat)q;
 - (void)startPumpingIfNeeded;
 - (void)stopPumping;
 @end
@@ -368,6 +369,21 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
     CVPixelBufferRef pb = [self newPixelBufferFromShmForceFresh:YES];
     if (!pb) pb = [self newPixelBufferFromImage];
     return pb;
+}
+
+- (NSData *)currentSnapshotJPEGAtQuality:(CGFloat)q {
+    CVPixelBufferRef pb = [self currentPixelBuffer];
+    if (!pb) return nil;
+    CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];
+    static CIContext *ctx = nil; static dispatch_once_t once;
+    dispatch_once(&once, ^{ ctx = [CIContext contextWithOptions:nil]; });
+    CGImageRef cg = [ctx createCGImage:ci fromRect:ci.extent];
+    CVPixelBufferRelease(pb);
+    if (!cg) return nil;
+    UIImage *ui = [UIImage imageWithCGImage:cg];
+    NSData *data = UIImageJPEGRepresentation(ui, q);
+    CGImageRelease(cg);
+    return data;
 }
 
 - (CVPixelBufferRef)newPixelBufferFromImage CF_RETURNS_RETAINED {
@@ -761,6 +777,107 @@ static char kSimCamSessionRunningKey;
 }
 @end
 
+#pragma mark - NSData write redirect (expo-camera placeholder substitution)
+
+// expo-camera SDK 54 explicitly bypasses AVCapturePhotoOutput on simulator
+// (CameraViewModule.swift:`#if targetEnvironment(simulator)`) and instead
+// generates a 200×200 black-square placeholder, JPEG-encodes it, and writes
+// to <Caches>/Camera/<uuid>.jpg via Swift's `Data.write(to:options:)`. The
+// AsyncFunction returns that file URL to JS, so users see the placeholder
+// instead of the live feed even when our injection is active.
+//
+// We can't reliably reach into Swift static-method dispatch from Obj-C, but
+// `Data.write(to:options:)` bridges down to NSData's writeToURL/writeToFile
+// methods — those ARE in the Obj-C runtime. Swizzle them and substitute
+// the bytes when the destination URL looks like an expo-camera placeholder
+// drop site (path contains /Camera/, suffix .jpg or .jpeg).
+
+static BOOL SimCamLooksLikeCameraDropPath(NSString *path) {
+    if (!path.length) return NO;
+    if (![path containsString:@"/Camera/"]) return NO;
+    NSString *lower = path.lowercaseString;
+    return [lower hasSuffix:@".jpg"] || [lower hasSuffix:@".jpeg"];
+}
+
+@interface NSData (SimCam)
+@end
+@implementation NSData (SimCam)
+
+- (BOOL)simcam_writeToURL:(NSURL *)url
+                  options:(NSDataWritingOptions)opts
+                    error:(NSError **)err {
+    NSString *path = url.isFileURL ? url.path : nil;
+    if (SimCamLooksLikeCameraDropPath(path)) {
+        NSData *snap = [[SimCamRegistry shared] currentSnapshotJPEGAtQuality:0.92];
+        if (snap.length > 0) {
+            simcam_log(@"NSData writeToURL → substituted %lu→%lu bytes (%@)",
+                (unsigned long)self.length, (unsigned long)snap.length, path.lastPathComponent);
+            return [snap simcam_writeToURL:url options:opts error:err];
+        }
+    }
+    return [self simcam_writeToURL:url options:opts error:err];
+}
+
+- (BOOL)simcam_writeToFile:(NSString *)path
+                   options:(NSDataWritingOptions)opts
+                     error:(NSError **)err {
+    if (SimCamLooksLikeCameraDropPath(path)) {
+        NSData *snap = [[SimCamRegistry shared] currentSnapshotJPEGAtQuality:0.92];
+        if (snap.length > 0) {
+            simcam_log(@"NSData writeToFile → substituted %lu→%lu bytes (%@)",
+                (unsigned long)self.length, (unsigned long)snap.length, path.lastPathComponent);
+            return [snap simcam_writeToFile:path options:opts error:err];
+        }
+    }
+    return [self simcam_writeToFile:path options:opts error:err];
+}
+
+@end
+
+#pragma mark - UIGraphicsImageRenderer redirect (expo-camera generatePhoto)
+
+// Swift's `Data.write(to:options:)` reaches Foundation through CFData
+// internals that bypass the NSData Obj-C swizzles above. Hook one level
+// higher: ExpoCameraUtils.generatePhoto allocates a UIGraphicsImageRenderer
+// and returns its `image(actions:)` result, which IS dispatched through the
+// Obj-C runtime. Filter by call-stack frame name so only expo-camera (and
+// any framework with "ExpoCamera" in the symbol) gets redirected; everyone
+// else gets the real renderer.
+
+static BOOL SimCamCallerIsExpoCamera(void) {
+    NSArray<NSString *> *stack = [NSThread callStackSymbols];
+    // Skip the top two frames (this function + the swizzle thunk). Walk a
+    // bounded number — generatePhoto sits near the top.
+    NSUInteger limit = MIN((NSUInteger)8, stack.count);
+    for (NSUInteger i = 2; i < limit; i++) {
+        NSString *frame = stack[i];
+        if ([frame containsString:@"ExpoCamera"]) return YES;
+        if ([frame containsString:@"expo_camera"]) return YES;
+        if ([frame containsString:@"generatePhoto"]) return YES;
+        if ([frame containsString:@"generatePictureForSimulator"]) return YES;
+    }
+    return NO;
+}
+
+@interface UIGraphicsImageRenderer (SimCam)
+@end
+@implementation UIGraphicsImageRenderer (SimCam)
+- (UIImage *)simcam_imageWithActions:(void (NS_NOESCAPE ^)(UIGraphicsImageRendererContext *))actions {
+    if (SimCamCallerIsExpoCamera()) {
+        NSData *jpeg = [[SimCamRegistry shared] currentSnapshotJPEGAtQuality:0.92];
+        if (jpeg.length > 0) {
+            UIImage *snap = [UIImage imageWithData:jpeg];
+            if (snap) {
+                simcam_log(@"UIGraphicsImageRenderer image: → live frame (jpeg %lu bytes)",
+                    (unsigned long)jpeg.length);
+                return snap;
+            }
+        }
+    }
+    return [self simcam_imageWithActions:actions];
+}
+@end
+
 #pragma mark - Image loading
 
 static void LoadSourceImage(void) {
@@ -845,6 +962,19 @@ static void InstallSwizzles(void) {
     SwizzleInstanceMethod(photoOut,
         @selector(capturePhotoWithSettings:delegate:),
         @selector(simcam_capturePhotoWithSettings:delegate:));
+
+    Class data = [NSData class];
+    SwizzleInstanceMethod(data,
+        @selector(writeToURL:options:error:),
+        @selector(simcam_writeToURL:options:error:));
+    SwizzleInstanceMethod(data,
+        @selector(writeToFile:options:error:),
+        @selector(simcam_writeToFile:options:error:));
+
+    Class renderer = [UIGraphicsImageRenderer class];
+    SwizzleInstanceMethod(renderer,
+        @selector(imageWithActions:),
+        @selector(simcam_imageWithActions:));
 }
 
 static void OpenShmIfRequested(void) {
