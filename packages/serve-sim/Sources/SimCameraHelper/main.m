@@ -433,6 +433,7 @@ static NSData *EncodeReply(NSDictionary *dict) {
     NSMutableDictionary *m = dict.mutableCopy;
     if (!m[@"source"]) m[@"source"] = SourceName(gActiveSource);
     if (!m[@"arg"] && gActiveArg) m[@"arg"] = gActiveArg;
+    if (!m[@"mirror"] && gHeader) m[@"mirror"] = MirrorName(gHeader->mirrorMode);
     NSError *e = nil;
     NSData *json = [NSJSONSerialization dataWithJSONObject:m options:0 error:&e];
     if (!json) json = [@"{\"ok\":false}" dataUsingEncoding:NSUTF8StringEncoding];

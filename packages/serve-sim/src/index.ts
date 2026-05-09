@@ -1430,6 +1430,34 @@ Examples:
     return;
   }
 
+  // `serve-sim camera status [-d udid]` — JSON-only probe used by the
+  // preview UI (and humans) to see whether the helper is still alive after
+  // a page reload, so we don't have to "Inject + relaunch" the app just to
+  // re-establish UI state.
+  if (filtered[0] === "status") {
+    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    if (!udid) {
+      console.log(JSON.stringify({ alive: false, error: "no booted simulator" }));
+      return;
+    }
+    if (!isHelperAlive(udid)) {
+      console.log(JSON.stringify({ udid, alive: false }));
+      return;
+    }
+    let helperPid: number | null = null;
+    try { helperPid = Number(readFileSync(helperPidFile(udid), "utf-8").trim()) || null; } catch {}
+    try {
+      const reply = await sendHelperCommand(udid, { action: "status" });
+      console.log(JSON.stringify({ udid, alive: true, helperPid, ...reply }));
+    } catch (e: any) {
+      // pid file + socket exist but the helper didn't reply — surface
+      // alive:true so the UI can still skip "Inject + relaunch", and
+      // include the error for diagnosis.
+      console.log(JSON.stringify({ udid, alive: true, helperPid, error: e?.message ?? String(e) }));
+    }
+    return;
+  }
+
   const bundleId = filtered[0];
   if (!bundleId) {
     console.error("Usage: serve-sim camera <bundle-id> [--image <path>] [-d udid]");

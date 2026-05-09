@@ -2128,12 +2128,58 @@ function CameraTool({
   // Set after a successful inject so subsequent source changes hot-swap
   // through `camera switch` instead of relaunching the simulator app.
   const [injected, setInjected] = useState(false);
+  // Suppress the next auto-swap / auto-mirror effect run when state was
+  // hydrated from the helper's existing status (a page reload, not a user
+  // edit). Without this we'd send a redundant `switch` to the live helper
+  // and briefly tear down its AVCaptureSession.
+  const skipNextAutoSwapRef = useRef(false);
+  const skipNextAutoMirrorRef = useRef(false);
 
   const cliPrefix = useMemo(() => {
     const bin = window.__SIM_PREVIEW__?.serveSimBin;
     if (!bin) return "serve-sim";
     return /\.js$/.test(bin) ? `node ${shellEscape(bin)}` : shellEscape(bin);
   }, []);
+
+  // Page reloads forget local React state but the camera helper for this
+  // device often outlives the tab. Probe `serve-sim camera status` once on
+  // mount and adopt its source/mirror so the user doesn't see "Inject +
+  // relaunch" on a session that's already injected.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await execOnHost(`${cliPrefix} camera status -d ${udid}`);
+        if (cancelled || res.exitCode !== 0) return;
+        const reply = JSON.parse(res.stdout.trim()) as {
+          alive?: boolean;
+          source?: string;
+          arg?: string;
+          mirror?: string;
+        };
+        if (!reply.alive) return;
+        // Order matters: arm the skip refs before flipping `injected`,
+        // since that's what un-gates the auto-swap/mirror effects.
+        skipNextAutoSwapRef.current = true;
+        skipNextAutoMirrorRef.current = true;
+        if (reply.source === "placeholder" || reply.source === "webcam" || reply.source === "image") {
+          setSource(reply.source);
+        }
+        if (reply.source === "image" && reply.arg) setImagePath(reply.arg);
+        if (reply.source === "webcam" && reply.arg) setWebcamId(reply.arg);
+        if (reply.mirror === "auto" || reply.mirror === "on" || reply.mirror === "off") {
+          setMirror(reply.mirror);
+        }
+        setInjected(true);
+        setStatus(`Reattached → ${reply.source ?? "running helper"}${reply.arg ? ` (${reply.arg})` : ""}`);
+      } catch {
+        // Helper not running, or status unparseable — fall through to the
+        // first-time inject UI.
+      }
+    })();
+    return () => { cancelled = true; };
+    // Re-probe when the udid changes (multi-device); cliPrefix is stable.
+  }, [udid, cliPrefix]);
 
   // Lazy-load webcam list on first expand.
   const refreshWebcams = useCallback(async () => {
@@ -2248,6 +2294,10 @@ function CameraTool({
     if (!injected) return;
     if (source === "image" && !imagePath.trim()) return;
     if (source === "webcam" && !webcamId) return;
+    if (skipNextAutoSwapRef.current) {
+      skipNextAutoSwapRef.current = false;
+      return;
+    }
     let cancelled = false;
     void (async () => {
       setPending("switch");
@@ -2268,6 +2318,10 @@ function CameraTool({
   // preview transform without relaunching the app.
   useEffect(() => {
     if (!injected) return;
+    if (skipNextAutoMirrorRef.current) {
+      skipNextAutoMirrorRef.current = false;
+      return;
+    }
     let cancelled = false;
     void (async () => {
       setPending("mirror");
