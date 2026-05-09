@@ -48,6 +48,17 @@ serve-sim ca-debug <option> <on|off> [-d udid]
                                       (blended|copies|misaligned|offscreen|slow-animations)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 
+serve-sim camera <bundle-id> [-d udid] [source-options]
+                                      Inject a synthetic camera feed and (re)launch the app
+serve-sim camera switch <placeholder|webcam|file> [arg] [-d udid]
+                                      Hot-swap the running helper's source (no relaunch)
+serve-sim camera mirror <auto|on|off> [-d udid]
+                                      Hot-swap preview-layer mirror mode
+serve-sim camera status [-d udid]     Print helper state as JSON ({alive, source, ...})
+serve-sim camera --list-webcams       List host camera devices
+serve-sim camera --stop-webcam [-d udid]
+                                      Stop the camera helper for a device
+
 Options:
   -p, --port <port>   Starting port (preview default: 3200, stream default: 3100)
   -d, --detach        Spawn helper and exit (daemon mode)
@@ -55,6 +66,17 @@ Options:
       --no-preview    Skip the web UI; stream in foreground only
       --list [device] List running streams
       --kill [device] Kill running stream(s)
+
+Camera options (used with `serve-sim camera <bundle-id>`):
+  -f, --file <path>          Image or video file (kind auto-detected from
+                             extension/magic bytes; videos loop at native FPS)
+      --webcam [name]        Live host webcam (defaults to the built-in
+                             front camera when [name] is omitted)
+      --mirror [on|off|auto] Override preview-layer mirroring (default: auto =
+                             front mirrored, back not). Data-output buffers
+                             are never auto-mirrored, matching AVF defaults.
+      --no-mirror            Shortcut for --mirror off
+      --build                Rebuild the dylib + helper from source
 ```
 
 ### Examples
@@ -65,9 +87,39 @@ serve-sim "iPhone 16 Pro"              # target a specific device
 serve-sim --detach                     # start a background helper, return JSON
 serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
+
+# Camera injection
+serve-sim camera com.acme.MyApp                            # animated placeholder
+serve-sim camera com.acme.MyApp --webcam                   # default webcam
+serve-sim camera com.acme.MyApp --webcam "MacBook Pro Camera"
+serve-sim camera com.acme.MyApp --file ~/Pictures/face.png # static image
+serve-sim camera com.acme.MyApp --file ~/Movies/loop.mp4   # looping video
+
+# Hot-swap source on a running helper (no app relaunch)
+serve-sim camera switch placeholder
+serve-sim camera switch webcam
+serve-sim camera switch ~/Movies/loop.mp4                  # auto-detects file kind
+
+# Other helpers
+serve-sim camera mirror on
+serve-sim camera status                                    # JSON: alive, source, mirror
+serve-sim camera --list-webcams
+serve-sim camera --stop-webcam
 ```
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
+
+### Camera
+
+`serve-sim camera <bundle-id>` replaces the simulator's camera feed for a single app. A small host-side helper writes BGRA frames into a POSIX shared-memory region; an injected dylib (`DYLD_INSERT_LIBRARIES`) swizzles AVFoundation inside the simulator process so the app reads from that region instead of the simulator's stub camera.
+
+The helper is one-per-device and outlives any single app launch, so multiple apps on the same simulator can share the feed — just run `serve-sim camera <other-bundle-id>` again to relaunch the next app with the dylib attached. Source changes (`camera switch`) and mirror changes (`camera mirror`) flow through the helper's control socket and don't relaunch the app.
+
+Sources:
+
+- **placeholder** — animated programmatic frames (default).
+- **file** — image (PNG/JPEG/HEIC/…) or video (mp4/mov/m4v/webm/…). The CLI sniffs the kind from the extension and falls back to magic bytes for files without an extension.
+- **webcam** — live `AVCaptureDevice` (built-in, Continuity, external).
 
 ## Connectors
 
