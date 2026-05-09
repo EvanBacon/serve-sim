@@ -2475,12 +2475,24 @@ function CameraPanel({
     return () => window.removeEventListener("mousedown", onDocDown);
   }, [sourceMenuOpen]);
 
-  // Cycle mirror through auto → on → off → auto. The icon button reflects
-  // the current value; primary affordance is "click to flip" rather than
-  // a full segmented control.
-  const cycleMirror = useCallback(() => {
-    setMirror((m) => (m === "auto" ? "on" : m === "on" ? "off" : "auto"));
+  // Mirror is two-state from the user's perspective (mirrored / not).
+  // Auto-mode delegates the choice to a sensible default — currently
+  // "mirrored" since that matches the front-camera selfie convention
+  // most apps target. A manual click flips off auto:
+  //   - from auto: switch to the opposite of auto's pick
+  //   - from manual on/off: flip to the other state, stay manual
+  // A small × badge in the corner appears whenever we're in manual mode
+  // and reverts the value back to "auto" on click.
+  const AUTO_MIRROR_DISPLAY: CamMirror = "on";
+  const mirrorDisplay: "on" | "off" = mirror === "auto" ? AUTO_MIRROR_DISPLAY : mirror;
+  const mirrorIsManual = mirror !== "auto";
+  const toggleMirror = useCallback(() => {
+    setMirror((m) => {
+      if (m === "auto") return AUTO_MIRROR_DISPLAY === "on" ? "off" : "on";
+      return m === "on" ? "off" : "on";
+    });
   }, []);
+  const revertMirrorToAuto = useCallback(() => setMirror("auto"), []);
 
   const onDragEnter = useCallback((e: DragEvent) => {
     e.preventDefault();
@@ -2546,6 +2558,12 @@ function CameraPanel({
 
       {open && (
         <div style={panelStyles.body}>
+          <p style={cameraPanelStyles.subtitle}>
+            Replaces the simulator's camera feed by injecting a dylib at launch
+            and streaming frames into shared memory. Pick media or a webcam,
+            then Play to inject into the foreground app.
+          </p>
+
           <input
             ref={fileInputRef}
             type="file"
@@ -2596,12 +2614,30 @@ function CameraPanel({
                   position: "relative",
                 }}
               >
+                {uploading ? (
+                  <span style={cameraPanelStyles.dropHint}>Uploading…</span>
+                ) : showFile ? (
+                  <>
+                    <div style={cameraPanelStyles.sourceBadge}>
+                      {source === "video" ? "Video" : "Image"}
+                    </div>
+                    <span style={cameraPanelStyles.dropFilename}>{droppedFileName}</span>
+                  </>
+                ) : showWebcam ? (
+                  <>
+                    <div style={cameraPanelStyles.sourceBadge}>Webcam</div>
+                    <span style={cameraPanelStyles.dropFilename}>{activeWebcamName}</span>
+                  </>
+                ) : (
+                  <span style={cameraPanelStyles.dropTitle}>Select or drop media</span>
+                )}
+
                 {!isPlaceholder && !uploading && (
                   <button
                     data-clear-media
                     onClick={(e) => { e.stopPropagation(); clearMedia(); }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.16)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = "#fff"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}
                     style={cameraPanelStyles.clearBtn}
                     aria-label="Clear source"
                     title="Clear → placeholder"
@@ -2611,31 +2647,6 @@ function CameraPanel({
                       <line x1="6" y1="6" x2="18" y2="18" />
                     </svg>
                   </button>
-                )}
-
-                {uploading ? (
-                  <span style={cameraPanelStyles.dropHint}>Uploading…</span>
-                ) : showFile ? (
-                  <>
-                    <div style={cameraPanelStyles.sourceBadge}>
-                      {source === "video" ? "Video" : "Image"}
-                    </div>
-                    <span style={cameraPanelStyles.dropFilename}>{droppedFileName}</span>
-                    <span style={cameraPanelStyles.dropHint}>
-                      {source === "video" ? "Looping at native FPS" : "Static frame"}
-                    </span>
-                  </>
-                ) : showWebcam ? (
-                  <>
-                    <div style={cameraPanelStyles.sourceBadge}>Webcam</div>
-                    <span style={cameraPanelStyles.dropFilename}>{activeWebcamName}</span>
-                    <span style={cameraPanelStyles.dropHint}>Live host camera</span>
-                  </>
-                ) : (
-                  <>
-                    <span style={cameraPanelStyles.dropTitle}>Select or drop media</span>
-                    <span style={cameraPanelStyles.dropHint}>Image or video</span>
-                  </>
                 )}
               </div>
             );
@@ -2753,48 +2764,48 @@ function CameraPanel({
               )}
             </button>
 
-            <button
-              onClick={cycleMirror}
-              style={{
-                ...cameraPanelStyles.iconButton,
-                ...(mirror !== "auto" ? cameraPanelStyles.iconButtonActive : null),
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = mirror !== "auto"
-                  ? "rgba(10,132,255,0.28)"
-                  : "#2a2a2e";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = mirror !== "auto"
-                  ? "rgba(10,132,255,0.18)"
-                  : "#1c1c1e";
-              }}
-              title={`Mirror: ${mirror} — click to cycle (auto → on → off)`}
-              aria-label={`Mirror: ${mirror}`}
-            >
-              {/* Lucide flip-horizontal-2. The dashed central spine is part
-                  of the lucide glyph; we fill the chevrons when mirror=on
-                  and overlay a slash when mirror=off so each state is
-                  visually distinct. */}
-              <svg width="20" height="20" viewBox="0 0 24 24" fill={mirror === "on" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m3 7 5 5-5 5V7" />
-                <path d="m21 7-5 5 5 5V7" />
-                <path d="M12 20v2" stroke="currentColor" fill="none" />
-                <path d="M12 14v2" stroke="currentColor" fill="none" />
-                <path d="M12 8v2" stroke="currentColor" fill="none" />
-                <path d="M12 2v2" stroke="currentColor" fill="none" />
-                {mirror === "off" && <line x1="4" y1="20" x2="20" y2="4" stroke="currentColor" fill="none" />}
-              </svg>
-            </button>
+            <div style={{ position: "relative" }}>
+              <button
+                onClick={toggleMirror}
+                style={cameraPanelStyles.iconButton}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "#2a2a2e"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "#1c1c1e"; }}
+                title={
+                  mirrorIsManual
+                    ? `Mirror: ${mirrorDisplay} (manual) — click to flip`
+                    : `Mirror: auto (${mirrorDisplay}) — click to override`
+                }
+                aria-label={`Mirror: ${mirrorDisplay}${mirrorIsManual ? " (manual)" : " (auto)"}`}
+              >
+                {/* Lucide flip-horizontal-2. Fill the chevrons when the
+                    resolved state is mirrored; outline-only when not. */}
+                <svg width="20" height="20" viewBox="0 0 24 24" fill={mirrorDisplay === "on" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m3 7 5 5-5 5V7" />
+                  <path d="m21 7-5 5 5 5V7" />
+                  <path d="M12 20v2" stroke="currentColor" fill="none" />
+                  <path d="M12 14v2" stroke="currentColor" fill="none" />
+                  <path d="M12 8v2" stroke="currentColor" fill="none" />
+                  <path d="M12 2v2" stroke="currentColor" fill="none" />
+                </svg>
+              </button>
+              {mirrorIsManual && (
+                <button
+                  onClick={revertMirrorToAuto}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.22)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.14)"; }}
+                  style={cameraPanelStyles.mirrorBadge}
+                  aria-label="Revert mirror to auto"
+                  title="Revert to auto mirror"
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              )}
+            </div>
           </div>
 
-          {!bundleId && (
-            <div style={cameraToolStyles.hint}>
-              Bring an app to the foreground to enable injection.
-            </div>
-          )}
-
-          {status && <div style={cameraToolStyles.status}>{status}</div>}
           {error && <div style={panelStyles.error}>{error}</div>}
         </div>
       )}
@@ -2893,17 +2904,23 @@ const cameraToolStyles: Record<string, CSSProperties> = {
 };
 
 const cameraPanelStyles: Record<string, CSSProperties> = {
+  subtitle: {
+    margin: "0 0 14px",
+    fontSize: 11,
+    lineHeight: 1.5,
+    color: "rgba(255,255,255,0.5)",
+  },
   dropZone: {
-    minHeight: 160,
+    minHeight: 44,
     display: "flex",
-    flexDirection: "column",
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
-    padding: 16,
+    gap: 10,
+    padding: "10px 14px",
     background: "#0e0e10",
     border: "1px dashed rgba(255,255,255,0.15)",
-    borderRadius: 12,
+    borderRadius: 10,
     textAlign: "center",
     transition: "border-color 0.15s, background 0.15s",
   },
@@ -2926,39 +2943,39 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.08)",
     padding: "2px 7px",
     borderRadius: 999,
-    marginBottom: 4,
+    flexShrink: 0,
   },
-  dropTitle: { fontSize: 13, color: "#eee", fontWeight: 600 },
+  dropTitle: { fontSize: 12, color: "#eee", fontWeight: 600 },
   dropHint: { fontSize: 11, color: "rgba(255,255,255,0.45)" },
   dropFilename: {
     fontSize: 12,
     color: "#fff",
     fontFamily: "ui-monospace, monospace",
-    wordBreak: "break-all",
-    padding: "0 28px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
+    flex: 1,
   },
   clearBtn: {
-    position: "absolute",
-    top: 8,
-    right: 8,
-    width: 24,
-    height: 24,
+    width: 20,
+    height: 20,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "rgba(255,255,255,0.08)",
-    border: "1px solid rgba(255,255,255,0.12)",
-    color: "rgba(255,255,255,0.7)",
-    borderRadius: 6,
+    background: "transparent",
+    border: "none",
+    color: "rgba(255,255,255,0.55)",
     cursor: "pointer",
     padding: 0,
+    flexShrink: 0,
   },
   controls: {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    gap: 10,
-    marginTop: 12,
+    gap: 24,
+    marginTop: 16,
   },
   iconButton: {
     width: 40,
@@ -2977,6 +2994,22 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
     background: "rgba(10,132,255,0.18)",
     borderColor: "rgba(10,132,255,0.6)",
     color: "#fff",
+  },
+  mirrorBadge: {
+    position: "absolute",
+    top: -5,
+    right: -5,
+    width: 16,
+    height: 16,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(255,255,255,0.14)",
+    border: "1px solid #0a0a0a",
+    color: "#fff",
+    borderRadius: "50%",
+    cursor: "pointer",
+    padding: 0,
   },
   playBtn: {
     width: 52,
