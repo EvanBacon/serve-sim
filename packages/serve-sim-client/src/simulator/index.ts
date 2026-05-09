@@ -26,6 +26,8 @@ export {
   rotationDegreesForOrientation,
   streamDisplayGeometry,
 } from "./orientation.js";
+export { extractImageFrame } from "./streamFrames.js";
+export type { ExtractedImageFrame } from "./streamFrames.js";
 export type { StreamDisplayGeometry } from "./orientation.js";
 export type { DeviceType } from "./deviceFrames.js";
 export type { SimulatorOrientation, StreamConfig } from "../types.js";

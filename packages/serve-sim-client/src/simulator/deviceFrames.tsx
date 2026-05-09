@@ -9,11 +9,15 @@ import {
   isLandscapeConfig,
 } from "./orientation.js";
 
-export type DeviceType = "iphone" | "ipad" | "watch" | "vision";
+export type DeviceType = "iphone" | "ipad" | "watch" | "vision" | "android";
+
+const ANDROID_DEVICE_NAME_RE =
+  /(android|pixel|sdk_gphone|gphone|emulator|galaxy|samsung|oneplus|moto|motorola|nexus|xiaomi|redmi|poco|oppo|vivo|huawei|honor|realme|nothing|xperia|sony|fairphone|^sm[-_\s])/;
 
 export function getDeviceType(name?: string | null): DeviceType {
   if (!name) return "iphone";
   const lower = name.toLowerCase();
+  if (ANDROID_DEVICE_NAME_RE.test(lower)) return "android";
   if (lower.includes("ipad")) return "ipad";
   if (lower.includes("watch")) return "watch";
   if (lower.includes("vision")) return "vision";
@@ -23,6 +27,7 @@ export function getDeviceType(name?: string | null): DeviceType {
 /** Frame geometry for each device type. */
 export const DEVICE_FRAMES = {
   iphone: { width: 427, height: 881, bezelX: 18, bezelY: 18, innerRadius: 55 },
+  android: { width: 427, height: 881, bezelX: 14, bezelY: 14, innerRadius: 36 },
   ipad: { width: 430, height: 605, bezelX: 16, bezelY: 16, innerRadius: 12 },
   watch: { width: 274, height: 322, bezelX: 12, bezelY: 12, innerRadius: 79 },
   vision: { width: 640, height: 400, bezelX: 12, bezelY: 12, innerRadius: 32 },
@@ -117,6 +122,7 @@ export function simulatorMaxWidth(
         return 580;
       case "watch":
         return 200;
+      case "android":
       default:
         return 620;
     }
@@ -128,6 +134,7 @@ export function simulatorMaxWidth(
       return 200;
     case "vision":
       return 580;
+    case "android":
     default:
       return 320;
   }
@@ -161,6 +168,8 @@ export function screenBorderRadius(
 /** Renders the correct frame chrome for the given device type. */
 export function DeviceFrameChrome({ type = "iphone", streaming = false }: { type?: DeviceType; streaming?: boolean }) {
   switch (type) {
+    case "android":
+      return <AndroidPhoneFrameChrome streaming={streaming} />;
     case "ipad":
       return <IPadFrameChrome streaming={streaming} />;
     case "watch":
@@ -170,6 +179,45 @@ export function DeviceFrameChrome({ type = "iphone", streaming = false }: { type
     default:
       return <PhoneFrameChrome streaming={streaming} />;
   }
+}
+
+export function AndroidPhoneFrameChrome({ streaming = false }: { streaming?: boolean }) {
+  return (
+    <svg viewBox="0 0 427 881" style={{ width: "100%", height: "100%" }} fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="android-frame-edge" x1="0" y1="0" x2="427" y2="881" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#4b5563" />
+          <stop offset="0.42" stopColor="#111827" />
+          <stop offset="1" stopColor="#374151" />
+        </linearGradient>
+        <filter id="android-frame-shadow" x="-20" y="-20" width="467" height="921" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+          <feDropShadow dx="0" dy="18" stdDeviation="18" floodColor="#000" floodOpacity="0.35" />
+        </filter>
+      </defs>
+      <rect
+        x="1"
+        y="1"
+        width="425"
+        height="879"
+        rx="48"
+        fill="url(#android-frame-edge)"
+        stroke={streaming ? "#34d399" : "#4b5563"}
+        strokeWidth="2"
+        filter="url(#android-frame-shadow)"
+      />
+      <rect x="8" y="8" width="411" height="865" rx="42" fill="#06070a" />
+      <rect x="188" y="17" width="51" height="5" rx="2.5" fill="#374151" />
+      <circle cx="254" cy="19.5" r="3.5" fill="#1f2937" />
+      <rect
+        x="13.5"
+        y="13.5"
+        width="400"
+        height="854"
+        rx="36"
+        stroke="rgba(255,255,255,0.08)"
+      />
+    </svg>
+  );
 }
 
 export function PhoneFrameChrome({ streaming = false }: { streaming?: boolean }) {

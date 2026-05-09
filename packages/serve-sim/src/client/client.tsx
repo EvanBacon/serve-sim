@@ -23,6 +23,7 @@ import {
   fallbackScreenSize,
   screenBorderRadius,
   SimulatorToolbar,
+  extractImageFrame,
   getDeviceType,
   simulatorAspectRatio,
   simulatorMaxWidth,
@@ -113,34 +114,12 @@ function useMjpegStream(streamUrl: string | null) {
           newBuf.set(value, buffer.length);
           buffer = newBuf;
 
-          // Look for JPEG frames: find Content-Length or JPEG markers (FFD8...FFD9)
-          // Simpler approach: split on boundary markers and extract JPEG data
           while (true) {
-            // Find first JPEG start (FF D8)
-            let jpegStart = -1;
-            for (let i = 0; i < buffer.length - 1; i++) {
-              if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) {
-                jpegStart = i;
-                break;
-              }
-            }
-            if (jpegStart === -1) break;
+            const extracted = extractImageFrame(buffer);
+            if (!extracted) break;
+            buffer = extracted.rest;
 
-            // Find JPEG end (FF D9) after the start
-            let jpegEnd = -1;
-            for (let i = jpegStart + 2; i < buffer.length - 1; i++) {
-              if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) {
-                jpegEnd = i + 2;
-                break;
-              }
-            }
-            if (jpegEnd === -1) break;
-
-            // Extract the JPEG frame
-            const jpeg = buffer.slice(jpegStart, jpegEnd);
-            buffer = buffer.slice(jpegEnd);
-
-            const blob = new Blob([jpeg], { type: "image/jpeg" });
+            const blob = new Blob([extracted.frame], { type: extracted.mimeType });
             const blobUrl = URL.createObjectURL(blob);
             if (subscribersRef.current.size === 0) {
               URL.revokeObjectURL(blobUrl);
@@ -216,6 +195,7 @@ declare global {
       wsUrl: string;
       port: number;
       device: string;
+      platform?: "ios" | "android";
       basePath: string;
       logsEndpoint?: string;
       axEndpoint?: string;
@@ -260,6 +240,43 @@ function ReloadIcon({ size = 18, strokeWidth = 2 }: { size?: number; strokeWidth
     >
       <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
       <path d="M3 3v5h5" />
+    </svg>
+  );
+}
+
+function BackIcon({ size = 18, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m15 18-6-6 6-6" />
+    </svg>
+  );
+}
+
+function AppSwitcherIcon({ size = 18, strokeWidth = 2 }: { size?: number; strokeWidth?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="8" y="8" width="10" height="10" rx="2" />
+      <path d="M6 14H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1" />
     </svg>
   );
 }
@@ -710,6 +727,7 @@ interface SimDevice {
   name: string;
   state: string;
   runtime: string;
+  platform: "ios" | "android";
 }
 
 function parseSimctlList(stdout: string): SimDevice[] {
@@ -722,7 +740,7 @@ function parseSimctlList(stdout: string): SimDevice[] {
         .replace(/-/g, ".");
       for (const d of devs) {
         if (d.isAvailable) {
-          out.push({ udid: d.udid, name: d.name, state: d.state, runtime: runtimeName });
+          out.push({ udid: d.udid, name: d.name, state: d.state, runtime: runtimeName, platform: "ios" });
         }
       }
     }
@@ -732,8 +750,36 @@ function parseSimctlList(stdout: string): SimDevice[] {
   }
 }
 
+function parseAdbList(stdout: string): SimDevice[] {
+  const out: SimDevice[] = [];
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^List of devices attached/i.test(line)) continue;
+    const parts = line.split(/\s+/);
+    const serial = parts[0];
+    const state = parts[1];
+    if (!serial || !state) continue;
+    const attrs = new Map<string, string>();
+    for (const part of parts.slice(2)) {
+      const index = part.indexOf(":");
+      if (index <= 0) continue;
+      attrs.set(part.slice(0, index), part.slice(index + 1));
+    }
+    const name = attrs.get("model") || attrs.get("product") || serial;
+    out.push({
+      udid: serial,
+      name,
+      state,
+      runtime: "Android",
+      platform: "android",
+    });
+  }
+  return out;
+}
+
 function deviceKind(name: string): number {
   const n = name.toLowerCase();
+  if (n.includes("android") || n.includes("pixel") || n.includes("sdk_gphone")) return 0;
   if (n.includes("iphone")) return 0;
   if (n.includes("ipad")) return 1;
   if (n.includes("watch")) return 2;
@@ -743,11 +789,16 @@ function deviceKind(name: string): number {
 
 function runtimeOrder(runtime: string): number {
   const r = runtime.toLowerCase();
+  if (r.startsWith("android")) return 0;
   if (r.startsWith("ios")) return 0;
   if (r.startsWith("ipados")) return 1;
   if (r.startsWith("watchos")) return 2;
   if (r.startsWith("visionos") || r.startsWith("xros")) return 3;
   return 4;
+}
+
+function isDeviceReadyForStream(device: Pick<SimDevice, "platform" | "state">): boolean {
+  return device.platform === "android" ? device.state === "device" : device.state === "Booted";
 }
 
 // ─── Device picker ───
@@ -816,7 +867,7 @@ function DevicePicker({
       {open && (
         <div style={pickerMenuStyle}>
           <div style={pickerHeaderStyle}>
-            <span style={{ fontWeight: 600 }}>Simulators</span>
+            <span style={{ fontWeight: 600 }}>Devices</span>
             <button
               onClick={(e) => { e.stopPropagation(); onRefresh(); }}
               disabled={loading}
@@ -829,21 +880,21 @@ function DevicePicker({
           {selected && (
             <>
               <div style={{ ...pickerItemStyle, color: "#a5b4fc" }}>
-                <span style={dotStyle(selected.state === "Booted" ? "#4ade80" : "#444")} />
+                <span style={dotStyle(isDeviceReadyForStream(selected) ? "#4ade80" : "#444")} />
                 <span style={{ flex: 1 }}>{selected.name}</span>
               </div>
               <div style={pickerSeparatorStyle} />
             </>
           )}
           {devices.length === 0 && !loading && !error && (
-            <div style={pickerEmptyStyle}>No available simulators found</div>
+            <div style={pickerEmptyStyle}>No available devices found</div>
           )}
           {sortedGroups.map(([runtime, devs]) => (
             <div key={runtime}>
               <div style={pickerGroupHeaderStyle}>{runtime}</div>
               {devs.map((d) => {
                 const isStopping = stoppingUdids.has(d.udid);
-                const isBooted = d.state === "Booted";
+                const isReady = isDeviceReadyForStream(d);
                 return (
                   <div
                     key={d.udid}
@@ -852,9 +903,9 @@ function DevicePicker({
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                     onClick={() => { onSelect(d); setOpen(false); }}
                   >
-                    <span style={dotStyle(isBooted ? "#4ade80" : "#444")} />
+                    <span style={dotStyle(isReady ? "#4ade80" : "#444")} />
                     <span style={{ flex: 1 }}>{d.name}</span>
-                    {isBooted && (
+                    {isReady && d.platform === "ios" && (
                       <span
                         role="button"
                         onClick={(e) => { e.stopPropagation(); if (!isStopping) onStop(d.udid); }}
@@ -1491,11 +1542,11 @@ function AppPermissionsTool({
   );
 }
 
-// ─── Empty state: pick a simulator to boot ───
+// ─── Empty state: pick a device to stream ───
 //
 // When no serve-sim helper is running, the middleware has no state file to
 // inject and `window.__SIM_PREVIEW__` is undefined. Instead of telling the
-// user to drop into a terminal, list available simulators inline and let
+// user to drop into a terminal, list available devices inline and let
 // them boot one + start `serve-sim --detach` from the browser.
 
 function BootEmptyState({
@@ -1519,11 +1570,15 @@ function BootEmptyState({
     try {
       // Single round-trip: the middleware's grid/start endpoint resolves the
       // serve-sim binary itself (no `bunx` lookup) and `serve-sim --detach`
-      // already boots the device + waits for readiness, so the prior
-      // explicit `xcrun simctl boot` was redundant and just added latency.
+      // already boots iOS devices + waits for readiness. Android devices must
+      // already be in adb's `device` state, which keeps emulator booting under
+      // the user's Android tooling instead of guessing here.
       // We also poll the API in parallel with the start request so as soon
       // as the helper writes its state file we can navigate — no need to
       // wait for the start request to fully return.
+      if (d.platform === "android" && d.state !== "device") {
+        throw new Error(`Android device is not ready (adb state: ${d.state})`);
+      }
       const apiUrl = `${simEndpoint("api")}?device=${encodeURIComponent(d.udid)}`;
       const navigateWhenReady = (async () => {
         // Generous deadline: a cold simulator can take 30-60s to reach
@@ -1548,7 +1603,7 @@ function BootEmptyState({
       const startReq = fetch(startUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ udid: d.udid }),
+        body: JSON.stringify({ udid: d.udid, platform: d.platform }),
       })
         .then(async (res) => {
           const json = await res.json().catch(() => ({} as any));
@@ -1585,9 +1640,9 @@ function BootEmptyState({
   }
   for (const list of grouped.values()) {
     list.sort((a, b) => {
-      // Booted first, then by device kind, then by name.
-      const ab = a.state === "Booted" ? 0 : 1;
-      const bb = b.state === "Booted" ? 0 : 1;
+      // Ready first, then by device kind, then by name.
+      const ab = isDeviceReadyForStream(a) ? 0 : 1;
+      const bb = isDeviceReadyForStream(b) ? 0 : 1;
       if (ab !== bb) return ab - bb;
       return deviceKind(a.name) - deviceKind(b.name) || a.name.localeCompare(b.name);
     });
@@ -1601,12 +1656,12 @@ function BootEmptyState({
       <div style={s.empty}>
         <h1 style={s.emptyTitle}>No serve-sim stream running</h1>
         <p style={s.emptyHint}>
-          Pick a simulator to boot, or start one yourself with{" "}
+          Pick a device to stream, or start one yourself with{" "}
           <code style={s.code}>bunx serve-sim --detach</code>.
         </p>
         <div style={bootListStyle}>
           <div style={pickerHeaderStyle}>
-            <span style={{ fontWeight: 600 }}>Simulators</span>
+            <span style={{ fontWeight: 600 }}>Devices</span>
             <button onClick={onRefresh} disabled={loading} style={pickerRefreshStyle}>
               {loading ? "..." : "Refresh"}
             </button>
@@ -1614,15 +1669,16 @@ function BootEmptyState({
           {error && <div style={pickerErrorStyle}>{error}</div>}
           {startError && <div style={pickerErrorStyle}>{startError}</div>}
           {!loading && !error && devices.length === 0 && (
-            <div style={pickerEmptyStyle}>No available simulators found</div>
+            <div style={pickerEmptyStyle}>No available devices found</div>
           )}
           {sortedGroups.map(([runtime, devs]) => (
             <div key={runtime}>
               <div style={pickerGroupHeaderStyle}>{runtime}</div>
               {devs.map((d) => {
                 const isStarting = startingUdid === d.udid;
-                const disabled = startingUdid !== null && !isStarting;
-                const isBooted = d.state === "Booted";
+                const isReady = isDeviceReadyForStream(d);
+                const cannotStart = d.platform === "android" && !isReady;
+                const disabled = (startingUdid !== null && !isStarting) || cannotStart;
                 return (
                   <div
                     key={d.udid}
@@ -1637,12 +1693,12 @@ function BootEmptyState({
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                     onClick={() => { if (!disabled) start(d); }}
                   >
-                    <span style={dotStyle(isBooted ? "#4ade80" : "#444")} />
+                    <span style={dotStyle(isReady ? "#4ade80" : "#444")} />
                     <span style={{ flex: 1, textAlign: "left" }}>{d.name}</span>
                     <span style={{ fontSize: 10, color: isStarting ? "#a5b4fc" : "#888" }}>
                       {isStarting
-                        ? (isBooted ? "Starting..." : "Booting...")
-                        : (isBooted ? "Start stream" : "Boot & stream")}
+                        ? (isReady ? "Starting..." : "Booting...")
+                        : (isReady ? "Start stream" : d.platform === "ios" ? "Boot & stream" : d.state)}
                     </span>
                   </div>
                 );
@@ -2008,6 +2064,7 @@ interface GridDevice {
   name: string;
   runtime: string;
   state: string;
+  platform: "ios" | "android";
   helper: { port: number; url: string; streamUrl: string; wsUrl: string } | null;
 }
 
@@ -2271,14 +2328,15 @@ function GridTile({
   onShutdown: () => void;
 }) {
   const helper = device.helper;
-  const isBooted = device.state === "Booted";
+  const isReady = device.platform === "android" ? device.state === "device" : device.state === "Booted";
+  const isIOS = device.platform === "ios";
   const status = helper
     ? "● live"
     : starting
-    ? (isBooted ? "starting helper…" : "booting & starting…")
+    ? (isReady ? "starting helper…" : "booting & starting…")
     : shuttingDown
-    ? "shutting down…"
-    : isBooted ? "booted (no stream)" : device.state.toLowerCase();
+    ? (isIOS ? "shutting down…" : "stopping stream…")
+    : isReady ? (isIOS ? "booted (no stream)" : "connected (no stream)") : device.state.toLowerCase();
   const statusColor = helper ? "#3b3" : "#888";
   const ringColor = active ? "rgba(10,132,255,0.55)" : "transparent";
 
@@ -2296,11 +2354,11 @@ function GridTile({
         outline: `1px solid ${ringColor}`,
       }}
     >
-      {(helper || isBooted) && (
+      {(helper || (isIOS && isReady)) && (
         <button
           type="button"
-          title={shuttingDown ? "Shutting down…" : "Shutdown simulator"}
-          aria-label="Shutdown simulator"
+          title={shuttingDown ? (isIOS ? "Shutting down…" : "Stopping stream…") : isIOS ? "Shutdown simulator" : "Stop stream"}
+          aria-label={isIOS ? "Shutdown simulator" : "Stop stream"}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2337,21 +2395,21 @@ function GridTile({
               }}
             />
           ) : (
-            <div style={{ fontSize: 28, opacity: 0.5 }}>{isBooted ? "▣" : "▢"}</div>
+            <div style={{ fontSize: 28, opacity: 0.5 }}>{isReady ? "▣" : "▢"}</div>
           )}
           {error ? <div style={gridStyles.tileError}>{error}</div> : null}
           <button
             type="button"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart(); }}
-            disabled={starting}
+            disabled={starting || (!isReady && !isIOS)}
             style={{
               ...gridStyles.tileStartBtn,
-              background: starting ? "#1a1a1a" : "#1d2a1d",
-              color: starting ? "#888" : "#9c9",
-              cursor: starting ? "default" : "pointer",
+              background: starting || (!isReady && !isIOS) ? "#1a1a1a" : "#1d2a1d",
+              color: starting || (!isReady && !isIOS) ? "#888" : "#9c9",
+              cursor: starting || (!isReady && !isIOS) ? "default" : "pointer",
             }}
           >
-            {starting ? (isBooted ? "Starting…" : "Booting…") : (isBooted ? "Start stream" : "Boot & start")}
+            {starting ? (isReady ? "Starting…" : "Booting…") : (isReady ? "Start stream" : isIOS ? "Boot & start" : device.state)}
           </button>
         </div>
       )}
@@ -2413,7 +2471,7 @@ function GridPanel({
   );
 
   const start = useCallback(
-    async (udid: string) => {
+    async (udid: string, platform: "ios" | "android") => {
       if (!startEndpoint) return;
       setPending((p) => ({ ...p, [udid]: true }));
       setErrors((e) => ({ ...e, [udid]: null }));
@@ -2421,7 +2479,7 @@ function GridPanel({
         const res = await fetch(startEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid }),
+          body: JSON.stringify({ udid, platform }),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok || !json.ok) {
@@ -2465,7 +2523,7 @@ function GridPanel({
   }, [devices, currentUdid, previewEndpoint]);
 
   const shutdown = useCallback(
-    async (udid: string) => {
+    async (udid: string, platform: "ios" | "android") => {
       if (!shutdownEndpoint) return;
       setShuttingDown((s) => ({ ...s, [udid]: true }));
       setErrors((e) => ({ ...e, [udid]: null }));
@@ -2473,7 +2531,7 @@ function GridPanel({
         const res = await fetch(shutdownEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid }),
+          body: JSON.stringify({ udid, platform }),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok || !json.ok) {
@@ -2493,7 +2551,7 @@ function GridPanel({
     <Panel open={open} width={width}>
       <style>{GRID_HOVER_CSS}</style>
       <PanelHeader>
-        <PanelTitle>Simulators</PanelTitle>
+        <PanelTitle>Devices</PanelTitle>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <GridCapacityBanner report={memory} />
           <PanelCloseButton onClick={onClose} />
@@ -2501,7 +2559,7 @@ function GridPanel({
       </PanelHeader>
       <div style={gridStyles.body}>
         {devices === null ? null : devices.length === 0 ? (
-          <div style={gridStyles.empty}>No iOS simulators available.</div>
+          <div style={gridStyles.empty}>No streamable devices available.</div>
         ) : (
           devices.map((d) => (
             <GridTile
@@ -2512,8 +2570,8 @@ function GridPanel({
               starting={!!pending[d.device]}
               shuttingDown={!!shuttingDown[d.device]}
               error={errors[d.device] ?? null}
-              onStart={() => start(d.device)}
-              onShutdown={() => shutdown(d.device)}
+              onStart={() => start(d.device, d.platform)}
+              onShutdown={() => shutdown(d.device, d.platform)}
             />
           ))
         )}
@@ -2683,9 +2741,33 @@ function App() {
     setDevicesLoading(true);
     setDevicesError(null);
     try {
-      const res = await execOnHost("xcrun simctl list devices available -j");
-      if (res.exitCode !== 0) throw new Error(res.stderr || "simctl list failed");
-      setDevices(parseSimctlList(res.stdout));
+      try {
+        const gridRes = await fetch(simEndpoint("grid/api"), { cache: "no-store" });
+        if (gridRes.ok) {
+          const grid = await gridRes.json() as { devices?: GridDevice[] };
+          setDevices((grid.devices ?? []).map((d) => ({
+            udid: d.device,
+            name: d.name,
+            state: d.state,
+            runtime: d.runtime,
+            platform: d.platform,
+          })));
+          return;
+        }
+      } catch {}
+
+      const [simctl, adb] = await Promise.all([
+        execOnHost("xcrun simctl list devices available -j"),
+        execOnHost("adb devices -l"),
+      ]);
+      const nextDevices: SimDevice[] = [];
+      const errors: string[] = [];
+      if (simctl.exitCode === 0) nextDevices.push(...parseSimctlList(simctl.stdout));
+      else errors.push(simctl.stderr || "simctl list failed");
+      if (adb.exitCode === 0) nextDevices.push(...parseAdbList(adb.stdout));
+      else errors.push(adb.stderr || "adb devices failed");
+      setDevices(nextDevices);
+      if (nextDevices.length === 0 && errors.length > 0) throw new Error(errors.join("\n"));
     } catch (err) {
       setDevicesError(err instanceof Error ? err.message : "Failed to list devices");
     } finally {
@@ -2780,12 +2862,16 @@ function App() {
 
   useEffect(() => {
     document.title = selectedDevice?.name
-      ? `Simulator - ${selectedDevice.name}`
-      : "Simulator Preview";
-  }, [selectedDevice?.name]);
+      ? `${selectedDevice.platform === "android" ? "Android" : "Simulator"} - ${selectedDevice.name}`
+      : "Device Preview";
+  }, [selectedDevice?.name, selectedDevice?.platform]);
 
-  const deviceType: DeviceType = getDeviceType(selectedDevice?.name);
-  const devtools = useWebKitDevtools(config.devtoolsEndpoint ?? simEndpoint("devtools"), devtoolsOpen);
+  const isIOSPreview = (config.platform ?? "ios") === "ios";
+  const deviceType: DeviceType = isIOSPreview ? getDeviceType(selectedDevice?.name) : "android";
+  const devtools = useWebKitDevtools(isIOSPreview ? (config.devtoolsEndpoint ?? simEndpoint("devtools")) : undefined, devtoolsOpen && isIOSPreview);
+  useEffect(() => {
+    if (!isIOSPreview) setDevtoolsOpen(false);
+  }, [isIOSPreview]);
 
   useEffect(() => {
     if (!devtoolsOpen) return;
@@ -2939,7 +3025,12 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
-    const es = new EventSource(config.appStateEndpoint ?? simEndpoint("appstate"));
+    const endpoint = isIOSPreview ? (config.appStateEndpoint ?? simEndpoint("appstate")) : undefined;
+    if (!endpoint) {
+      setCurrentApp(null);
+      return;
+    }
+    const es = new EventSource(endpoint);
     let timer: ReturnType<typeof setTimeout> | null = null;
     es.onmessage = (e) => {
       try {
@@ -2952,7 +3043,7 @@ function App() {
       } catch {}
     };
     return () => { if (timer) clearTimeout(timer); es.close(); };
-  }, [config.appStateEndpoint]);
+  }, [config.appStateEndpoint, isIOSPreview]);
 
   // Cmd+R to reload the RN/Expo bundle. RCTKeyCommands on iOS listens for
   // this combo and triggers DevSupport reload. We hold Meta, tap R, release.
@@ -3027,7 +3118,7 @@ function App() {
         return;
       }
       // Cmd+Shift+A → toggle appearance (Simulator.app's shortcut).
-      if (e.code === "KeyA" && e.metaKey && e.shiftKey) {
+      if (isIOSPreview && e.code === "KeyA" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) {
           // simctl has no toggle; query current, invert, set.
@@ -3055,27 +3146,32 @@ function App() {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device]);
+  }, [sendWs, config.device, isIOSPreview]);
 
   const switchToDevice = useCallback(async (d: SimDevice) => {
     if (switching || d.udid === config.device) return;
     setSwitching(true);
-    // Ensure the target simulator is booted (serve-sim boots on --detach but
-    // this keeps the flow snappy) and spin up a helper bound to it. Do not
-    // kill the current helper here; another preview window may be using it.
+    // Spin up a helper bound to the target. Do not kill the current helper
+    // here; another preview window may be using it.
     try {
-      if (d.state !== "Booted") {
-        await execOnHost(`xcrun simctl boot ${d.udid}`);
+      if (d.platform === "android" && d.state !== "device") {
+        throw new Error(`Android device is not ready (adb state: ${d.state})`);
       }
-      const detach = await execOnHost(`bunx serve-sim --detach ${d.udid}`);
-      if (detach.exitCode !== 0) throw new Error(detach.stderr || "Failed to start serve-sim");
+      const startEndpoint = config.gridStartEndpoint ?? simEndpoint("grid/api/start");
+      const res = await fetch(startEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ udid: d.udid, platform: d.platform }),
+      });
+      const json = await res.json().catch(() => ({} as any));
+      if (!res.ok || !json.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.set("device", d.udid);
       window.location.assign(nextUrl.toString());
     } catch {
       setSwitching(false);
     }
-  }, [switching, config.device]);
+  }, [switching, config.device, config.gridStartEndpoint]);
 
   // Drag/drop images, videos, or .ipa files onto the simulator.
   // Media → Photos (addmedia); .ipa → install.
@@ -3083,7 +3179,7 @@ function App() {
   const mediaDrop = useMediaDrop({
     exec: execOnHost,
     udid: config.device,
-    enabled: streaming,
+    enabled: streaming && isIOSPreview,
     onUploadStart: uploads.add,
     onUploadEnd: (id, ok, message) =>
       uploads.update(id, { status: ok ? "success" : "error", message }),
@@ -3099,7 +3195,10 @@ function App() {
   const stopDevice = useCallback(async (udid: string) => {
     setStoppingUdids((prev) => new Set(prev).add(udid));
     try {
-      await execOnHost(`xcrun simctl shutdown ${udid}`);
+      const device = devices.find((d) => d.udid === udid);
+      if (device?.platform === "ios") {
+        await execOnHost(`xcrun simctl shutdown ${udid}`);
+      }
       await fetchDevices();
     } finally {
       setStoppingUdids((prev) => {
@@ -3108,7 +3207,7 @@ function App() {
         return next;
       });
     }
-  }, [fetchDevices]);
+  }, [devices, fetchDevices]);
 
   const simulatorResize = useSimulatorResize({
     defaultWidth: frameMaxWidth,
@@ -3197,14 +3296,34 @@ function App() {
                 <ReloadIcon />
               </SimulatorToolbar.Button>
             )}
+            {!isIOSPreview && (
+              <SimulatorToolbar.Button
+                aria-label="Back"
+                title="Back"
+                onClick={() => onStreamButton("back")}
+              >
+                <BackIcon />
+              </SimulatorToolbar.Button>
+            )}
             <SimulatorToolbar.HomeButton
               onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
             />
-            <AxToolbarButton
-              overlayEnabled={axOverlayEnabled}
-              streaming={streaming}
-              onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
-            />
+            {!isIOSPreview && (
+              <SimulatorToolbar.Button
+                aria-label="App switcher"
+                title="App switcher"
+                onClick={() => onStreamButton("app_switcher")}
+              >
+                <AppSwitcherIcon />
+              </SimulatorToolbar.Button>
+            )}
+            {isIOSPreview && (
+              <AxToolbarButton
+                overlayEnabled={axOverlayEnabled}
+                streaming={streaming}
+                onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+              />
+            )}
             <SimulatorToolbar.RotateButton title="Rotate device" />
           </SimulatorToolbar.Actions>
         </SimulatorToolbar>
@@ -3238,6 +3357,7 @@ function App() {
             onStreamingChange={setStreaming}
             onStreamTouch={onStreamTouch}
             onStreamMultiTouch={onStreamMultiTouch}
+            multiTouchEnabled={isIOSPreview}
             onStreamButton={onStreamButton}
             subscribeFrame={mjpeg.subscribeFrame}
             streamFrame={mjpeg.frame}
@@ -3331,23 +3451,25 @@ function App() {
             <line x1="15" y1="4" x2="15" y2="20" />
           </svg>
         </button>
-        <button
-          onClick={() => {
-            setPanelOpen(false);
-            setGridOpen(false);
-            setDevtoolsOpen((o) => !o);
-          }}
-          style={sidebarRailStyles.button}
-          aria-label="Open WebKit DevTools"
-          aria-pressed={devtoolsOpen}
-          title="WebKit DevTools"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
-            <path d="M2 12h20" />
-          </svg>
-        </button>
+        {isIOSPreview && (
+          <button
+            onClick={() => {
+              setPanelOpen(false);
+              setGridOpen(false);
+              setDevtoolsOpen((o) => !o);
+            }}
+            style={sidebarRailStyles.button}
+            aria-label="Open WebKit DevTools"
+            aria-pressed={devtoolsOpen}
+            title="WebKit DevTools"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+              <path d="M2 12h20" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={() => {
             setPanelOpen(false);
@@ -3355,9 +3477,9 @@ function App() {
             setGridOpen((o) => !o);
           }}
           style={sidebarRailStyles.button}
-          aria-label="Open simulator grid"
+          aria-label="Open device grid"
           aria-pressed={gridOpen}
-          title="Simulators"
+          title="Devices"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
             <rect x="3" y="3" width="7" height="7" rx="1.5" />
@@ -3397,24 +3519,28 @@ function App() {
         ariaLabel="Resize simulators panel"
       />
 
-      <WebKitDevtoolsPanel
-        open={devtoolsOpen}
-        onClose={() => setDevtoolsOpen(false)}
-        udid={config.device}
-        targets={devtools.targets}
-        selectedTargetId={selectedDevtoolsTargetId}
-        onSelectTarget={setSelectedDevtoolsTargetId}
-        loading={devtools.loading}
-        error={devtools.error}
-        onRefresh={() => void devtools.refresh()}
-        width={devtoolsPanelWidth}
-      />
-      <ResizeHandle
-        panelWidth={devtoolsPanelWidth}
-        visible={devtoolsOpen}
-        onPointerDown={onDevtoolsResize}
-        ariaLabel="Resize WebKit DevTools panel"
-      />
+      {isIOSPreview && (
+        <>
+          <WebKitDevtoolsPanel
+            open={devtoolsOpen}
+            onClose={() => setDevtoolsOpen(false)}
+            udid={config.device}
+            targets={devtools.targets}
+            selectedTargetId={selectedDevtoolsTargetId}
+            onSelectTarget={setSelectedDevtoolsTargetId}
+            loading={devtools.loading}
+            error={devtools.error}
+            onRefresh={() => void devtools.refresh()}
+            width={devtoolsPanelWidth}
+          />
+          <ResizeHandle
+            panelWidth={devtoolsPanelWidth}
+            visible={devtoolsOpen}
+            onPointerDown={onDevtoolsResize}
+            ariaLabel="Resize WebKit DevTools panel"
+          />
+        </>
+      )}
 
       {/* Status bar */}
       <div style={s.bar}>

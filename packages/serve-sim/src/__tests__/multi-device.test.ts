@@ -34,6 +34,11 @@ describe("multi-device state", () => {
     expect(file.startsWith(STATE_DIR)).toBe(true);
   });
 
+  it("stateFileForDevice escapes Android network serials for file paths", () => {
+    const file = stateFileForDevice("127.0.0.1:5555");
+    expect(file).toContain("server-127.0.0.1%3A5555.json");
+  });
+
   it("multiple state files can coexist", () => {
     // Write state files directly to the real state dir for listStateFiles
     mkdirSync(STATE_DIR, { recursive: true });
@@ -83,4 +88,3 @@ describe("multi-device state", () => {
     }
   });
 });
-

@@ -1,6 +1,6 @@
 {
   "name": "serve-sim-client",
-  "description": "Client library for serve-sim — iOS Simulator streaming and gateway protocol.",
+  "description": "Client library for serve-sim mobile streaming and gateway protocol.",
   "version": "0.1.15",
   "type": "module",
   "main": "src/index.ts",

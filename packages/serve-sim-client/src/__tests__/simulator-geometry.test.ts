@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   fallbackScreenSize,
+  getDeviceType,
   screenBorderRadius,
   simulatorAspectRatio,
   simulatorMaxWidth,
@@ -58,6 +59,15 @@ describe("simulator geometry helpers", () => {
     expect(simulatorAspectRatio(null, fallbackScreenSize("iphone", "iPhone 16 Pro Max"))).toBe(
       "1320 / 2868",
     );
+  });
+
+  test("detects Android device names", () => {
+    expect(getDeviceType("sdk_gphone64_arm64")).toBe("android");
+    expect(getDeviceType("Pixel 9 Pro")).toBe("android");
+    expect(getDeviceType("SM-S918B")).toBe("android");
+    expect(getDeviceType("ONEPLUS A6013")).toBe("android");
+    expect(getDeviceType("moto g power")).toBe("android");
+    expect(getDeviceType("iPhone 16 Pro")).toBe("iphone");
   });
 
   test("uses wider max width for landscape phones and tablets", () => {

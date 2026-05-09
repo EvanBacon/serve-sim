@@ -20,6 +20,7 @@ const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2
 const WS_MSG_TOUCH = 0x03;
 const WS_MSG_BUTTON = 0x04;
 const WS_MSG_MULTI_TOUCH = 0x05;
+const RELAY_FRAME_DECODE_TIMEOUT_MS = 2000;
 
 export interface SimulatorViewProps {
   /** Base URL of the serve-sim server, e.g. "http://localhost:3100" */
@@ -36,6 +37,8 @@ export interface SimulatorViewProps {
   onStreamTouch?: (data: { type: "begin" | "move" | "end"; x: number; y: number; edge?: number }) => void;
   /** Relay mode: callback for multi-touch events */
   onStreamMultiTouch?: (data: { type: "begin" | "move" | "end"; x1: number; y1: number; x2: number; y2: number }) => void;
+  /** Enable two-finger gestures such as option-drag pinch/pan. */
+  multiTouchEnabled?: boolean;
   /** Relay mode: callback for button events */
   onStreamButton?: (button: string) => void;
   /** Relay mode: subscribe to frame updates (bypasses React state for performance).
@@ -73,6 +76,7 @@ export function SimulatorView({
   onHomePress,
   onStreamTouch,
   onStreamMultiTouch,
+  multiTouchEnabled = true,
   onStreamButton,
   subscribeFrame,
   streamFrame,
@@ -176,6 +180,11 @@ export function SimulatorView({
   const connectedRef = useRef(false);
   connectedRef.current = connected;
   const prevBlobUrlRef = useRef<string | null>(null);
+  const revokeAfterLoadRef = useRef<string[]>([]);
+  const pendingRelayImagesRef = useRef<Set<HTMLImageElement>>(new Set());
+  const pendingRelayDecodeTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const decodingRelayFrameRef = useRef(false);
+  const queuedRelayBlobUrlRef = useRef<string | null>(null);
   useEffect(() => {
     if (!relayMode || !subscribeFrame) return;
     // Startup watchdog: flag the stream as broken if no frame arrives within
@@ -188,27 +197,83 @@ export function SimulatorView({
         setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
       }
     }, STARTUP_MS);
-    const unsubscribe = subscribeFrame((blobUrl) => {
+    const markFrameReceived = () => {
       frameCountRef.current++;
       lastFrameAtRef.current = Date.now();
-      const img = relayImgRef.current;
-      if (img) {
-        // Revoke the previous blob URL to avoid memory leaks
-        if (prevBlobUrlRef.current) {
-          URL.revokeObjectURL(prevBlobUrlRef.current);
-        }
-        prevBlobUrlRef.current = blobUrl;
-        img.src = blobUrl;
-      }
       if (!connectedRef.current) {
         clearTimeout(watchdog);
         setConnected(true);
         setError(null);
       }
+    };
+    const decodeFrame = (blobUrl: string) => {
+      decodingRelayFrameRef.current = true;
+      const nextImage = new Image();
+      pendingRelayImagesRef.current.add(nextImage);
+      let settled = false;
+      const finish = (loaded: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(decodeTimer);
+        pendingRelayDecodeTimersRef.current.delete(decodeTimer);
+        pendingRelayImagesRef.current.delete(nextImage);
+        nextImage.onload = null;
+        nextImage.onerror = null;
+        const img = relayImgRef.current;
+        if (!loaded || !img) {
+          URL.revokeObjectURL(blobUrl);
+        } else {
+          if (prevBlobUrlRef.current) {
+            revokeAfterLoadRef.current.push(prevBlobUrlRef.current);
+          }
+          prevBlobUrlRef.current = blobUrl;
+          img.src = blobUrl;
+        }
+        nextImage.src = "";
+        decodingRelayFrameRef.current = false;
+        const queued = queuedRelayBlobUrlRef.current;
+        queuedRelayBlobUrlRef.current = null;
+        if (queued) decodeFrame(queued);
+      };
+      const decodeTimer = setTimeout(() => finish(false), RELAY_FRAME_DECODE_TIMEOUT_MS);
+      pendingRelayDecodeTimersRef.current.add(decodeTimer);
+      nextImage.onload = () => finish(true);
+      nextImage.onerror = () => finish(false);
+      nextImage.src = blobUrl;
+    };
+    const unsubscribe = subscribeFrame((blobUrl) => {
+      markFrameReceived();
+      if (decodingRelayFrameRef.current) {
+        if (queuedRelayBlobUrlRef.current) {
+          URL.revokeObjectURL(queuedRelayBlobUrlRef.current);
+        }
+        queuedRelayBlobUrlRef.current = blobUrl;
+        return;
+      }
+      decodeFrame(blobUrl);
     });
     return () => {
       clearTimeout(watchdog);
       unsubscribe?.();
+      for (const pendingImage of pendingRelayImagesRef.current) {
+        pendingImage.onload = null;
+        pendingImage.onerror = null;
+        pendingImage.src = "";
+      }
+      pendingRelayImagesRef.current.clear();
+      for (const timer of pendingRelayDecodeTimersRef.current) {
+        clearTimeout(timer);
+      }
+      pendingRelayDecodeTimersRef.current.clear();
+      decodingRelayFrameRef.current = false;
+      if (queuedRelayBlobUrlRef.current) {
+        URL.revokeObjectURL(queuedRelayBlobUrlRef.current);
+        queuedRelayBlobUrlRef.current = null;
+      }
+      for (const staleUrl of revokeAfterLoadRef.current) {
+        URL.revokeObjectURL(staleUrl);
+      }
+      revokeAfterLoadRef.current = [];
       if (prevBlobUrlRef.current) {
         URL.revokeObjectURL(prevBlobUrlRef.current);
         prevBlobUrlRef.current = null;
@@ -269,6 +334,7 @@ export function SimulatorView({
       x2: number;
       y2: number;
     }) => {
+      if (!multiTouchEnabled) return;
       const orientation = streamDisplayGeometry(screenSizeRef.current).inputOrientation;
       const p1 = rawPointForDisplayPoint(orientation, touch.x1, touch.y1);
       const p2 = rawPointForDisplayPoint(orientation, touch.x2, touch.y2);
@@ -292,7 +358,7 @@ export function SimulatorView({
       msg.set(json, 1);
       ws.send(msg);
     },
-    [relayMode, onStreamMultiTouch],
+    [relayMode, onStreamMultiTouch, multiTouchEnabled],
   );
 
   useEffect(() => {
@@ -466,7 +532,7 @@ export function SimulatorView({
   // Track Alt key globally to show preview before click
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Alt") setAltHeld(true);
+      if (multiTouchEnabled && e.key === "Alt") setAltHeld(true);
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === "Alt") {
@@ -482,7 +548,7 @@ export function SimulatorView({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, []);
+  }, [multiTouchEnabled]);
 
   // Show preview indicators when Alt is held but no gesture is active
   useEffect(() => {
@@ -656,6 +722,11 @@ export function SimulatorView({
             ref={relayImgRef}
             draggable={false}
             onLoad={(e) => {
+              for (const staleUrl of revokeAfterLoadRef.current) {
+                URL.revokeObjectURL(staleUrl);
+              }
+              revokeAfterLoadRef.current = [];
+              if (streamConfig) return;
               const el = e.currentTarget;
               if (el.naturalWidth > 0 && el.naturalHeight > 0) {
                 updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
@@ -679,7 +750,7 @@ export function SimulatorView({
             const x = (e.clientX - rect.left) / rect.width;
             const y = (e.clientY - rect.top) / rect.height;
 
-            if (e.altKey) {
+            if (multiTouchEnabled && e.altKey) {
               // Multi-touch mode: begin gesture
               multiTouchActiveRef.current = true;
               multiTouchShiftRef.current = e.shiftKey;
@@ -709,7 +780,7 @@ export function SimulatorView({
 
             // Alt-hover preview (no buttons pressed)
             if (e.buttons === 0) {
-              if (e.altKey) {
+              if (multiTouchEnabled && e.altKey) {
                 setFingerIndicators({
                   x1: x,
                   y1: y,
@@ -815,7 +886,7 @@ export function SimulatorView({
             const rect = getInputRect();
             if (!rect) return;
 
-            if (e.touches.length >= 2) {
+            if (multiTouchEnabled && e.touches.length >= 2) {
               // Two fingers down — start multi-touch
               hideTouchIndicator();
               const t1 = e.touches[0];

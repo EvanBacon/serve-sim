@@ -2,6 +2,18 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { readdirSync } from "fs";
 
+export type DevicePlatform = "ios" | "android";
+
+export interface ServerState {
+  pid: number;
+  port: number;
+  device: string;
+  platform?: DevicePlatform;
+  url: string;
+  streamUrl: string;
+  wsUrl: string;
+}
+
 /** Directory where serve-sim stores runtime state. */
 export const STATE_DIR = join(tmpdir(), "serve-sim");
 
@@ -11,7 +23,7 @@ export const STATE_FILE = join(STATE_DIR, "server.json");
 
 /** Per-device state file: `/tmp/serve-sim/server-{udid}.json` */
 export function stateFileForDevice(udid: string): string {
-  return join(STATE_DIR, `server-${udid}.json`);
+  return join(STATE_DIR, `server-${encodeURIComponent(udid)}.json`);
 }
 
 /** List all per-device state files in the state directory. */

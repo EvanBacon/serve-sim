@@ -7,6 +7,7 @@ export interface SimStreamInfo {
   wsUrl: string;
   port: number;
   device: string;
+  platform?: "ios" | "android";
 }
 
 export interface UseSimStreamOptions {

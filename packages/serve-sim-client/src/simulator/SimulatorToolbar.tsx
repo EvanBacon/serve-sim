@@ -81,7 +81,9 @@ function SimulatorToolbarRoot({
   style,
   ...rest
 }: SimulatorToolbarProps) {
-  const deviceType = getDeviceType(deviceName);
+  const deviceType = deviceRuntime?.toLowerCase().startsWith("android")
+    ? "android"
+    : getDeviceType(deviceName);
   const effectiveDisabled = disabled || !deviceUdid || !streaming;
   const value: ToolbarContextValue = {
     exec,

@@ -4,8 +4,17 @@ import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, un
 import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
 import { join, resolve } from "path";
-import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
+import { STATE_DIR, stateFileForDevice, listStateFiles, type DevicePlatform, type ServerState } from "./state";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
+import {
+  findConnectedAndroidDevice,
+  getAndroidDeviceName,
+  getConnectedAndroidSerials,
+  resolveAndroidDevice,
+  runAndroidHelper,
+  sendAndroidButton,
+  setAndroidOrientation,
+} from "./android";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -16,15 +25,6 @@ const __dirname = dirnameOf(import.meta.url);
 // real file on disk; inside a compiled binary it points at bun's virtual FS
 // and we extract the bytes to a cached location on first use.
 import swiftHelperEmbeddedPath from "../bin/serve-sim-bin" with { type: "file" };
-
-interface ServerState {
-  pid: number;
-  port: number;
-  device: string;
-  url: string;
-  streamUrl: string;
-  wsUrl: string;
-}
 
 function ensureStateDir() {
   if (!existsSync(STATE_DIR)) {
@@ -81,10 +81,22 @@ function getBootedUdids(): Set<string> | null {
   }
 }
 
+let androidSnapshot: { at: number; connected: Set<string> | null } = { at: 0, connected: null };
+function getConnectedAndroidDeviceIds(): Set<string> | null {
+  const now = Date.now();
+  if (androidSnapshot.connected && now - androidSnapshot.at < 1000) {
+    return androidSnapshot.connected;
+  }
+  const connected = getConnectedAndroidSerials();
+  if (connected) androidSnapshot = { at: now, connected };
+  return connected;
+}
+
 function readStateFile(file: string): ServerState | null {
   try {
     if (!existsSync(file)) return null;
     const state = JSON.parse(readFileSync(file, "utf-8")) as ServerState;
+    const platform = state.platform ?? "ios";
     try {
       process.kill(state.pid, 0);
     } catch {
@@ -97,16 +109,18 @@ function readStateFile(file: string): ServerState | null {
     // When that happens the helper keeps accepting /stream.mjpeg connections
     // but never emits frames, so clients hang on "Connecting...". Detect and
     // recycle here so --detach / --list always return a working stream.
-    const booted = getBootedUdids();
-    if (booted && !booted.has(state.device)) {
+    const liveDevices = platform === "android"
+      ? getConnectedAndroidDeviceIds()
+      : getBootedUdids();
+    if (liveDevices && !liveDevices.has(state.device)) {
       console.error(
-        `[serve-sim] Helper pid ${state.pid} is bound to device ${state.device} which is no longer booted — killing stale helper.`,
+        `[serve-sim] Helper pid ${state.pid} is bound to ${platform} device ${state.device} which is no longer available — killing stale helper.`,
       );
       try { process.kill(state.pid, "SIGTERM"); } catch {}
       try { unlinkSync(file); } catch {}
       return null;
     }
-    return state;
+    return { ...state, platform };
   } catch {
     return null;
   }
@@ -267,6 +281,14 @@ function resolveDevice(nameOrUDID: string): string {
   process.exit(1);
 }
 
+function resolveDeviceForPlatform(nameOrUDID: string, platform: DevicePlatform): string {
+  return platform === "android" ? resolveAndroidDevice(nameOrUDID) : resolveDevice(nameOrUDID);
+}
+
+function stateDeviceForPlatform(nameOrUDID: string, platform: DevicePlatform): string {
+  return platform === "android" ? nameOrUDID : resolveDevice(nameOrUDID);
+}
+
 function isDeviceBooted(udid: string): boolean {
   try {
     const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
@@ -367,6 +389,31 @@ function getLocalNetworkIP(): string | null {
   return null;
 }
 
+function findDefaultDevice(platform: DevicePlatform, quiet = false): string[] {
+  if (platform === "android") {
+    const connected = findConnectedAndroidDevice();
+    if (connected) return [connected];
+    console.error("No Android device specified and no connected Android device/emulator found. Start an emulator or connect a device, then rerun with --platform android.");
+    process.exit(1);
+  }
+
+  const booted = findBootedDevice();
+  if (booted) return [booted];
+  const fallback = pickDefaultDevice();
+  if (!fallback) {
+    console.error("No device specified and no available iOS simulator found.");
+    process.exit(1);
+  }
+  if (!quiet) {
+    console.log(`No booted simulator — booting ${fallback.name}...`);
+  }
+  return [fallback.udid];
+}
+
+function getDisplayName(udid: string, platform: DevicePlatform): string | null {
+  return platform === "android" ? getAndroidDeviceName(udid) : getDeviceName(udid);
+}
+
 async function findAvailablePort(start: number): Promise<number> {
   const usedPorts = new Set(readAllStates().map((s) => s.port));
   for (let port = start; port < start + 100; port++) {
@@ -402,6 +449,21 @@ interface SpawnHelperOptions {
   port: number;
   host: string;
   logFile: string;
+}
+
+interface SpawnAndroidHelperOptions {
+  serial: string;
+  port: number;
+  host: string;
+  logFile: string;
+}
+
+function selfCommandArgs(args: string[]): { command: string; args: string[] } {
+  const entry = process.argv[1];
+  if (entry && entry !== process.execPath && !entry.startsWith("/$bunfs/") && existsSync(entry)) {
+    return { command: process.execPath, args: [entry, ...args] };
+  }
+  return { command: process.execPath, args };
 }
 
 /** Wait for the helper to become ready (health check + capture started). */
@@ -510,8 +572,59 @@ async function spawnHelperAttached(opts: SpawnHelperOptions): Promise<{
   return { ready, child, log };
 }
 
+async function spawnAndroidHelper(opts: SpawnAndroidHelperOptions, detachMode: boolean): Promise<{
+  ready: boolean;
+  pid: number;
+  child?: ChildProcess;
+  log: string;
+}> {
+  const { serial, port, host, logFile } = opts;
+  const url = `http://${host}:${port}`;
+
+  ensureStateDir();
+  const logFd = openSync(logFile, "w");
+  const command = selfCommandArgs(["__android-helper", serial, "--port", String(port)]);
+  const child = nodeSpawn(command.command, command.args, {
+    detached: detachMode,
+    stdio: ["ignore", logFd, logFd],
+  });
+  if (detachMode) child.unref();
+  closeSync(logFd);
+
+  const childPid = child.pid!;
+  let childExited = false;
+  child.once("exit", () => { childExited = true; });
+
+  const { ready, log } = await waitForHelperReady(
+    childPid,
+    url,
+    logFile,
+    () => !childExited && isProcessAlive(childPid),
+  );
+
+  return {
+    ready,
+    pid: childPid,
+    child: detachMode ? undefined : child,
+    log,
+  };
+}
+
+function makeState(platform: DevicePlatform, device: string, pid: number, port: number): ServerState {
+  const host = "127.0.0.1";
+  return {
+    pid,
+    port,
+    device,
+    platform,
+    url: `http://${host}:${port}`,
+    streamUrl: `http://${host}:${port}/stream.mjpeg`,
+    wsUrl: `ws://${host}:${port}/ws`,
+  };
+}
+
 /** Boot + spawn helper with retry logic. Returns pid on success, exits on failure. */
-async function startHelper(
+async function startIOSHelper(
   udid: string,
   port: number,
   opts: { detach: boolean },
@@ -532,15 +645,7 @@ async function startHelper(
     if (opts.detach) {
       const result = await spawnHelperDetached(spawnOpts);
       if (result.ready) {
-        const state: ServerState = {
-          pid: result.pid,
-          port,
-          device: udid,
-          url: `http://${host}:${port}`,
-          streamUrl: `http://${host}:${port}/stream.mjpeg`,
-          wsUrl: `ws://${host}:${port}/ws`,
-        };
-        writeState(state);
+        writeState(makeState("ios", udid, result.pid, port));
         return { pid: result.pid };
       }
       stopProcess(result.pid);
@@ -548,15 +653,7 @@ async function startHelper(
     } else {
       const result = await spawnHelperAttached(spawnOpts);
       if (result.ready) {
-        const state: ServerState = {
-          pid: result.child.pid!,
-          port,
-          device: udid,
-          url: `http://${host}:${port}`,
-          streamUrl: `http://${host}:${port}/stream.mjpeg`,
-          wsUrl: `ws://${host}:${port}/ws`,
-        };
-        writeState(state);
+        writeState(makeState("ios", udid, result.child.pid!, port));
         return { pid: result.child.pid!, child: result.child };
       }
       stopProcess(result.child.pid!);
@@ -573,25 +670,63 @@ async function startHelper(
   process.exit(1);
 }
 
+async function startAndroidHelper(
+  serial: string,
+  port: number,
+  opts: { detach: boolean },
+): Promise<{ pid: number; child?: ChildProcess }> {
+  const connected = getConnectedAndroidDeviceIds();
+  if (connected && !connected.has(serial)) {
+    console.error(`Android device ${serial} is not connected or ready.`);
+    process.exit(1);
+  }
+
+  const host = "127.0.0.1";
+  const logFile = join(STATE_DIR, `server-${serial}.log`);
+  const spawnOpts: SpawnAndroidHelperOptions = { serial, port, host, logFile };
+
+  let lastLog = "";
+  const MAX_ATTEMPTS = 2;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    killPortHolder(port);
+
+    const result = await spawnAndroidHelper(spawnOpts, opts.detach);
+    if (result.ready) {
+      writeState(makeState("android", serial, result.pid, port));
+      return { pid: result.pid, child: result.child };
+    }
+    stopProcess(result.pid);
+    lastLog = result.log;
+
+    if (attempt < MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  const reason = lastLog ? `Android helper failed:\n${lastLog}` : "Android helper process failed to start";
+  console.error(reason);
+  process.exit(1);
+}
+
+async function startHelper(
+  platform: DevicePlatform,
+  device: string,
+  port: number,
+  opts: { detach: boolean },
+): Promise<{ pid: number; child?: ChildProcess }> {
+  return platform === "android"
+    ? startAndroidHelper(device, port, opts)
+    : startIOSHelper(device, port, opts);
+}
+
 // ─── Commands ───
 
 /** Foreground follow mode (default). Stays attached, cleans up on Ctrl+C. */
-async function follow(devices: string[], startPort: number, quiet: boolean) {
+async function follow(platform: DevicePlatform, devices: string[], startPort: number, quiet: boolean) {
   const udids = devices.length > 0
-    ? devices.map(resolveDevice)
-    : (() => {
-        const booted = findBootedDevice();
-        if (booted) return [booted];
-        const fallback = pickDefaultDevice();
-        if (!fallback) {
-          console.error("No device specified and no available iOS simulator found.");
-          process.exit(1);
-        }
-        if (!quiet) {
-          console.log(`No booted simulator — booting ${fallback.name}...`);
-        }
-        return [fallback.udid];
-      })();
+    ? devices.map((device) => resolveDeviceForPlatform(device, platform))
+    : findDefaultDevice(platform, quiet);
 
   const children = new Map<string, ChildProcess>();
   const states: ServerState[] = [];
@@ -602,7 +737,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
     const existing = readState(udid);
     if (existing) {
       if (!quiet) {
-        const name = getDeviceName(udid) ?? udid;
+        const name = getDisplayName(udid, platform) ?? udid;
         if (udids.length > 1) console.log(`\n==> ${name} (${udid}) <==`);
         console.log(`  Already running on port ${existing.port}`);
         console.log(`  Stream:    ${existing.streamUrl}`);
@@ -613,25 +748,17 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
     }
 
     port = await findAvailablePort(port);
-    const { pid, child } = await startHelper(udid, port, { detach: false });
+    const { pid, child } = await startHelper(platform, udid, port, { detach: false });
 
     if (child) {
       children.set(udid, child);
     }
 
-    const host = "127.0.0.1";
-    const state: ServerState = {
-      pid,
-      port,
-      device: udid,
-      url: `http://${host}:${port}`,
-      streamUrl: `http://${host}:${port}/stream.mjpeg`,
-      wsUrl: `ws://${host}:${port}/ws`,
-    };
+    const state = makeState(platform, udid, pid, port);
     states.push(state);
 
     if (!quiet) {
-      const name = getDeviceName(udid) ?? udid;
+      const name = getDisplayName(udid, platform) ?? udid;
       if (udids.length > 1) console.log(`\n==> ${name} (${udid}) <==`);
       console.log(`  Stream:    ${state.streamUrl}`);
       console.log(`  WebSocket: ${state.wsUrl}`);
@@ -646,11 +773,13 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
     const s = states[0]!;
     console.log(JSON.stringify({
       url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+      platform: s.platform ?? "ios",
     }));
   } else {
     console.log(JSON.stringify({
       devices: states.map((s) => ({
         url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+        platform: s.platform ?? "ios",
       })),
     }));
   }
@@ -702,19 +831,10 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
 }
 
 /** Detach mode (--detach). Spawns helpers and returns their states. */
-async function detach(devices: string[], startPort: number): Promise<ServerState[]> {
+async function detach(platform: DevicePlatform, devices: string[], startPort: number): Promise<ServerState[]> {
   const udids = devices.length > 0
-    ? devices.map(resolveDevice)
-    : (() => {
-        const booted = findBootedDevice();
-        if (booted) return [booted];
-        const fallback = pickDefaultDevice();
-        if (!fallback) {
-          console.error("No device specified and no available iOS simulator found.");
-          process.exit(1);
-        }
-        return [fallback.udid];
-      })();
+    ? devices.map((device) => resolveDeviceForPlatform(device, platform))
+    : findDefaultDevice(platform, true);
 
   const states: ServerState[] = [];
   let port = startPort;
@@ -727,17 +847,9 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
     }
 
     port = await findAvailablePort(port);
-    await startHelper(udid, port, { detach: true });
+    await startHelper(platform, udid, port, { detach: true });
 
-    const host = "127.0.0.1";
-    states.push({
-      pid: readState(udid)!.pid,
-      port,
-      device: udid,
-      url: `http://${host}:${port}`,
-      streamUrl: `http://${host}:${port}/stream.mjpeg`,
-      wsUrl: `ws://${host}:${port}/ws`,
-    });
+    states.push(readState(udid)!);
 
     port++;
   }
@@ -750,34 +862,38 @@ function printStatesJSON(states: ServerState[]) {
     const s = states[0]!;
     console.log(JSON.stringify({
       url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+      platform: s.platform ?? "ios",
     }));
   } else {
     console.log(JSON.stringify({
       devices: states.map((s) => ({
         url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+        platform: s.platform ?? "ios",
       })),
     }));
   }
 }
 
 /** List running streams (--list). */
-function listStreams(deviceArg?: string) {
+function listStreams(deviceArg: string | undefined, platform: DevicePlatform, platformExplicit: boolean) {
   if (deviceArg) {
-    const udid = resolveDevice(deviceArg);
+    const udid = stateDeviceForPlatform(deviceArg, platform);
     const state = readState(udid);
     if (!state) {
-      console.log(JSON.stringify({ running: false, device: udid }));
+      console.log(JSON.stringify({ running: false, device: udid, platform }));
     } else {
       console.log(JSON.stringify({
         running: true,
         url: state.url, streamUrl: state.streamUrl, wsUrl: state.wsUrl,
-        port: state.port, device: state.device, pid: state.pid,
+        port: state.port, device: state.device, platform: state.platform ?? "ios", pid: state.pid,
       }));
     }
     return;
   }
 
-  const states = readAllStates();
+  const states = readAllStates().filter(
+    (state) => !platformExplicit || (state.platform ?? "ios") === platform,
+  );
   if (states.length === 0) {
     console.log(JSON.stringify({ running: false }));
   } else if (states.length === 1) {
@@ -785,33 +901,35 @@ function listStreams(deviceArg?: string) {
     console.log(JSON.stringify({
       running: true,
       url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl,
-      port: s.port, device: s.device, pid: s.pid,
+      port: s.port, device: s.device, platform: s.platform ?? "ios", pid: s.pid,
     }));
   } else {
     console.log(JSON.stringify({
       running: true,
       streams: states.map((s) => ({
         url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl,
-        port: s.port, device: s.device, pid: s.pid,
+        port: s.port, device: s.device, platform: s.platform ?? "ios", pid: s.pid,
       })),
     }));
   }
 }
 
 /** Kill running streams (--kill). */
-function killStreams(deviceArg?: string) {
+function killStreams(deviceArg: string | undefined, platform: DevicePlatform, platformExplicit: boolean) {
   if (deviceArg) {
-    const udid = resolveDevice(deviceArg);
+    const udid = stateDeviceForPlatform(deviceArg, platform);
     const state = readState(udid);
     if (!state) {
-      console.log(JSON.stringify({ disconnected: true, device: udid }));
+      console.log(JSON.stringify({ disconnected: true, device: udid, platform }));
       return;
     }
     try { process.kill(state.pid, "SIGTERM"); } catch {}
     clearState(udid);
     console.log(JSON.stringify({ disconnected: true, device: state.device }));
   } else {
-    const states = readAllStates();
+    const states = readAllStates().filter(
+      (state) => !platformExplicit || (state.platform ?? "ios") === platform,
+    );
     if (states.length === 0) {
       console.log(JSON.stringify({ disconnected: true, devices: [] }));
       return;
@@ -821,7 +939,11 @@ function killStreams(deviceArg?: string) {
       try { process.kill(state.pid, "SIGTERM"); } catch {}
       devices.push(state.device);
     }
-    clearState();
+    if (platformExplicit) {
+      for (const device of devices) clearState(device);
+    } else {
+      clearState();
+    }
     console.log(JSON.stringify({ disconnected: true, devices }));
   }
 }
@@ -907,6 +1029,11 @@ async function rotate(args: string[]) {
     process.exit(1);
   }
 
+  if ((state.platform ?? "ios") === "android") {
+    await setAndroidOrientation(state.device, orientation as Parameters<typeof setAndroidOrientation>[1]);
+    return;
+  }
+
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl);
     ws.binaryType = "arraybuffer";
@@ -944,6 +1071,11 @@ async function button(args: string[]) {
   }
 
   const buttonName = filteredArgs[0] ?? "home";
+
+  if ((state.platform ?? "ios") === "android") {
+    await sendAndroidButton(state.device, buttonName);
+    return;
+  }
 
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl);
@@ -1049,20 +1181,20 @@ async function memoryWarning(args: string[]) {
 
 // ─── Serve preview ───
 
-async function serve(servePort: number, devices: string[], portExplicit: boolean) {
+async function serve(servePort: number, devices: string[], portExplicit: boolean, platform: DevicePlatform) {
   let targetDevice: string | undefined;
 
   if (devices.length > 0) {
-    const states = await detach(devices, 3100);
+    const states = await detach(platform, devices, 3100);
     targetDevice = states[0]?.device;
   } else {
     // Ensure a serve-sim stream is running (start one if not)
-    const existing = readAllStates();
+    const existing = readAllStates().filter((state) => (state.platform ?? "ios") === platform);
     if (existing.length > 0) {
       targetDevice = existing[0]?.device;
     } else {
-      console.log("Starting simulator stream...");
-      const states = await detach(devices, 3100);
+      console.log(platform === "android" ? "Starting Android stream..." : "Starting simulator stream...");
+      const states = await detach(platform, devices, 3100);
       targetDevice = states[0]?.device;
     }
   }
@@ -1118,11 +1250,12 @@ function bindPreviewServer(port: number, middleware: ReturnType<typeof import(".
 
 function printHelp() {
   console.log(`
-serve-sim - Stream iOS Simulator to the browser
+serve-sim - Stream iOS Simulator or Android emulator to the browser
 
 Usage:
   serve-sim [device...]                 Start preview server (default: localhost:3200)
   serve-sim --no-preview [device...]    Stream in foreground without a preview server
+  serve-sim --platform android [serial] Stream a connected Android device/emulator
   serve-sim gesture '<json>' [-d udid]  Send a touch gesture
   serve-sim button [name] [-d udid]     Send a button press (default: home)
   serve-sim rotate <orientation> [-d udid]
@@ -1137,6 +1270,9 @@ Options:
   -p, --port <port>   Starting port (preview default: 3200, stream default: 3100)
   -d, --detach        Spawn helper and exit (daemon mode)
   -q, --quiet         Suppress human-readable output, JSON only
+      --platform <p>  Device platform: ios (default) or android
+      --ios           Alias for --platform ios
+      --android       Alias for --platform android
       --no-preview    Skip the web preview server; stream in foreground only
       --list [device] List running streams
       --kill [device] Kill running stream(s)
@@ -1147,6 +1283,7 @@ Examples:
   serve-sim -p 8080                     Preview on a custom port
   serve-sim --no-preview                Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
+  serve-sim --android emulator-5554     Stream a connected Android emulator
   serve-sim --detach                    Start streaming in background (daemon)
   serve-sim --list                      Show all running streams
   serve-sim --kill                      Stop all streams
@@ -1156,6 +1293,28 @@ Examples:
 // ─── Main ───
 
 const argv = process.argv.slice(2);
+
+function parsePlatform(value: string | undefined): DevicePlatform {
+  if (value === "ios" || value === "android") return value;
+  console.error(`Invalid platform: ${value ?? ""}. Expected "ios" or "android".`);
+  process.exit(1);
+}
+
+if (argv[0] === "__android-helper") {
+  const serial = argv[1];
+  let port = 3100;
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === "--port" || argv[i] === "-p") {
+      port = parseInt(argv[++i] ?? "3100", 10);
+    }
+  }
+  if (!serial) {
+    console.error("Missing Android device serial.");
+    process.exit(1);
+  }
+  await runAndroidHelper(serial, port);
+  await new Promise(() => {});
+}
 
 // Subcommands: gesture and button
 if (argv[0] === "gesture") {
@@ -1186,6 +1345,8 @@ let list = false;
 let kill = false;
 let help = false;
 let noPreview = false;
+let platform: DevicePlatform = "ios";
+let platformExplicit = false;
 const positionalDevices: string[] = [];
 let listDevice: string | undefined;
 let killDevice: string | undefined;
@@ -1204,6 +1365,18 @@ for (let i = 0; i < argv.length; i++) {
       break;
     case "--no-preview":
       noPreview = true;
+      break;
+    case "--platform":
+      platform = parsePlatform(argv[++i]);
+      platformExplicit = true;
+      break;
+    case "--ios":
+      platform = "ios";
+      platformExplicit = true;
+      break;
+    case "--android":
+      platform = "android";
+      platformExplicit = true;
       break;
     case "--list": case "-l":
       list = true;
@@ -1239,20 +1412,20 @@ if (help) {
 }
 
 if (list) {
-  listStreams(listDevice);
+  listStreams(listDevice, platform, platformExplicit);
   process.exit(0);
 }
 
 if (kill) {
-  killStreams(killDevice);
+  killStreams(killDevice, platform, platformExplicit);
   process.exit(0);
 }
 
 if (detachMode) {
-  const states = await detach(positionalDevices, startPort ?? 3100);
+  const states = await detach(platform, positionalDevices, startPort ?? 3100);
   printStatesJSON(states);
 } else if (noPreview) {
-  await follow(positionalDevices, startPort ?? 3100, quiet);
+  await follow(platform, positionalDevices, startPort ?? 3100, quiet);
 } else {
-  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined);
+  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined, platform);
 }
