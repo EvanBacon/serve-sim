@@ -53,6 +53,75 @@ static void simcam_log(NSString *fmt, ...) {
 // class_createInstance bypasses normal -init, so we avoid synthesized ivars.
 static char kFakePositionKey;
 
+// WebKit's getUserMedia path validates the requested mediaStreamConstraints
+// against `device.formats[*].videoSupportedFrameRateRanges` and rejects with
+// "InvalidConstraint" if no format matches. Frameworks that don't probe
+// formats (expo-camera, vision-camera on simulator) won't notice these
+// existing, but Safari (and any AVF code that walks formats) needs at least
+// one well-formed entry. AVCaptureDeviceFormat / AVFrameRateRange both have
+// private inits so we subclass and route via class_createInstance.
+
+@interface SimCamFakeFrameRateRange : AVFrameRateRange
+@end
+@implementation SimCamFakeFrameRateRange
+- (Float64)minFrameRate { return 1.0; }
+- (Float64)maxFrameRate { return 60.0; }
+- (CMTime)minFrameDuration { return CMTimeMake(1, 60); }
+- (CMTime)maxFrameDuration { return CMTimeMake(1, 1); }
+@end
+
+@interface SimCamFakeFormat : AVCaptureDeviceFormat
+@end
+@implementation SimCamFakeFormat {
+    CMVideoFormatDescriptionRef _fd;
+    NSArray<AVFrameRateRange *> *_ranges;
+}
+- (CMFormatDescriptionRef)formatDescription {
+    if (!_fd) {
+        CMVideoFormatDescriptionCreate(kCFAllocatorDefault,
+            kCVPixelFormatType_32BGRA, 1280, 720, NULL, &_fd);
+    }
+    return _fd;
+}
+- (NSArray<AVFrameRateRange *> *)videoSupportedFrameRateRanges {
+    if (!_ranges) {
+        AVFrameRateRange *r = (AVFrameRateRange *)class_createInstance(
+            [SimCamFakeFrameRateRange class], 0);
+        _ranges = r ? @[r] : @[];
+    }
+    return _ranges;
+}
+- (NSString *)mediaType { return AVMediaTypeVideo; }
+- (FourCharCode)mediaSubType { return kCVPixelFormatType_32BGRA; }
+- (CMVideoDimensions)highResolutionStillImageDimensions {
+    return (CMVideoDimensions){ 1280, 720 };
+}
+- (BOOL)isHighestPhotoQualitySupported { return YES; }
+- (BOOL)isVideoBinned { return NO; }
+- (BOOL)isVideoStabilizationModeSupported:(AVCaptureVideoStabilizationMode)m { return NO; }
+- (CGFloat)videoMaxZoomFactor { return 16.0; }
+- (CGFloat)videoZoomFactorUpscaleThreshold { return 1.0; }
+- (NSArray *)autoFocusSystem { return @[]; }
+- (BOOL)isMultiCamSupported { return NO; }
+- (NSArray *)supportedColorSpaces { return @[]; }
+- (NSArray *)supportedDepthDataFormats { return @[]; }
+- (BOOL)isPortraitEffectSupported { return NO; }
+- (CGFloat)minISO { return 25.0; }
+- (CGFloat)maxISO { return 6400.0; }
+- (CMTime)minExposureDuration { return CMTimeMake(1, 8000); }
+- (CMTime)maxExposureDuration { return CMTimeMake(1, 30); }
+- (void)dealloc { if (_fd) CFRelease(_fd); }
+@end
+
+static AVCaptureDeviceFormat *SimCamSharedFakeFormat(void) {
+    static AVCaptureDeviceFormat *f = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        f = (AVCaptureDeviceFormat *)class_createInstance([SimCamFakeFormat class], 0);
+    });
+    return f;
+}
+
 @interface SimCamFakeDevice : AVCaptureDevice
 @end
 
@@ -75,7 +144,10 @@ static char kFakePositionKey;
 - (BOOL)hasMediaType:(AVMediaType)mediaType { return [mediaType isEqualToString:AVMediaTypeVideo]; }
 - (BOOL)supportsAVCaptureSessionPreset:(AVCaptureSessionPreset)preset { return YES; }
 - (AVCaptureDeviceType)deviceType { return AVCaptureDeviceTypeBuiltInWideAngleCamera; }
-- (NSArray<AVCaptureDeviceFormat *> *)formats { return @[]; }
+- (NSArray<AVCaptureDeviceFormat *> *)formats {
+    AVCaptureDeviceFormat *f = SimCamSharedFakeFormat();
+    return f ? @[f] : @[];
+}
 - (BOOL)isConnected { return YES; }
 - (BOOL)isSuspended { return NO; }
 - (BOOL)lockForConfiguration:(NSError **)e { return YES; }
@@ -83,7 +155,7 @@ static char kFakePositionKey;
 // Properties read by camera frameworks (RN-Vision-Camera, expo-camera).
 // Override every accessor that Apple's implementation would otherwise reach
 // into private ivars for — they're zero on our class_createInstance object.
-- (AVCaptureDeviceFormat *)activeFormat { return nil; }
+- (AVCaptureDeviceFormat *)activeFormat { return SimCamSharedFakeFormat(); }
 - (CMTime)activeVideoMinFrameDuration { return CMTimeMake(1, 30); }
 - (CMTime)activeVideoMaxFrameDuration { return CMTimeMake(1, 30); }
 - (CGFloat)videoZoomFactor { return 1.0; }
