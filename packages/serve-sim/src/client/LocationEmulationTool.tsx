@@ -801,7 +801,7 @@ function renderScene(
   const scale = Math.min(
     (cssW - padX * 2) / fitW,
     (cssH - padY * 2) / fitH,
-  );
+  ) * 1.2;
 
   // Vertical exaggeration — real ridges look pancake-flat in plain ortho,
   // so we push hills harder. Cap at 24× and scale down on big xy extents so
