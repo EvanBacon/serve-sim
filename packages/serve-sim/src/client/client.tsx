@@ -2594,10 +2594,10 @@ function CameraPanel({
                   openFilePicker();
                 }}
                 onMouseEnter={(e) => {
-                  if (!isDragOver && isPlaceholder) e.currentTarget.style.borderColor = "rgba(255,255,255,0.3)";
+                  if (!isDragOver && isPlaceholder) e.currentTarget.style.borderColor = "#444";
                 }}
                 onMouseLeave={(e) => {
-                  if (!isDragOver && isPlaceholder) e.currentTarget.style.borderColor = "rgba(255,255,255,0.15)";
+                  if (!isDragOver && isPlaceholder) e.currentTarget.style.borderColor = "#2a2a2c";
                 }}
                 title={
                   isPlaceholder
@@ -2637,7 +2637,7 @@ function CameraPanel({
                     data-clear-media
                     onClick={(e) => { e.stopPropagation(); clearMedia(); }}
                     onMouseEnter={(e) => { e.currentTarget.style.color = "#fff"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.color = "rgba(255,255,255,0.55)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = "#888"; }}
                     style={cameraPanelStyles.clearBtn}
                     aria-label="Clear source"
                     title="Clear → placeholder"
@@ -2908,7 +2908,7 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
     margin: "0 0 14px",
     fontSize: 11,
     lineHeight: 1.5,
-    color: "rgba(255,255,255,0.5)",
+    color: "#888",
   },
   dropZone: {
     minHeight: 44,
@@ -2919,7 +2919,7 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
     gap: 10,
     padding: "10px 14px",
     background: "#0e0e10",
-    border: "1px dashed rgba(255,255,255,0.15)",
+    border: "1px dashed #2a2a2c",
     borderRadius: 10,
     textAlign: "center",
     transition: "border-color 0.15s, background 0.15s",
@@ -2932,21 +2932,21 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
   // the zone reads as "media is set" rather than "drop here".
   dropZoneFilled: {
     background: "#141416",
-    border: "1px solid rgba(255,255,255,0.1)",
+    border: "1px solid #232325",
   },
   sourceBadge: {
     fontSize: 9,
     letterSpacing: "0.1em",
     textTransform: "uppercase",
-    color: "rgba(255,255,255,0.55)",
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.08)",
+    color: "#888",
+    background: "#18181a",
+    border: "1px solid #232325",
     padding: "2px 7px",
     borderRadius: 999,
     flexShrink: 0,
   },
   dropTitle: { fontSize: 12, color: "#eee", fontWeight: 600 },
-  dropHint: { fontSize: 11, color: "rgba(255,255,255,0.45)" },
+  dropHint: { fontSize: 11, color: "#777" },
   dropFilename: {
     fontSize: 12,
     color: "#fff",
@@ -2965,7 +2965,7 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
     justifyContent: "center",
     background: "transparent",
     border: "none",
-    color: "rgba(255,255,255,0.55)",
+    color: "#888",
     cursor: "pointer",
     padding: 0,
     flexShrink: 0,
@@ -3058,7 +3058,7 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
   },
   menuLabel: {
     fontSize: 10,
-    color: "rgba(255,255,255,0.45)",
+    color: "#777",
     textTransform: "uppercase",
     letterSpacing: "0.08em",
   },
@@ -3077,7 +3077,7 @@ const cameraPanelStyles: Record<string, CSSProperties> = {
     background: "transparent",
     border: "none",
     borderRadius: 5,
-    color: "rgba(255,255,255,0.55)",
+    color: "#888",
     cursor: "pointer",
     padding: 0,
   },
@@ -3860,14 +3860,9 @@ function App() {
           aria-pressed={cameraPanelOpen}
           title="Camera"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="m14.31 8 5.74 9.94" />
-            <path d="M9.69 8h11.48" />
-            <path d="m7.38 12 5.74-9.94" />
-            <path d="M9.69 16 3.95 6.06" />
-            <path d="M14.31 16H2.83" />
-            <path d="m16.62 12-5.74 9.94" />
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M13.997 4a2 2 0 0 1 1.76 1.05l.486.9A2 2 0 0 0 18.003 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1.997a2 2 0 0 0 1.759-1.048l.489-.904A2 2 0 0 1 10.004 4z" />
+            <circle cx="12" cy="13" r="3" />
           </svg>
         </button>
         <button
