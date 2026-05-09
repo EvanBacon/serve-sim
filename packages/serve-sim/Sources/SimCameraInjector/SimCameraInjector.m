@@ -834,27 +834,58 @@ static BOOL SimCamLooksLikeCameraDropPath(NSString *path) {
 
 @end
 
-#pragma mark - UIGraphicsImageRenderer redirect (expo-camera generatePhoto)
+#pragma mark - UIGraphicsImageRenderer redirect (camera-placeholder generators)
 
 // Swift's `Data.write(to:options:)` reaches Foundation through CFData
-// internals that bypass the NSData Obj-C swizzles above. Hook one level
-// higher: ExpoCameraUtils.generatePhoto allocates a UIGraphicsImageRenderer
-// and returns its `image(actions:)` result, which IS dispatched through the
-// Obj-C runtime. Filter by call-stack frame name so only expo-camera (and
-// any framework with "ExpoCamera" in the symbol) gets redirected; everyone
-// else gets the real renderer.
+// internals that bypass the NSData Obj-C swizzles above, so frameworks
+// that JPEG-encode a fake photo and write it via Swift `Data.write` slip
+// past those hooks. Hook one level higher: most simulator camera
+// placeholder generators allocate a UIGraphicsImageRenderer and return its
+// `image(actions:)` result. That dispatches through the Obj-C runtime.
+//
+// Rather than name a specific framework, we match the *behavior* via call
+// stack symbol substrings. The pattern is "this frame is some camera lib
+// generating a placeholder / simulator / fake photo" — the union of common
+// naming conventions. Frameworks whose authors name their generator with
+// any of these tokens get redirected automatically.
+//
+// If you find a camera framework that slips past this, the next-most-
+// agnostic option is to interpose `UIImageJPEGRepresentation` via fishhook
+// (cross-image C symbol rebind) and filter the same way. Not done here to
+// keep the dylib free of vendored deps.
 
-static BOOL SimCamCallerIsExpoCamera(void) {
+static BOOL SimCamCallerLooksLikeCameraPlaceholder(void) {
     NSArray<NSString *> *stack = [NSThread callStackSymbols];
-    // Skip the top two frames (this function + the swizzle thunk). Walk a
-    // bounded number — generatePhoto sits near the top.
-    NSUInteger limit = MIN((NSUInteger)8, stack.count);
+    // Skip the top two frames (this fn + the swizzle thunk). Camera-side
+    // generators sit close to the top; bound the walk to keep this cheap
+    // for the common (no-match) case.
+    NSUInteger limit = MIN((NSUInteger)16, stack.count);
     for (NSUInteger i = 2; i < limit; i++) {
         NSString *frame = stack[i];
-        if ([frame containsString:@"ExpoCamera"]) return YES;
-        if ([frame containsString:@"expo_camera"]) return YES;
-        if ([frame containsString:@"generatePhoto"]) return YES;
-        if ([frame containsString:@"generatePictureForSimulator"]) return YES;
+        // Generator-naming tokens, by themselves enough to identify a fake
+        // photo path regardless of which framework owns it.
+        if ([frame containsString:@"generatePhoto"] ||
+            [frame containsString:@"generatePicture"] ||
+            [frame containsString:@"generateImage"] ||
+            [frame containsString:@"placeholderPhoto"] ||
+            [frame containsString:@"placeholderImage"] ||
+            [frame containsString:@"simulatorPhoto"] ||
+            [frame containsString:@"PictureForSimulator"] ||
+            [frame containsString:@"PhotoForSimulator"] ||
+            [frame containsString:@"ImageForSimulator"] ||
+            [frame containsString:@"mockPhoto"] ||
+            [frame containsString:@"fakePhoto"]) return YES;
+        // Camera-namespaced frames combined with a simulator / placeholder
+        // / generator hint catch the rest (e.g. ExpoCamera, RNCamera,
+        // VisionCamera, AnyCamera with a "Simulator" or "Placeholder"
+        // helper).
+        if ([frame containsString:@"Camera"] || [frame containsString:@"camera"]) {
+            if ([frame containsString:@"Simulator"] ||
+                [frame containsString:@"simulator"] ||
+                [frame containsString:@"Placeholder"] ||
+                [frame containsString:@"placeholder"] ||
+                [frame containsString:@"generate"]) return YES;
+        }
     }
     return NO;
 }
@@ -863,7 +894,7 @@ static BOOL SimCamCallerIsExpoCamera(void) {
 @end
 @implementation UIGraphicsImageRenderer (SimCam)
 - (UIImage *)simcam_imageWithActions:(void (NS_NOESCAPE ^)(UIGraphicsImageRendererContext *))actions {
-    if (SimCamCallerIsExpoCamera()) {
+    if (SimCamCallerLooksLikeCameraPlaceholder()) {
         NSData *jpeg = [[SimCamRegistry shared] currentSnapshotJPEGAtQuality:0.92];
         if (jpeg.length > 0) {
             UIImage *snap = [UIImage imageWithData:jpeg];
