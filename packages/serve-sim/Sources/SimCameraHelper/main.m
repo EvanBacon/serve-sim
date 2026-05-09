@@ -83,6 +83,7 @@ typedef NS_ENUM(NSInteger, SimCamSourceKind) {
     SimCamSourcePlaceholder,
     SimCamSourceWebcam,
     SimCamSourceImage,
+    SimCamSourceVideo,
 };
 
 static SimCamSourceKind gActiveSource = SimCamSourceNone;
@@ -382,6 +383,184 @@ static void StopImageSource(void) {
     // Nothing live; the published frame stays in shm until next source overwrites.
 }
 
+#pragma mark Video source (looping playback via AVAssetReader)
+
+// Looping AVAsset playback at native FPS. Frames are decoded as BGRA on a
+// background queue, scaled with vImage into the shm buffer, then paced with
+// `clock_nanosleep` against the track's presentation timestamps so playback
+// runs at real time. When the reader hits AVAssetReaderStatusCompleted we
+// recreate it and reset the wall-clock anchor so the loop boundary is
+// seamless.
+
+static dispatch_queue_t gVideoQueue;
+static atomic_bool gVideoCancelled = false;
+static dispatch_semaphore_t gVideoStopped;  // signaled when the loop exits
+
+static AVAssetReaderTrackOutput *MakeVideoOutput(AVAssetReader **outReader,
+                                                 AVAssetTrack *track,
+                                                 NSString **errOut) {
+    NSError *e = nil;
+    AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:track.asset error:&e];
+    if (!reader) {
+        if (errOut) *errOut = e.localizedDescription ?: @"AVAssetReader init failed";
+        return nil;
+    }
+    AVAssetReaderTrackOutput *out = [AVAssetReaderTrackOutput
+        assetReaderTrackOutputWithTrack:track
+                         outputSettings:@{
+                             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+                             (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+                         }];
+    out.alwaysCopiesSampleData = NO;
+    if (![reader canAddOutput:out]) {
+        if (errOut) *errOut = @"reader rejected BGRA output";
+        return nil;
+    }
+    [reader addOutput:out];
+    if (![reader startReading]) {
+        if (errOut) *errOut = reader.error.localizedDescription ?: @"reader failed to start";
+        return nil;
+    }
+    *outReader = reader;
+    return out;
+}
+
+// Aspect-fill a source pixel buffer into a transient BGRA buffer sized to
+// the shm region. We allocate once per call so the caller is free to free
+// the result without worrying about lifetime sharing.
+static uint8_t *RenderPixelBufferToShmSize(CVPixelBufferRef pb) {
+    size_t srcW = CVPixelBufferGetWidth(pb);
+    size_t srcH = CVPixelBufferGetHeight(pb);
+    if (srcW == 0 || srcH == 0) return NULL;
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    uint8_t *src = CVPixelBufferGetBaseAddress(pb);
+    size_t srcBPR = CVPixelBufferGetBytesPerRow(pb);
+    if (!src) {
+        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+        return NULL;
+    }
+
+    size_t bpr = (size_t)gWidth * 4;
+    uint8_t *out = calloc(1, bpr * gHeight);
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(out, gWidth, gHeight, 8, bpr, cs,
+        kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+
+    // Wrap the source pixels as a CGImage we can hand to CoreGraphics.
+    CGDataProviderRef dp = CGDataProviderCreateWithData(NULL, src, srcBPR * srcH, NULL);
+    CGColorSpaceRef imgCs = CGColorSpaceCreateDeviceRGB();
+    CGImageRef img = CGImageCreate(srcW, srcH, 8, 32, srcBPR, imgCs,
+        kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little,
+        dp, NULL, false, kCGRenderingIntentDefault);
+    CGColorSpaceRelease(imgCs);
+    CGDataProviderRelease(dp);
+
+    double sx = (double)gWidth / srcW, sy = (double)gHeight / srcH;
+    double s = MAX(sx, sy);
+    double dw = srcW * s, dh = srcH * s;
+    CGContextDrawImage(ctx, CGRectMake((gWidth - dw)/2.0, (gHeight - dh)/2.0, dw, dh), img);
+    CGImageRelease(img);
+    CGContextRelease(ctx);
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    return out;
+}
+
+static void RunVideoLoop(NSString *path) {
+    NSURL *url = [NSURL fileURLWithPath:path];
+    AVAsset *asset = [AVAsset assetWithURL:url];
+    NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+    if (tracks.count == 0) {
+        fprintf(stderr, "[serve-sim-camera] video → %s: no video tracks\n", path.UTF8String);
+        dispatch_semaphore_signal(gVideoStopped);
+        return;
+    }
+    AVAssetTrack *track = tracks.firstObject;
+
+    while (!atomic_load(&gVideoCancelled)) {
+        NSString *err = nil;
+        AVAssetReader *reader = nil;
+        AVAssetReaderTrackOutput *out = MakeVideoOutput(&reader, track, &err);
+        if (!out) {
+            fprintf(stderr, "[serve-sim-camera] video reader failed: %s\n", err.UTF8String ?: "?");
+            break;
+        }
+
+        uint64_t loopStartNs = MachAbsToNs(mach_absolute_time());
+        while (!atomic_load(&gVideoCancelled)) {
+            CMSampleBufferRef sb = [out copyNextSampleBuffer];
+            if (!sb) break;  // end of track or read error → loop or exit
+            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sb);
+            CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sb);
+            if (pb) {
+                uint8_t *frame = RenderPixelBufferToShmSize(pb);
+                if (frame) {
+                    // Pace against wall clock: don't publish until the
+                    // frame's PTS has caught up. Skips backwards (e.g.
+                    // first frame of each loop) without sleeping.
+                    if (CMTIME_IS_VALID(pts) && pts.timescale > 0) {
+                        uint64_t targetNs = loopStartNs +
+                            (uint64_t)((double)pts.value * 1e9 / pts.timescale);
+                        uint64_t nowNs = MachAbsToNs(mach_absolute_time());
+                        if (targetNs > nowNs) {
+                            uint64_t sleepNs = targetNs - nowNs;
+                            // Cap waits to 100ms slices so cancellation
+                            // is responsive on long-PTS gaps.
+                            while (sleepNs > 0 && !atomic_load(&gVideoCancelled)) {
+                                uint64_t slice = sleepNs > 100000000ULL ? 100000000ULL : sleepNs;
+                                struct timespec ts = {
+                                    .tv_sec = (time_t)(slice / 1000000000ULL),
+                                    .tv_nsec = (long)(slice % 1000000000ULL),
+                                };
+                                nanosleep(&ts, NULL);
+                                sleepNs -= slice;
+                            }
+                        }
+                    }
+                    PublishFrame(frame);
+                    free(frame);
+                }
+            }
+            CFRelease(sb);
+        }
+
+        AVAssetReaderStatus status = reader.status;
+        [reader cancelReading];
+        if (status == AVAssetReaderStatusFailed) {
+            fprintf(stderr, "[serve-sim-camera] video reader failed mid-loop: %s\n",
+                    reader.error.localizedDescription.UTF8String ?: "?");
+            break;
+        }
+        // Otherwise rewind by re-creating the reader on the next iteration.
+    }
+    dispatch_semaphore_signal(gVideoStopped);
+}
+
+static BOOL StartVideoSource(NSString *path, NSString **err) {
+    if (!path.length) { if (err) *err = @"video source needs a path"; return NO; }
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        if (err) *err = [NSString stringWithFormat:@"video file not found: %@", path];
+        return NO;
+    }
+    if (!gVideoQueue) {
+        gVideoQueue = dispatch_queue_create("serve-sim.cam.video", DISPATCH_QUEUE_SERIAL);
+    }
+    atomic_store(&gVideoCancelled, false);
+    gVideoStopped = dispatch_semaphore_create(0);
+    NSString *captured = [path copy];
+    dispatch_async(gVideoQueue, ^{ RunVideoLoop(captured); });
+    fprintf(stderr, "[serve-sim-camera] video → %s\n", path.UTF8String);
+    return YES;
+}
+
+static void StopVideoSource(void) {
+    if (!gVideoStopped) return;
+    atomic_store(&gVideoCancelled, true);
+    // Wait up to 1s for the decode loop to bail.
+    dispatch_semaphore_wait(gVideoStopped, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
+    gVideoStopped = nil;
+}
+
 #pragma mark Source switch entry point
 
 static BOOL SwitchSource(SimCamSourceKind kind, NSString *arg, NSString **errOut) {
@@ -392,6 +571,7 @@ static BOOL SwitchSource(SimCamSourceKind kind, NSString *arg, NSString **errOut
             case SimCamSourcePlaceholder: StopPlaceholderSource(); break;
             case SimCamSourceWebcam:      StopWebcamSource(); break;
             case SimCamSourceImage:       StopImageSource(); break;
+            case SimCamSourceVideo:       StopVideoSource(); break;
             default: break;
         }
         gActiveSource = SimCamSourceNone;
@@ -400,6 +580,7 @@ static BOOL SwitchSource(SimCamSourceKind kind, NSString *arg, NSString **errOut
             case SimCamSourcePlaceholder: StartPlaceholderSource(); ok = YES; break;
             case SimCamSourceWebcam:      ok = StartWebcamSource(arg, &err); break;
             case SimCamSourceImage:       ok = StartImageSource(arg, &err); break;
+            case SimCamSourceVideo:       ok = StartVideoSource(arg, &err); break;
             default: ok = YES; break;
         }
         if (ok) { gActiveSource = kind; gActiveArg = [arg copy]; }
@@ -412,6 +593,7 @@ static SimCamSourceKind ParseSourceName(NSString *name) {
     if ([name isEqualToString:@"placeholder"]) return SimCamSourcePlaceholder;
     if ([name isEqualToString:@"webcam"])      return SimCamSourceWebcam;
     if ([name isEqualToString:@"image"])       return SimCamSourceImage;
+    if ([name isEqualToString:@"video"])       return SimCamSourceVideo;
     if ([name isEqualToString:@"none"])        return SimCamSourceNone;
     return -1;
 }
@@ -420,6 +602,7 @@ static NSString *SourceName(SimCamSourceKind k) {
         case SimCamSourcePlaceholder: return @"placeholder";
         case SimCamSourceWebcam:      return @"webcam";
         case SimCamSourceImage:       return @"image";
+        case SimCamSourceVideo:       return @"video";
         default:                      return @"none";
     }
 }

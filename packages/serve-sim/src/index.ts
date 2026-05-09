@@ -1216,14 +1216,18 @@ function spawnCameraHelper(args: {
   return child.pid;
 }
 
-type CamSourceKind = "placeholder" | "webcam" | "image";
+type CamSourceKind = "placeholder" | "webcam" | "image" | "video";
 
 interface ResolvedSource { kind: CamSourceKind; arg?: string }
 
 function resolveSourceArg(opts: {
   image?: string;
   webcam?: string | true;
+  video?: string;
 }): ResolvedSource {
+  if (opts.video) {
+    return { kind: "video", arg: resolve(opts.video) };
+  }
   if (opts.image) {
     return { kind: "image", arg: resolve(opts.image) };
   }
@@ -1281,6 +1285,7 @@ async function ensureHelperWithSource(opts: {
 async function camera(args: string[]) {
   let deviceArg: string | undefined;
   let imagePath: string | undefined;
+  let videoPath: string | undefined;
   let webcam: string | true | undefined;
   let stopWebcam = false;
   let listWebcams = false;
@@ -1292,6 +1297,7 @@ async function camera(args: string[]) {
     const a = args[i];
     if (a === "--device" || a === "-d") { deviceArg = args[++i]; continue; }
     if (a === "--image" || a === "-i") { imagePath = args[++i]; continue; }
+    if (a === "--video") { videoPath = args[++i]; continue; }
     if (a === "--webcam") {
       const next = args[i + 1];
       if (next && !next.startsWith("-")) { webcam = next; i++; }
@@ -1328,6 +1334,7 @@ the feed without relaunching the app.
 
 Source options (pick one; default is placeholder):
   -i, --image <path>         PNG/JPEG to use as a static feed
+      --video <path>         Loop a video file (mp4/mov/etc.) at native FPS
       --webcam [name]        Live host webcam (default: built-in front camera)
 
 Other:
@@ -1405,12 +1412,12 @@ Examples:
     const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
     const wanted = filtered[1];
-    if (!wanted || (wanted !== "placeholder" && wanted !== "webcam" && wanted !== "image")) {
-      console.error("Usage: serve-sim camera switch <placeholder|webcam|image> [arg] [-d udid]");
+    if (!wanted || (wanted !== "placeholder" && wanted !== "webcam" && wanted !== "image" && wanted !== "video")) {
+      console.error("Usage: serve-sim camera switch <placeholder|webcam|image|video> [arg] [-d udid]");
       process.exit(1);
     }
     let arg: string | undefined = filtered[2];
-    if (wanted === "image" && arg) arg = resolve(arg);
+    if ((wanted === "image" || wanted === "video") && arg) arg = resolve(arg);
     if (!isHelperAlive(udid)) {
       console.error("camera helper not running for this device — run `serve-sim camera <bundle-id>` first.");
       process.exit(1);
@@ -1479,8 +1486,9 @@ Examples:
     }
   }
 
-  if (imagePath && webcam) {
-    console.error("Pick one source: --image or --webcam, not both.");
+  const sourceFlagCount = [imagePath, webcam, videoPath].filter(Boolean).length;
+  if (sourceFlagCount > 1) {
+    console.error("Pick one source: --image, --video, or --webcam.");
     process.exit(1);
   }
 
@@ -1491,10 +1499,17 @@ Examples:
       process.exit(1);
     }
   }
+  if (videoPath) {
+    videoPath = resolve(videoPath);
+    if (!existsSync(videoPath)) {
+      console.error(`Video not found: ${videoPath}`);
+      process.exit(1);
+    }
+  }
 
   // Default source is the animated placeholder. The helper always runs so
   // the dylib reads from a single shm wire format regardless of source.
-  const source = resolveSourceArg({ image: imagePath, webcam });
+  const source = resolveSourceArg({ image: imagePath, video: videoPath, webcam });
   const helperRes = await ensureHelperWithSource({ udid, source, forceBuild });
   const shmName = helperRes.shmName;
   const helperPid = helperRes.helperPid;
@@ -1508,29 +1523,12 @@ Examples:
     } catch {} // non-fatal; dylib falls back to env or default
   }
 
-  // If we hot-swapped, don't relaunch the app.
-  if (!helperRes.relaunched) {
-    const result = {
-      udid,
-      bundleId,
-      pid: null,
-      dylib,
-      source: source.kind,
-      arg: source.arg ?? null,
-      shm: shmName,
-      helperPid,
-      mirror,
-      hotSwapped: true,
-    };
-    if (quiet) console.log(JSON.stringify(result));
-    else {
-      console.log(`📷 Hot-swapped source for ${bundleId} on ${udid}`);
-      console.log(`   source: ${source.kind}${source.arg ? ` (${source.arg})` : ""}`);
-    }
-    return;
-  }
-
-  // Helper just (re)started — give the app a fresh launch with the dylib.
+  // Always (re)launch the named bundle with the dylib. The helper feeds a
+  // single shm region keyed by udid, so multiple apps on the same simulator
+  // can attach to the same camera stream — but each one has to be launched
+  // with DYLD_INSERT_LIBRARIES, which means a terminate+relaunch every time
+  // we want to bring a new app into the set. Source-only hot-swaps go
+  // through `camera switch`, not this path.
   try {
     execSync(`xcrun simctl privacy "${udid}" grant camera "${bundleId}"`, {
       stdio: "ignore",
@@ -1572,11 +1570,13 @@ Examples:
     helperPid,
     mirror,
     hotSwapped: false,
+    helperRelaunched: helperRes.relaunched,
   };
   if (quiet) {
     console.log(JSON.stringify(result));
   } else {
-    console.log(`📷 Injected camera into ${bundleId} (pid ${pid ?? "?"}) on ${udid}`);
+    const verb = helperRes.relaunched ? "Injected" : "Attached";
+    console.log(`📷 ${verb} camera into ${bundleId} (pid ${pid ?? "?"}) on ${udid}`);
     console.log(`   source: ${source.kind}${source.arg ? ` (${source.arg})` : ""}`);
     if (helperPid) console.log(`   helper pid: ${helperPid}  (shm ${shmName})`);
     console.log(`   dylib: ${dylib}`);
