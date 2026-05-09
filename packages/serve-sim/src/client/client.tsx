@@ -2334,10 +2334,12 @@ function GridPanel({
   open,
   onClose,
   currentUdid,
+  width,
 }: {
   open: boolean;
   onClose: () => void;
   currentUdid: string;
+  width: number;
 }) {
   const config = window.__SIM_PREVIEW__;
   const apiEndpoint = config?.gridApiEndpoint;
@@ -2455,6 +2457,7 @@ function GridPanel({
     <aside
       style={{
         ...gridStyles.panel,
+        width,
         transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
         opacity: open ? 1 : 0,
         pointerEvents: open ? "auto" : "none",
@@ -2916,6 +2919,12 @@ function App() {
     420,
     1400,
   );
+  const { width: gridPanelWidth, onPointerDown: onGridResize } = useResizableWidth(
+    "serve-sim:grid-panel-width",
+    GRID_PANEL_WIDTH,
+    360,
+    1400,
+  );
   const [viewportWidth, setViewportWidth] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 0),
   );
@@ -3117,7 +3126,7 @@ function App() {
   const panelWidthPx = devtoolsOpen
     ? devtoolsPanelWidth
     : gridOpen
-    ? GRID_PANEL_WIDTH
+    ? gridPanelWidth
     : panelOpen
     ? toolsPanelWidth
     : 0;
@@ -3380,6 +3389,13 @@ function App() {
         open={gridOpen}
         onClose={() => setGridOpen(false)}
         currentUdid={config.device}
+        width={gridPanelWidth}
+      />
+      <ResizeHandle
+        panelWidth={gridPanelWidth}
+        visible={gridOpen}
+        onPointerDown={onGridResize}
+        ariaLabel="Resize simulators panel"
       />
 
       <WebKitDevtoolsPanel
