@@ -39,7 +39,11 @@ describeWithSim(`serve-sim accessibility endpoint (booted sim ${bootedUdid ?? "<
   beforeAll(() => {
     try { execSync(`bun run ${CLI_PATH} --kill ${bootedUdid}`, { stdio: "pipe" }); } catch {}
 
-    const detach = spawnSync("bun", ["run", CLI_PATH, "--detach", "-p", "3190", bootedUdid!], {
+    // Random high port avoids collisions with the user's running serve-sim
+    // (default 3100) and with concurrent test runs on the same machine. The
+    // CLI's findAvailablePort scans up from this if it's taken.
+    const startPort = 40_000 + Math.floor(Math.random() * 20_000);
+    const detach = spawnSync("bun", ["run", CLI_PATH, "--detach", "-p", String(startPort), bootedUdid!], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "inherit"],
       timeout: 45_000,

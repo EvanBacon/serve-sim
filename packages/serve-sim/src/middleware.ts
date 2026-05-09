@@ -723,20 +723,25 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       ], { stdio: ["ignore", "pipe", "ignore"] });
 
       let lastBundle = "";
+      let hasEmitted = false;
       let closed = false;
       const emitApp = async (bundleId: string, pid?: number) => {
         if (!isUserFacingBundle(bundleId)) return;
         if (bundleId === lastBundle) return;
         lastBundle = bundleId;
+        hasEmitted = true;
         const isReactNative = await detectReactNative(udid, bundleId);
         if (!closed) {
           res.write("data: " + JSON.stringify({ bundleId, pid, isReactNative }) + "\n\n");
         }
       };
 
+      // The seed loses to any live log event — a SpringBoard log that fires
+      // while the AX call is in flight is fresher than the AX snapshot.
       detectCurrentForegroundApp(udid, state.url).then((app) => {
-        if (!app || closed || app.bundleId === lastBundle) return;
+        if (!app || closed || hasEmitted) return;
         lastBundle = app.bundleId;
+        hasEmitted = true;
         res.write("data: " + JSON.stringify(app) + "\n\n");
       });
 
