@@ -1,9 +1,14 @@
 import { readdirSync, readFileSync, existsSync, unlinkSync } from "fs";
-import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
+import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer as createNetServer } from "net";
+import type { IncomingMessage, ServerResponse } from "http";
 import { createAxStreamerCache } from "./ax";
+
+type SimReq = IncomingMessage;
+type SimRes = ServerResponse;
+type SimNext = (err?: unknown) => void;
 
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
@@ -343,24 +348,37 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
           port,
           cdpUrl: `http://127.0.0.1:${port}`,
           async listTargets() {
-            return server.getTargets()
-              .filter((target: any) => target.source?.kind === "simulator")
-              .map((target: any) => ({
-                id: target.targetId,
-                title: target.title || target.appName || target.url || "Untitled",
-                url: /^https?:/i.test(target.url) ? target.url : "about:blank",
-                type: target.type || "page",
-                appName: target.appName,
-                bundleId: target.bundleId,
-                udid: target.source?.id,
-                inUseByOtherInspector: !!target.inUseByOtherInspector,
-              }));
+            type BridgeTarget = {
+              targetId: string;
+              title?: string;
+              appName?: string;
+              url?: string;
+              type?: string;
+              bundleId?: string;
+              inUseByOtherInspector?: boolean;
+              source?: { kind?: string; id?: string };
+            };
+            return (server.getTargets() as BridgeTarget[])
+              .filter((target) => target.source?.kind === "simulator")
+              .map((target) => {
+                const url = target.url ?? "";
+                return {
+                  id: target.targetId,
+                  title: target.title || target.appName || url || "Untitled",
+                  url: /^https?:/i.test(url) ? url : "about:blank",
+                  type: target.type || "page",
+                  appName: target.appName,
+                  bundleId: target.bundleId,
+                  udid: target.source?.id,
+                  inUseByOtherInspector: !!target.inUseByOtherInspector,
+                };
+              });
           },
           highlightTarget: server.highlightTarget?.bind(server),
           releaseHighlight: server.releaseHighlight?.bind(server),
         };
-      } catch (err: any) {
-        if (err?.code === "EADDRINUSE") {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
           const existing = await existingInspectWebKitBridge(port);
           if (existing) return existing;
           continue;
@@ -597,7 +615,7 @@ export interface SimMiddlewareOptions {
 export function simMiddleware(options?: SimMiddlewareOptions) {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
 
-  return (req: any, res: any, next?: () => void) => {
+  return (req: SimReq, res: SimRes, next?: SimNext) => {
     const rawUrl: string = req.url ?? "";
     const qIndex = rawUrl.indexOf("?");
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
@@ -982,7 +1000,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           res.end(JSON.stringify({
             stdout: stdout.toString(),
             stderr: stderr.toString(),
-            exitCode: err ? (err as any).code ?? 1 : 0,
+            exitCode: err ? (err as ExecException).code ?? 1 : 0,
           }));
         });
       });
