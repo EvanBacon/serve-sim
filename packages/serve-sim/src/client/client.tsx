@@ -938,6 +938,7 @@ async function uploadDroppedFile(
   kind: DropKind,
   exec: (command: string) => Promise<ExecResult>,
   udid: string,
+  onProgress: (progress: number | null) => void,
 ) {
   if (file.size > DROP_MAX_FILE_SIZE) {
     throw new Error("File too large (max 500MB)");
@@ -948,9 +949,11 @@ async function uploadDroppedFile(
   const tmpPath = `/tmp/${prefix}-${crypto.randomUUID()}.${ext}`;
 
   try {
+    onProgress(0);
     const buffer = await file.arrayBuffer();
     const b64 = arrayBufferToBase64(buffer);
 
+    let lastReportedPct = 0;
     for (let offset = 0; offset < b64.length; offset += DROP_CHUNK_SIZE) {
       const chunk = b64.slice(offset, offset + DROP_CHUNK_SIZE);
       const op = offset === 0 ? ">" : ">>";
@@ -958,8 +961,16 @@ async function uploadDroppedFile(
       if (result.exitCode !== 0) {
         throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
       }
+      const written = Math.min(offset + DROP_CHUNK_SIZE, b64.length);
+      const pct = Math.floor((written / b64.length) * 100);
+      if (pct !== lastReportedPct) {
+        lastReportedPct = pct;
+        onProgress(written / b64.length);
+      }
     }
 
+    // Upload complete; install/addmedia gives no progress signal.
+    onProgress(null);
     const cmd = kind === "ipa"
       ? `xcrun simctl install ${udid} ${tmpPath}`
       : `xcrun simctl addmedia ${udid} ${tmpPath}`;
@@ -978,6 +989,9 @@ type UploadToast = {
   name: string;
   kind: DropKind;
   status: "uploading" | "success" | "error";
+  // Determinate transfer progress 0..1; null after upload completes (install
+  // /addmedia phase has no progress signal, so the bar animates indeterminate).
+  progress: number | null;
   message?: string;
 };
 
@@ -985,7 +999,7 @@ function useUploadToasts() {
   const [toasts, setToasts] = useState<UploadToast[]>([]);
   const add = useCallback((name: string, kind: DropKind): string => {
     const id = crypto.randomUUID();
-    setToasts((t) => [...t, { id, name, kind, status: "uploading" }]);
+    setToasts((t) => [...t, { id, name, kind, status: "uploading", progress: 0 }]);
     return id;
   }, []);
   const update = useCallback((id: string, patch: Partial<UploadToast>) => {
@@ -997,7 +1011,10 @@ function useUploadToasts() {
       }, 3000);
     }
   }, []);
-  return { toasts, add, update };
+  const setProgress = useCallback((id: string, progress: number | null) => {
+    setToasts((t) => t.map((x) => (x.id === id ? { ...x, progress } : x)));
+  }, []);
+  return { toasts, add, update, setProgress };
 }
 
 function useMediaDrop({
@@ -1005,6 +1022,7 @@ function useMediaDrop({
   udid,
   enabled,
   onUploadStart,
+  onUploadProgress,
   onUploadEnd,
   onUnsupported,
 }: {
@@ -1012,6 +1030,7 @@ function useMediaDrop({
   udid: string | undefined;
   enabled: boolean;
   onUploadStart: (name: string, kind: DropKind) => string;
+  onUploadProgress: (id: string, progress: number | null) => void;
   onUploadEnd: (id: string, ok: boolean, message?: string) => void;
   onUnsupported: (file: File) => void;
 }) {
@@ -1037,14 +1056,14 @@ function useMediaDrop({
           continue;
         }
         const id = onUploadStart(file.name, kind);
-        uploadDroppedFile(file, kind, exec, udid)
+        uploadDroppedFile(file, kind, exec, udid, (p) => onUploadProgress(id, p))
           .then(() => onUploadEnd(id, true))
           .catch((err) =>
             onUploadEnd(id, false, err instanceof Error ? err.message : "Upload failed"),
           );
       }
     },
-    [enabled, udid, exec, onUploadStart, onUploadEnd, onUnsupported],
+    [enabled, udid, exec, onUploadStart, onUploadProgress, onUploadEnd, onUnsupported],
   );
 
   const onDragOver = useCallback(
@@ -3085,6 +3104,7 @@ function App() {
     udid: config.device,
     enabled: streaming,
     onUploadStart: uploads.add,
+    onUploadProgress: uploads.setProgress,
     onUploadEnd: (id, ok, message) =>
       uploads.update(id, { status: ok ? "success" : "error", message }),
     onUnsupported: (file) => {
@@ -3289,18 +3309,64 @@ function App() {
       {/* Upload toasts */}
       {uploads.toasts.length > 0 && (
         <div style={s.toastStack}>
-          {uploads.toasts.map((t) => (
-            <div key={t.id} style={s.toast}>
-              <span style={{ ...s.dot, background: t.status === "uploading" ? "#a5b4fc" : t.status === "success" ? "#4ade80" : "#f87171" }} />
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {t.status === "uploading" &&
-                  (t.kind === "ipa" ? `Installing ${t.name}…` : `Uploading ${t.name}…`)}
-                {t.status === "success" &&
-                  (t.kind === "ipa" ? `Installed ${t.name}` : `Added ${t.name} to Photos`)}
-                {t.status === "error" && `${t.name}: ${t.message ?? "Upload failed"}`}
-              </span>
-            </div>
-          ))}
+          <style>{UPLOAD_TOAST_CSS}</style>
+          {uploads.toasts.map((t) => {
+            const isError = t.status === "error";
+            const isUploading = t.status === "uploading";
+            // While transferring chunks, show "Uploading … N%". Once chunks are
+            // done, the install/addmedia step has no progress signal, so swap
+            // to a phase-specific verb and an indeterminate bar.
+            const transferring = isUploading && t.progress !== null;
+            const pct = t.progress != null ? Math.round(t.progress * 100) : 0;
+            return (
+              <div
+                key={t.id}
+                style={{
+                  ...s.toast,
+                  userSelect: isError ? "text" : "none",
+                  WebkitUserSelect: isError ? "text" : "none",
+                  cursor: isError ? "text" : "default",
+                }}
+              >
+                <div style={s.toastRow}>
+                  <span
+                    style={{
+                      ...s.dot,
+                      background:
+                        t.status === "uploading"
+                          ? "#a5b4fc"
+                          : t.status === "success"
+                          ? "#4ade80"
+                          : "#f87171",
+                    }}
+                  />
+                  <span style={s.toastText}>
+                    {isUploading && transferring &&
+                      `Uploading ${t.name}… ${pct}%`}
+                    {isUploading && !transferring &&
+                      (t.kind === "ipa" ? `Installing ${t.name}…` : `Adding ${t.name}…`)}
+                    {t.status === "success" &&
+                      (t.kind === "ipa" ? `Installed ${t.name}` : `Added ${t.name} to Photos`)}
+                    {isError && `${t.name}: ${t.message ?? "Upload failed"}`}
+                  </span>
+                </div>
+                {isUploading && (
+                  <div style={s.progressTrack}>
+                    {transferring ? (
+                      <div
+                        style={{
+                          ...s.progressFill,
+                          width: `${pct}%`,
+                        }}
+                      />
+                    ) : (
+                      <div className="serve-sim-toast-indeterminate" style={s.progressIndeterminate} />
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -3510,8 +3576,8 @@ const s: Record<string, CSSProperties> = {
   },
   toast: {
     display: "flex",
-    alignItems: "center",
-    gap: 8,
+    flexDirection: "column",
+    gap: 6,
     padding: "8px 12px",
     background: "#1c1c1e",
     border: "1px solid rgba(255,255,255,0.12)",
@@ -3521,7 +3587,51 @@ const s: Record<string, CSSProperties> = {
     fontFamily: "ui-monospace, monospace",
     boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
   },
+  toastRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  toastText: {
+    flex: 1,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  progressTrack: {
+    position: "relative",
+    height: 3,
+    width: "100%",
+    background: "rgba(255,255,255,0.08)",
+    borderRadius: 2,
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    background: "#a5b4fc",
+    borderRadius: 2,
+    transition: "width 120ms linear",
+  },
+  progressIndeterminate: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    height: "100%",
+    width: "40%",
+    background: "#a5b4fc",
+    borderRadius: 2,
+  },
 };
+
+const UPLOAD_TOAST_CSS = `
+  @keyframes serve-sim-toast-indeterminate {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
+  .serve-sim-toast-indeterminate {
+    animation: serve-sim-toast-indeterminate 1.1s ease-in-out infinite;
+  }
+`;
 
 const pickerMenuStyle: CSSProperties = {
   position: "absolute",
