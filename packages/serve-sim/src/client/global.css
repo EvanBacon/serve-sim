@@ -6,6 +6,8 @@
   /* Panel / surface palette */
   --color-panel: #1c1c1e;
   --color-panel-bg: rgba(20, 20, 22, 0.92);
+  --color-panel-overlay: rgba(20, 20, 22, 0.65);
+  --color-panel-deep: #111113;
   --color-page: #0a0a0a;
 
   /* Accent palette */

@@ -50,7 +50,7 @@ export function ResizeHandle({
       />
       {/* Centered pill grabber, straddling the panel's left border. */}
       <div
-        className={`absolute top-1/2 left-1/2 w-1 h-7 rounded-[2px] -translate-x-1/2 -translate-y-1/2 z-[1] pointer-events-none [transition:opacity_0.15s_ease,background_0.15s_ease] ${hot ? "opacity-100" : "opacity-0"} ${active ? "bg-[#9a9a9e]" : "bg-[#6e6e72]"}`}
+        className={`absolute top-1/2 left-1/2 w-1 h-7 rounded-xs -translate-x-1/2 -translate-y-1/2 z-1 pointer-events-none [transition:opacity_0.15s_ease,background_0.15s_ease] ${hot ? "opacity-100" : "opacity-0"} ${active ? "bg-[#9a9a9e]" : "bg-[#6e6e72]"}`}
       />
     </div>
   );

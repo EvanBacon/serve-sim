@@ -94,13 +94,13 @@ export function BootEmptyState({
   return (
     <div className="flex flex-col items-center justify-center h-screen bg-page p-6 gap-3 font-system box-border">
       <div className="flex flex-col items-center gap-3 text-center">
-        <h1 className="text-[18px] m-0 text-[#eee]">No serve-sim stream running</h1>
-        <p className="text-[#888] text-[14px] max-w-[480px]">
+        <h1 className="text-[18px] m-0 text-white/90">No serve-sim stream running</h1>
+        <p className="text-white/55 text-[14px] max-w-120">
           Pick a simulator to boot, or start one yourself with{" "}
           <code className="bg-[#222] px-1.5 py-0.5 rounded text-[13px]">bunx serve-sim --detach</code>.
         </p>
-        <div className="w-full max-w-[360px] mt-2 bg-panel border border-white/12 rounded-[10px] p-1 font-mono text-[13px] text-[#eee] text-left max-h-[70vh] overflow-y-auto min-h-0">
-          <div className="flex items-center justify-between px-2.5 py-1.5 text-[11px] text-[#aaa]">
+        <div className="w-full max-w-90 mt-2 bg-panel border border-white/12 rounded-[10px] p-1 font-mono text-[13px] text-white/90 text-left max-h-[70vh] overflow-y-auto min-h-0">
+          <div className="flex items-center justify-between px-2.5 py-1.5 text-[11px] text-white/65">
             <span className="font-semibold">Simulators</span>
             <button onClick={onRefresh} disabled={loading} className="bg-transparent border-none text-accent text-[11px] cursor-pointer p-0">
               {loading ? "..." : "Refresh"}
@@ -129,7 +129,7 @@ export function BootEmptyState({
                       style={{ background: isBooted ? "#4ade80" : "#444" }}
                     />
                     <span className="flex-1 text-left">{d.name}</span>
-                    <span className={`text-[10px] ${isStarting ? "text-accent" : "text-[#888]"}`}>
+                    <span className={`text-[10px] ${isStarting ? "text-accent" : "text-white/55"}`}>
                       {isStarting
                         ? (isBooted ? "Starting..." : "Booting...")
                         : (isBooted ? "Start stream" : "Boot & stream")}

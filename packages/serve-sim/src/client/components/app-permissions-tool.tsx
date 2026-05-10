@@ -94,7 +94,7 @@ export function AppPermissionsTool({
       </button>
 
       {open && error && (
-        <div className="bg-[rgba(248,113,113,0.08)] border border-[rgba(248,113,113,0.2)] text-danger-soft text-[11px] px-2 py-1.5 rounded-md mt-2">
+        <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md mt-2">
           {error}
         </div>
       )}
@@ -106,7 +106,7 @@ export function AppPermissionsTool({
               const current = state[key];
               return (
                 <div key={key} className="flex items-center justify-between gap-2 px-0.5 py-1">
-                  <span className="text-[12px] text-[#eee] overflow-hidden text-ellipsis whitespace-nowrap flex-1 min-w-0">{label}</span>
+                  <span className="text-[12px] text-white/90 overflow-hidden text-ellipsis whitespace-nowrap flex-1 min-w-0">{label}</span>
                   <div
                     className="flex gap-0.5 bg-white/[0.04] border border-white/8 rounded-md p-0.5"
                     role="group"

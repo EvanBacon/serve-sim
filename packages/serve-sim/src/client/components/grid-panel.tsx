@@ -130,7 +130,7 @@ export function GridPanel({
           <PanelCloseButton onClick={onClose} />
         </div>
       </PanelHeader>
-      <div className="flex-1 min-h-0 overflow-y-auto p-3.5 grid auto-rows-[minmax(300px,auto)] gap-3 content-start [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3.5 grid auto-rows-[minmax(300px,auto)] gap-3 content-start grid-cols-[repeat(auto-fill,minmax(200px,1fr))]">
         {devices === null ? null : devices.length === 0 ? (
           <div className="col-span-full bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">No iOS simulators available.</div>
         ) : (

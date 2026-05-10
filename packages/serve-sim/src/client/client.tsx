@@ -737,7 +737,7 @@ function AppWithConfig({
           {uploads.toasts.map((t) => (
             <div
               key={t.id}
-              className="flex items-center gap-2 px-3 py-2 bg-panel border border-white/12 rounded-lg text-[#eee] text-[12px] font-mono shadow-[0_4px_12px_rgba(0,0,0,0.4)]"
+              className="flex items-center gap-2 px-3 py-2 bg-panel border border-white/12 rounded-lg text-white/90 text-[12px] font-mono shadow-[0_4px_12px_rgba(0,0,0,0.4)]"
             >
               <span
                 className="size-1.5 rounded-full shrink-0 [transition:background_0.3s]"
@@ -861,7 +861,7 @@ function AppWithConfig({
       />
 
       {/* Status bar */}
-      <div className="flex items-center gap-2.5 text-[12px] font-mono text-[#666]">
+      <div className="flex items-center gap-2.5 text-[12px] font-mono text-white/40">
         <span
           className="flex items-center gap-[5px] [transition:color_0.3s]"
           style={{ color: streaming ? "#4ade80" : "#666" }}

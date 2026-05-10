@@ -58,7 +58,7 @@ export function WebKitDevtoolsPanel({
 
       <div className="flex-1 min-h-0 bg-white relative">
         {error ? (
-          <div className="h-full flex items-center justify-center p-6 bg-[#111113] text-white/[0.58] text-center text-[13px]">{error}</div>
+          <div className="h-full flex items-center justify-center p-6 bg-panel-deep text-white/[0.58] text-center text-[13px]">{error}</div>
         ) : selected && open ? (
           // Mount the iframe only while the panel is visible. Unmounting tears
           // down the WebSocket so WIR releases the page; otherwise we'd hold
@@ -72,7 +72,7 @@ export function WebKitDevtoolsPanel({
             onLoad={(event) => collapseScreencastPane(event.currentTarget)}
           />
         ) : (
-          <div className="h-full flex items-center justify-center p-6 bg-[#111113] text-white/[0.58] text-center text-[13px]">
+          <div className="h-full flex items-center justify-center p-6 bg-panel-deep text-white/[0.58] text-center text-[13px]">
             {selected
               ? "DevTools paused — open the panel to reattach."
               : "Open Safari or an inspectable WKWebView in the simulator."}

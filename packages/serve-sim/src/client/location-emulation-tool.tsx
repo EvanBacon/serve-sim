@@ -321,7 +321,7 @@ export function LocationEmulationTool({
       <button
         type="button"
         onClick={() => setOpen((v: boolean) => !v)}
-        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-[#eee] py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
+        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
         aria-expanded={open}
       >
         <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
@@ -345,7 +345,7 @@ export function LocationEmulationTool({
               <select
                 value={trailId}
                 onChange={(e) => onTrailChange((e.target as HTMLSelectElement).value)}
-                className="lem-select appearance-none [-webkit-appearance:none] bg-white/[0.04] border border-white/8 rounded-md text-[#eee] text-[12px] py-1.5 pr-[26px] pl-2 font-[inherit] cursor-pointer w-full [transition:background_0.12s,border-color_0.12s]"
+                className="lem-select appearance-none [-webkit-appearance:none] bg-white/[0.04] border border-white/8 rounded-md text-white/90 text-[12px] py-1.5 pr-[26px] pl-2 font-[inherit] cursor-pointer w-full [transition:background_0.12s,border-color_0.12s]"
                 aria-label="Trail"
               >
                 {DEFAULT_TRAILS.map((t) => (
@@ -424,7 +424,7 @@ export function LocationEmulationTool({
           </div>
 
           {error && (
-            <div className="bg-[rgba(248,113,113,0.08)] border border-[rgba(248,113,113,0.2)] text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
+            <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
               {error}
             </div>
           )}
@@ -486,10 +486,10 @@ function ElevationBadges({ prepared }: { prepared: PreparedTrail }) {
   if (prepared.rawMaxAlt - prepared.rawMinAlt < 5) return null;
   return (
     <>
-      <div className="absolute top-2 left-2.5 bg-[rgba(20,20,22,0.65)] text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
+      <div className="absolute top-2 left-2.5 bg-panel-overlay text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
         <ArrowGlyph dir="up" /> {formatElevation(prepared.rawMaxAlt)}
       </div>
-      <div className="absolute top-2 right-2.5 bg-[rgba(20,20,22,0.65)] text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
+      <div className="absolute top-2 right-2.5 bg-panel-overlay text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
         <ArrowGlyph dir="down" /> {formatElevation(prepared.rawMinAlt)}
       </div>
     </>

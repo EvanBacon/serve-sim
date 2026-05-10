@@ -65,7 +65,7 @@ export function AppDetectionTool({
       </div>
 
       {details.error && (
-        <div className="bg-[rgba(248,113,113,0.08)] border border-[rgba(248,113,113,0.2)] text-danger-soft text-[11px] px-2 py-1.5 rounded-md mb-2.5">
+        <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md mb-2.5">
           {details.error}
         </div>
       )}
@@ -115,7 +115,7 @@ function Row({
     <div className="group flex items-baseline gap-2 min-w-0">
       <dt className="m-0 text-[11px] text-white/50 w-21 shrink-0">{label}</dt>
       <dd
-        className={`m-0 text-[#eee] flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap relative ${mono ? "font-mono text-[11px]" : "text-[12px]"}`}
+        className={`m-0 text-white/90 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap relative ${mono ? "font-mono text-[11px]" : "text-[12px]"}`}
         title={value}
       >
         {value}

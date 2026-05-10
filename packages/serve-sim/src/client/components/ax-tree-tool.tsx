@@ -106,7 +106,7 @@ const AxTreeItem = memo(function AxTreeItem({
       className={`flex items-center justify-between gap-2 rounded-md py-1 px-0.5 min-w-0 ${active ? "bg-white/[0.06]" : ""}`}
     >
       <span className="flex flex-col gap-0.5 flex-1 min-w-0">
-        <span className="overflow-hidden text-ellipsis whitespace-nowrap text-[#eee] text-[12px] font-medium">{element.label || element.role || "Unlabeled"}</span>
+        <span className="overflow-hidden text-ellipsis whitespace-nowrap text-white/90 text-[12px] font-medium">{element.label || element.role || "Unlabeled"}</span>
         <span className="overflow-hidden text-ellipsis whitespace-nowrap text-white/45 font-mono text-[10px]">{element.role || element.type || "element"}</span>
       </span>
       <code className="shrink-0 bg-white/[0.04] border border-white/8 rounded-md text-white/55 font-mono text-[10px] px-1.5 py-[3px]">{size}</code>

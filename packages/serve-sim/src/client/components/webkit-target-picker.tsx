@@ -71,7 +71,7 @@ export function WebKitTargetPicker({
             return !wasOpen;
           });
         }}
-        className="w-full min-w-0 h-[26px] flex items-center justify-between gap-2 bg-panel text-[#eee] border border-white/12 rounded-md text-[12px] px-2 cursor-pointer text-left"
+        className="w-full min-w-0 h-[26px] flex items-center justify-between gap-2 bg-panel text-white/90 border border-white/12 rounded-md text-[12px] px-2 cursor-pointer text-left"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="WebKit target"

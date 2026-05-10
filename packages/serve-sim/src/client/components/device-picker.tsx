@@ -62,8 +62,8 @@ export function DevicePicker({
         {trigger}
       </div>
       {open && (
-        <div className="absolute top-[calc(100%+6px)] left-0 min-w-[260px] max-h-[360px] overflow-y-auto bg-panel border border-white/12 rounded-[10px] p-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)] font-mono text-[13px] text-[#eee] z-20">
-          <div className="flex items-center justify-between px-2.5 py-1.5 text-[11px] text-[#aaa]">
+        <div className="absolute top-[calc(100%+6px)] left-0 min-w-65 max-h-90 overflow-y-auto bg-panel border border-white/12 rounded-[10px] p-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)] font-mono text-[13px] text-white/90 z-20">
+          <div className="flex items-center justify-between px-2.5 py-1.5 text-[11px] text-white/65">
             <span className="font-semibold">Simulators</span>
             <button
               onClick={(e) => { e.stopPropagation(); onRefresh(); }}
@@ -110,7 +110,7 @@ export function DevicePicker({
                       <span
                         role="button"
                         onClick={(e) => { e.stopPropagation(); if (!isStopping) onStop(d.udid); }}
-                        className={`text-[10px] py-px px-1.5 rounded ${isStopping ? "text-[#888] bg-transparent cursor-default" : "text-danger bg-[rgba(248,113,113,0.1)] cursor-pointer"}`}
+                        className={`text-[10px] py-px px-1.5 rounded ${isStopping ? "text-white/55 bg-transparent cursor-default" : "text-danger bg-danger/10 cursor-pointer"}`}
                       >
                         {isStopping ? "Stopping..." : "Stop"}
                       </span>

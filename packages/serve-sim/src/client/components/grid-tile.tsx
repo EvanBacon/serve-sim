@@ -53,7 +53,7 @@ export function GridTile({
             onShutdown();
           }}
           disabled={shuttingDown}
-          className="grid-shutdown-btn absolute top-1.5 right-1.5 w-[22px] h-[22px] rounded-full border border-[#444] bg-[rgba(20,20,20,0.85)] text-[#ccc] text-[13px] leading-none cursor-pointer flex items-center justify-center p-0 z-[2] pointer-events-auto"
+          className="grid-shutdown-btn absolute top-1.5 right-1.5 w-[22px] h-[22px] rounded-full border border-[#444] bg-[rgba(20,20,20,0.85)] text-white/80 text-[13px] leading-none cursor-pointer flex items-center justify-center p-0 z-[2] pointer-events-auto"
         >
           ×
         </button>
@@ -68,32 +68,32 @@ export function GridTile({
           />
         </div>
       ) : (
-        <div className="flex-1 min-h-0 flex items-center justify-center p-3 flex-col gap-2.5 text-[#888] text-[12px] text-center">
+        <div className="flex-1 min-h-0 flex items-center justify-center p-3 flex-col gap-2.5 text-white/55 text-[12px] text-center">
           {starting ? (
             <span
               aria-hidden
-              className="w-[22px] h-[22px] rounded-full border-2 border-white/15 [animation:grid-spin_0.8s_linear_infinite]"
+              className="w-5.5 h-5.5 rounded-full border-2 border-white/15 animate-[grid-spin_0.8s_linear_infinite]"
               style={{ borderTopColor: "rgba(155,201,155,0.95)" }}
             />
           ) : (
             <div className="text-[28px] opacity-50">{isBooted ? "▣" : "▢"}</div>
           )}
-          {error ? <div className="text-[#e66] text-[11px] font-mono">{error}</div> : null}
+          {error ? <div className="text-danger text-[11px] font-mono">{error}</div> : null}
           <button
             type="button"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart(); }}
             disabled={starting}
-            className={`px-3 py-1.5 rounded-md border border-[#333] text-[11px] font-mono ${starting ? "bg-[#1a1a1a] text-[#888] cursor-default" : "bg-[#1d2a1d] text-[#9c9] cursor-pointer"}`}
+            className={`px-3 py-1.5 rounded-md border border-[#333] text-[11px] font-mono ${starting ? "bg-[#1a1a1a] text-white/55 cursor-default" : "bg-[#1d2a1d] text-success cursor-pointer"}`}
           >
             {starting ? (isBooted ? "Starting…" : "Booting…") : (isBooted ? "Start stream" : "Boot & start")}
           </button>
         </div>
       )}
-      <div className="px-2.5 py-1.5 border-t border-[#222] text-[11px] font-mono text-[#bbb] flex justify-between gap-2">
+      <div className="px-2.5 py-1.5 border-t border-[#222] text-[11px] font-mono text-white/70 flex justify-between gap-2">
         <span className="overflow-hidden text-ellipsis whitespace-nowrap">{device.name}</span>
         <span className="whitespace-nowrap" style={{ color: statusColor }}>
           {status}
-          {helper ? <span className="text-[#666]"> :{helper.port}</span> : null}
+          {helper ? <span className="text-white/40"> :{helper.port}</span> : null}
         </span>
       </div>
     </Wrapper>
