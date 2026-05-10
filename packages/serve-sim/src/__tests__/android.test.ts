@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { androidKeyCodeForHidUsage, parseAdbDevices, parseAndroidDisplayConfig, parsePngSize } from "../android";
+import {
+  androidKeyCodeForHidUsage,
+  parseAdbDevices,
+  parseAndroidAccessibilityTree,
+  parseAndroidDisplayConfig,
+  parsePngSize,
+} from "../android";
 
 describe("Android helpers", () => {
   test("parses adb device listings", () => {
@@ -50,6 +56,71 @@ DisplayPolicy
       height: 1080,
       orientation: "landscape_left",
     });
+  });
+
+  test("maps uiautomator XML to the existing accessibility tree shape", () => {
+    const nodes = parseAndroidAccessibilityTree(`
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" content-desc="" enabled="true" bounds="[0,0][1080,2340]">
+    <node index="0" text="Search &amp; Maps" resource-id="com.example:id/search" class="android.widget.EditText" content-desc="Search field" enabled="true" bounds="[24,100][1056,180]" />
+    <node index="1" text="" resource-id="com.example:id/submit" class="android.widget.Button" content-desc="Submit" enabled="false" bounds="[800,200][1056,320]" />
+  </node>
+</hierarchy>UI hierchary dumped to: /dev/tty
+`, { width: 1080, height: 2340, orientation: "portrait" });
+
+    expect(nodes).toEqual([{
+      AXUniqueId: null,
+      AXLabel: null,
+      AXValue: null,
+      enabled: true,
+      frame: { x: 0, y: 0, width: 1080, height: 2340 },
+      role_description: "FrameLayout",
+      type: "FrameLayout",
+      children: [
+        {
+          AXUniqueId: "com.example:id/search@[24,100][1056,180]",
+          AXLabel: "Search field",
+          AXValue: "Search & Maps",
+          enabled: true,
+          frame: { x: 24, y: 100, width: 1032, height: 80 },
+          role_description: "Text Field",
+          type: "EditText",
+          children: [],
+        },
+        {
+          AXUniqueId: "com.example:id/submit@[800,200][1056,320]",
+          AXLabel: "Submit",
+          AXValue: null,
+          enabled: false,
+          frame: { x: 800, y: 200, width: 256, height: 120 },
+          role_description: "Button",
+          type: "Button",
+          children: [],
+        },
+      ],
+    }]);
+  });
+
+  test("keeps text-only Android node values", () => {
+    const nodes = parseAndroidAccessibilityTree(`
+<hierarchy rotation="0">
+  <node text="Typed value" resource-id="com.example:id/input" class="android.widget.EditText" content-desc="" enabled="true" bounds="[0,0][100,40]" />
+</hierarchy>
+`, { width: 100, height: 40, orientation: "portrait" });
+
+    expect(nodes[0]?.AXLabel).toBe("Typed value");
+    expect(nodes[0]?.AXValue).toBe("Typed value");
+  });
+
+  test("rejects malformed uiautomator output", () => {
+    expect(() =>
+      parseAndroidAccessibilityTree("UI hierchary dumped to: /dev/tty", {
+        width: 1080,
+        height: 2340,
+        orientation: "portrait",
+      })
+    ).toThrow("uiautomator dump did not contain hierarchy XML");
   });
 
   test("maps HID keyboard usage codes to Android keycodes", () => {

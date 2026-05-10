@@ -38,6 +38,17 @@ interface ScreenConfig {
   orientation: SimulatorOrientation;
 }
 
+interface AndroidAxNode {
+  AXUniqueId: string | null;
+  AXLabel: string | null;
+  AXValue: string | null;
+  enabled: boolean;
+  frame: { x: number; y: number; width: number; height: number };
+  role_description: string;
+  type: string;
+  children: AndroidAxNode[];
+}
+
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const DEFAULT_ANDROID_FPS = 8;
 
@@ -219,6 +230,121 @@ export function parseAndroidDisplayConfig(output: string): ScreenConfig | null {
   };
 }
 
+function decodeXmlAttribute(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (match, entity: string) => {
+    switch (entity) {
+      case "amp":
+        return "&";
+      case "lt":
+        return "<";
+      case "gt":
+        return ">";
+      case "quot":
+        return "\"";
+      case "apos":
+        return "'";
+      default: {
+        const numeric = entity.startsWith("#x")
+          ? Number.parseInt(entity.slice(2), 16)
+          : Number.parseInt(entity.slice(1), 10);
+        return Number.isFinite(numeric) && numeric >= 0 && numeric <= 0x10ffff
+          ? String.fromCodePoint(numeric)
+          : match;
+      }
+    }
+  });
+}
+
+function parseXmlAttributes(source: string): Map<string, string> {
+  const attrs = new Map<string, string>();
+  for (const match of source.matchAll(/([A-Za-z0-9:_-]+)="([^"]*)"/g)) {
+    attrs.set(match[1]!, decodeXmlAttribute(match[2]!));
+  }
+  return attrs;
+}
+
+function parseAndroidBounds(value: string | undefined): AndroidAxNode["frame"] {
+  const match = value?.match(/\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/);
+  if (!match) return { x: 0, y: 0, width: 0, height: 0 };
+  const left = Number(match[1]);
+  const top = Number(match[2]);
+  const right = Number(match[3]);
+  const bottom = Number(match[4]);
+  return {
+    x: left,
+    y: top,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+  };
+}
+
+function androidRoleForClass(className: string): string {
+  const simple = className.split(".").pop() || className || "View";
+  if (/button/i.test(simple)) return "Button";
+  if (/edittext/i.test(simple)) return "Text Field";
+  if (/checkbox/i.test(simple)) return "Checkbox";
+  if (/switch/i.test(simple)) return "Switch";
+  if (/radiobutton/i.test(simple)) return "Radio Button";
+  if (/image/i.test(simple)) return "Image";
+  if (/textview/i.test(simple)) return "Text";
+  if (/list|recycler/i.test(simple)) return "List";
+  if (/scroll/i.test(simple)) return "Scroll View";
+  if (/progress/i.test(simple)) return "Progress Indicator";
+  return simple;
+}
+
+function androidAxNodeFromAttributes(attrs: Map<string, string>): AndroidAxNode {
+  const className = attrs.get("class") || "android.view.View";
+  const contentDescription = attrs.get("content-desc") || "";
+  const text = attrs.get("text") || "";
+  const resourceId = attrs.get("resource-id") || "";
+  const bounds = attrs.get("bounds") || "";
+  const label = contentDescription || text || null;
+  const value = text || null;
+  return {
+    AXUniqueId: resourceId ? `${resourceId}@${bounds}` : null,
+    AXLabel: label,
+    AXValue: value,
+    enabled: attrs.get("enabled") !== "false",
+    frame: parseAndroidBounds(bounds),
+    role_description: androidRoleForClass(className),
+    type: className.split(".").pop() || className,
+    children: [],
+  };
+}
+
+export function parseAndroidAccessibilityTree(xml: string, screen: ScreenConfig): AndroidAxNode[] {
+  const start = xml.indexOf("<hierarchy");
+  const end = xml.lastIndexOf("</hierarchy>");
+  if (start < 0 || end < start) {
+    throw new Error("uiautomator dump did not contain hierarchy XML");
+  }
+  const body = xml.slice(start, end + "</hierarchy>".length);
+  const roots: AndroidAxNode[] = [];
+  const stack: AndroidAxNode[] = [];
+
+  for (const match of body.matchAll(/<\/node\s*>|<node\b[^>]*>/g)) {
+    const token = match[0];
+    if (/^<\/node\s*>$/.test(token)) {
+      stack.pop();
+      continue;
+    }
+
+    const isSelfClosing = /\/\s*>$/.test(token);
+    const node = androidAxNodeFromAttributes(parseXmlAttributes(token));
+    const parent = stack.at(-1);
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+
+    if (!isSelfClosing) stack.push(node);
+  }
+
+  if (roots.length === 0) {
+    throw new Error(`uiautomator hierarchy did not contain nodes for ${screen.width}x${screen.height}`);
+  }
+  return roots;
+}
+
 function clampCoordinate(value: number, max: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(max - 1, Math.round(value * max)));
@@ -277,6 +403,12 @@ async function androidScreenConfig(serial: string): Promise<ScreenConfig> {
     if (size) return { ...size, orientation: orientationForSize(size) };
   } catch {}
   return { width: 1, height: 1, orientation: "portrait" };
+}
+
+async function androidAccessibilityTree(serial: string, screen: ScreenConfig): Promise<AndroidAxNode[]> {
+  const xml = await adb(serial, ["exec-out", "uiautomator", "dump", "/dev/tty"], 8_000)
+    .then((out) => out.toString("utf-8"));
+  return parseAndroidAccessibilityTree(xml, screen);
 }
 
 export async function sendAndroidButton(serial: string, button: string): Promise<void> {
@@ -339,10 +471,7 @@ class AndroidStreamServer {
       }
 
       if (url === "/ax") {
-        writeJson(res, {
-          error: "ax_unavailable",
-          message: "Android accessibility snapshots are not available through adb.",
-        }, 503);
+        void this.writeAccessibilityTree(res);
         return;
       }
 
@@ -398,6 +527,18 @@ class AndroidStreamServer {
   private async writeConfig(res: ServerResponse): Promise<void> {
     await this.refreshScreenConfig(true);
     writeJson(res, this.screen);
+  }
+
+  private async writeAccessibilityTree(res: ServerResponse): Promise<void> {
+    try {
+      await this.refreshScreenConfig(true);
+      writeJson(res, await androidAccessibilityTree(this.serial, this.screen));
+    } catch (err) {
+      writeJson(res, {
+        error: "ax_unavailable",
+        message: (err as Error).message || "Android accessibility snapshot failed.",
+      }, 503);
+    }
   }
 
   private async refreshScreenConfig(force = false): Promise<void> {
