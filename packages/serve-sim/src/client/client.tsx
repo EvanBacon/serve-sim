@@ -21,7 +21,6 @@ import {
 } from "serve-sim-client/simulator";
 
 import { ReloadIcon } from "./icons";
-import { AppDetectionTool } from "./components/app-detection-tool";
 import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
