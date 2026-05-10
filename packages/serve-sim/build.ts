@@ -46,7 +46,7 @@ const preactPlugin = {
 };
 
 async function buildTailwindCss(): Promise<string> {
-  const sourcePath = resolve(root, "src/client/tailwind.css");
+  const sourcePath = resolve(root, "src/client/global.css");
   const source = readFileSync(sourcePath, "utf8");
 
   const result = await postcss([tailwindcss()]).process(source, {
