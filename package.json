@@ -3,9 +3,15 @@
   "private": true,
   "scripts": {
     "build": "bun run --filter '*' build",
-    "build:swift": "cd packages/serve-sim && ./build.sh"
+    "build:swift": "cd packages/serve-sim && ./build.sh",
+    "knip": "knip"
   },
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "knip": "^6.12.2",
+    "typescript": "^6.0.3"
+  }
 }

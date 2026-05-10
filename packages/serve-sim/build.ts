@@ -55,7 +55,7 @@ async function buildTailwindCss(): Promise<string> {
     for (const log of result.logs) console.error(log);
     process.exit(1);
   }
-  const css = await result.outputs[0].text();
+  const css = await result.outputs[0]!.text();
   console.log(`tailwind css      ${kb(css.length)}`);
   return css;
 }
@@ -74,7 +74,7 @@ async function bundleBrowserClient(entry: string): Promise<string> {
     for (const log of result.logs) console.error(log);
     process.exit(1);
   }
-  return (await result.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
+  return (await result.outputs[0]!.text()).replace(/<\/script>/gi, "<\\/script>");
 }
 
 const tailwindCss = await buildTailwindCss();
@@ -126,7 +126,7 @@ if (!mwResult.success) {
   for (const log of mwResult.logs) console.error(log);
   process.exit(1);
 }
-const mwSize = (await mwResult.outputs[0].text()).length;
+const mwSize = (await mwResult.outputs[0]!.text()).length;
 console.log(`dist/middleware.js ${kb(mwSize)}`);
 
 writeFileSync(
@@ -153,7 +153,7 @@ if (!binJsResult.success) {
   process.exit(1);
 }
 
-const binJsSize = (await binJsResult.outputs[0].text()).length;
+const binJsSize = (await binJsResult.outputs[0]!.text()).length;
 console.log(`dist/serve-sim.js   ${kb(binJsSize)}`);
 
 // ─── 5. Compiled single-file executable ──────────────────────────────────

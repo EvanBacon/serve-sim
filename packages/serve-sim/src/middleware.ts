@@ -335,7 +335,10 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
         // (and what the DevTools frontend CSP whitelists). `localhost` resolves
         // to ::1 first on some setups, which would leave the iframe's
         // ws://127.0.0.1:9222 connection refused.
-        const server = await startCdpServer({ host: "127.0.0.1", port });
+        const server = await startCdpServer({ host: "127.0.0.1", port }) as Awaited<ReturnType<typeof startCdpServer>> & {
+          highlightTarget?(targetId: string, on: boolean): Promise<void>;
+          releaseHighlight?(targetId?: string): void;
+        };
         return {
           port,
           cdpUrl: `http://127.0.0.1:${port}`,
@@ -353,8 +356,14 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
                 inUseByOtherInspector: !!target.inUseByOtherInspector,
               }));
           },
-          highlightTarget: server.highlightTarget?.bind(server),
-          releaseHighlight: server.releaseHighlight?.bind(server),
+          highlightTarget: (server as CdpServer & {
+            highlightTarget?(targetId: string, on: boolean): Promise<void>;
+            releaseHighlight?(targetId?: string): void;
+          }).highlightTarget?.bind(server),
+          releaseHighlight: (server as CdpServer & {
+            highlightTarget?(targetId: string, on: boolean): Promise<void>;
+            releaseHighlight?(targetId?: string): void;
+          }).releaseHighlight?.bind(server),
         };
       } catch (err: any) {
         if (err?.code === "EADDRINUSE") {
@@ -513,7 +522,7 @@ function readSimulatorMemoryUsage(): { perUdid: Record<string, number>; totalByt
       const rssKb = Number(line.split(/\s+/, 1)[0]);
       if (!Number.isFinite(rssKb)) continue;
       const bytes = rssKb * 1024;
-      const udid = m[1].toUpperCase();
+      const udid = m[1]!.toUpperCase();
       perUdid[udid] = (perUdid[udid] ?? 0) + bytes;
       totalBytes += bytes;
     }
@@ -875,7 +884,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     // Optional body { targetId } releases just one; empty body releases all.
     if (url === base + "/devtools/release" && req.method === "POST") {
       let body = "";
-      req.on("data", (chunk) => (body += chunk));
+      req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {
         try {
           const parsed = body ? JSON.parse(body) as { targetId?: string } : {};
@@ -898,7 +907,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     // { targetId: string, on: boolean }.
     if (url === base + "/devtools/highlight" && req.method === "POST") {
       let body = "";
-      req.on("data", (chunk) => (body += chunk));
+      req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {
         try {
           const { targetId, on } = JSON.parse(body || "{}") as { targetId?: string; on?: boolean };
