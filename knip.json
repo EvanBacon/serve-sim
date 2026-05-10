@@ -3,7 +3,32 @@
   "tags": [
     "-lintignore"
   ],
+  "ignore": [
+    "**/__tests__/**",
+    "**/*.test.{ts,tsx,js,jsx}"
+  ],
   "workspaces": {
-    ".": {}
+    ".": {},
+    "packages/serve-sim": {
+      "ignoreDependencies": [
+        "preact"
+      ],
+      "entry": [
+        "src/index.ts",
+        "src/middleware.ts",
+        "src/state.ts",
+        "src/client/client.tsx",
+        "src/client/global.css",
+        "build.ts",
+        "dev.ts",
+        "scripts/build-trails.ts"
+      ]
+    },
+    "packages/serve-sim-client": {
+      "ignoreDependencies": [
+        "react-dom",
+        "@types/react-dom"
+      ]
+    }
   }
 }

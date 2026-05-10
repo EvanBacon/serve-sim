@@ -903,7 +903,7 @@ function dropKindFor(file: File): DropKind | null {
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
   return btoa(binary);
 }
 
@@ -2693,7 +2693,7 @@ function App() {
       if (!c) {
         let h = 0;
         for (let i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
-        c = palette[Math.abs(h) % palette.length];
+        c = palette[Math.abs(h) % palette.length]!;
         procColors.set(name, c);
       }
       return c;
@@ -2775,7 +2775,7 @@ function App() {
     // Only auto-pick when there's no ambiguity (single inspectable target).
     // Otherwise let the user choose explicitly so we don't surprise them by
     // attaching to one app's webview when several are inspectable.
-    setSelectedDevtoolsTargetId(devtools.targets.length === 1 ? devtools.targets[0].id : null);
+    setSelectedDevtoolsTargetId(devtools.targets.length === 1 ? devtools.targets[0]!.id : null);
   }, [devtoolsOpen, devtools.targets, selectedDevtoolsTargetId]);
 
   useEffect(() => {
@@ -3152,7 +3152,7 @@ function App() {
         <SimulatorToolbar
           exec={execOnHost}
           onRotate={rotateDevice}
-          orientation={activeStreamConfig.orientation ?? null}
+          orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
           deviceUdid={config.device}
           deviceName={selectedDevice?.name ?? null}
           deviceRuntime={selectedDevice?.runtime ?? null}
@@ -3412,6 +3412,13 @@ function App() {
 
 // ─── Styles (before mount — Preact renders synchronously) ───
 
+const SIMULATOR_RESIZE_MIN_WIDTH = 280;
+const SIMULATOR_RESIZE_MAX_SCALE = 3;
+const SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME = 136;
+const SIMULATOR_RESIZE_DRAG_TRANSITION = "width 70ms linear";
+const SIMULATOR_RESIZE_LAYOUT_TRANSITION = "width 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
+const SIMULATOR_RESIZE_PAGE_TRANSITION = "padding-right 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
+
 const s: Record<string, CSSProperties> = {
   page: {
     display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -3582,13 +3589,6 @@ const pickerGroupHeaderStyle: CSSProperties = {
 const PANEL_WIDTH = 320;
 const DEVTOOLS_PANEL_WIDTH = 760;
 const GRID_PANEL_WIDTH = 720;
-const SIMULATOR_RESIZE_MIN_WIDTH = 280;
-const SIMULATOR_RESIZE_MAX_SCALE = 3;
-const SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME = 136;
-const SIMULATOR_RESIZE_DRAG_TRANSITION = "width 70ms linear";
-const SIMULATOR_RESIZE_LAYOUT_TRANSITION = "width 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
-const SIMULATOR_RESIZE_PAGE_TRANSITION = "padding-right 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
-
 function useSimulatorResize({
   defaultWidth,
   viewportWidth,

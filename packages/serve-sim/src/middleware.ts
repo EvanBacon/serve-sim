@@ -356,14 +356,8 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
                 inUseByOtherInspector: !!target.inUseByOtherInspector,
               }));
           },
-          highlightTarget: (server as CdpServer & {
-            highlightTarget?(targetId: string, on: boolean): Promise<void>;
-            releaseHighlight?(targetId?: string): void;
-          }).highlightTarget?.bind(server),
-          releaseHighlight: (server as CdpServer & {
-            highlightTarget?(targetId: string, on: boolean): Promise<void>;
-            releaseHighlight?(targetId?: string): void;
-          }).releaseHighlight?.bind(server),
+          highlightTarget: server.highlightTarget?.bind(server),
+          releaseHighlight: server.releaseHighlight?.bind(server),
         };
       } catch (err: any) {
         if (err?.code === "EADDRINUSE") {
