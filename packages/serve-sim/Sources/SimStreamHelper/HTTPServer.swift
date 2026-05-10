@@ -123,6 +123,38 @@ final class HTTPServer {
             }
         }
 
+        // Frontmost-app probe. Returns `{bundleId, pid}` for the visible
+        // app right now — used to bootstrap `/appstate` SSE clients after
+        // a page reload, since SpringBoard's foreground log is edge-only.
+        server["/foreground"] = { [weak self] _ in
+            guard let self else { return .internalServerError }
+            do {
+                let info = try AccessibilityBridge.shared.frontmostApp(udid: self.deviceUDID)
+                let data = try JSONSerialization.data(withJSONObject: info)
+                var headers = self.corsHeaders
+                headers["Content-Type"] = "application/json"
+                headers["Cache-Control"] = "no-cache, no-store"
+                headers["Content-Length"] = "\(data.count)"
+                return .raw(200, "OK", headers) { writer in
+                    try? writer.write(data)
+                }
+            } catch {
+                let payload: [String: Any] = [
+                    "error": "foreground_unavailable",
+                    "message": error.localizedDescription,
+                ]
+                guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+                    return .internalServerError
+                }
+                var headers = self.corsHeaders
+                headers["Content-Type"] = "application/json"
+                headers["Content-Length"] = "\(body.count)"
+                return .raw(503, "Service Unavailable", headers) { writer in
+                    try? writer.write(body)
+                }
+            }
+        }
+
         // CORS preflight
         server.middleware.append { request in
             if request.method == "OPTIONS" {

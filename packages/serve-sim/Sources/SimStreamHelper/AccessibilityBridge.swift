@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Darwin
 import ObjectiveC.runtime
 
 // Accessibility tree fetcher for booted iOS Simulators.
@@ -185,6 +186,104 @@ final class AccessibilityBridge: NSObject {
 
         let json: [Any] = [root]
         return try JSONSerialization.data(withJSONObject: json)
+    }
+
+    /// Cheap point-query for the frontmost app on a simulator: returns
+    /// `{bundleId, pid}` without walking the AX tree. Used to bootstrap
+    /// `/appstate` SSE clients (the SpringBoard log stream is edge-triggered
+    /// so a fresh subscriber sees nothing until the user re-foregrounds an
+    /// app). Throws when SpringBoard hasn't surfaced an app yet.
+    func frontmostApp(udid: String) throws -> [String: Any] {
+        try ensureLoaded()
+
+        guard let device = FrameCapture.findSimDevice(udid: udid) else {
+            throw NSError(domain: "Accessibility", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Device \(udid) not found"])
+        }
+        guard let translator = translator else {
+            throw AccessibilityError.translatorUnavailable
+        }
+
+        let token = UUID().uuidString
+        registerToken(token, device: device)
+        defer { unregisterToken(token) }
+
+        let frontmostSel = NSSelectorFromString("frontmostApplicationWithDisplayId:bridgeDelegateToken:")
+        typealias FrontmostFunc = @convention(c) (AnyObject, Selector, UInt32, NSString) -> AnyObject?
+        guard let frontmostIMP = translator.method(for: frontmostSel) else {
+            throw AccessibilityError.translatorUnavailable
+        }
+        let frontmost = unsafeBitCast(frontmostIMP, to: FrontmostFunc.self)
+        guard let translation = frontmost(translator, frontmostSel, 0, token as NSString) as? NSObject else {
+            throw AccessibilityError.noFrontmostApplication
+        }
+        translation.setValue(token, forKey: "bridgeDelegateToken")
+
+        // AXPTranslationObject's accessors vary across simulator runtimes
+        // and throw NSUnknownKeyException for undefined keys, so probe via
+        // -respondsToSelector: before each KVC fetch.
+        func safeValue<T>(_ key: String, as: T.Type) -> T? {
+            guard translation.responds(to: NSSelectorFromString(key)) else { return nil }
+            return translation.value(forKey: key) as? T
+        }
+
+        var pid: Int32 = 0
+        for key in ["pid", "processIdentifier", "processID"] {
+            if let n = safeValue(key, as: NSNumber.self) {
+                pid = n.int32Value
+                if pid > 0 { break }
+            }
+        }
+
+        // Bundle identifier sometimes ships as a property on the translation
+        // (newer simulator runtimes) — try first, then fall back to walking
+        // the executable path up to the surrounding `.app/Info.plist`.
+        var bundleId: String? = nil
+        for key in ["bundleIdentifier", "processBundleIdentifier", "applicationIdentifier"] {
+            if let s = safeValue(key, as: String.self), !s.isEmpty {
+                bundleId = s
+                break
+            }
+        }
+        if bundleId == nil, pid > 0 {
+            bundleId = Self.bundleIdForPid(pid)
+        }
+
+        guard let bundleId else { throw AccessibilityError.noFrontmostApplication }
+        var result: [String: Any] = ["bundleId": bundleId]
+        if pid > 0 { result["pid"] = Int(pid) }
+        return result
+    }
+
+    /// Resolve a pid to its bundle identifier by reading
+    /// `<executable>.app/Info.plist`. Works for simulator app processes
+    /// because `proc_pidpath` returns the host-side path to the
+    /// `MyApp.app/MyApp` binary inside the simulator's runtime container.
+    private static func bundleIdForPid(_ pid: Int32) -> String? {
+        // PROC_PIDPATHINFO_MAXSIZE = 4 * MAXPATHLEN (4096) — not exported to
+        // Swift in some SDKs, so size the buffer explicitly.
+        var buffer = [CChar](repeating: 0, count: 4 * 1024)
+        let len = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard len > 0 else { return nil }
+        let path = String(cString: buffer)
+        var url = URL(fileURLWithPath: path)
+        // Walk up until we find the enclosing `.app` bundle. SpringBoard
+        // and most user apps land inside one within a few components.
+        for _ in 0..<8 {
+            url.deleteLastPathComponent()
+            if url.pathExtension == "app" {
+                let plist = url.appendingPathComponent("Info.plist")
+                if let data = try? Data(contentsOf: plist),
+                   let obj = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                   let bundleId = obj["CFBundleIdentifier"] as? String,
+                   !bundleId.isEmpty {
+                    return bundleId
+                }
+                return nil
+            }
+            if url.path == "/" { break }
+        }
+        return nil
     }
 
     /// Sample a grid of screen points and ask the translator for the

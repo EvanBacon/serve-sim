@@ -7,6 +7,7 @@ export function useMediaDrop({
   udid,
   enabled,
   onUploadStart,
+  onUploadProgress,
   onUploadEnd,
   onUnsupported,
 }: {
@@ -14,6 +15,7 @@ export function useMediaDrop({
   udid: string | undefined;
   enabled: boolean;
   onUploadStart: (name: string, kind: DropKind) => string;
+  onUploadProgress: (id: string, progress: number | null) => void;
   onUploadEnd: (id: string, ok: boolean, message?: string) => void;
   onUnsupported: (file: File) => void;
 }) {
@@ -39,14 +41,14 @@ export function useMediaDrop({
           continue;
         }
         const id = onUploadStart(file.name, kind);
-        uploadDroppedFile(file, kind, exec, udid)
+        uploadDroppedFile(file, kind, exec, udid, (p) => onUploadProgress(id, p))
           .then(() => onUploadEnd(id, true))
           .catch((err) =>
             onUploadEnd(id, false, err instanceof Error ? err.message : "Upload failed"),
           );
       }
     },
-    [enabled, udid, exec, onUploadStart, onUploadEnd, onUnsupported],
+    [enabled, udid, exec, onUploadStart, onUploadProgress, onUploadEnd, onUnsupported],
   );
 
   const onDragOver = useCallback(

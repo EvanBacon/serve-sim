@@ -534,6 +534,7 @@ function AppWithConfig({
     udid: config.device,
     enabled: streaming,
     onUploadStart: uploads.add,
+    onUploadProgress: uploads.setProgress,
     onUploadEnd: (id, ok, message) =>
       uploads.update(id, { status: ok ? "success" : "error", message }),
     onUnsupported: (file) => {
@@ -734,24 +735,49 @@ function AppWithConfig({
       {/* Upload toasts */}
       {uploads.toasts.length > 0 && (
         <div className="fixed bottom-4 right-4 flex flex-col gap-1.5 max-w-[320px] z-30">
-          {uploads.toasts.map((t) => (
-            <div
-              key={t.id}
-              className="flex items-center gap-2 px-3 py-2 bg-panel border border-white/12 rounded-lg text-white/90 text-[12px] font-mono shadow-[0_4px_12px_rgba(0,0,0,0.4)]"
-            >
-              <span
-                className="size-1.5 rounded-full shrink-0 [transition:background_0.3s]"
-                style={{ background: t.status === "uploading" ? "#a5b4fc" : t.status === "success" ? "#4ade80" : "#f87171" }}
-              />
-              <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-                {t.status === "uploading" &&
-                  (t.kind === "ipa" ? `Installing ${t.name}…` : `Uploading ${t.name}…`)}
-                {t.status === "success" &&
-                  (t.kind === "ipa" ? `Installed ${t.name}` : `Added ${t.name} to Photos`)}
-                {t.status === "error" && `${t.name}: ${t.message ?? "Upload failed"}`}
-              </span>
-            </div>
-          ))}
+          {uploads.toasts.map((t) => {
+            const isError = t.status === "error";
+            const isUploading = t.status === "uploading";
+            // While transferring chunks, show "Uploading … N%". Once chunks
+            // are done, the install/addmedia step has no progress signal, so
+            // swap to a phase-specific verb and an indeterminate bar.
+            const transferring = isUploading && t.progress !== null;
+            const pct = t.progress != null ? Math.round(t.progress * 100) : 0;
+            return (
+              <div
+                key={t.id}
+                className={`flex flex-col gap-1.5 px-3 py-2 bg-panel border border-white/12 rounded-lg text-white/90 text-[12px] font-mono shadow-[0_4px_12px_rgba(0,0,0,0.4)] ${isError ? "select-text cursor-text" : "select-none cursor-default"}`}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className="size-1.5 rounded-full shrink-0 [transition:background_0.3s]"
+                    style={{ background: isUploading ? "#a5b4fc" : t.status === "success" ? "#4ade80" : "#f87171" }}
+                  />
+                  <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+                    {isUploading && transferring &&
+                      `Uploading ${t.name}… ${pct}%`}
+                    {isUploading && !transferring &&
+                      (t.kind === "ipa" ? `Installing ${t.name}…` : `Adding ${t.name}…`)}
+                    {t.status === "success" &&
+                      (t.kind === "ipa" ? `Installed ${t.name}` : `Added ${t.name} to Photos`)}
+                    {isError && `${t.name}: ${t.message ?? "Upload failed"}`}
+                  </span>
+                </div>
+                {isUploading && (
+                  <div className="relative h-[3px] w-full bg-white/8 rounded-[2px] overflow-hidden">
+                    {transferring ? (
+                      <div
+                        className="h-full bg-accent rounded-[2px] [transition:width_120ms_linear]"
+                        style={{ width: `${pct}%` }}
+                      />
+                    ) : (
+                      <div className="serve-sim-toast-indeterminate absolute top-0 left-0 h-full w-[40%] bg-accent rounded-[2px]" />
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 

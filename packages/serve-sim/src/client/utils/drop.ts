@@ -53,6 +53,7 @@ export async function uploadDroppedFile(
   kind: DropKind,
   exec: (command: string) => Promise<ExecResult>,
   udid: string,
+  onProgress: (progress: number | null) => void,
 ) {
   if (file.size > DROP_MAX_FILE_SIZE) {
     throw new Error("File too large (max 500MB)");
@@ -63,9 +64,11 @@ export async function uploadDroppedFile(
   const tmpPath = `/tmp/${prefix}-${crypto.randomUUID()}.${ext}`;
 
   try {
+    onProgress(0);
     const buffer = await file.arrayBuffer();
     const b64 = arrayBufferToBase64(buffer);
 
+    let lastReportedPct = 0;
     for (let offset = 0; offset < b64.length; offset += DROP_CHUNK_SIZE) {
       const chunk = b64.slice(offset, offset + DROP_CHUNK_SIZE);
       const op = offset === 0 ? ">" : ">>";
@@ -73,8 +76,16 @@ export async function uploadDroppedFile(
       if (result.exitCode !== 0) {
         throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
       }
+      const written = Math.min(offset + DROP_CHUNK_SIZE, b64.length);
+      const pct = Math.floor((written / b64.length) * 100);
+      if (pct !== lastReportedPct) {
+        lastReportedPct = pct;
+        onProgress(written / b64.length);
+      }
     }
 
+    // install/addmedia gives no progress signal — flip to indeterminate.
+    onProgress(null);
     const cmd = kind === "ipa"
       ? `xcrun simctl install ${udid} ${tmpPath}`
       : `xcrun simctl addmedia ${udid} ${tmpPath}`;
