@@ -38,7 +38,7 @@ import {
   RunGlyph,
   StopGlyph,
   WalkGlyph,
-} from "./location-emulation-icons";
+} from "./icons";
 
 const TRAIL_MORPH_MS = 650;
 
