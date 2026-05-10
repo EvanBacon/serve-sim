@@ -14,7 +14,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type ReactNode,
 } from "react";
 import {
@@ -317,20 +316,19 @@ export function LocationEmulationTool({
     : `${formatDistance(prepared.totalDistance)} total`;
 
   return (
-    <div style={{ ...sectionStyle, padding: "8px 12px 12px" }}>
+    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 pt-2 pb-3">
       <style>{HOVER_CSS}</style>
       <button
         type="button"
         onClick={() => setOpen((v: boolean) => !v)}
-        style={toggleStyle}
-        className="lem-toggle"
+        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-[#eee] py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
         aria-expanded={open}
       >
-        <span style={titleStyle}>Location</span>
-        <span style={statusStyle}>
+        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
+        <span className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none">
           <span
+            className="size-1.5 rounded-full [transition:background_0.2s,box-shadow_0.2s]"
             style={{
-              ...dotStyle,
               background: playing ? "#4ade80" : prepared.totalDistance > 0 ? "rgba(255,255,255,0.3)" : "transparent",
               boxShadow: playing ? "0 0 6px rgba(74,222,128,0.7)" : "none",
             }}
@@ -342,47 +340,41 @@ export function LocationEmulationTool({
 
       {open && (
         <>
-          <div style={pickerRowStyle}>
-            <div style={selectWrapStyle}>
+          <div className="flex flex-col gap-1">
+            <div className="relative block">
               <select
                 value={trailId}
                 onChange={(e) => onTrailChange((e.target as HTMLSelectElement).value)}
-                style={selectStyle}
-                className="lem-select"
+                className="lem-select appearance-none [-webkit-appearance:none] bg-white/[0.04] border border-white/8 rounded-md text-[#eee] text-[12px] py-1.5 pr-[26px] pl-2 font-[inherit] cursor-pointer w-full [transition:background_0.12s,border-color_0.12s]"
                 aria-label="Trail"
               >
                 {DEFAULT_TRAILS.map((t) => (
                   <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
               </select>
-              <span style={selectChevronStyle} aria-hidden="true">
+              <span className="absolute right-[9px] top-1/2 -translate-y-1/2 pointer-events-none flex items-center" aria-hidden="true">
                 <Chevron open={false} />
               </span>
             </div>
-            <div style={trailMetaStyle}>{trail.description}</div>
+            <div className="text-[10px] text-white/45">{trail.description}</div>
           </div>
 
-          <div style={canvasWrapStyle}>
-            <canvas ref={canvasRef} style={canvasStyle} />
+          <div className="relative w-full rounded-[10px] overflow-hidden bg-[#0a0a0c] border border-white/[0.06] [aspect-ratio:16/11]">
+            <canvas ref={canvasRef} className="w-full h-full block" />
             <ElevationBadges prepared={prepared} />
           </div>
 
-          <div style={statRowStyle}>
+          <div className="grid [grid-template-columns:1fr_1fr_1fr] gap-1.5">
             <Stat label="Distance" value={formatDistance(playback.arc)} />
             <Stat label="Pace" value={formatPace(speedRef.current)} />
             <Stat label="Elapsed" value={formatDuration(playback.elapsedMs)} />
           </div>
 
-          <div style={controlsRowStyle}>
+          <div className="flex gap-1.5">
             <button
               type="button"
               onClick={onPlayPause}
-              style={{
-                ...primaryBtnStyle,
-                background: playing ? "rgba(255,255,255,0.16)" : "#34d399",
-                color: playing ? "#fff" : "#062018",
-              }}
-              className={playing ? "lem-primary lem-primary-on" : "lem-primary"}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer font-[inherit] ${playing ? "lem-primary lem-primary-on bg-white/[0.16] text-white" : "lem-primary bg-success-emerald text-[#062018]"}`}
               aria-pressed={playing}
               title={playing ? "Pause" : "Play"}
             >
@@ -392,8 +384,7 @@ export function LocationEmulationTool({
             <button
               type="button"
               onClick={onStop}
-              style={ghostBtnStyle}
-              className="lem-ghost"
+              className="lem-ghost flex items-center justify-center gap-1.5 py-2 px-3 border border-white/12 rounded-[7px] text-[12px] font-medium bg-transparent text-white/85 cursor-pointer font-[inherit]"
               disabled={playback.status === "idle" && playback.arc === 0}
               title="Stop and clear simulated location"
             >
@@ -402,8 +393,8 @@ export function LocationEmulationTool({
             </button>
           </div>
 
-          <div style={modeRowStyle}>
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="flex flex-row items-stretch gap-1.5">
+            <div className="flex-1 min-w-0">
               <Segmented
                 ariaLabel="Transport mode"
                 value={mode}
@@ -423,22 +414,20 @@ export function LocationEmulationTool({
                 const next = SPEED_MULTIPLIERS[(idx + 1) % SPEED_MULTIPLIERS.length]!;
                 setMultiplier(next);
               }}
-              style={{
-                ...speedBtnStyle,
-                background: multiplier > 1 ? "#fff" : speedBtnStyle.background,
-                borderColor: multiplier > 1 ? "#fff" : (speedBtnStyle as { borderColor?: string }).borderColor,
-                color: multiplier > 1 ? "#0a0a0c" : speedBtnStyle.color,
-              }}
-              className={multiplier > 1 ? "lem-speed lem-speed-on" : "lem-speed"}
+              className={`flex items-center justify-center gap-1 px-2.5 border rounded-[7px] cursor-pointer font-[inherit] text-[11px] font-semibold min-w-[56px] ${multiplier > 1 ? "lem-speed lem-speed-on bg-white border-white text-[#0a0a0c]" : "lem-speed bg-white/[0.04] border-white/8 text-white/85"}`}
               aria-label={`Speed ${multiplier}× — tap to cycle`}
               title={`Speed ${multiplier}× — tap to cycle`}
             >
               <FastForwardGlyph />
-              {multiplier > 1 && <span style={speedBtnLabelStyle}>{multiplier}×</span>}
+              {multiplier > 1 && <span className="font-mono [font-variant-numeric:tabular-nums]">{multiplier}×</span>}
             </button>
           </div>
 
-          {error && <div style={errorStyle}>{error}</div>}
+          {error && (
+            <div className="bg-[rgba(248,113,113,0.08)] border border-[rgba(248,113,113,0.2)] text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
+              {error}
+            </div>
+          )}
         </>
       )}
     </div>
@@ -449,9 +438,9 @@ export function LocationEmulationTool({
 
 const Stat = memo(function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div style={statColStyle}>
-      <div style={statLabelStyle}>{label}</div>
-      <div style={statValueStyle}>{value}</div>
+    <div className="flex flex-col gap-0.5 bg-white/[0.03] border border-white/[0.06] rounded-md py-[5px] px-[7px] min-w-0">
+      <div className="text-[9px] uppercase tracking-[0.06em] text-white/45">{label}</div>
+      <div className="text-[12px] font-mono text-white overflow-hidden text-ellipsis whitespace-nowrap">{value}</div>
     </div>
   );
 });
@@ -468,7 +457,11 @@ function Segmented<T extends string>({
   ariaLabel: string;
 }) {
   return (
-    <div role="group" aria-label={ariaLabel} style={segGroupStyle}>
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className="flex bg-white/[0.04] border border-white/8 rounded-[7px] p-0.5 gap-0.5"
+    >
       {options.map((o) => {
         const active = o.value === value;
         return (
@@ -476,12 +469,7 @@ function Segmented<T extends string>({
             key={o.value}
             type="button"
             onClick={() => onChange(o.value)}
-            style={{
-              ...segBtnStyle,
-              background: active ? "rgba(255,255,255,0.12)" : "transparent",
-              color: active ? "#fff" : "rgba(255,255,255,0.6)",
-            }}
-            className={active ? "lem-seg lem-seg-active" : "lem-seg"}
+            className={`flex-1 flex items-center justify-center border-none rounded-[5px] py-[5px] px-2 text-[11px] font-medium cursor-pointer font-[inherit] [transition:background_0.12s,color_0.12s] min-h-[22px] ${active ? "lem-seg lem-seg-active bg-white/[0.12] text-white" : "lem-seg bg-transparent text-white/60"}`}
             aria-pressed={active}
             aria-label={o.icon ? o.label : undefined}
             title={o.icon ? o.label : undefined}
@@ -498,10 +486,10 @@ function ElevationBadges({ prepared }: { prepared: PreparedTrail }) {
   if (prepared.rawMaxAlt - prepared.rawMinAlt < 5) return null;
   return (
     <>
-      <div style={{ ...badgeStyle, top: 8, left: 10 }}>
+      <div className="absolute top-2 left-2.5 bg-[rgba(20,20,22,0.65)] text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
         <ArrowGlyph dir="up" /> {formatElevation(prepared.rawMaxAlt)}
       </div>
-      <div style={{ ...badgeStyle, top: 8, right: 10 }}>
+      <div className="absolute top-2 right-2.5 bg-[rgba(20,20,22,0.65)] text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
         <ArrowGlyph dir="down" /> {formatElevation(prepared.rawMinAlt)}
       </div>
     </>
@@ -909,266 +897,4 @@ function parseSimctlError(stderr: string): string {
   if (m) return m[1]!;
   return trimmed.split("\n").slice(-1)[0] ?? trimmed;
 }
-
-// ─── Styles ────────────────────────────────────────────────────────────────
-
-const sectionStyle: CSSProperties = {
-  background: "#1c1c1e",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 10,
-  display: "flex",
-  flexDirection: "column",
-  gap: 10,
-};
-
-const toggleStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "auto 1fr auto",
-  alignItems: "center",
-  gap: 8,
-  background: "transparent",
-  border: "none",
-  color: "#eee",
-  // Expanded touch target — extend padding outward and pull margins back so
-  // the visual section doesn't grow.
-  padding: "10px 4px",
-  margin: "-8px -4px",
-  cursor: "pointer",
-  width: "calc(100% + 8px)",
-  textAlign: "left",
-  minHeight: 36,
-  lineHeight: 1,
-};
-
-const titleStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  color: "rgba(255,255,255,0.5)",
-  textTransform: "uppercase",
-  letterSpacing: "0.08em",
-  lineHeight: 1,
-  display: "inline-flex",
-  alignItems: "center",
-};
-
-const statusStyle: CSSProperties = {
-  fontSize: 11,
-  color: "rgba(255,255,255,0.55)",
-  fontFamily: "ui-monospace, monospace",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  justifySelf: "end",
-  lineHeight: 1,
-};
-
-const dotStyle: CSSProperties = {
-  width: 6,
-  height: 6,
-  borderRadius: "50%",
-  transition: "background 0.2s, box-shadow 0.2s",
-};
-
-const pickerRowStyle: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 4,
-};
-
-const selectWrapStyle: CSSProperties = {
-  position: "relative",
-  display: "block",
-};
-
-const selectStyle: CSSProperties = {
-  appearance: "none",
-  WebkitAppearance: "none",
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 6,
-  color: "#eee",
-  fontSize: 12,
-  padding: "6px 26px 6px 8px",
-  fontFamily: "inherit",
-  cursor: "pointer",
-  width: "100%",
-  transition: "background 0.12s, border-color 0.12s",
-};
-
-const selectChevronStyle: CSSProperties = {
-  position: "absolute",
-  right: 9,
-  top: "50%",
-  transform: "translateY(-50%)",
-  pointerEvents: "none",
-  display: "flex",
-  alignItems: "center",
-};
-
-const trailMetaStyle: CSSProperties = {
-  fontSize: 10,
-  color: "rgba(255,255,255,0.45)",
-};
-
-const canvasWrapStyle: CSSProperties = {
-  position: "relative",
-  width: "100%",
-  aspectRatio: "16 / 11",
-  borderRadius: 10,
-  overflow: "hidden",
-  background: "#0a0a0c",
-  border: "1px solid rgba(255,255,255,0.06)",
-};
-
-const canvasStyle: CSSProperties = {
-  width: "100%",
-  height: "100%",
-  display: "block",
-};
-
-const badgeStyle: CSSProperties = {
-  position: "absolute",
-  background: "rgba(20,20,22,0.65)",
-  color: "rgba(255,255,255,0.85)",
-  fontSize: 10,
-  fontFamily: "ui-monospace, monospace",
-  padding: "2px 6px",
-  borderRadius: 5,
-  display: "flex",
-  alignItems: "center",
-  letterSpacing: "0.02em",
-  border: "1px solid rgba(255,255,255,0.06)",
-};
-
-const statRowStyle: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "1fr 1fr 1fr",
-  gap: 6,
-};
-
-const statColStyle: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 2,
-  background: "rgba(255,255,255,0.03)",
-  border: "1px solid rgba(255,255,255,0.06)",
-  borderRadius: 6,
-  padding: "5px 7px",
-  minWidth: 0,
-};
-
-const statLabelStyle: CSSProperties = {
-  fontSize: 9,
-  textTransform: "uppercase",
-  letterSpacing: "0.06em",
-  color: "rgba(255,255,255,0.45)",
-};
-
-const statValueStyle: CSSProperties = {
-  fontSize: 12,
-  fontFamily: "ui-monospace, monospace",
-  color: "#fff",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const controlsRowStyle: CSSProperties = {
-  display: "flex",
-  gap: 6,
-};
-
-const primaryBtnStyle: CSSProperties = {
-  flex: 1,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 6,
-  padding: "8px 10px",
-  border: "none",
-  borderRadius: 7,
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: "pointer",
-  fontFamily: "inherit",
-};
-
-const ghostBtnStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 6,
-  padding: "8px 12px",
-  border: "1px solid rgba(255,255,255,0.12)",
-  borderRadius: 7,
-  fontSize: 12,
-  fontWeight: 500,
-  background: "transparent",
-  color: "rgba(255,255,255,0.85)",
-  cursor: "pointer",
-  fontFamily: "inherit",
-};
-
-const modeRowStyle: CSSProperties = {
-  display: "flex",
-  flexDirection: "row",
-  alignItems: "stretch",
-  gap: 6,
-};
-
-const speedBtnStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 4,
-  padding: "0 10px",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 7,
-  background: "rgba(255,255,255,0.04)",
-  color: "rgba(255,255,255,0.85)",
-  cursor: "pointer",
-  fontFamily: "inherit",
-  fontSize: 11,
-  fontWeight: 600,
-  minWidth: 56,
-};
-
-const speedBtnLabelStyle: CSSProperties = {
-  fontFamily: "ui-monospace, monospace",
-  fontVariantNumeric: "tabular-nums",
-};
-
-const segGroupStyle: CSSProperties = {
-  display: "flex",
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 7,
-  padding: 2,
-  gap: 2,
-};
-
-const segBtnStyle: CSSProperties = {
-  flex: 1,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  border: "none",
-  borderRadius: 5,
-  padding: "5px 8px",
-  fontSize: 11,
-  fontWeight: 500,
-  cursor: "pointer",
-  fontFamily: "inherit",
-  transition: "background 0.12s, color 0.12s",
-  minHeight: 22,
-};
-
-const errorStyle: CSSProperties = {
-  background: "rgba(248,113,113,0.08)",
-  border: "1px solid rgba(248,113,113,0.2)",
-  color: "#fca5a5",
-  fontSize: 11,
-  padding: "6px 8px",
-  borderRadius: 6,
-};
 

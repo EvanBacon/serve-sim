@@ -36,6 +36,43 @@ type WebKitBridge = {
   releaseHighlight?(targetId?: string): void;
 };
 
+type InspectWebKitBridgeTarget = {
+  targetId: string;
+  title?: string;
+  appName?: string;
+  url?: string;
+  type?: string;
+  bundleId?: string;
+  inUseByOtherInspector?: boolean;
+  source?: { kind?: string; id?: string };
+};
+
+type CdpHttpListEntry = {
+  id: string;
+  title: string;
+  url: string;
+  type: string;
+  description?: string;
+};
+
+type CdpHttpVersion = { Browser?: string };
+
+type AxRootNode = { AXLabel?: unknown };
+
+type SimctlBootedList = {
+  devices: Record<string, Array<{ udid: string; state: string }>>;
+};
+
+type SimctlAllList = {
+  devices: Record<string, Array<Omit<SimctlDevice, "runtime">>>;
+};
+
+type ShutdownRequestBody = { udid?: string };
+type StartRequestBody = { udid?: string };
+type ReleaseRequestBody = { targetId?: string };
+type HighlightRequestBody = { targetId?: string; on?: boolean };
+type ExecRequestBody = { command?: string };
+
 export interface ServeSimState {
   pid: number;
   port: number;
@@ -158,7 +195,7 @@ async function detectCurrentForegroundApp(
   try {
     const res = await fetch(`${stateUrl}/ax`, { signal: controller.signal });
     if (!res.ok) return null;
-    const tree = await res.json() as Array<{ AXLabel?: unknown }>;
+    const tree = await res.json() as AxRootNode[];
     const displayName = tree?.[0]?.AXLabel;
     if (typeof displayName !== "string") return null;
 
@@ -190,9 +227,7 @@ function getBootedUdids(): Set<string> | null {
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 3_000,
     });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; state: string }>>;
-    };
+    const data = JSON.parse(output) as SimctlBootedList;
     const booted = new Set<string>();
     for (const runtime of Object.values(data.devices)) {
       for (const device of runtime) {
@@ -277,7 +312,7 @@ async function existingInspectWebKitBridge(port: number): Promise<WebKitBridge |
   try {
     const versionRes = await fetch(`${cdpUrl}/json/version`);
     if (!versionRes.ok) return null;
-    const version = await versionRes.json() as { Browser?: string };
+    const version = await versionRes.json() as CdpHttpVersion;
     if (version.Browser !== "Safari/inspect-webkit") return null;
     return {
       port,
@@ -288,13 +323,7 @@ async function existingInspectWebKitBridge(port: number): Promise<WebKitBridge |
         // shape `sim:<udid>:<appId>:<pageId>` and the description string
         // `<deviceLabel> (<bundleId>)` are all we have here.
         const listRes = await fetch(`${cdpUrl}/json/list`);
-        const targets = await listRes.json() as Array<{
-          id: string;
-          title: string;
-          url: string;
-          type: string;
-          description?: string;
-        }>;
+        const targets = await listRes.json() as CdpHttpListEntry[];
         return targets
           .filter((target) => target.id.startsWith("sim:"))
           .map((target) => {
@@ -348,17 +377,7 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
           port,
           cdpUrl: `http://127.0.0.1:${port}`,
           async listTargets() {
-            type BridgeTarget = {
-              targetId: string;
-              title?: string;
-              appName?: string;
-              url?: string;
-              type?: string;
-              bundleId?: string;
-              inUseByOtherInspector?: boolean;
-              source?: { kind?: string; id?: string };
-            };
-            return (server.getTargets() as BridgeTarget[])
+            return (server.getTargets() as InspectWebKitBridgeTarget[])
               .filter((target) => target.source?.kind === "simulator")
               .map((target) => {
                 const url = target.url ?? "";
@@ -435,9 +454,7 @@ function listAllSimulators(): SimctlDevice[] {
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 3_000,
     });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<Omit<SimctlDevice, "runtime">>>;
-    };
+    const data = JSON.parse(output) as SimctlAllList;
     const out: SimctlDevice[] = [];
     for (const [runtime, devices] of Object.entries(data.devices)) {
       // Only iOS (skip watchOS / tvOS / visionOS for the grid MVP — the helper
@@ -760,7 +777,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       });
       req.on("end", () => {
         let udid = "";
-        try { udid = JSON.parse(body).udid ?? ""; } catch {}
+        try { udid = (JSON.parse(body) as ShutdownRequestBody).udid ?? ""; } catch {}
         if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
@@ -793,7 +810,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       });
       req.on("end", () => {
         let udid = "";
-        try { udid = JSON.parse(body).udid ?? ""; } catch {}
+        try { udid = (JSON.parse(body) as StartRequestBody).udid ?? ""; } catch {}
         if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
@@ -895,7 +912,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {
         try {
-          const parsed = body ? JSON.parse(body) as { targetId?: string } : {};
+          const parsed: ReleaseRequestBody = body ? JSON.parse(body) : {};
           const bridge = await ensureInspectWebKitBridge();
           bridge.releaseHighlight?.(parsed.targetId);
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -918,7 +935,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {
         try {
-          const { targetId, on } = JSON.parse(body || "{}") as { targetId?: string; on?: boolean };
+          const { targetId, on } = JSON.parse(body || "{}") as HighlightRequestBody;
           if (!targetId) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Missing targetId" }));
@@ -988,7 +1005,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       req.on("end", () => {
         let command = "";
         try {
-          command = JSON.parse(body).command ?? "";
+          command = (JSON.parse(body) as ExecRequestBody).command ?? "";
         } catch {}
         if (!command) {
           res.writeHead(400, { "Content-Type": "application/json" });
