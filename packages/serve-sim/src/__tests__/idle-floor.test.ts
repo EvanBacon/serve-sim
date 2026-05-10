@@ -140,7 +140,7 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
     try {
       const info = JSON.parse(detach.stdout.trim()) as { streamUrl: string };
       streamUrl = info.streamUrl;
-    } catch (err) {
+    } catch {
       throw new Error(
         `serve-sim --detach returned unparseable stdout: ${detach.stdout}\n` +
         `helper logs:\n${dumpHelperLogs()}`,

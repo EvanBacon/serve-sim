@@ -436,10 +436,6 @@ function listAllSimulators(): SimctlDevice[] {
   }
 }
 
-function deviceNameFor(udid: string): string | null {
-  return listAllSimulators().find((d) => d.udid === udid)?.name ?? null;
-}
-
 // Default per-simulator footprint when we have no running sim to measure
 // from — a fresh booted iOS sim with one app launched typically sits in
 // the 1.2–1.8 GB range. Used as a fallback only.

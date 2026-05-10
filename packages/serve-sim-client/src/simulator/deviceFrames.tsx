@@ -303,7 +303,7 @@ function IPadFrameChrome({ streaming = false }: { streaming?: boolean }) {
   );
 }
 
-function WatchFrameChrome({ streaming = false }: { streaming?: boolean }) {
+function WatchFrameChrome({ streaming: _streaming = false }: { streaming?: boolean }) {
   const w = DEVICE_FRAMES.watch.width;
   const h = DEVICE_FRAMES.watch.height;
   // Outer case radius — proportional to real Watch case rounding

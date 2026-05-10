@@ -75,7 +75,7 @@ export function SimulatorView({
   onStreamMultiTouch,
   onStreamButton,
   subscribeFrame,
-  streamFrame,
+  streamFrame: _streamFrame,
   streamConfig,
   onScreenConfigChange,
   hideControls,

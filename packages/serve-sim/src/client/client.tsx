@@ -1176,7 +1176,7 @@ function AppDetectionTool({
       });
     });
     return () => { cancelled = true; };
-  }, [udid, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
+  }, [udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
 
   if (!details) {
     return (
@@ -2875,7 +2875,7 @@ function App() {
         ? prev
         : null,
     );
-  }, [mjpeg.config?.width, mjpeg.config?.height, mjpeg.config?.orientation]);
+  }, [mjpeg.config, mjpeg.config?.width, mjpeg.config?.height, mjpeg.config?.orientation]);
 
   const sendKey = useCallback((type: "down" | "up", usage: number) => {
     sendWs(0x06, { type, usage });
