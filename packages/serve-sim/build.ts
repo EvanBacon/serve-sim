@@ -19,8 +19,7 @@
 import { resolve } from "path";
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { spawnSync } from "child_process";
-import postcss from "postcss";
-import tailwindcss from "@tailwindcss/postcss";
+import tailwindPlugin from "bun-plugin-tailwind";
 
 const root = import.meta.dir;
 const distDir = resolve(root, "dist");
@@ -46,14 +45,17 @@ const preactPlugin = {
 };
 
 async function buildTailwindCss(): Promise<string> {
-  const sourcePath = resolve(root, "src/client/global.css");
-  const source = readFileSync(sourcePath, "utf8");
-
-  const result = await postcss([tailwindcss()]).process(source, {
-    from: sourcePath,
+  const result = await Bun.build({
+    entrypoints: [resolve(root, "src/client/global.css")],
+    minify: true,
+    plugins: [tailwindPlugin],
   });
-
-  const css = result.css;
+  if (!result.success) {
+    console.error("Tailwind build failed:");
+    for (const log of result.logs) console.error(log);
+    process.exit(1);
+  }
+  const css = await result.outputs[0].text();
   console.log(`tailwind css      ${kb(css.length)}`);
   return css;
 }

@@ -50,15 +50,16 @@
     "dev": "bun run dev.ts"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.7",
     "@types/bun": "latest",
-    "serve-sim-client": "workspace:*",
+    "bun-plugin-tailwind": "^0.1.2",
+    "postcss": "^8.4.49",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "typescript": "^5.7.0",
+    "serve-sim-client": "workspace:*",
     "tailwindcss": "^4.1.7",
-    "@tailwindcss/postcss": "^4.1.7",
-    "postcss": "^8.4.49"
+    "typescript": "^5.7.0"
   },
   "dependencies": {
     "inspect-webkit": "^0.0.3"
