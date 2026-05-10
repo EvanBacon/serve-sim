@@ -76,6 +76,9 @@ httpServer.clientManager.onCADebug = { payload in
 httpServer.clientManager.onMemoryWarning = {
     hidInjector.simulateMemoryWarning()
 }
+httpServer.clientManager.onDigitalCrown = { payload in
+    hidInjector.sendDigitalCrown(delta: payload.delta)
+}
 
 // Start HTTP + WebSocket server
 do {

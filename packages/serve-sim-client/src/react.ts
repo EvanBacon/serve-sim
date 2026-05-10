@@ -26,6 +26,7 @@ export interface StreamAPI {
   sendTouch: (data: { type: "begin" | "move" | "end"; x: number; y: number; edge?: number }) => void;
   sendMultiTouch: (data: { type: "begin" | "move" | "end"; x1: number; y1: number; x2: number; y2: number }) => void;
   sendButton: (button: string) => void;
+  sendDigitalCrown?: (delta: number) => void;
   /** Subscribe to frame updates (bypasses React state for performance). Returns unsubscribe fn.
    * Callback receives a blob URL (object URL) pointing to the JPEG frame. */
   subscribeFrame: (cb: (blobUrl: string) => void) => () => void;
@@ -170,6 +171,7 @@ export function useGateway(options: UseGatewayOptions): UseGatewayResult {
     sendTouch: (data) => shellRef.current?.transport.streamTouch(data),
     sendMultiTouch: (data) => shellRef.current?.transport.streamMultiTouch(data),
     sendButton: (button) => shellRef.current?.transport.streamButton(button),
+    sendDigitalCrown: (delta) => shellRef.current?.transport.streamDigitalCrown(delta),
     subscribeFrame,
     get frame() { return streamFrameRef.current; },
     config: streamConfig,

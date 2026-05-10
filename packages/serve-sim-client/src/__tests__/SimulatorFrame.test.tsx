@@ -18,6 +18,7 @@ function streamWithConfig(
     sendTouch: () => {},
     sendMultiTouch: () => {},
     sendButton: () => {},
+    sendDigitalCrown: () => {},
     subscribeFrame: () => () => {},
     frame: null,
     config: { width, height, orientation },

@@ -9,6 +9,7 @@ enum WSMessageType: UInt8 {
     case orientation = 0x07    // client → server: JSON orientation event
     case caDebug = 0x08        // client → server: JSON CoreAnimation debug toggle
     case memoryWarning = 0x09  // client → server: empty body, triggers [SimDevice simulateMemoryWarning]
+    case digitalCrown = 0x0A   // client → server: JSON Digital Crown rotation event
 }
 
 struct TouchEventPayload: Codable {
@@ -38,6 +39,11 @@ struct KeyEventPayload: Codable {
 struct OrientationEventPayload: Codable {
     // "portrait", "portrait_upside_down", "landscape_left", "landscape_right"
     let orientation: String
+}
+
+struct DigitalCrownEventPayload: Codable {
+    /// Raw scroll delta to feed through SimulatorKit's Digital Crown HID event.
+    let delta: Double
 }
 
 // Simulator.app's Debug menu toggles map to `-[SimDevice setCADebugOption:enabled:]`

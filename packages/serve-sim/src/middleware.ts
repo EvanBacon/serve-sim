@@ -422,9 +422,9 @@ function listAllSimulators(): SimctlDevice[] {
     const data = JSON.parse(output) as SimctlAllList;
     const out: SimctlDevice[] = [];
     for (const [runtime, devices] of Object.entries(data.devices)) {
-      // Only iOS (skip watchOS / tvOS / visionOS for the grid MVP — the helper
-      // is iOS-focused and the bezel/touch model assumes a phone-shaped device).
-      if (!/SimRuntime\.iOS-/i.test(runtime)) continue;
+      // Keep this to touch-capable simulator families that serve-sim can frame
+      // and inject into. tvOS is intentionally left out for now.
+      if (!/SimRuntime\.(iOS|watchOS|visionOS|xrOS)-/i.test(runtime)) continue;
       for (const d of devices) {
         if (d.isAvailable === false) continue;
         out.push({ ...d, runtime: runtime.replace(/^.*SimRuntime\./, "") });
@@ -725,7 +725,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       return;
     }
 
-    // Grid JSON: every iOS simulator, annotated with running helper info if any.
+    // Grid JSON: every supported simulator, annotated with running helper info if any.
     if (url === base + "/grid/api") {
       const states = readServeSimStates();
       const helperByUdid = new Map(states.map((s) => [s.device, s] as const));

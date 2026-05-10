@@ -37,6 +37,10 @@ final class HIDInjector {
     private typealias IndigoKeyboardFunc = @convention(c) (UInt32, UInt32) -> UnsafeMutableRawPointer?
     private var keyboardFunc: IndigoKeyboardFunc?
 
+    // IndigoHIDMessageForDigitalCrownEvent(double rotationalDelta) -> IndigoMessage*
+    private typealias IndigoDigitalCrownFunc = @convention(c) (Double) -> UnsafeMutableRawPointer?
+    private var digitalCrownFunc: IndigoDigitalCrownFunc?
+
     func setup(deviceUDID: String) throws {
         _ = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW)
         _ = dlopen("/Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit", RTLD_NOW)
@@ -65,6 +69,13 @@ final class HIDInjector {
             print("[hid] IndigoHIDMessageForKeyboardArbitrary loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForKeyboardArbitrary not found")
+        }
+
+        if let crownPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForDigitalCrownEvent") {
+            self.digitalCrownFunc = unsafeBitCast(crownPtr, to: IndigoDigitalCrownFunc.self)
+            print("[hid] IndigoHIDMessageForDigitalCrownEvent loaded")
+        } else {
+            print("[hid] Warning: IndigoHIDMessageForDigitalCrownEvent not found")
         }
 
         guard let hidClass = NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") else {
@@ -231,6 +242,39 @@ final class HIDInjector {
         }
 
         print("[hid] Key \(type) usage=0x\(String(usage, radix: 16))")
+
+        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
+        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
+            free(msg)
+            return
+        }
+        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
+        sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
+    }
+
+    // MARK: - Digital Crown events
+
+    /// Inject a Digital Crown rotation event.
+    /// - Parameter delta: Raw scroll delta, matching SimulatorKit's wheel-to-crown path.
+    func sendDigitalCrown(delta: Double) {
+        guard delta.isFinite, delta != 0 else { return }
+        guard let client = hidClient, let sendSel = sendSel else {
+            print("[hid] Digital Crown injection unavailable")
+            return
+        }
+
+        guard let digitalCrownFunc else {
+            print("[hid] Digital Crown injection unavailable")
+            return
+        }
+
+        let msg = digitalCrownFunc(delta)
+        guard let msg else {
+            print("[hid] IndigoHIDMessageForDigitalCrownEvent returned nil (delta=\(delta))")
+            return
+        }
+
+        print("[hid] Digital Crown delta=\(String(format:"%.4f", delta))")
 
         typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
         guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {

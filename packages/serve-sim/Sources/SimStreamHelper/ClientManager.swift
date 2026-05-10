@@ -23,6 +23,7 @@ final class ClientManager {
     var onOrientation: ((UInt32) -> Bool)?
     var onCADebug: ((CADebugEventPayload) -> Void)?
     var onMemoryWarning: (() -> Void)?
+    var onDigitalCrown: ((DigitalCrownEventPayload) -> Void)?
 
     // MARK: - Configuration
 
@@ -137,6 +138,9 @@ final class ClientManager {
             onCADebug?(json)
         } else if type == 0x09 { // WS_MSG_MEMORY_WARNING
             onMemoryWarning?()
+        } else if type == 0x0A { // WS_MSG_DIGITAL_CROWN
+            guard let json = try? JSONDecoder().decode(DigitalCrownEventPayload.self, from: data[1...]) else { return }
+            onDigitalCrown?(json)
         }
     }
 

@@ -13,6 +13,7 @@ import {
   rawPointForDisplayPoint,
   streamDisplayGeometry,
 } from "./orientation.js";
+import { digitalCrownDeltaFromWheel } from "./digitalCrown.js";
 
 // Custom round cursor matching the finger dot indicator
 const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='rgba(255,255,255,0.45)' stroke='rgba(0,0,0,0.55)' stroke-width='1.25' filter='drop-shadow(0 1px 2px rgba(0,0,0,0.45))'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -20,6 +21,7 @@ const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2
 const WS_MSG_TOUCH = 0x03;
 const WS_MSG_BUTTON = 0x04;
 const WS_MSG_MULTI_TOUCH = 0x05;
+const WS_MSG_DIGITAL_CROWN = 0x0a;
 
 export interface SimulatorViewProps {
   /** Base URL of the serve-sim server, e.g. "http://localhost:3100" */
@@ -38,6 +40,10 @@ export interface SimulatorViewProps {
   onStreamMultiTouch?: (data: { type: "begin" | "move" | "end"; x1: number; y1: number; x2: number; y2: number }) => void;
   /** Relay mode: callback for button events */
   onStreamButton?: (button: string) => void;
+  /** Relay mode: callback for Digital Crown rotation events */
+  onStreamDigitalCrown?: (delta: number) => void;
+  /** Enables mouse-wheel/trackpad Digital Crown rotation forwarding. */
+  enableDigitalCrown?: boolean;
   /** Relay mode: subscribe to frame updates (bypasses React state for performance).
    * Callback receives a blob URL (object URL) pointing to the JPEG frame. */
   subscribeFrame?: (cb: (blobUrl: string) => void) => () => void;
@@ -74,6 +80,8 @@ export function SimulatorView({
   onStreamTouch,
   onStreamMultiTouch,
   onStreamButton,
+  onStreamDigitalCrown,
+  enableDigitalCrown,
   subscribeFrame,
   streamFrame: _streamFrame,
   streamConfig,
@@ -86,6 +94,7 @@ export function SimulatorView({
   const imgRef = useRef<HTMLImageElement | null>(null);
   const relayImgRef = useRef<HTMLImageElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const inputLayerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -260,6 +269,21 @@ export function SimulatorView({
     msg.set(json, 1);
     ws.send(msg);
   }, [relayMode, onStreamButton]);
+
+  const sendDigitalCrown = useCallback((delta: number) => {
+    if (!Number.isFinite(delta) || delta === 0) return;
+    if (relayMode) {
+      onStreamDigitalCrown?.(delta);
+      return;
+    }
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const json = new TextEncoder().encode(JSON.stringify({ delta }));
+    const msg = new Uint8Array(1 + json.length);
+    msg[0] = WS_MSG_DIGITAL_CROWN;
+    msg.set(json, 1);
+    ws.send(msg);
+  }, [relayMode, onStreamDigitalCrown]);
 
   const sendMultiTouch = useCallback(
     (touch: {
@@ -442,6 +466,34 @@ export function SimulatorView({
     },
     [getInputRect, sendTouch],
   );
+
+  const handleDigitalCrownWheelDelta = useCallback(
+    (deltaY: number, deltaMode: number) => {
+      const rect = getInputRect();
+      const pageHeight = rect?.height || 1;
+      const delta = digitalCrownDeltaFromWheel(deltaY, deltaMode, pageHeight);
+      if (delta === null) return false;
+      sendDigitalCrown(delta);
+      return true;
+    },
+    [getInputRect, sendDigitalCrown],
+  );
+
+  useEffect(() => {
+    if (!enableDigitalCrown) return;
+    const el = inputLayerRef.current;
+    if (!el) return;
+
+    const onWheel = (event: globalThis.WheelEvent) => {
+      const handled = handleDigitalCrownWheelDelta(event.deltaY, event.deltaMode);
+      if (!handled) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [enableDigitalCrown, handleDigitalCrownWheelDelta]);
 
   // Bottom-edge gesture: forward touches with edge=3 (bottom) so iOS
   // handles the interactive home indicator animation natively.
@@ -666,6 +718,7 @@ export function SimulatorView({
         )}
         {/* Interactive overlay — captures all pointer events */}
         <div
+          ref={inputLayerRef}
           style={{
             position: "absolute",
             inset: 0,

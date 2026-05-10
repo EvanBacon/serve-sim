@@ -318,6 +318,7 @@ function AppWithConfig({
   const onStreamTouch = useCallback((data: any) => sendWs(0x03, data), [sendWs]);
   const onStreamMultiTouch = useCallback((data: any) => sendWs(0x05, data), [sendWs]);
   const onStreamButton = useCallback((button: string) => sendWs(0x04, { button }), [sendWs]);
+  const onStreamDigitalCrown = useCallback((delta: number) => sendWs(0x0a, { delta }), [sendWs]);
   const onScreenConfigChange = useCallback((next: StreamConfig) => {
     setLiveStreamConfig((prev) =>
       prev &&
@@ -665,9 +666,11 @@ function AppWithConfig({
             onStreamTouch={onStreamTouch}
             onStreamMultiTouch={onStreamMultiTouch}
             onStreamButton={onStreamButton}
+            onStreamDigitalCrown={onStreamDigitalCrown}
             subscribeFrame={mjpeg.subscribeFrame}
             streamFrame={mjpeg.frame}
             streamConfig={activeStreamConfig}
+            enableDigitalCrown={deviceType === "watch"}
             onScreenConfigChange={onScreenConfigChange}
           />
           {axOverlayEnabled && <AxDomOverlay />}

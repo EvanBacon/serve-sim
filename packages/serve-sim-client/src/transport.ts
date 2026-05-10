@@ -620,6 +620,13 @@ export class GatewayTransport {
     this.ws.send(JSON.stringify(msg));
   }
 
+  streamDigitalCrown(delta: number, device?: string): void {
+    if (!Number.isFinite(delta) || delta === 0) return;
+    const msg: any = { type: "stream:digital-crown", data: { delta } };
+    if (device) msg.device = device;
+    this.ws.send(JSON.stringify(msg));
+  }
+
   // ─── Throttle helpers ───
 
   private _isBackpressured(): boolean {

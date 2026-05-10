@@ -83,6 +83,7 @@ export function SimulatorFrame({
   const aspectRatio = simulatorAspectRatio(activeScreen, fallbackScreen);
   const imgBorderRadius = bare ? 44 : screenBorderRadius(deviceType, activeScreen);
   const maxWidth = simulatorMaxWidth(deviceType, activeScreen);
+  const enableDigitalCrown = streamProps.enableDigitalCrown ?? deviceType === "watch";
 
   return (
     <div
@@ -113,6 +114,7 @@ export function SimulatorFrame({
           borderRadius: imgBorderRadius,
           cornerShape: "superellipse(1.3)",
         } as CSSProperties}
+        enableDigitalCrown={enableDigitalCrown}
         onScreenConfigChange={handleScreenConfigChange}
       />
       {shouldShowChrome && (

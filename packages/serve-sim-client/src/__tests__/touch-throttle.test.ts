@@ -240,4 +240,14 @@ describe("Touch throttle", () => {
     const buttons = server.messages.filter((m) => m.type === "stream:button");
     expect(buttons.length).toBe(5);
   });
+
+  test("digital crown rotation is sent as JSON", async () => {
+    transport.streamDigitalCrown(0.125);
+
+    await sleep(50);
+
+    const crown = server.messages.filter((m) => m.type === "stream:digital-crown");
+    expect(crown.length).toBe(1);
+    expect(crown[0]?.data?.delta).toBe(0.125);
+  });
 });
