@@ -30,7 +30,7 @@ import {
   type SimulatorOrientation,
   type StreamConfig,
 } from "serve-sim-client/simulator";
-import { LocationEmulationTool } from "./LocationEmulationTool";
+import { LocationEmulationTool } from "./location-emulation-tool";
 import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "./Panel";
 import { ReloadIcon } from "./icons";
 
