@@ -1,0 +1,1 @@
+- Prefer kebab-case for all TS/JS files.
