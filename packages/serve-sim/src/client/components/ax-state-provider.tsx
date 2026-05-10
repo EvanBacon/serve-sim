@@ -38,10 +38,10 @@ export function AxStateProvider({
   );
 
   return (
-    <AxSnapshotContext.Provider value={snapshotValue}>
-      <AxSelectionContext.Provider value={selectionValue}>
+    <AxSnapshotContext value={snapshotValue}>
+      <AxSelectionContext value={selectionValue}>
         {children}
-      </AxSelectionContext.Provider>
-    </AxSnapshotContext.Provider>
+      </AxSelectionContext>
+    </AxSnapshotContext>
   );
 }

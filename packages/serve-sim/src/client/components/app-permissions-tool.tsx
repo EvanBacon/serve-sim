@@ -192,7 +192,7 @@ function PermBtn({
       disabled={pending}
       title={title}
       aria-label={title}
-      className="w-6 h-[22px] flex items-center justify-center border-none rounded p-0 cursor-pointer [transition:background_0.12s,color_0.12s]"
+      className="w-6 h-5.5 flex items-center justify-center border-none rounded p-0 cursor-pointer [transition:background_0.12s,color_0.12s]"
       style={{
         background: active ? `${accent}22` : "transparent",
         color: active ? accent : "rgba(255,255,255,0.55)",

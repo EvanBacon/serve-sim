@@ -111,14 +111,9 @@ function Row({
   mono?: boolean;
   action?: { title: string; onClick: () => void; icon: ReactNode };
 }) {
-  const [hover, setHover] = useState(false);
   return (
-    <div
-      className="flex items-baseline gap-2 min-w-0"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      <dt className="m-0 text-[11px] text-white/50 w-[84px] shrink-0">{label}</dt>
+    <div className="group flex items-baseline gap-2 min-w-0">
+      <dt className="m-0 text-[11px] text-white/50 w-21 shrink-0">{label}</dt>
       <dd
         className={`m-0 text-[#eee] flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap relative ${mono ? "font-mono text-[11px]" : "text-[12px]"}`}
         title={value}
@@ -126,7 +121,7 @@ function Row({
         {value}
         {action && (
           <div
-            className={`absolute top-0 right-0 bottom-0 pl-7 flex items-center justify-end bg-[linear-gradient(to_right,rgba(28,28,30,0)_0%,#1c1c1e_55%)] [transition:opacity_0.15s_ease,transform_0.15s_ease] ${hover ? "opacity-100 translate-x-0 pointer-events-auto" : "opacity-0 translate-x-1 pointer-events-none"}`}
+            className="absolute top-0 right-0 bottom-0 pl-7 flex items-center justify-end bg-[linear-gradient(to_right,rgba(28,28,30,0)_0%,#1c1c1e_55%)] [transition:opacity_0.15s_ease,transform_0.15s_ease] opacity-0 translate-x-1 pointer-events-none group-hover:opacity-100 group-hover:translate-x-0 group-hover:pointer-events-auto"
           >
             <button
               type="button"
