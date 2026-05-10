@@ -8,6 +8,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { CheckIcon, DotIcon } from "./icons";
 
 type ExecFn = (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
@@ -390,11 +391,11 @@ function Item({
 }
 
 function CheckItem({ checked, children, onSelect }: { checked: boolean; onSelect: () => void; children: ReactNode }) {
-  return <Item onSelect={onSelect} indicator={checked ? CheckIcon : null}>{children}</Item>;
+  return <Item onSelect={onSelect} indicator={checked ? <CheckIcon /> : null}>{children}</Item>;
 }
 
 function RadioItem({ checked, children, onSelect }: { checked: boolean; onSelect: () => void; children: ReactNode }) {
-  return <Item onSelect={onSelect} indicator={checked ? DotIcon : null}>{children}</Item>;
+  return <Item onSelect={onSelect} indicator={checked ? <DotIcon /> : null}>{children}</Item>;
 }
 
 function Separator() {
@@ -462,18 +463,6 @@ function Sub({ name, label, children }: { name: string; label: string; children:
     </div>
   );
 }
-
-const CheckIcon = (
-  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-
-const DotIcon = (
-  <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
-    <circle cx="5" cy="5" r="3" />
-  </svg>
-);
 
 const rootStyle: CSSProperties = {
   display: "flex",
