@@ -16,9 +16,11 @@
  * encoded) is injected into every artifact that could need to serve the UI
  * via the __PREVIEW_HTML_B64__ build-time define.
  */
-import { resolve, dirname } from "path";
+import { resolve } from "path";
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { spawnSync } from "child_process";
+import postcss from "postcss";
+import tailwindcss from "@tailwindcss/postcss";
 
 const root = import.meta.dir;
 const distDir = resolve(root, "dist");
@@ -43,6 +45,19 @@ const preactPlugin = {
   },
 };
 
+async function buildTailwindCss(): Promise<string> {
+  const sourcePath = resolve(root, "src/client/tailwind.css");
+  const source = readFileSync(sourcePath, "utf8");
+
+  const result = await postcss([tailwindcss()]).process(source, {
+    from: sourcePath,
+  });
+
+  const css = result.css;
+  console.log(`tailwind css      ${kb(css.length)}`);
+  return css;
+}
+
 async function bundleBrowserClient(entry: string): Promise<string> {
   const result = await Bun.build({
     entrypoints: [resolve(root, entry)],
@@ -60,6 +75,7 @@ async function bundleBrowserClient(entry: string): Promise<string> {
   return (await result.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
 }
 
+const tailwindCss = await buildTailwindCss();
 const clientJs = await bundleBrowserClient("src/client/client.tsx");
 console.log(`client bundle     ${kb(clientJs.length)}`);
 
@@ -78,6 +94,7 @@ const html = `<!doctype html>
 <title>Simulator Preview</title>
 ${faviconTag}
 <style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}</style>
+<style>${tailwindCss}</style>
 </head><body>
 <div id="root"></div>
 <!--__SIM_PREVIEW_CONFIG__-->
