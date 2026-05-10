@@ -13,7 +13,7 @@ export function Panel({
 }) {
   return (
     <aside
-      className="fixed top-3 right-3 bottom-3 z-[35] min-w-0 overflow-hidden rounded-[14px] border border-white/10 bg-[rgba(20,20,22,0.92)] text-[#eee] shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-[18px] [font-family:-apple-system,system-ui,sans-serif] [transition:transform_0.25s_ease,opacity_0.2s_ease] flex flex-col"
+      className="fixed top-3 right-3 bottom-3 z-35 min-w-0 overflow-hidden rounded-[14px] border border-white/10 bg-[rgba(20,20,22,0.92)] text-[#eee] shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-[18px] [font-family:-apple-system,system-ui,sans-serif] [transition:transform_0.25s_ease,opacity_0.2s_ease] flex flex-col"
       style={{
         width,
         transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",

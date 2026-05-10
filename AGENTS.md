@@ -1,3 +1,3 @@
-- Prefer kebab-case for all TS/JS files.
 - Test-driven development where possible.
-- Avoid low-opacity for icons
+- Prefer kebab-case for all TS/JS files.
+- Avoid low-opacity for icons.

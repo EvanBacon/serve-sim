@@ -17,6 +17,8 @@
       "devDependencies": {
         "@tailwindcss/postcss": "^4.1.7",
         "@types/bun": "latest",
+        "@types/react": "^19.0.0",
+        "@types/react-dom": "^19.0.0",
         "bun-plugin-tailwind": "^0.1.2",
         "postcss": "^8.4.49",
         "preact": "^10.29.1",
