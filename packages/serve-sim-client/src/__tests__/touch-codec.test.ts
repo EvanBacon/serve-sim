@@ -22,8 +22,8 @@ describe("touch-codec edge cases", () => {
       expect(decoded).not.toBeNull();
       expect(decoded!.kind).toBe("touch");
       expect(decoded!.data.type).toBe(subtype);
-      expect(decoded!.data.x).toBeCloseTo(0.5, 5);
-      expect(decoded!.data.y).toBeCloseTo(0.75, 5);
+      expect((decoded!.data as SingleTouchData).x).toBeCloseTo(0.5, 5);
+      expect((decoded!.data as SingleTouchData).y).toBeCloseTo(0.75, 5);
       expect(decoded!.seq).toBe(42);
     }
   );
@@ -55,40 +55,40 @@ describe("touch-codec edge cases", () => {
     const buf = encodeSingleTouch({ type: "begin", x: 0, y: 0 }, 0);
     const decoded = decodeTouchMessage(buf);
     expect(decoded).not.toBeNull();
-    expect(decoded!.data.x).toBe(0);
-    expect(decoded!.data.y).toBe(0);
+    expect((decoded!.data as SingleTouchData).x).toBe(0);
+    expect((decoded!.data as SingleTouchData).y).toBe(0);
   });
 
   test("single touch with boundary value x=1, y=1", () => {
     const buf = encodeSingleTouch({ type: "end", x: 1, y: 1 }, 1);
     const decoded = decodeTouchMessage(buf);
     expect(decoded).not.toBeNull();
-    expect(decoded!.data.x).toBeCloseTo(1, 5);
-    expect(decoded!.data.y).toBeCloseTo(1, 5);
+    expect((decoded!.data as SingleTouchData).x).toBeCloseTo(1, 5);
+    expect((decoded!.data as SingleTouchData).y).toBeCloseTo(1, 5);
   });
 
   test("single touch with NaN coordinates", () => {
     const buf = encodeSingleTouch({ type: "move", x: NaN, y: NaN }, 5);
     const decoded = decodeTouchMessage(buf);
     expect(decoded).not.toBeNull();
-    expect(decoded!.data.x).toBeNaN();
-    expect(decoded!.data.y).toBeNaN();
+    expect((decoded!.data as SingleTouchData).x).toBeNaN();
+    expect((decoded!.data as SingleTouchData).y).toBeNaN();
   });
 
   test("single touch with negative coordinates", () => {
     const buf = encodeSingleTouch({ type: "move", x: -0.1, y: -0.5 }, 10);
     const decoded = decodeTouchMessage(buf);
     expect(decoded).not.toBeNull();
-    expect(decoded!.data.x).toBeCloseTo(-0.1, 5);
-    expect(decoded!.data.y).toBeCloseTo(-0.5, 5);
+    expect((decoded!.data as SingleTouchData).x).toBeCloseTo(-0.1, 5);
+    expect((decoded!.data as SingleTouchData).y).toBeCloseTo(-0.5, 5);
   });
 
   test("single touch with large float values", () => {
     const buf = encodeSingleTouch({ type: "move", x: 999.99, y: -999.99 }, 1);
     const decoded = decodeTouchMessage(buf);
     expect(decoded).not.toBeNull();
-    expect(decoded!.data.x).toBeCloseTo(999.99, 1);
-    expect(decoded!.data.y).toBeCloseTo(-999.99, 1);
+    expect((decoded!.data as SingleTouchData).x).toBeCloseTo(999.99, 1);
+    expect((decoded!.data as SingleTouchData).y).toBeCloseTo(-999.99, 1);
   });
 
   // ─── Sequence number edge cases ───
@@ -195,7 +195,7 @@ describe("touch-codec edge cases", () => {
     const u8 = new Uint8Array(buf);
     const decoded = decodeTouchMessage(u8);
     expect(decoded).not.toBeNull();
-    expect(decoded!.data.x).toBeCloseTo(0.3, 5);
+    expect((decoded!.data as SingleTouchData).x).toBeCloseTo(0.3, 5);
     expect(decoded!.seq).toBe(99);
   });
 

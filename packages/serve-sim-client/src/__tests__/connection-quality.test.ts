@@ -40,7 +40,7 @@ function startFrameServer(): {
     }
   };
 
-  return { port: server.port, sendFrame, close: () => server.stop(), clients };
+  return { port: server.port!, sendFrame, close: () => server.stop(), clients };
 }
 
 async function createTransport(port: number) {
