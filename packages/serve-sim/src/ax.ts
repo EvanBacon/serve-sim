@@ -62,12 +62,12 @@ function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
     }
 
     for (let index = 0; index < node.children.length && elements.length < MAX_ELEMENTS; index++) {
-      visit(node.children[index], `${path}.${index}`);
+      visit(node.children[index]!, `${path}.${index}`);
     }
   };
 
   for (let index = 0; index < roots.length && elements.length < MAX_ELEMENTS; index++) {
-    visit(roots[index], String(index));
+    visit(roots[index]!, String(index));
   }
 
   return {

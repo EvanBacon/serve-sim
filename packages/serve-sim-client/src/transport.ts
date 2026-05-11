@@ -466,9 +466,8 @@ export class GatewayTransport {
   }
 
   bridge(commandName: string) {
-    const self = this;
     return defineCommand(commandName, async (args: string[]) => {
-      const result = await self.exec(commandName, args);
+      const result = await this.exec(commandName, args);
       return {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -503,7 +502,7 @@ export class GatewayTransport {
     this.ws.send(JSON.stringify(msg));
   }
 
-  streamTouch(data: { type: "begin" | "move" | "end"; x: number; y: number; edge?: number }, device?: string): void {
+  streamTouch(data: { type: "begin" | "move" | "end"; x: number; y: number; edge?: number }, _device?: string): void {
     if (data.type === "end") {
       // Flush the pending move BEFORE we allocate `end`'s seq. The flushed
       // move keeps whatever seq the buffered move owned, and `end` gets the
@@ -561,7 +560,7 @@ export class GatewayTransport {
     }
   }
 
-  streamMultiTouch(data: { type: "begin" | "move" | "end"; x1: number; y1: number; x2: number; y2: number }, device?: string): void {
+  streamMultiTouch(data: { type: "begin" | "move" | "end"; x1: number; y1: number; x2: number; y2: number }, _device?: string): void {
     if (data.type === "end") {
       // Same seq-allocation ordering as streamTouch — flush first, then
       // give `end` the next seq so the two events can't collide.

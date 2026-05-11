@@ -16,9 +16,10 @@
  * encoded) is injected into every artifact that could need to serve the UI
  * via the __PREVIEW_HTML_B64__ build-time define.
  */
-import { resolve, dirname } from "path";
+import { resolve } from "path";
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { spawnSync } from "child_process";
+import tailwindPlugin from "bun-plugin-tailwind";
 
 const root = import.meta.dir;
 const distDir = resolve(root, "dist");
@@ -43,6 +44,22 @@ const preactPlugin = {
   },
 };
 
+async function buildTailwindCss(): Promise<string> {
+  const result = await Bun.build({
+    entrypoints: [resolve(root, "src/client/global.css")],
+    minify: true,
+    plugins: [tailwindPlugin],
+  });
+  if (!result.success) {
+    console.error("Tailwind build failed:");
+    for (const log of result.logs) console.error(log);
+    process.exit(1);
+  }
+  const css = await result.outputs[0]!.text();
+  console.log(`tailwind css      ${kb(css.length)}`);
+  return css;
+}
+
 async function bundleBrowserClient(entry: string): Promise<string> {
   const result = await Bun.build({
     entrypoints: [resolve(root, entry)],
@@ -57,9 +74,10 @@ async function bundleBrowserClient(entry: string): Promise<string> {
     for (const log of result.logs) console.error(log);
     process.exit(1);
   }
-  return (await result.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
+  return (await result.outputs[0]!.text()).replace(/<\/script>/gi, "<\\/script>");
 }
 
+const tailwindCss = await buildTailwindCss();
 const clientJs = await bundleBrowserClient("src/client/client.tsx");
 console.log(`client bundle     ${kb(clientJs.length)}`);
 
@@ -78,6 +96,7 @@ const html = `<!doctype html>
 <title>Simulator Preview</title>
 ${faviconTag}
 <style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}</style>
+<style>${tailwindCss}</style>
 </head><body>
 <div id="root"></div>
 <!--__SIM_PREVIEW_CONFIG__-->
@@ -107,7 +126,7 @@ if (!mwResult.success) {
   for (const log of mwResult.logs) console.error(log);
   process.exit(1);
 }
-const mwSize = (await mwResult.outputs[0].text()).length;
+const mwSize = (await mwResult.outputs[0]!.text()).length;
 console.log(`dist/middleware.js ${kb(mwSize)}`);
 
 writeFileSync(
@@ -134,7 +153,7 @@ if (!binJsResult.success) {
   process.exit(1);
 }
 
-const binJsSize = (await binJsResult.outputs[0].text()).length;
+const binJsSize = (await binJsResult.outputs[0]!.text()).length;
 console.log(`dist/serve-sim.js   ${kb(binJsSize)}`);
 
 // ─── 5. Compiled single-file executable ──────────────────────────────────

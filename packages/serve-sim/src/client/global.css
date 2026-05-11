@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@source "./";
+
+@theme {
+  /* Panel / surface palette */
+  --color-panel: #1c1c1e;
+  --color-panel-bg: rgba(20, 20, 22, 0.92);
+  --color-panel-overlay: rgba(20, 20, 22, 0.65);
+  --color-panel-deep: #111113;
+  --color-page: #0a0a0a;
+
+  /* Accent palette */
+  --color-accent: #a5b4fc;
+  --color-success: #4ade80;
+  --color-success-emerald: #34d399;
+  --color-danger: #f87171;
+  --color-danger-soft: #fca5a5;
+  --color-warning: #fbbf24;
+
+  /* Font families */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-system: -apple-system, system-ui, sans-serif;
+}
+
+@keyframes grid-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes serve-sim-toast-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+.serve-sim-toast-indeterminate {
+  animation: serve-sim-toast-indeterminate 1.1s ease-in-out infinite;
+}
+
+.grid-shutdown-btn {
+  opacity: 0;
+  transition: opacity 120ms, background 120ms, color 120ms;
+}
+.grid-tile:hover .grid-shutdown-btn { opacity: 1; }
+.grid-shutdown-btn:hover:not(:disabled) {
+  background: #5a1d1d;
+  color: #fff;
+  border-color: #a33;
+}
+.grid-tile:hover { border-color: #555 !important; }

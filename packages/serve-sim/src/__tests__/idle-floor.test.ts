@@ -140,7 +140,7 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
     try {
       const info = JSON.parse(detach.stdout.trim()) as { streamUrl: string };
       streamUrl = info.streamUrl;
-    } catch (err) {
+    } catch {
       throw new Error(
         `serve-sim --detach returned unparseable stdout: ${detach.stdout}\n` +
         `helper logs:\n${dumpHelperLogs()}`,
@@ -171,7 +171,7 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
         if (done) break;
         buf = Buffer.concat([buf, Buffer.from(value)]);
         const parsed = parseMjpegStream(buf);
-        buf = parsed.rest;
+        buf = parsed.rest as Buffer<ArrayBuffer>;
         if (parsed.frames.length > 0) {
           firstFrameAt = Date.now() - t0;
           // Sanity: every frame must start with JPEG SOI.
@@ -214,7 +214,7 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
         if (done) break;
         buf = Buffer.concat([buf, Buffer.from(value)]);
         const parsed = parseMjpegStream(buf);
-        buf = parsed.rest;
+        buf = parsed.rest as Buffer<ArrayBuffer>;
         for (const f of parsed.frames) {
           frameCount++;
           sizes.push(f.jpeg.length);

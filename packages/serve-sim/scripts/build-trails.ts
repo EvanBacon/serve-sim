@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 // Fetch OSM way geometries + NED10m elevations and emit trail waypoint arrays.
 
+export {};
+
 type LL = [number, number]; // [lat, lon]
 
 async function overpass(query: string): Promise<any> {
@@ -50,10 +52,10 @@ function resample(points: LL[], n: number): LL[] {
   if (points.length <= n) return points;
   const cum = [0.0];
   for (let i = 1; i < points.length; i++) {
-    cum.push(cum[cum.length - 1] + haversine(points[i - 1], points[i]));
+    cum.push(cum[cum.length - 1]! + haversine(points[i - 1]!, points[i]!));
   }
-  const total = cum[cum.length - 1];
-  const closed = points[0][0] === points[points.length - 1][0] && points[0][1] === points[points.length - 1][1];
+  const total = cum[cum.length - 1]!;
+  const closed = points[0]![0] === points[points.length - 1]![0] && points[0]![1] === points[points.length - 1]![1];
   const out: LL[] = [];
   for (let i = 0; i < n; i++) {
     const t = closed ? (i * total) / n : (i * total) / (n - 1);
@@ -61,13 +63,13 @@ function resample(points: LL[], n: number): LL[] {
     let hi = cum.length - 1;
     while (lo + 1 < hi) {
       const mid = (lo + hi) >> 1;
-      if (cum[mid] <= t) lo = mid;
+      if (cum[mid]! <= t) lo = mid;
       else hi = mid;
     }
-    const span = cum[hi] - cum[lo];
-    const f = span === 0 ? 0 : (t - cum[lo]) / span;
-    const a = points[lo];
-    const b = points[hi];
+    const span = cum[hi]! - cum[lo]!;
+    const f = span === 0 ? 0 : (t - cum[lo]!) / span;
+    const a = points[lo]!;
+    const b = points[hi]!;
     out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
   }
   return out;
@@ -75,7 +77,7 @@ function resample(points: LL[], n: number): LL[] {
 
 function fmt(points: LL[], alts: number[], indent = "  "): string {
   return points
-    .map(([lat, lon], i) => `${indent}{ lat: ${lat.toFixed(5)}, lng: ${lon.toFixed(5)}, alt: ${Math.round(alts[i])} },`)
+    .map(([lat, lon], i) => `${indent}{ lat: ${lat.toFixed(5)}, lng: ${lon.toFixed(5)}, alt: ${Math.round(alts[i]!)} },`)
     .join("\n");
 }
 
@@ -86,27 +88,27 @@ function near(p: LL, q: LL, tol = 20): boolean {
 function stitch(segments: LL[][], tol = 20): LL[] {
   if (!segments.length) return [];
   const used = new Array(segments.length).fill(false);
-  let chain: LL[] = [...segments[0]];
+  let chain: LL[] = [...segments[0]!];
   used[0] = true;
   let changed = true;
   while (changed) {
     changed = false;
     for (let i = 0; i < segments.length; i++) {
       if (used[i]) continue;
-      const seg = segments[i];
-      if (near(chain[chain.length - 1], seg[0], tol)) {
+      const seg = segments[i]!;
+      if (near(chain[chain.length - 1]!, seg[0]!, tol)) {
         chain.push(...seg.slice(1));
         used[i] = true;
         changed = true;
-      } else if (near(chain[chain.length - 1], seg[seg.length - 1], tol)) {
+      } else if (near(chain[chain.length - 1]!, seg[seg.length - 1]!, tol)) {
         chain.push(...seg.slice(0, -1).reverse());
         used[i] = true;
         changed = true;
-      } else if (near(chain[0], seg[seg.length - 1], tol)) {
+      } else if (near(chain[0]!, seg[seg.length - 1]!, tol)) {
         chain = [...seg, ...chain.slice(1)];
         used[i] = true;
         changed = true;
-      } else if (near(chain[0], seg[0], tol)) {
+      } else if (near(chain[0]!, seg[0]!, tol)) {
         chain = [...[...seg].reverse(), ...chain.slice(1)];
         used[i] = true;
         changed = true;
@@ -132,8 +134,8 @@ log("Golden Gate...");
 r = await overpass("[out:json];(way(537838948);way(595194543););out geom;");
 const ways: Record<number, LL[]> = {};
 for (const el of r.elements) ways[el.id] = geomToLL(el);
-const sn = ways[537838948];
-const ns = ways[595194543];
+const sn = ways[537838948]!;
+const ns = ways[595194543]!;
 const gg = [...sn, ...ns.slice(1)];
 const gg_rs = resample(gg, 18);
 function bridgeAlt(lat: number): number {
@@ -154,14 +156,14 @@ r = await overpass(`[out:json];
 const groups: Record<string, LL[][]> = { "Matt Davis Trail": [], "Steep Ravine Trail": [] };
 for (const el of r.elements) {
   const name = el.tags?.name;
-  if (name in groups) groups[name].push(geomToLL(el));
+  if (name in groups) groups[name]!.push(geomToLL(el));
 }
-const md = stitch(groups["Matt Davis Trail"]);
-const sr = stitch(groups["Steep Ravine Trail"]);
+const md = stitch(groups["Matt Davis Trail"]!);
+const sr = stitch(groups["Steep Ravine Trail"]!);
 log(`  MD pts=${md.length} ${JSON.stringify(md[0])}->${JSON.stringify(md[md.length - 1])}`);
 log(`  SR pts=${sr.length} ${JSON.stringify(sr[0])}->${JSON.stringify(sr[sr.length - 1])}`);
 const tam_chain = stitch([md, sr], 1000);
-log(`  Tam loop pts=${tam_chain.length}, closed=${near(tam_chain[0], tam_chain[tam_chain.length - 1], 1500)}`);
+log(`  Tam loop pts=${tam_chain.length}, closed=${near(tam_chain[0]!, tam_chain[tam_chain.length - 1]!, 1500)}`);
 const tam_rs = resample(tam_chain, 22);
 const tam_alt = await elevations(tam_rs);
 
@@ -190,7 +192,7 @@ while (remaining.length) {
   const cs = new Set(chain.map((p) => `${p[0].toFixed(5)},${p[1].toFixed(5)}`));
   const newRemaining: LL[][] = [];
   for (const seg of remaining) {
-    const mid = seg[Math.floor(seg.length / 2)];
+    const mid = seg[Math.floor(seg.length / 2)]!;
     const key = `${mid[0].toFixed(5)},${mid[1].toFixed(5)}`;
     if (!cs.has(key)) newRemaining.push(seg);
   }

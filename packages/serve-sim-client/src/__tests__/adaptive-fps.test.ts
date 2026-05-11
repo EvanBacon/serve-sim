@@ -37,7 +37,7 @@ function startEchoServer(): {
       message(ws, message) {
         try {
           const parsed = JSON.parse(
-            typeof message === "string" ? message : new TextDecoder().decode(message as ArrayBuffer),
+            typeof message === "string" ? message : new TextDecoder().decode(message as unknown as ArrayBuffer),
           );
           messages.push(parsed);
         } catch {}
@@ -45,7 +45,7 @@ function startEchoServer(): {
     },
   });
   return {
-    port: server.port,
+    port: server.port!,
     messages,
     sendToAll: (data: string) => {
       for (const ws of clients) ws.send(data);
@@ -84,7 +84,7 @@ describe("Adaptive FPS", () => {
     await sleep(50);
     const setFpsMsgs = server.messages.filter((m) => m.type === "stream:set-fps");
     expect(setFpsMsgs.length).toBe(1);
-    expect(setFpsMsgs[0].maxFps).toBe(15);
+    expect(setFpsMsgs[0]!.maxFps).toBe(15);
   });
 
   test("adaptiveFps starts at 30 after streamStart", () => {
@@ -122,8 +122,8 @@ describe("Adaptive FPS", () => {
     }
 
     expect(events.length).toBeGreaterThanOrEqual(1);
-    expect(events[0].fps).toBe(15); // halved from 30
-    expect(events[0].state).toBe("degraded");
+    expect(events[0]!.fps).toBe(15); // halved from 30
+    expect(events[0]!.state).toBe("degraded");
     expect(transport.adaptiveFps).toBe(15);
     expect(transport.adaptiveState).toBe("degraded");
   });
@@ -233,6 +233,6 @@ describe("Adaptive FPS", () => {
     await sleep(50);
     const setFpsMsgs = server.messages.filter((m) => m.type === "stream:set-fps");
     expect(setFpsMsgs.length).toBeGreaterThanOrEqual(1);
-    expect(setFpsMsgs[0].maxFps).toBe(15);
+    expect(setFpsMsgs[0]!.maxFps).toBe(15);
   });
 });

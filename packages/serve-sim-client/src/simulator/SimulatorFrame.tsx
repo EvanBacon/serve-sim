@@ -66,7 +66,7 @@ export function SimulatorFrame({
         ? prev
         : streamConfig,
     );
-  }, [streamConfig?.width, streamConfig?.height, streamConfig?.orientation]);
+  }, [streamConfig, streamConfig?.width, streamConfig?.height, streamConfig?.orientation]);
 
   const handleScreenConfigChange = useCallback((config: StreamConfig) => {
     setLiveScreenConfig((prev) =>

@@ -62,6 +62,7 @@ export function useGateway(options: UseGatewayOptions): UseGatewayResult {
   const shellRef = useRef<GatewayShell | null>(null);
 
   const { url, token, bridgedCommands } = options;
+  const bridgedCommandsKey = bridgedCommands?.join(",");
 
   // Reconnect when the tab/window becomes visible again
   useEffect(() => {
@@ -128,7 +129,9 @@ export function useGateway(options: UseGatewayOptions): UseGatewayResult {
       setAdaptiveState("normal");
       setConnectionQuality(null);
     };
-  }, [url, token, bridgedCommands?.join(","), reconnectKey]);
+    // bridgedCommands is intentionally tracked via its joined key
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, token, bridgedCommandsKey, reconnectKey]);
 
   const exec = useCallback(async (command: string): Promise<ShellResult> => {
     const $ = shellRef.current;

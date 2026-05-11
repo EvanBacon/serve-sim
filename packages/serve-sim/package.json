@@ -1,6 +1,6 @@
 {
   "name": "serve-sim",
-  "version": "0.1.20",
+  "version": "0.1.22",
   "type": "module",
   "author": {
     "name": "Evan Bacon",
@@ -58,10 +58,14 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "serve-sim-client": "workspace:*",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "bun-plugin-tailwind": "^0.1.2",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "serve-sim-client": "workspace:*",
+    "tailwindcss": "^4.1.7",
     "typescript": "^5.7.0"
   },
   "dependencies": {

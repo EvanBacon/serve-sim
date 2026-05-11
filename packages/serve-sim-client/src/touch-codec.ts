@@ -91,7 +91,7 @@ export function decodeTouchMessage(
     const y = view.getFloat32(6);
     const seq = view.getUint16(10);
     const data: SingleTouchData = {
-      type: SUBTYPE_REVERSE[subtypeIdx],
+      type: SUBTYPE_REVERSE[subtypeIdx]!,
       x,
       y,
     };
@@ -112,7 +112,7 @@ export function decodeTouchMessage(
     const seq = view.getUint16(18);
     return {
       kind: "multitouch",
-      data: { type: SUBTYPE_REVERSE[subtypeIdx], x1, y1, x2, y2 },
+      data: { type: SUBTYPE_REVERSE[subtypeIdx]!, x1, y1, x2, y2 },
       seq,
     };
   }

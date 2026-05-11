@@ -1,57 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
 
-// Shared chrome for the right-edge drawers (Tools, Simulators, WebKit DevTools).
-// All panels share the fixed-position card, blur, border, and slide-in
-// transition; only the body content differs.
-const PANEL_SHELL_STYLE: CSSProperties = {
-  position: "fixed",
-  top: 12,
-  right: 12,
-  bottom: 12,
-  minWidth: 0,
-  background: "rgba(20,20,22,0.92)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: 14,
-  color: "#eee",
-  display: "flex",
-  flexDirection: "column",
-  overflow: "hidden",
-  transition: "transform 0.25s ease, opacity 0.2s ease",
-  boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-  backdropFilter: "blur(18px)",
-  WebkitBackdropFilter: "blur(18px)",
-  fontFamily: "-apple-system, system-ui, sans-serif",
-  zIndex: 35,
-};
-
-const PANEL_HEADER_STYLE: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-  padding: "6px 10px 6px 12px",
-  flexShrink: 0,
-};
-
-const PANEL_TITLE_STYLE: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 500,
-  color: "rgba(255,255,255,0.55)",
-};
-
-const PANEL_CLOSE_BTN_STYLE: CSSProperties = {
-  background: "transparent",
-  border: "none",
-  color: "#aaa",
-  cursor: "pointer",
-  padding: 4,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  borderRadius: 4,
-  flexShrink: 0,
-};
-
 export function Panel({
   open,
   width,
@@ -65,8 +13,8 @@ export function Panel({
 }) {
   return (
     <aside
+      className="fixed top-3 right-3 bottom-3 z-35 min-w-0 overflow-hidden rounded-[14px] border border-white/10 bg-panel-bg text-white/90 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-[18px] [font-family:-apple-system,system-ui,sans-serif] [transition:transform_0.25s_ease,opacity_0.2s_ease] flex flex-col"
       style={{
-        ...PANEL_SHELL_STYLE,
         width,
         transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
         opacity: open ? 1 : 0,
@@ -87,11 +35,11 @@ export function PanelHeader({
   children: ReactNode;
   style?: CSSProperties;
 }) {
-  return <header style={{ ...PANEL_HEADER_STYLE, ...style }}>{children}</header>;
+  return <header className="flex shrink-0 items-center justify-between gap-2.5 px-2.5 py-1.5 pl-3" style={style}>{children}</header>;
 }
 
 export function PanelTitle({ children }: { children: ReactNode }) {
-  return <span style={PANEL_TITLE_STYLE}>{children}</span>;
+  return <span className="text-[11px] font-medium text-white/55">{children}</span>;
 }
 
 export function PanelCloseButton({
@@ -109,7 +57,7 @@ export function PanelCloseButton({
     <button
       type="button"
       onClick={onClick}
-      style={PANEL_CLOSE_BTN_STYLE}
+      className="flex shrink-0 cursor-pointer items-center justify-center rounded bg-transparent p-1 text-white/65"
       aria-label={ariaLabel}
       title={title}
     >

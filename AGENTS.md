@@ -1,0 +1,3 @@
+- Test-driven development where possible.
+- Prefer kebab-case for all TS/JS files.
+- Avoid low-opacity for icons.

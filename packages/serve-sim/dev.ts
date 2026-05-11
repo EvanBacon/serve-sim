@@ -136,7 +136,7 @@ async function buildClient() {
     },
   });
   if (result.success) {
-    clientJs = (await result.outputs[0].text()).replace(/<\/script>/gi, "<\\/script>");
+    clientJs = (await result.outputs[0]!.text()).replace(/<\/script>/gi, "<\\/script>");
     clientError = "";
     const ms = (performance.now() - start).toFixed(0);
     console.log(`\x1b[32m✓\x1b[0m Bundled client.tsx (${(clientJs.length / 1024).toFixed(0)} KB) in ${ms}ms`);

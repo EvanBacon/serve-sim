@@ -13,8 +13,8 @@ describe("groupTargetsByApp", () => {
       "com.apple.mobilesafari",
       "com.example.app",
     ]);
-    expect(groups[0].targets.map((t) => t.id)).toEqual(["a", "c"]);
-    expect(groups[1].targets.map((t) => t.id)).toEqual(["b"]);
+    expect(groups[0]!.targets.map((t) => t.id)).toEqual(["a", "c"]);
+    expect(groups[1]!.targets.map((t) => t.id)).toEqual(["b"]);
   });
 
   test("falls back to appName when bundleId is missing", () => {
@@ -23,15 +23,15 @@ describe("groupTargetsByApp", () => {
       { id: "b", appName: "Safari" },
     ]);
     expect(groups).toHaveLength(1);
-    expect(groups[0].appName).toBe("Safari");
-    expect(groups[0].bundleId).toBeUndefined();
-    expect(groups[0].targets.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(groups[0]!.appName).toBe("Safari");
+    expect(groups[0]!.bundleId).toBeUndefined();
+    expect(groups[0]!.targets.map((t) => t.id)).toEqual(["a", "b"]);
   });
 
   test("uses 'Unknown' when no identifying fields are present", () => {
     const groups = groupTargetsByApp([{ id: "a" }, { id: "b" }]);
     expect(groups).toHaveLength(1);
-    expect(groups[0].appName).toBe("Unknown");
+    expect(groups[0]!.appName).toBe("Unknown");
   });
 
   test("treats matching bundleId with different appName as the same group", () => {
@@ -40,6 +40,6 @@ describe("groupTargetsByApp", () => {
       { id: "b", appName: "MyApp Helper", bundleId: "com.example.app" },
     ]);
     expect(groups).toHaveLength(1);
-    expect(groups[0].targets).toHaveLength(2);
+    expect(groups[0]!.targets).toHaveLength(2);
   });
 });
