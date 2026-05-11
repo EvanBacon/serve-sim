@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { ReloadIcon } from "../icons";
+import { Chevron, PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
 
@@ -346,26 +346,23 @@ export function CameraTool({
   const primaryDisabled = !bundleId || pending !== null || uploading;
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] px-3 py-2">
+    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
       <button
+        type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center justify-between gap-1.5 bg-transparent border-none text-white/50 p-0 m-0 cursor-pointer w-full text-left leading-none"
+        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
         aria-expanded={open}
       >
-        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] m-0">Camera</span>
-        <svg
-          width="11"
-          height="11"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className={`shrink-0 transition-transform duration-150 ${open ? "rotate-90" : "rotate-0"}`}
-        >
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
+        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Camera</span>
+        <span className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none">
+          {injected && (
+            <span
+              className="size-1.5 rounded-full bg-success-emerald [box-shadow:0_0_6px_rgba(74,222,128,0.7)]"
+            />
+          )}
+          {injected ? "Active" : source !== "placeholder" ? "Ready" : ""}
+        </span>
+        <Chevron open={open} />
       </button>
 
       {open && (
@@ -374,9 +371,9 @@ export function CameraTool({
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
           onDrop={onDrop}
-          className="flex flex-col pt-2"
+          className="flex flex-col gap-2.5"
         >
-          <p className="m-0 mb-3.5 text-[11px] leading-normal text-[#888]">
+          <p className="m-0 text-[10px] leading-[1.5] text-white/45">
             Replaces the simulator's camera feed by injecting a dylib at app launch
             and streaming frames into shared memory. Pick media or a webcam,
             then Play to inject into the foreground app.
@@ -412,37 +409,37 @@ export function CameraTool({
                       : `Source: ${droppedFileName ?? source}`
                 }
                 className={[
-                  "relative min-h-[44px] flex flex-row items-center justify-center gap-2.5 px-3.5 py-2.5 rounded-[10px] text-center transition-[border-color,background] duration-150",
+                  "relative min-h-[44px] flex flex-row items-center justify-center gap-2.5 px-3.5 py-2.5 rounded-[7px] text-center transition-[border-color,background] duration-150",
                   isPlaceholder
-                    ? "bg-[#0e0e10] border border-dashed border-[#2a2a2c]"
-                    : "bg-[#141416] border border-[#232325]",
+                    ? "bg-white/[0.04] border border-dashed border-white/12"
+                    : "bg-white/[0.04] border border-white/8",
                   isDragOver ? "!bg-[rgba(10,132,255,0.08)] !border-[rgba(10,132,255,0.6)]" : "",
                   uploading ? "cursor-progress" : isPlaceholder ? "cursor-pointer" : "cursor-default",
                 ].join(" ")}
               >
                 {uploading ? (
-                  <span className="text-[11px] text-[#777]">Uploading…</span>
+                  <span className="text-[11px] text-white/55">Uploading…</span>
                 ) : showFile ? (
                   <>
-                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-[#888] bg-[#18181a] border border-[#232325] px-[7px] py-[2px] rounded-full">
+                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-white/55 bg-white/[0.06] border border-white/8 px-[7px] py-[2px] rounded-full">
                       {source === "video" ? "Video" : "Image"}
                     </div>
-                    <span className="flex-1 min-w-0 truncate text-[12px] text-white font-mono">{droppedFileName}</span>
+                    <span className="flex-1 min-w-0 truncate text-[12px] text-white/90 font-mono">{droppedFileName}</span>
                   </>
                 ) : showWebcam ? (
                   <>
-                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-[#888] bg-[#18181a] border border-[#232325] px-[7px] py-[2px] rounded-full">Webcam</div>
-                    <span className="flex-1 min-w-0 truncate text-[12px] text-white font-mono">{activeWebcamName}</span>
+                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-white/55 bg-white/[0.06] border border-white/8 px-[7px] py-[2px] rounded-full">Webcam</div>
+                    <span className="flex-1 min-w-0 truncate text-[12px] text-white/90 font-mono">{activeWebcamName}</span>
                   </>
                 ) : (
-                  <span className="text-[12px] text-[#eee] font-semibold">Select or drop media</span>
+                  <span className="text-[12px] text-white/85 font-medium">Select or drop media</span>
                 )}
 
                 {!isPlaceholder && !uploading && (
                   <button
                     data-clear-media
                     onClick={(e) => { e.stopPropagation(); clearMedia(); }}
-                    className="shrink-0 w-5 h-5 flex items-center justify-center bg-transparent border-none text-[#888] cursor-pointer p-0"
+                    className="shrink-0 w-5 h-5 flex items-center justify-center bg-transparent border-none text-white/55 hover:text-white/90 cursor-pointer p-0"
                     aria-label="Clear source"
                     title="Clear → placeholder"
                   >
@@ -456,11 +453,11 @@ export function CameraTool({
             );
           })()}
 
-          <div className="flex items-center justify-center gap-6 mt-4">
+          <div className="flex items-stretch gap-1.5">
             <div className="relative" data-camera-source-menu>
               <button
                 onClick={() => setSourceMenuOpen((o) => !o)}
-                className="w-10 h-10 flex items-center justify-center bg-panel border border-white/8 text-[#eee] rounded-[10px] cursor-pointer p-0"
+                className="lem-ghost h-full min-h-[36px] w-10 flex items-center justify-center bg-transparent border border-white/12 text-white/85 rounded-[7px] cursor-pointer p-0"
                 aria-haspopup="menu"
                 aria-expanded={sourceMenuOpen}
                 title={
@@ -481,11 +478,11 @@ export function CameraTool({
               {sourceMenuOpen && (
                 <div
                   role="menu"
-                  className="absolute top-[calc(100%+6px)] left-0 z-10 min-w-[200px] flex flex-col gap-px p-1 bg-panel border border-white/10 rounded-[10px] shadow-[0_8px_24px_rgba(0,0,0,0.4)]"
+                  className="absolute top-[calc(100%+6px)] left-0 z-10 min-w-[200px] flex flex-col gap-px p-1 bg-panel border border-white/8 rounded-[7px] shadow-[0_8px_24px_rgba(0,0,0,0.4)]"
                 >
                   <button
                     role="menuitem"
-                    className="text-left bg-transparent border-none text-[#eee] text-[12px] px-2.5 py-[7px] rounded-md cursor-pointer hover:bg-white/5"
+                    className="text-left bg-transparent border-none text-white/85 text-[12px] px-2.5 py-[7px] rounded-md cursor-pointer hover:bg-white/[0.06]"
                     onClick={() => { setSourceMenuOpen(false); openFilePicker(); }}
                     title="Pick an image or video from disk"
                   >
@@ -493,13 +490,13 @@ export function CameraTool({
                   </button>
                   <div className="h-px bg-white/8 my-1" />
                   <div className="flex items-center justify-between pl-2.5 pr-2 pt-1 pb-[2px]">
-                    <span className="text-[10px] text-[#777] uppercase tracking-[0.08em]">
+                    <span className="text-[10px] text-white/45 uppercase tracking-[0.08em]">
                       {webcamLoading ? "Cameras (loading…)" : webcams.length === 0 ? "No cameras" : "Cameras"}
                     </span>
                     <button
                       onClick={(e) => { e.stopPropagation(); void refreshWebcams(); }}
                       disabled={webcamLoading}
-                      className="flex items-center justify-center w-[22px] h-[22px] bg-transparent border-none rounded-[5px] text-[#888] cursor-pointer p-0 disabled:opacity-50"
+                      className="flex items-center justify-center w-[22px] h-[22px] bg-transparent border-none rounded-[5px] text-white/55 hover:text-white/90 cursor-pointer p-0 disabled:opacity-50"
                       aria-label="Refresh cameras"
                       title="Refresh cameras"
                     >
@@ -513,8 +510,8 @@ export function CameraTool({
                         key={w.id}
                         role="menuitem"
                         className={[
-                          "text-left bg-transparent border-none text-[12px] px-2.5 py-[7px] rounded-md cursor-pointer hover:bg-white/5",
-                          active ? "!bg-[rgba(10,132,255,0.18)] !text-white" : "text-[#eee]",
+                          "text-left bg-transparent border-none text-[12px] px-2.5 py-[7px] rounded-md cursor-pointer hover:bg-white/[0.06]",
+                          active ? "!bg-white/[0.12] !text-white" : "text-white/85",
                         ].join(" ")}
                         onClick={() => {
                           setWebcamId(w.id);
@@ -535,8 +532,10 @@ export function CameraTool({
               onClick={primary.onClick}
               disabled={primaryDisabled}
               className={[
-                "w-[52px] h-[52px] flex items-center justify-center border-none text-white rounded-full cursor-pointer p-0 disabled:opacity-50",
-                primary.kind === "stop" ? "bg-[#ff453a]" : "bg-[#0a84ff]",
+                "flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer disabled:opacity-50 min-h-[36px]",
+                primary.kind === "stop"
+                  ? "lem-primary lem-primary-on bg-white/[0.16] text-white"
+                  : "lem-primary bg-success-emerald text-[#062018]",
               ].join(" ")}
               title={
                 !bundleId ? "Bring an app to the foreground first" :
@@ -544,23 +543,17 @@ export function CameraTool({
                 primary.kind === "attach" ? `Inject ${bundleId} so it joins the camera feed` :
                 "Start: inject the dylib and launch the foreground app with the chosen source"
               }
+              aria-pressed={primary.kind === "stop"}
               aria-label={primary.kind === "stop" ? "Stop" : "Play"}
             >
-              {primary.kind === "stop" ? (
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                  <rect x="6" y="6" width="12" height="12" rx="1.5" />
-                </svg>
-              ) : (
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-              )}
+              {primary.kind === "stop" ? <StopGlyph /> : <PlayGlyph />}
+              <span>{primary.kind === "stop" ? "Stop" : primary.kind === "attach" ? "Inject" : "Play"}</span>
             </button>
 
             <div className="relative">
               <button
                 onClick={toggleMirror}
-                className="w-10 h-10 flex items-center justify-center bg-panel border border-white/8 text-[#eee] rounded-[10px] cursor-pointer p-0"
+                className="lem-ghost h-full min-h-[36px] w-10 flex items-center justify-center bg-transparent border border-white/12 text-white/85 rounded-[7px] cursor-pointer p-0"
                 title={
                   mirrorIsManual
                     ? `Mirror: ${mirrorDisplay} (manual) — click to flip`
@@ -580,7 +573,7 @@ export function CameraTool({
               {mirrorIsManual && (
                 <button
                   onClick={revertMirrorToAuto}
-                  className="absolute -top-[5px] -right-[5px] w-4 h-4 flex items-center justify-center bg-white/15 border border-[#0a0a0a] text-white rounded-full cursor-pointer p-0"
+                  className="absolute -top-[5px] -right-[5px] w-4 h-4 flex items-center justify-center bg-white/20 border border-panel text-white rounded-full cursor-pointer p-0"
                   aria-label="Revert mirror to auto"
                   title="Revert to auto mirror"
                 >
@@ -594,7 +587,7 @@ export function CameraTool({
           </div>
 
           {error && (
-            <div className="mt-3 text-[11px] text-red-400 font-mono break-words">
+            <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md break-words">
               {error}
             </div>
           )}

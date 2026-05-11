@@ -37,9 +37,9 @@ export function ToolsPanel({
             overlayEnabled={axOverlayEnabled}
             onToggleOverlay={onToggleAxOverlay}
           />
-          <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <CameraTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <LocationEmulationTool udid={udid} exec={execOnHost} />
+          <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
         </div>
       )}
     </Panel>
