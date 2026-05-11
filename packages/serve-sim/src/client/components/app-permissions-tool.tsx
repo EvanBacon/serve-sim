@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ReloadIcon } from "../icons";
+import { Chevron, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import {
   PERMISSION_SERVICES,
@@ -78,19 +78,7 @@ export function AppPermissionsTool({
         aria-expanded={open}
       >
         <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] m-0">Permissions</span>
-        <svg
-          width="11"
-          height="11"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className={`shrink-0 transition-transform duration-150 ${open ? "rotate-90" : "rotate-0"}`}
-        >
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
+        <Chevron open={open} />
       </button>
 
       {open && error && (

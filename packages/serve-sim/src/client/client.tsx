@@ -761,7 +761,7 @@ function AppWithConfig({
             setGridOpen(false);
             setPanelOpen((o) => !o);
           }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-white/70 cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
           aria-label="Open tools panel"
           aria-pressed={panelOpen}
           title="Tools"
@@ -777,7 +777,7 @@ function AppWithConfig({
             setGridOpen(false);
             setDevtoolsOpen((o) => !o);
           }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-white/70 cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
           aria-label="Open WebKit DevTools"
           aria-pressed={devtoolsOpen}
           title="WebKit DevTools"
@@ -794,7 +794,7 @@ function AppWithConfig({
             setDevtoolsOpen(false);
             setGridOpen((o) => !o);
           }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-white/70 cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
           aria-label="Open simulator grid"
           aria-pressed={gridOpen}
           title="Simulators"
