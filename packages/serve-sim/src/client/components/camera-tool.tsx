@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from "react";
-import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "../Panel";
 import { ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
@@ -8,19 +7,14 @@ type CamSource = "placeholder" | "image" | "video" | "webcam";
 type CamMirror = "auto" | "on" | "off";
 interface CamWebcam { id: string; name: string }
 
-export function CameraPanel({
-  open,
-  onClose,
+export function CameraTool({
   udid,
   bundleId,
-  width,
 }: {
-  open: boolean;
-  onClose: () => void;
   udid: string;
   bundleId: string | null;
-  width: number;
 }) {
+  const [open, setOpen] = useState(false);
   const [source, setSource] = useState<CamSource>("placeholder");
   const [filePath, setFilePath] = useState<string>("");
   const [droppedFileName, setDroppedFileName] = useState<string | null>(null);
@@ -37,13 +31,7 @@ export function CameraPanel({
   const [error, setError] = useState<string | null>(null);
   const [, setStatus] = useState<string | null>(null);
   const [injected, setInjected] = useState(false);
-  // Track every bundle we've launched with the dylib so the primary button
-  // can read "Inject <NewApp>" when the foreground changes to one that
-  // hasn't joined the running helper yet.
   const [injectedBundleIds, setInjectedBundleIds] = useState<Set<string>>(() => new Set());
-  // Suppress the next auto-swap / auto-mirror effect when state was hydrated
-  // from the live helper's status (page reload, not a user edit) so we don't
-  // bounce its AVCaptureSession.
   const skipNextAutoSwapRef = useRef(false);
   const skipNextAutoMirrorRef = useRef(false);
 
@@ -53,7 +41,6 @@ export function CameraPanel({
     return /\.js$/.test(bin) ? `node ${shellEscape(bin)}` : shellEscape(bin);
   }, []);
 
-  // Reattach to the existing helper across page reloads.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -359,248 +346,262 @@ export function CameraPanel({
   const primaryDisabled = !bundleId || pending !== null || uploading;
 
   return (
-    <Panel open={open} width={width}>
-      <div
-        onDragEnter={onDragEnter}
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onDrop={onDrop}
-        className="flex flex-col flex-1 overflow-hidden"
+    <div className="bg-panel border border-white/8 rounded-[10px] px-3 py-2">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center justify-between gap-1.5 bg-transparent border-none text-white/50 p-0 m-0 cursor-pointer w-full text-left leading-none"
+        aria-expanded={open}
       >
-        <PanelHeader>
-          <PanelTitle>Camera</PanelTitle>
-          <PanelCloseButton onClick={onClose} />
-        </PanelHeader>
+        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] m-0">Camera</span>
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={`shrink-0 transition-transform duration-150 ${open ? "rotate-90" : "rotate-0"}`}
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
 
-        {open && (
-          <div className="p-3.5 overflow-y-auto flex-1 flex flex-col">
-            <p style={cameraPanelStyles.subtitle}>
-              Replaces the simulator's camera feed by injecting a dylib at launch
-              and streaming frames into shared memory. Pick media or a webcam,
-              then Play to inject into the foreground app.
-            </p>
+      {open && (
+        <div
+          onDragEnter={onDragEnter}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          className="flex flex-col pt-2"
+        >
+          <p style={cameraToolStyles.subtitle}>
+            Replaces the simulator's camera feed by injecting a dylib at launch
+            and streaming frames into shared memory. Pick media or a webcam,
+            then Play to inject into the foreground app.
+          </p>
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*,video/*"
-              style={{ display: "none" }}
-              onChange={onFilePicked as any}
-            />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,video/*"
+            style={{ display: "none" }}
+            onChange={onFilePicked as any}
+          />
 
-            {(() => {
-              const isPlaceholder = source === "placeholder";
-              const showWebcam = source === "webcam";
-              const showFile = (source === "image" || source === "video") && !!droppedFileName;
-              const activeWebcamName = showWebcam
-                ? (webcams.find((w) => w.id === webcamId)?.name ?? webcamId ?? "Webcam")
-                : null;
-              return (
-                <div
-                  onClick={(e) => {
-                    if (!isPlaceholder) return;
-                    if ((e.target as HTMLElement).closest("[data-clear-media]")) return;
-                    openFilePicker();
-                  }}
-                  title={
-                    isPlaceholder
-                      ? "Click to select an image or video, or drop one here"
-                      : showWebcam
-                        ? `Source: ${activeWebcamName}`
-                        : `Source: ${droppedFileName ?? source}`
-                  }
-                  style={{
-                    ...cameraPanelStyles.dropZone,
-                    ...(isPlaceholder ? null : cameraPanelStyles.dropZoneFilled),
-                    ...(isDragOver ? cameraPanelStyles.dropZoneActive : null),
-                    cursor: uploading ? "progress" : isPlaceholder ? "pointer" : "default",
-                    position: "relative",
-                  }}
-                >
-                  {uploading ? (
-                    <span style={cameraPanelStyles.dropHint}>Uploading…</span>
-                  ) : showFile ? (
-                    <>
-                      <div style={cameraPanelStyles.sourceBadge}>
-                        {source === "video" ? "Video" : "Image"}
-                      </div>
-                      <span style={cameraPanelStyles.dropFilename}>{droppedFileName}</span>
-                    </>
-                  ) : showWebcam ? (
-                    <>
-                      <div style={cameraPanelStyles.sourceBadge}>Webcam</div>
-                      <span style={cameraPanelStyles.dropFilename}>{activeWebcamName}</span>
-                    </>
-                  ) : (
-                    <span style={cameraPanelStyles.dropTitle}>Select or drop media</span>
-                  )}
-
-                  {!isPlaceholder && !uploading && (
-                    <button
-                      data-clear-media
-                      onClick={(e) => { e.stopPropagation(); clearMedia(); }}
-                      style={cameraPanelStyles.clearBtn}
-                      aria-label="Clear source"
-                      title="Clear → placeholder"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                        <line x1="6" y1="6" x2="18" y2="18" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              );
-            })()}
-
-            <div style={cameraPanelStyles.controls}>
-              <div style={{ position: "relative" }} data-camera-source-menu>
-                <button
-                  onClick={() => setSourceMenuOpen((o) => !o)}
-                  style={cameraPanelStyles.iconButton}
-                  aria-haspopup="menu"
-                  aria-expanded={sourceMenuOpen}
-                  title={
-                    source === "webcam"
-                      ? `Source: webcam${webcamId ? ` (${webcams.find((w) => w.id === webcamId)?.name ?? webcamId})` : ""} — click to change`
-                      : `Source: ${source} — click to pick media or webcam`
-                  }
-                  aria-label="Choose camera source"
-                >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16" />
-                    <path d="M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2" />
-                    <circle cx="13" cy="7" r="1" fill="currentColor" />
-                    <rect x="8" y="2" width="14" height="14" rx="2" />
-                  </svg>
-                </button>
-
-                {sourceMenuOpen && (
-                  <div style={cameraPanelStyles.menu} role="menu">
-                    <button
-                      role="menuitem"
-                      style={cameraPanelStyles.menuItem}
-                      onClick={() => { setSourceMenuOpen(false); openFilePicker(); }}
-                      title="Pick an image or video from disk"
-                    >
-                      Browse media…
-                    </button>
-                    <div style={cameraPanelStyles.menuSeparator} />
-                    <div style={cameraPanelStyles.menuLabelRow}>
-                      <span style={cameraPanelStyles.menuLabel}>
-                        {webcamLoading ? "Cameras (loading…)" : webcams.length === 0 ? "No cameras" : "Cameras"}
-                      </span>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); void refreshWebcams(); }}
-                        disabled={webcamLoading}
-                        style={cameraPanelStyles.menuRefreshBtn}
-                        aria-label="Refresh cameras"
-                        title="Refresh cameras"
-                      >
-                        <ReloadIcon size={13} strokeWidth={2} />
-                      </button>
-                    </div>
-                    {webcams.map((w) => {
-                      const active = source === "webcam" && webcamId === w.id;
-                      return (
-                        <button
-                          key={w.id}
-                          role="menuitem"
-                          style={{
-                            ...cameraPanelStyles.menuItem,
-                            ...(active ? cameraPanelStyles.menuItemActive : null),
-                          }}
-                          onClick={() => {
-                            setWebcamId(w.id);
-                            setSource("webcam");
-                            setSourceMenuOpen(false);
-                          }}
-                          title={w.name}
-                        >
-                          {w.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              <button
-                onClick={primary.onClick}
-                disabled={primaryDisabled}
-                style={{
-                  ...cameraPanelStyles.playBtn,
-                  ...(primary.kind === "stop" ? cameraPanelStyles.stopBtn : null),
-                  opacity: primaryDisabled ? 0.5 : 1,
+          {(() => {
+            const isPlaceholder = source === "placeholder";
+            const showWebcam = source === "webcam";
+            const showFile = (source === "image" || source === "video") && !!droppedFileName;
+            const activeWebcamName = showWebcam
+              ? (webcams.find((w) => w.id === webcamId)?.name ?? webcamId ?? "Webcam")
+              : null;
+            return (
+              <div
+                onClick={(e) => {
+                  if (!isPlaceholder) return;
+                  if ((e.target as HTMLElement).closest("[data-clear-media]")) return;
+                  openFilePicker();
                 }}
                 title={
-                  !bundleId ? "Bring an app to the foreground first" :
-                  primary.kind === "stop" ? "Stop the camera helper" :
-                  primary.kind === "attach" ? `Inject ${bundleId} so it joins the camera feed` :
-                  "Start: inject the dylib and launch the foreground app with the chosen source"
+                  isPlaceholder
+                    ? "Click to select an image or video, or drop one here"
+                    : showWebcam
+                      ? `Source: ${activeWebcamName}`
+                      : `Source: ${droppedFileName ?? source}`
                 }
-                aria-label={primary.kind === "stop" ? "Stop" : "Play"}
+                style={{
+                  ...cameraToolStyles.dropZone,
+                  ...(isPlaceholder ? null : cameraToolStyles.dropZoneFilled),
+                  ...(isDragOver ? cameraToolStyles.dropZoneActive : null),
+                  cursor: uploading ? "progress" : isPlaceholder ? "pointer" : "default",
+                  position: "relative",
+                }}
               >
-                {primary.kind === "stop" ? (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                    <rect x="6" y="6" width="12" height="12" rx="1.5" />
-                  </svg>
+                {uploading ? (
+                  <span style={cameraToolStyles.dropHint}>Uploading…</span>
+                ) : showFile ? (
+                  <>
+                    <div style={cameraToolStyles.sourceBadge}>
+                      {source === "video" ? "Video" : "Image"}
+                    </div>
+                    <span style={cameraToolStyles.dropFilename}>{droppedFileName}</span>
+                  </>
+                ) : showWebcam ? (
+                  <>
+                    <div style={cameraToolStyles.sourceBadge}>Webcam</div>
+                    <span style={cameraToolStyles.dropFilename}>{activeWebcamName}</span>
+                  </>
                 ) : (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
+                  <span style={cameraToolStyles.dropTitle}>Select or drop media</span>
                 )}
-              </button>
 
-              <div style={{ position: "relative" }}>
-                <button
-                  onClick={toggleMirror}
-                  style={cameraPanelStyles.iconButton}
-                  title={
-                    mirrorIsManual
-                      ? `Mirror: ${mirrorDisplay} (manual) — click to flip`
-                      : `Mirror: auto (${mirrorDisplay}) — click to override`
-                  }
-                  aria-label={`Mirror: ${mirrorDisplay}${mirrorIsManual ? " (manual)" : " (auto)"}`}
-                >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill={mirrorDisplay === "on" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="m3 7 5 5-5 5V7" />
-                    <path d="m21 7-5 5 5 5V7" />
-                    <path d="M12 20v2" stroke="currentColor" fill="none" />
-                    <path d="M12 14v2" stroke="currentColor" fill="none" />
-                    <path d="M12 8v2" stroke="currentColor" fill="none" />
-                    <path d="M12 2v2" stroke="currentColor" fill="none" />
-                  </svg>
-                </button>
-                {mirrorIsManual && (
+                {!isPlaceholder && !uploading && (
                   <button
-                    onClick={revertMirrorToAuto}
-                    style={cameraPanelStyles.mirrorBadge}
-                    aria-label="Revert mirror to auto"
-                    title="Revert to auto mirror"
+                    data-clear-media
+                    onClick={(e) => { e.stopPropagation(); clearMedia(); }}
+                    style={cameraToolStyles.clearBtn}
+                    aria-label="Clear source"
+                    title="Clear → placeholder"
                   >
-                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="18" y1="6" x2="6" y2="18" />
                       <line x1="6" y1="6" x2="18" y2="18" />
                     </svg>
                   </button>
                 )}
               </div>
+            );
+          })()}
+
+          <div style={cameraToolStyles.controls}>
+            <div style={{ position: "relative" }} data-camera-source-menu>
+              <button
+                onClick={() => setSourceMenuOpen((o) => !o)}
+                style={cameraToolStyles.iconButton}
+                aria-haspopup="menu"
+                aria-expanded={sourceMenuOpen}
+                title={
+                  source === "webcam"
+                    ? `Source: webcam${webcamId ? ` (${webcams.find((w) => w.id === webcamId)?.name ?? webcamId})` : ""} — click to change`
+                    : `Source: ${source} — click to pick media or webcam`
+                }
+                aria-label="Choose camera source"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16" />
+                  <path d="M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2" />
+                  <circle cx="13" cy="7" r="1" fill="currentColor" />
+                  <rect x="8" y="2" width="14" height="14" rx="2" />
+                </svg>
+              </button>
+
+              {sourceMenuOpen && (
+                <div style={cameraToolStyles.menu} role="menu">
+                  <button
+                    role="menuitem"
+                    style={cameraToolStyles.menuItem}
+                    onClick={() => { setSourceMenuOpen(false); openFilePicker(); }}
+                    title="Pick an image or video from disk"
+                  >
+                    Browse media…
+                  </button>
+                  <div style={cameraToolStyles.menuSeparator} />
+                  <div style={cameraToolStyles.menuLabelRow}>
+                    <span style={cameraToolStyles.menuLabel}>
+                      {webcamLoading ? "Cameras (loading…)" : webcams.length === 0 ? "No cameras" : "Cameras"}
+                    </span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); void refreshWebcams(); }}
+                      disabled={webcamLoading}
+                      style={cameraToolStyles.menuRefreshBtn}
+                      aria-label="Refresh cameras"
+                      title="Refresh cameras"
+                    >
+                      <ReloadIcon size={13} strokeWidth={2} />
+                    </button>
+                  </div>
+                  {webcams.map((w) => {
+                    const active = source === "webcam" && webcamId === w.id;
+                    return (
+                      <button
+                        key={w.id}
+                        role="menuitem"
+                        style={{
+                          ...cameraToolStyles.menuItem,
+                          ...(active ? cameraToolStyles.menuItemActive : null),
+                        }}
+                        onClick={() => {
+                          setWebcamId(w.id);
+                          setSource("webcam");
+                          setSourceMenuOpen(false);
+                        }}
+                        title={w.name}
+                      >
+                        {w.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
-            {error && (
-              <div className="mt-3 text-[11px] text-red-400 font-mono break-words">
-                {error}
-              </div>
-            )}
+            <button
+              onClick={primary.onClick}
+              disabled={primaryDisabled}
+              style={{
+                ...cameraToolStyles.playBtn,
+                ...(primary.kind === "stop" ? cameraToolStyles.stopBtn : null),
+                opacity: primaryDisabled ? 0.5 : 1,
+              }}
+              title={
+                !bundleId ? "Bring an app to the foreground first" :
+                primary.kind === "stop" ? "Stop the camera helper" :
+                primary.kind === "attach" ? `Inject ${bundleId} so it joins the camera feed` :
+                "Start: inject the dylib and launch the foreground app with the chosen source"
+              }
+              aria-label={primary.kind === "stop" ? "Stop" : "Play"}
+            >
+              {primary.kind === "stop" ? (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="1.5" />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              )}
+            </button>
+
+            <div style={{ position: "relative" }}>
+              <button
+                onClick={toggleMirror}
+                style={cameraToolStyles.iconButton}
+                title={
+                  mirrorIsManual
+                    ? `Mirror: ${mirrorDisplay} (manual) — click to flip`
+                    : `Mirror: auto (${mirrorDisplay}) — click to override`
+                }
+                aria-label={`Mirror: ${mirrorDisplay}${mirrorIsManual ? " (manual)" : " (auto)"}`}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill={mirrorDisplay === "on" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m3 7 5 5-5 5V7" />
+                  <path d="m21 7-5 5 5 5V7" />
+                  <path d="M12 20v2" stroke="currentColor" fill="none" />
+                  <path d="M12 14v2" stroke="currentColor" fill="none" />
+                  <path d="M12 8v2" stroke="currentColor" fill="none" />
+                  <path d="M12 2v2" stroke="currentColor" fill="none" />
+                </svg>
+              </button>
+              {mirrorIsManual && (
+                <button
+                  onClick={revertMirrorToAuto}
+                  style={cameraToolStyles.mirrorBadge}
+                  aria-label="Revert mirror to auto"
+                  title="Revert to auto mirror"
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              )}
+            </div>
           </div>
-        )}
-      </div>
-    </Panel>
+
+          {error && (
+            <div className="mt-3 text-[11px] text-red-400 font-mono break-words">
+              {error}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
-const cameraPanelStyles: Record<string, CSSProperties> = {
+const cameraToolStyles: Record<string, CSSProperties> = {
   subtitle: {
     margin: "0 0 14px",
     fontSize: 11,

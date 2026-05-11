@@ -43,6 +43,7 @@ const TRAIL_MORPH_MS = 650;
 
 // Inline hover styles — inline `style` objects can't express :hover, so we
 // emit a small style sheet keyed off classnames the components apply.
+// TODO: Convert to Tailwind
 const HOVER_CSS = `
 .lem-toggle:hover { color: #fff; }
 .lem-toggle:hover .lem-chevron { color: rgba(255,255,255,0.85) !important; }
@@ -316,7 +317,7 @@ export function LocationEmulationTool({
     : `${formatDistance(prepared.totalDistance)} total`;
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 pt-2 pb-3">
+    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
       <style>{HOVER_CSS}</style>
       <button
         type="button"

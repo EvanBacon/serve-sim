@@ -447,6 +447,13 @@ static BOOL SimCamShouldMirror(AVCaptureDevicePosition p) {
     CVPixelBufferRef pb = [self currentPixelBuffer];
     if (!pb) return nil;
     CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];
+    // Placeholder-substitution callers (expo-camera, etc.) have no
+    // AVCaptureConnection to consult; assume the front camera, which is
+    // what these libraries default to in the simulator and what the
+    // preview is mirroring.
+    if (SimCamShouldMirror(AVCaptureDevicePositionFront)) {
+        ci = [ci imageByApplyingOrientation:kCGImagePropertyOrientationUpMirrored];
+    }
     static CIContext *ctx = nil; static dispatch_once_t once;
     dispatch_once(&once, ^{ ctx = [CIContext contextWithOptions:nil]; });
     CGImageRef cg = [ctx createCGImage:ci fromRect:ci.extent];
@@ -826,9 +833,22 @@ static char kSimCamSessionRunningKey;
     if (!delegate) return;
     SimCamRegistry *reg = [SimCamRegistry shared];
     CVPixelBufferRef pb = [reg currentPixelBuffer];
+    AVCaptureDevicePosition p = SimCamPositionOf(self);
+    if (p == 0) p = AVCaptureDevicePositionFront;
+    // Mirror the captured image to match the preview the user sees. The
+    // preview layer is flipped via CATransform3DMakeScale(-1,1,1) when
+    // SimCamShouldMirror is YES, so the photo must apply the same flip
+    // to its pixels — otherwise users see a mirrored preview but a
+    // non-mirrored photo. Honor the photo connection's explicit
+    // isVideoMirrored if the app set one, otherwise fall back to the
+    // position-based default.
+    BOOL mirror = SimCamShouldMirror(p);
+    AVCaptureConnection *conn = [self connectionWithMediaType:AVMediaTypeVideo];
+    if (conn && conn.isVideoMirroringSupported) mirror = conn.isVideoMirrored;
     CGImageRef cg = NULL;
     if (pb) {
         CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];
+        if (mirror) ci = [ci imageByApplyingOrientation:kCGImagePropertyOrientationUpMirrored];
         static CIContext *ctx = nil; static dispatch_once_t once;
         dispatch_once(&once, ^{ ctx = [CIContext contextWithOptions:nil]; });
         cg = [ctx createCGImage:ci fromRect:ci.extent];
@@ -836,10 +856,8 @@ static char kSimCamSessionRunningKey;
     }
     SimCamFakePhoto *photo = [SimCamFakePhoto photoFromImage:cg jpegQuality:0.92];
     if (cg) CGImageRelease(cg);
-    AVCaptureDevicePosition p = SimCamPositionOf(self);
-    if (p == 0) p = AVCaptureDevicePositionFront;
-    simcam_log(@"capturePhoto intercepted (pos=%d, jpeg=%lu bytes)",
-        (int)p, (unsigned long)photo.fileDataRepresentation.length);
+    simcam_log(@"capturePhoto intercepted (pos=%d, mirror=%d, jpeg=%lu bytes)",
+        (int)p, (int)mirror, (unsigned long)photo.fileDataRepresentation.length);
     AVCapturePhotoOutput *output = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([delegate respondsToSelector:@selector(captureOutput:didFinishProcessingPhoto:error:)]) {

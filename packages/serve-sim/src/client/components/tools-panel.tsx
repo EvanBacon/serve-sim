@@ -4,6 +4,7 @@ import { execOnHost } from "../utils/exec";
 import { AppDetectionTool } from "./app-detection-tool";
 import { AppPermissionsTool } from "./app-permissions-tool";
 import { AxTreeTool } from "./ax-tree-tool";
+import { CameraTool } from "./camera-tool";
 
 export function ToolsPanel({
   open,
@@ -37,6 +38,7 @@ export function ToolsPanel({
           />
           <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
+          <CameraTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <LocationEmulationTool udid={udid} exec={execOnHost} />
         </div>
       )}

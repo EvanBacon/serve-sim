@@ -25,7 +25,6 @@ import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
 import { BootEmptyState } from "./components/boot-empty-state";
-import { CameraPanel } from "./components/camera-panel";
 import { DevicePicker } from "./components/device-picker";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
@@ -42,7 +41,6 @@ import { fileExtension } from "./utils/drop";
 import { execOnHost } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
 import {
-  CAMERA_PANEL_WIDTH,
   DEVTOOLS_PANEL_WIDTH,
   GRID_PANEL_WIDTH,
   PANEL_WIDTH,
@@ -96,7 +94,6 @@ function App() {
   const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
   const [devtoolsOpen, setDevtoolsOpen] = useState(false);
   const [gridOpen, setGridOpen] = useState(false);
-  const [cameraOpen, setCameraOpen] = useState(false);
   const [selectedDevtoolsTargetId, setSelectedDevtoolsTargetId] = useState<string | null>(null);
 
   const fetchDevices = useCallback(async () => {
@@ -212,8 +209,6 @@ function App() {
       setDevtoolsOpen={setDevtoolsOpen}
       gridOpen={gridOpen}
       setGridOpen={setGridOpen}
-      cameraOpen={cameraOpen}
-      setCameraOpen={setCameraOpen}
       selectedDevtoolsTargetId={selectedDevtoolsTargetId}
       setSelectedDevtoolsTargetId={setSelectedDevtoolsTargetId}
       streaming={streaming}
@@ -238,8 +233,6 @@ interface AppWithConfigProps {
   setDevtoolsOpen: React.Dispatch<React.SetStateAction<boolean>>;
   gridOpen: boolean;
   setGridOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  cameraOpen: boolean;
-  setCameraOpen: React.Dispatch<React.SetStateAction<boolean>>;
   selectedDevtoolsTargetId: string | null;
   setSelectedDevtoolsTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   streaming: boolean;
@@ -262,8 +255,6 @@ function AppWithConfig({
   setDevtoolsOpen,
   gridOpen,
   setGridOpen,
-  cameraOpen,
-  setCameraOpen,
   selectedDevtoolsTargetId,
   setSelectedDevtoolsTargetId,
   streaming,
@@ -409,12 +400,6 @@ function AppWithConfig({
     GRID_PANEL_WIDTH,
     360,
     1400,
-  );
-  const { width: cameraPanelWidth, onPointerDown: onCameraResize } = useResizableWidth(
-    "serve-sim:camera-panel-width",
-    CAMERA_PANEL_WIDTH,
-    300,
-    640,
   );
   const [viewportWidth, setViewportWidth] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 0),
@@ -588,8 +573,6 @@ function AppWithConfig({
     ? devtoolsPanelWidth
     : gridOpen
     ? gridPanelWidth
-    : cameraOpen
-    ? cameraPanelWidth
     : panelOpen
     ? toolsPanelWidth
     : 0;
@@ -800,13 +783,12 @@ function AppWithConfig({
 
       {/* Right-edge sidebar rail. */}
       <div
-        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-white/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || devtoolsOpen || gridOpen || cameraOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
+        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-white/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || devtoolsOpen || gridOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
       >
         <button
           onClick={() => {
             setDevtoolsOpen(false);
             setGridOpen(false);
-            setCameraOpen(false);
             setPanelOpen((o) => !o);
           }}
           className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-white/70 cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
@@ -823,7 +805,6 @@ function AppWithConfig({
           onClick={() => {
             setPanelOpen(false);
             setGridOpen(false);
-            setCameraOpen(false);
             setDevtoolsOpen((o) => !o);
           }}
           className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-white/70 cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
@@ -841,7 +822,6 @@ function AppWithConfig({
           onClick={() => {
             setPanelOpen(false);
             setDevtoolsOpen(false);
-            setCameraOpen(false);
             setGridOpen((o) => !o);
           }}
           className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-white/70 cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
@@ -854,23 +834,6 @@ function AppWithConfig({
             <rect x="14" y="3" width="7" height="7" rx="1.5" />
             <rect x="3" y="14" width="7" height="7" rx="1.5" />
             <rect x="14" y="14" width="7" height="7" rx="1.5" />
-          </svg>
-        </button>
-        <button
-          onClick={() => {
-            setPanelOpen(false);
-            setDevtoolsOpen(false);
-            setGridOpen(false);
-            setCameraOpen((o) => !o);
-          }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-white/70 cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
-          aria-label="Open camera tool"
-          aria-pressed={cameraOpen}
-          title="Camera"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z" />
-            <circle cx="12" cy="13" r="3.5" />
           </svg>
         </button>
       </div>
@@ -921,20 +884,6 @@ function AppWithConfig({
         visible={devtoolsOpen}
         onPointerDown={onDevtoolsResize}
         ariaLabel="Resize WebKit DevTools panel"
-      />
-
-      <CameraPanel
-        open={cameraOpen}
-        onClose={() => setCameraOpen(false)}
-        udid={config.device}
-        bundleId={currentApp?.bundleId ?? null}
-        width={cameraPanelWidth}
-      />
-      <ResizeHandle
-        panelWidth={cameraPanelWidth}
-        visible={cameraOpen}
-        onPointerDown={onCameraResize}
-        ariaLabel="Resize camera panel"
       />
 
       {/* Status bar */}
