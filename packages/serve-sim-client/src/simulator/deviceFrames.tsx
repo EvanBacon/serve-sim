@@ -158,6 +158,80 @@ export function screenBorderRadius(
   return `${(f.innerRadius / screenW) * 100}% / ${(f.innerRadius / screenH) * 100}%`;
 }
 
+/** Screen corner radii in CSS px for the given rendered container size, plus a geometric mean used for arc sizing. */
+export function simulatorScreenCornerRadiiPx(params: {
+  type: DeviceType;
+  config?: Pick<StreamConfig, "width" | "height" | "orientation"> | null;
+  containerWidth: number;
+  containerHeight: number;
+}): { rx: number; ry: number; rGeom: number } {
+  const f = DEVICE_FRAMES[params.type];
+  const screenW = f.width - 2 * f.bezelX;
+  const screenH = f.height - 2 * f.bezelY;
+  let rxFrac: number;
+  let ryFrac: number;
+  if (screenW < screenH && isLandscapeConfig(params.config ?? null)) {
+    rxFrac = f.innerRadius / screenH;
+    ryFrac = f.innerRadius / screenW;
+  } else {
+    rxFrac = f.innerRadius / screenW;
+    ryFrac = f.innerRadius / screenH;
+  }
+  const rx = rxFrac * params.containerWidth;
+  const ry = ryFrac * params.containerHeight;
+  const rGeom = Math.sqrt(Math.max(rx * ry, 0));
+  return { rx, ry, rGeom };
+}
+
+const RESIZE_CORNER_FALLBACK_R = 13;
+const RESIZE_ARC_SWEEP_DEG = 62;
+
+/** Short bottom-right arc for the simulator resize affordance (SVG path + reversed trace for dash animation). */
+export function simulatorResizeCornerArc(params: {
+  type: DeviceType;
+  config?: Pick<StreamConfig, "width" | "height" | "orientation"> | null;
+  containerWidth: number;
+  containerHeight: number;
+}): { d: string; dFill: string; viewBoxSize: number } {
+  const { containerWidth, containerHeight } = params;
+  const fmt = (n: number) => n.toFixed(3);
+
+  const pathsForR = (R: number, viewBoxSize: number) => {
+    const cx = viewBoxSize;
+    const cy = viewBoxSize;
+    const halfSweep = (RESIZE_ARC_SWEEP_DEG / 2) * (Math.PI / 180);
+    const mid = (225 * Math.PI) / 180;
+    const t0 = mid + halfSweep;
+    const t1 = mid - halfSweep;
+    const x0 = cx + R * Math.cos(t0);
+    const y0 = cy + R * Math.sin(t0);
+    const x1 = cx + R * Math.cos(t1);
+    const y1 = cy + R * Math.sin(t1);
+    const d = `M ${fmt(x0)} ${fmt(y0)} A ${fmt(R)} ${fmt(R)} 0 0 1 ${fmt(x1)} ${fmt(y1)}`;
+    const dFill = `M ${fmt(x1)} ${fmt(y1)} A ${fmt(R)} ${fmt(R)} 0 0 0 ${fmt(x0)} ${fmt(y0)}`;
+    return { d, dFill };
+  };
+
+  if (!(containerWidth > 0) || !(containerHeight > 0)) {
+    const R = RESIZE_CORNER_FALLBACK_R;
+    const viewBoxSize = Math.ceil(R + 14);
+    const { d, dFill } = pathsForR(R, viewBoxSize);
+    return { d, dFill, viewBoxSize };
+  }
+  const { rGeom } = simulatorScreenCornerRadiiPx(params);
+  const gutter = Math.max(2.2, Math.min(5.2, 0.011 * Math.min(containerWidth, containerHeight)));
+  let R = rGeom * 0.34 + gutter;
+  const shortSide = Math.min(containerWidth, containerHeight);
+  const floorR = Math.min(22, Math.max(12, shortSide * 0.052));
+  const Rmin = 12;
+  const Rmax = 24;
+  R = Math.min(Rmax, Math.max(Rmin, R, floorR));
+  const margin = 13;
+  const viewBoxSize = Math.max(26, Math.ceil(R + margin));
+  const { d, dFill } = pathsForR(R, viewBoxSize);
+  return { d, dFill, viewBoxSize };
+}
+
 /** Renders the correct frame chrome for the given device type. */
 export function DeviceFrameChrome({ type = "iphone", streaming = false }: { type?: DeviceType; streaming?: boolean }) {
   switch (type) {
