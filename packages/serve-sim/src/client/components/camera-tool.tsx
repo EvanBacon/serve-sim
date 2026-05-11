@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
@@ -376,8 +376,8 @@ export function CameraTool({
           onDrop={onDrop}
           className="flex flex-col pt-2"
         >
-          <p style={cameraToolStyles.subtitle}>
-            Replaces the simulator's camera feed by injecting a dylib at launch
+          <p className="m-0 mb-3.5 text-[11px] leading-normal text-[#888]">
+            Replaces the simulator's camera feed by injecting a dylib at app launch
             and streaming frames into shared memory. Pick media or a webcam,
             then Play to inject into the foreground app.
           </p>
@@ -386,7 +386,7 @@ export function CameraTool({
             ref={fileInputRef}
             type="file"
             accept="image/*,video/*"
-            style={{ display: "none" }}
+            className="hidden"
             onChange={onFilePicked as any}
           />
 
@@ -411,37 +411,38 @@ export function CameraTool({
                       ? `Source: ${activeWebcamName}`
                       : `Source: ${droppedFileName ?? source}`
                 }
-                style={{
-                  ...cameraToolStyles.dropZone,
-                  ...(isPlaceholder ? null : cameraToolStyles.dropZoneFilled),
-                  ...(isDragOver ? cameraToolStyles.dropZoneActive : null),
-                  cursor: uploading ? "progress" : isPlaceholder ? "pointer" : "default",
-                  position: "relative",
-                }}
+                className={[
+                  "relative min-h-[44px] flex flex-row items-center justify-center gap-2.5 px-3.5 py-2.5 rounded-[10px] text-center transition-[border-color,background] duration-150",
+                  isPlaceholder
+                    ? "bg-[#0e0e10] border border-dashed border-[#2a2a2c]"
+                    : "bg-[#141416] border border-[#232325]",
+                  isDragOver ? "!bg-[rgba(10,132,255,0.08)] !border-[rgba(10,132,255,0.6)]" : "",
+                  uploading ? "cursor-progress" : isPlaceholder ? "cursor-pointer" : "cursor-default",
+                ].join(" ")}
               >
                 {uploading ? (
-                  <span style={cameraToolStyles.dropHint}>Uploading…</span>
+                  <span className="text-[11px] text-[#777]">Uploading…</span>
                 ) : showFile ? (
                   <>
-                    <div style={cameraToolStyles.sourceBadge}>
+                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-[#888] bg-[#18181a] border border-[#232325] px-[7px] py-[2px] rounded-full">
                       {source === "video" ? "Video" : "Image"}
                     </div>
-                    <span style={cameraToolStyles.dropFilename}>{droppedFileName}</span>
+                    <span className="flex-1 min-w-0 truncate text-[12px] text-white font-mono">{droppedFileName}</span>
                   </>
                 ) : showWebcam ? (
                   <>
-                    <div style={cameraToolStyles.sourceBadge}>Webcam</div>
-                    <span style={cameraToolStyles.dropFilename}>{activeWebcamName}</span>
+                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-[#888] bg-[#18181a] border border-[#232325] px-[7px] py-[2px] rounded-full">Webcam</div>
+                    <span className="flex-1 min-w-0 truncate text-[12px] text-white font-mono">{activeWebcamName}</span>
                   </>
                 ) : (
-                  <span style={cameraToolStyles.dropTitle}>Select or drop media</span>
+                  <span className="text-[12px] text-[#eee] font-semibold">Select or drop media</span>
                 )}
 
                 {!isPlaceholder && !uploading && (
                   <button
                     data-clear-media
                     onClick={(e) => { e.stopPropagation(); clearMedia(); }}
-                    style={cameraToolStyles.clearBtn}
+                    className="shrink-0 w-5 h-5 flex items-center justify-center bg-transparent border-none text-[#888] cursor-pointer p-0"
                     aria-label="Clear source"
                     title="Clear → placeholder"
                   >
@@ -455,11 +456,11 @@ export function CameraTool({
             );
           })()}
 
-          <div style={cameraToolStyles.controls}>
-            <div style={{ position: "relative" }} data-camera-source-menu>
+          <div className="flex items-center justify-center gap-6 mt-4">
+            <div className="relative" data-camera-source-menu>
               <button
                 onClick={() => setSourceMenuOpen((o) => !o)}
-                style={cameraToolStyles.iconButton}
+                className="w-10 h-10 flex items-center justify-center bg-panel border border-white/8 text-[#eee] rounded-[10px] cursor-pointer p-0"
                 aria-haspopup="menu"
                 aria-expanded={sourceMenuOpen}
                 title={
@@ -478,24 +479,27 @@ export function CameraTool({
               </button>
 
               {sourceMenuOpen && (
-                <div style={cameraToolStyles.menu} role="menu">
+                <div
+                  role="menu"
+                  className="absolute top-[calc(100%+6px)] left-0 z-10 min-w-[200px] flex flex-col gap-px p-1 bg-panel border border-white/10 rounded-[10px] shadow-[0_8px_24px_rgba(0,0,0,0.4)]"
+                >
                   <button
                     role="menuitem"
-                    style={cameraToolStyles.menuItem}
+                    className="text-left bg-transparent border-none text-[#eee] text-[12px] px-2.5 py-[7px] rounded-md cursor-pointer hover:bg-white/5"
                     onClick={() => { setSourceMenuOpen(false); openFilePicker(); }}
                     title="Pick an image or video from disk"
                   >
                     Browse media…
                   </button>
-                  <div style={cameraToolStyles.menuSeparator} />
-                  <div style={cameraToolStyles.menuLabelRow}>
-                    <span style={cameraToolStyles.menuLabel}>
+                  <div className="h-px bg-white/8 my-1" />
+                  <div className="flex items-center justify-between pl-2.5 pr-2 pt-1 pb-[2px]">
+                    <span className="text-[10px] text-[#777] uppercase tracking-[0.08em]">
                       {webcamLoading ? "Cameras (loading…)" : webcams.length === 0 ? "No cameras" : "Cameras"}
                     </span>
                     <button
                       onClick={(e) => { e.stopPropagation(); void refreshWebcams(); }}
                       disabled={webcamLoading}
-                      style={cameraToolStyles.menuRefreshBtn}
+                      className="flex items-center justify-center w-[22px] h-[22px] bg-transparent border-none rounded-[5px] text-[#888] cursor-pointer p-0 disabled:opacity-50"
                       aria-label="Refresh cameras"
                       title="Refresh cameras"
                     >
@@ -508,10 +512,10 @@ export function CameraTool({
                       <button
                         key={w.id}
                         role="menuitem"
-                        style={{
-                          ...cameraToolStyles.menuItem,
-                          ...(active ? cameraToolStyles.menuItemActive : null),
-                        }}
+                        className={[
+                          "text-left bg-transparent border-none text-[12px] px-2.5 py-[7px] rounded-md cursor-pointer hover:bg-white/5",
+                          active ? "!bg-[rgba(10,132,255,0.18)] !text-white" : "text-[#eee]",
+                        ].join(" ")}
                         onClick={() => {
                           setWebcamId(w.id);
                           setSource("webcam");
@@ -530,11 +534,10 @@ export function CameraTool({
             <button
               onClick={primary.onClick}
               disabled={primaryDisabled}
-              style={{
-                ...cameraToolStyles.playBtn,
-                ...(primary.kind === "stop" ? cameraToolStyles.stopBtn : null),
-                opacity: primaryDisabled ? 0.5 : 1,
-              }}
+              className={[
+                "w-[52px] h-[52px] flex items-center justify-center border-none text-white rounded-full cursor-pointer p-0 disabled:opacity-50",
+                primary.kind === "stop" ? "bg-[#ff453a]" : "bg-[#0a84ff]",
+              ].join(" ")}
               title={
                 !bundleId ? "Bring an app to the foreground first" :
                 primary.kind === "stop" ? "Stop the camera helper" :
@@ -554,10 +557,10 @@ export function CameraTool({
               )}
             </button>
 
-            <div style={{ position: "relative" }}>
+            <div className="relative">
               <button
                 onClick={toggleMirror}
-                style={cameraToolStyles.iconButton}
+                className="w-10 h-10 flex items-center justify-center bg-panel border border-white/8 text-[#eee] rounded-[10px] cursor-pointer p-0"
                 title={
                   mirrorIsManual
                     ? `Mirror: ${mirrorDisplay} (manual) — click to flip`
@@ -577,7 +580,7 @@ export function CameraTool({
               {mirrorIsManual && (
                 <button
                   onClick={revertMirrorToAuto}
-                  style={cameraToolStyles.mirrorBadge}
+                  className="absolute -top-[5px] -right-[5px] w-4 h-4 flex items-center justify-center bg-white/15 border border-[#0a0a0a] text-white rounded-full cursor-pointer p-0"
                   aria-label="Revert mirror to auto"
                   title="Revert to auto mirror"
                 >
@@ -601,175 +604,3 @@ export function CameraTool({
   );
 }
 
-const cameraToolStyles: Record<string, CSSProperties> = {
-  subtitle: {
-    margin: "0 0 14px",
-    fontSize: 11,
-    lineHeight: 1.5,
-    color: "#888",
-  },
-  dropZone: {
-    minHeight: 44,
-    display: "flex",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    padding: "10px 14px",
-    background: "#0e0e10",
-    border: "1px dashed #2a2a2c",
-    borderRadius: 10,
-    textAlign: "center",
-    transition: "border-color 0.15s, background 0.15s",
-  },
-  dropZoneActive: {
-    background: "rgba(10,132,255,0.08)",
-    borderColor: "rgba(10,132,255,0.6)",
-  },
-  dropZoneFilled: {
-    background: "#141416",
-    border: "1px solid #232325",
-  },
-  sourceBadge: {
-    fontSize: 9,
-    letterSpacing: "0.1em",
-    textTransform: "uppercase",
-    color: "#888",
-    background: "#18181a",
-    border: "1px solid #232325",
-    padding: "2px 7px",
-    borderRadius: 999,
-    flexShrink: 0,
-  },
-  dropTitle: { fontSize: 12, color: "#eee", fontWeight: 600 },
-  dropHint: { fontSize: 11, color: "#777" },
-  dropFilename: {
-    fontSize: 12,
-    color: "#fff",
-    fontFamily: "ui-monospace, monospace",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    minWidth: 0,
-    flex: 1,
-  },
-  clearBtn: {
-    width: 20,
-    height: 20,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: "transparent",
-    border: "none",
-    color: "#888",
-    cursor: "pointer",
-    padding: 0,
-    flexShrink: 0,
-  },
-  controls: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 24,
-    marginTop: 16,
-  },
-  iconButton: {
-    width: 40,
-    height: 40,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: "#1c1c1e",
-    border: "1px solid rgba(255,255,255,0.08)",
-    color: "#eee",
-    borderRadius: 10,
-    cursor: "pointer",
-    padding: 0,
-  },
-  mirrorBadge: {
-    position: "absolute",
-    top: -5,
-    right: -5,
-    width: 16,
-    height: 16,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: "rgba(255,255,255,0.14)",
-    border: "1px solid #0a0a0a",
-    color: "#fff",
-    borderRadius: "50%",
-    cursor: "pointer",
-    padding: 0,
-  },
-  playBtn: {
-    width: 52,
-    height: 52,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: "#0a84ff",
-    border: "none",
-    color: "#fff",
-    borderRadius: "50%",
-    cursor: "pointer",
-    padding: 0,
-  },
-  stopBtn: { background: "#ff453a" },
-  menu: {
-    position: "absolute",
-    top: "calc(100% + 6px)",
-    left: 0,
-    minWidth: 200,
-    background: "#1c1c1e",
-    border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: 10,
-    padding: 4,
-    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-    zIndex: 10,
-    display: "flex",
-    flexDirection: "column",
-    gap: 1,
-  },
-  menuItem: {
-    textAlign: "left",
-    background: "transparent",
-    border: "none",
-    color: "#eee",
-    fontSize: 12,
-    padding: "7px 10px",
-    borderRadius: 6,
-    cursor: "pointer",
-  },
-  menuItemActive: { background: "rgba(10,132,255,0.18)", color: "#fff" },
-  menuSeparator: {
-    height: 1,
-    background: "rgba(255,255,255,0.08)",
-    margin: "4px 0",
-  },
-  menuLabel: {
-    fontSize: 10,
-    color: "#777",
-    textTransform: "uppercase",
-    letterSpacing: "0.08em",
-  },
-  menuLabelRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "4px 8px 2px 10px",
-  },
-  menuRefreshBtn: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: 22,
-    height: 22,
-    background: "transparent",
-    border: "none",
-    borderRadius: 5,
-    color: "#888",
-    cursor: "pointer",
-    padding: 0,
-  },
-};
