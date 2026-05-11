@@ -32,11 +32,11 @@ export function ToolsPanel({
 
       {open && (
         <div className="p-3.5 overflow-y-auto flex-1 flex flex-col gap-3">
+          <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AxTreeTool
             overlayEnabled={axOverlayEnabled}
             onToggleOverlay={onToggleAxOverlay}
           />
-          <AppDetectionTool udid={udid} currentApp={currentApp} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <CameraTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <LocationEmulationTool udid={udid} exec={execOnHost} />
