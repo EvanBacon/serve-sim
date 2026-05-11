@@ -877,6 +877,53 @@ async function gesture(args: string[]) {
   });
 }
 
+async function tap(args: string[]) {
+  let deviceArg: string | undefined;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--device" || args[i] === "-d") {
+      deviceArg = args[++i];
+    } else {
+      positional.push(args[i]!);
+    }
+  }
+  const x = positional[0] !== undefined ? Number(positional[0]) : NaN;
+  const y = positional[1] !== undefined ? Number(positional[1]) : NaN;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
+    console.error("Usage: serve-sim tap <x> <y> [-d udid]");
+    console.error("  x, y are normalized 0..1 of the simulator screen");
+    console.error("  Example: serve-sim tap 0.5 0.9   # near bottom-center");
+    process.exit(1);
+  }
+  const state = readState(deviceArg);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim` first.");
+    process.exit(1);
+  }
+  return new Promise<void>((resolve, reject) => {
+    const ws = new WebSocket(state.wsUrl);
+    ws.binaryType = "arraybuffer";
+    const send = (type: "begin" | "end") => {
+      const json = new TextEncoder().encode(JSON.stringify({ type, x, y }));
+      const msg = new Uint8Array(1 + json.length);
+      msg[0] = 0x03;
+      msg.set(json, 1);
+      ws.send(msg);
+    };
+    ws.onopen = () => {
+      send("begin");
+      setTimeout(() => {
+        send("end");
+        setTimeout(() => { ws.close(); resolve(); }, 50);
+      }, 40);
+    };
+    ws.onerror = () => {
+      console.error("Failed to connect to serve-sim server at", state.wsUrl);
+      reject(new Error("WebSocket connection failed"));
+    };
+  });
+}
+
 async function rotate(args: string[]) {
   let deviceArg: string | undefined;
   const filteredArgs: string[] = [];
@@ -1741,6 +1788,7 @@ Usage:
   serve-sim [device...]                 Start preview server (default: localhost:3200)
   serve-sim --no-preview [device...]    Stream in foreground without a preview server
   serve-sim gesture '<json>' [-d udid]  Send a touch gesture
+  serve-sim tap <x> <y> [-d udid]       Tap at normalized 0..1 coords
   serve-sim button [name] [-d udid]     Send a button press (default: home)
   serve-sim rotate <orientation> [-d udid]
                                         Set device orientation
@@ -1780,6 +1828,10 @@ const argv = process.argv.slice(2);
 // Subcommands: gesture and button
 if (argv[0] === "gesture") {
   await gesture(argv.slice(1));
+  process.exit(0);
+}
+if (argv[0] === "tap") {
+  await tap(argv.slice(1));
   process.exit(0);
 }
 if (argv[0] === "button") {
