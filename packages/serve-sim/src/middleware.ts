@@ -163,53 +163,6 @@ export function matchInstalledAppByDisplayName(
   return null;
 }
 
-function shellQuote(value: string): string {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
-function installedAppsForDevice(udid: string): Promise<Record<string, InstalledApp>> {
-  return new Promise((resolve) => {
-    exec(
-      `xcrun simctl listapps ${shellQuote(udid)} | plutil -convert json -o - -`,
-      { timeout: 3_000 },
-      (err, stdout) => {
-        if (err || !stdout) return resolve({});
-        try {
-          resolve(JSON.parse(stdout) as Record<string, InstalledApp>);
-        } catch {
-          resolve({});
-        }
-      },
-    );
-  });
-}
-
-async function detectCurrentForegroundApp(
-  udid: string,
-  stateUrl: string,
-): Promise<{ bundleId: string; isReactNative: boolean } | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2_000);
-  try {
-    const res = await fetch(`${stateUrl}/ax`, { signal: controller.signal });
-    if (!res.ok) return null;
-    const tree = await res.json() as Array<{ AXLabel?: unknown }>;
-    const displayName = tree?.[0]?.AXLabel;
-    if (typeof displayName !== "string") return null;
-
-    const bundleId = matchInstalledAppByDisplayName(
-      await installedAppsForDevice(udid),
-      displayName,
-    );
-    if (!bundleId || !isUserFacingBundle(bundleId)) return null;
-    return { bundleId, isReactNative: await detectReactNative(udid, bundleId) };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 // Cache simctl's booted-device set briefly so per-request cost stays bounded.
 // The middleware runs inside the user's dev server (Metro etc.) and
 // readServeSimStates() is called on every /api and every page load.
@@ -481,11 +434,6 @@ function listAllSimulators(): SimctlDevice[] {
     return [];
   }
 }
-
-function deviceNameFor(udid: string): string | null {
-  return listAllSimulators().find((d) => d.udid === udid)?.name ?? null;
-}
-
 
 // Default per-simulator footprint when we have no running sim to measure
 // from — a fresh booted iOS sim with one app launched typically sits in

@@ -1204,10 +1204,6 @@ function isHelperAlive(udid: string): boolean {
   return Number.isFinite(pid) && isProcessAlive(pid) && existsSync(helperSocketFile(udid));
 }
 
-function isProcessAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
 function stopExistingHelper(udid: string) {
   const pf = helperPidFile(udid);
   if (!existsSync(pf)) return;
@@ -1226,7 +1222,7 @@ function spawnCameraHelper(args: {
   helperBin: string;
   shmName: string;
   socketPath: string;
-  source: "placeholder" | "webcam" | "image";
+  source: CamSourceKind;
   arg?: string;
   width?: number;
   height?: number;
