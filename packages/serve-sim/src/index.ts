@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
+import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
 import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
+import { loadSessionManifest, type SessionApp } from "./manifest";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -24,6 +25,8 @@ interface ServerState {
   url: string;
   streamUrl: string;
   wsUrl: string;
+  label?: string;
+  bundleId?: string;
 }
 
 function ensureStateDir() {
@@ -124,6 +127,12 @@ function readAllStates(): ServerState[] {
 function writeState(state: ServerState) {
   ensureStateDir();
   writeFileSync(stateFileForDevice(state.device), JSON.stringify(state, null, 2));
+}
+
+function updateState(udid: string, patch: Partial<ServerState>) {
+  const state = readState(udid);
+  if (!state) return;
+  writeState({ ...state, ...patch });
 }
 
 function clearState(udid?: string) {
@@ -265,6 +274,67 @@ function resolveDevice(nameOrUDID: string): string {
   } catch {}
   console.error(`Could not resolve device: ${nameOrUDID}`);
   process.exit(1);
+}
+
+function readPlistJSON(path: string): Record<string, unknown> {
+  const output = execFileSync("plutil", ["-convert", "json", "-o", "-", path], {
+    encoding: "utf-8",
+  });
+  return JSON.parse(output) as Record<string, unknown>;
+}
+
+function appDisplayName(info: Record<string, unknown>): string | undefined {
+  return typeof info.CFBundleDisplayName === "string"
+    ? info.CFBundleDisplayName
+    : typeof info.CFBundleName === "string"
+      ? info.CFBundleName
+      : undefined;
+}
+
+function verifyAppIdentity(appPath: string, bundleId: string, displayName?: string): void {
+  const infoPath = join(appPath, "Info.plist");
+  if (!existsSync(infoPath)) {
+    throw new Error(`App bundle is missing Info.plist: ${appPath}`);
+  }
+
+  const info = readPlistJSON(infoPath);
+  if (info.CFBundleIdentifier !== bundleId) {
+    throw new Error(
+      `App bundle id mismatch for ${appPath}: expected ${bundleId}, found ${String(info.CFBundleIdentifier)}`,
+    );
+  }
+
+  if (displayName) {
+    const actualDisplayName = appDisplayName(info);
+    if (actualDisplayName !== displayName) {
+      throw new Error(
+        `App display name mismatch for ${appPath}: expected ${displayName}, found ${actualDisplayName ?? "<missing>"}`,
+      );
+    }
+  }
+}
+
+function installAndLaunchApp(udid: string, app: SessionApp, quiet: boolean): void {
+  if (!existsSync(app.appPath)) {
+    throw new Error(`App bundle does not exist: ${app.appPath}`);
+  }
+
+  verifyAppIdentity(app.appPath, app.bundleId, app.displayName);
+
+  if (!quiet) {
+    const label = app.label ? `${app.label} ` : "";
+    console.log(`Installing ${label}${app.bundleId} on ${getDeviceName(udid) ?? udid}...`);
+  }
+
+  execFileSync("xcrun", ["simctl", "install", udid, app.appPath], { stdio: "pipe" });
+
+  const installedPath = execFileSync("xcrun", ["simctl", "get_app_container", udid, app.bundleId, "app"], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  verifyAppIdentity(installedPath, app.bundleId, app.displayName);
+
+  execFileSync("xcrun", ["simctl", "launch", udid, app.bundleId], { stdio: "pipe" });
 }
 
 function isDeviceBooted(udid: string): boolean {
@@ -576,8 +646,10 @@ async function startHelper(
 // ─── Commands ───
 
 /** Foreground follow mode (default). Stays attached, cleans up on Ctrl+C. */
-async function follow(devices: string[], startPort: number, quiet: boolean) {
-  const udids = devices.length > 0
+async function follow(devices: string[], startPort: number, quiet: boolean, sessionApps: SessionApp[] = []) {
+  const udids = sessionApps.length > 0
+    ? sessionApps.map((app) => resolveDevice(app.device))
+    : devices.length > 0
     ? devices.map(resolveDevice)
     : (() => {
         const booted = findBootedDevice();
@@ -597,7 +669,9 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
   const states: ServerState[] = [];
   let port = startPort;
 
-  for (const udid of udids) {
+  for (let i = 0; i < udids.length; i++) {
+    const udid = udids[i]!;
+    const sessionApp = sessionApps[i];
     // Return existing server if already running
     const existing = readState(udid);
     if (existing) {
@@ -613,7 +687,10 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
     }
 
     port = await findAvailablePort(port);
+    await ensureBooted(udid);
+    if (sessionApp) installAndLaunchApp(udid, sessionApp, quiet);
     const { pid, child } = await startHelper(udid, port, { detach: false });
+    if (sessionApp) updateState(udid, { label: sessionApp.label, bundleId: sessionApp.bundleId });
 
     if (child) {
       children.set(udid, child);
@@ -627,6 +704,8 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
       url: `http://${host}:${port}`,
       streamUrl: `http://${host}:${port}/stream.mjpeg`,
       wsUrl: `ws://${host}:${port}/ws`,
+      label: sessionApp?.label,
+      bundleId: sessionApp?.bundleId,
     };
     states.push(state);
 
@@ -646,11 +725,13 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
     const s = states[0]!;
     console.log(JSON.stringify({
       url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+      label: s.label, bundleId: s.bundleId,
     }));
   } else {
     console.log(JSON.stringify({
       devices: states.map((s) => ({
         url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+        label: s.label, bundleId: s.bundleId,
       })),
     }));
   }
@@ -702,8 +783,10 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
 }
 
 /** Detach mode (--detach). Spawns helpers and returns their states. */
-async function detach(devices: string[], startPort: number): Promise<ServerState[]> {
-  const udids = devices.length > 0
+async function detach(devices: string[], startPort: number, sessionApps: SessionApp[] = []): Promise<ServerState[]> {
+  const udids = sessionApps.length > 0
+    ? sessionApps.map((app) => resolveDevice(app.device))
+    : devices.length > 0
     ? devices.map(resolveDevice)
     : (() => {
         const booted = findBootedDevice();
@@ -719,7 +802,9 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
   const states: ServerState[] = [];
   let port = startPort;
 
-  for (const udid of udids) {
+  for (let i = 0; i < udids.length; i++) {
+    const udid = udids[i]!;
+    const sessionApp = sessionApps[i];
     const existing = readState(udid);
     if (existing) {
       states.push(existing);
@@ -727,7 +812,10 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
     }
 
     port = await findAvailablePort(port);
+    await ensureBooted(udid);
+    if (sessionApp) installAndLaunchApp(udid, sessionApp, true);
     await startHelper(udid, port, { detach: true });
+    if (sessionApp) updateState(udid, { label: sessionApp.label, bundleId: sessionApp.bundleId });
 
     const host = "127.0.0.1";
     states.push({
@@ -737,6 +825,8 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
       url: `http://${host}:${port}`,
       streamUrl: `http://${host}:${port}/stream.mjpeg`,
       wsUrl: `ws://${host}:${port}/ws`,
+      label: sessionApp?.label,
+      bundleId: sessionApp?.bundleId,
     });
 
     port++;
@@ -750,11 +840,13 @@ function printStatesJSON(states: ServerState[]) {
     const s = states[0]!;
     console.log(JSON.stringify({
       url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+      label: s.label, bundleId: s.bundleId,
     }));
   } else {
     console.log(JSON.stringify({
       devices: states.map((s) => ({
         url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
+        label: s.label, bundleId: s.bundleId,
       })),
     }));
   }
@@ -1049,11 +1141,11 @@ async function memoryWarning(args: string[]) {
 
 // ─── Serve preview ───
 
-async function serve(servePort: number, devices: string[], portExplicit: boolean) {
+async function serve(servePort: number, devices: string[], portExplicit: boolean, sessionApps: SessionApp[] = []) {
   let targetDevice: string | undefined;
 
-  if (devices.length > 0) {
-    const states = await detach(devices, 3100);
+  if (sessionApps.length > 0 || devices.length > 0) {
+    const states = await detach(devices, 3100, sessionApps);
     targetDevice = states[0]?.device;
   } else {
     // Ensure a serve-sim stream is running (start one if not)
@@ -1140,6 +1232,7 @@ Options:
       --no-preview    Skip the web preview server; stream in foreground only
       --list [device] List running streams
       --kill [device] Kill running stream(s)
+      --manifest <path> Install/launch apps from a JSON manifest before streaming
   -h, --help          Show this help
 
 Examples:
@@ -1150,6 +1243,7 @@ Examples:
   serve-sim --detach                    Start streaming in background (daemon)
   serve-sim --list                      Show all running streams
   serve-sim --kill                      Stop all streams
+  serve-sim --manifest sim-session.json Start a multi-app simulator session
 `);
 }
 
@@ -1189,6 +1283,7 @@ let noPreview = false;
 const positionalDevices: string[] = [];
 let listDevice: string | undefined;
 let killDevice: string | undefined;
+let manifestPath: string | undefined;
 
 for (let i = 0; i < argv.length; i++) {
   const arg = argv[i]!;
@@ -1204,6 +1299,13 @@ for (let i = 0; i < argv.length; i++) {
       break;
     case "--no-preview":
       noPreview = true;
+      break;
+    case "--manifest":
+      manifestPath = argv[++i];
+      if (!manifestPath) {
+        console.error("--manifest requires a path");
+        process.exit(1);
+      }
       break;
     case "--list": case "-l":
       list = true;
@@ -1248,11 +1350,13 @@ if (kill) {
   process.exit(0);
 }
 
+const sessionApps = manifestPath ? loadSessionManifest(manifestPath).apps : [];
+
 if (detachMode) {
-  const states = await detach(positionalDevices, startPort ?? 3100);
+  const states = await detach(positionalDevices, startPort ?? 3100, sessionApps);
   printStatesJSON(states);
 } else if (noPreview) {
-  await follow(positionalDevices, startPort ?? 3100, quiet);
+  await follow(positionalDevices, startPort ?? 3100, quiet, sessionApps);
 } else {
-  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined);
+  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined, sessionApps);
 }
