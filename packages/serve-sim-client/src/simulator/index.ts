@@ -16,6 +16,8 @@ export {
   screenInsets,
   simulatorAspectRatio,
   simulatorMaxWidth,
+  simulatorResizeCornerArc,
+  simulatorScreenCornerRadiiPx,
 } from "./deviceFrames.js";
 export {
   displayStreamConfig,

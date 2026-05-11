@@ -28,6 +28,8 @@ import { BootEmptyState } from "./components/boot-empty-state";
 import { DevicePicker } from "./components/device-picker";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
+import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
+import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
 import { ToolsPanel } from "./components/tools-panel";
 import { WebKitDevtoolsPanel } from "./components/webkit-devtools-panel";
 import { useMediaDrop } from "./hooks/use-media-drop";
@@ -51,35 +53,6 @@ import {
   SIMULATOR_RESIZE_LAYOUT_TRANSITION,
   SIMULATOR_RESIZE_PAGE_TRANSITION,
 } from "./utils/simulator-resize";
-
-const RESIZE_HANDLE_BASE: CSSProperties = {
-  position: "absolute",
-  right: -34,
-  bottom: 2,
-  width: 28,
-  height: 28,
-  borderRadius: 14,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  color: "rgba(255,255,255,0.72)",
-  background: "rgba(28,28,30,0.62)",
-  border: "1px solid rgba(255,255,255,0.14)",
-  boxShadow: "0 8px 24px rgba(0,0,0,0.32)",
-  backdropFilter: "blur(18px)",
-  WebkitBackdropFilter: "blur(18px)",
-  cursor: "nwse-resize",
-  touchAction: "none",
-  opacity: 0.72,
-  transition: "opacity 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease",
-  zIndex: 25,
-};
-const RESIZE_HANDLE_ACTIVE: CSSProperties = {
-  opacity: 1,
-  background: "rgba(44,44,46,0.82)",
-  border: "1px solid rgba(255,255,255,0.28)",
-  boxShadow: "0 10px 28px rgba(0,0,0,0.42), 0 0 0 4px rgba(255,255,255,0.08)",
-};
 
 // ─── App ───
 
@@ -444,12 +417,14 @@ function AppWithConfig({
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
+  const [deviceRenderedHeight, setDeviceRenderedHeight] = useState(0);
   useEffect(() => {
     const el = simContainerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 0;
-      setDeviceRenderedWidth(w);
+      const rect = entries[0]?.contentRect;
+      setDeviceRenderedWidth(rect?.width ?? 0);
+      setDeviceRenderedHeight(rect?.height ?? 0);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -599,16 +574,18 @@ function AppWithConfig({
       className="flex flex-col items-center justify-center h-screen bg-page py-6 pl-6 gap-3 font-system box-border"
       style={{
         paddingRight: 24 + shiftForPanel,
-        transition: simulatorResize.isResizing ? "none" : SIMULATOR_RESIZE_PAGE_TRANSITION,
+        transition:
+          simulatorResize.isResizing || simulatorResize.isInertia ? "none" : SIMULATOR_RESIZE_PAGE_TRANSITION,
       }}
     >
       <div
         className="flex flex-col items-center gap-3 min-w-0"
         style={{
           width: simulatorResize.width,
-          transition: simulatorResize.isResizing
-            ? SIMULATOR_RESIZE_DRAG_TRANSITION
-            : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
+          transition:
+            simulatorResize.isResizing || simulatorResize.isInertia
+              ? SIMULATOR_RESIZE_DRAG_TRANSITION
+              : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
         }}
       >
         <SimulatorToolbar
@@ -658,10 +635,12 @@ function AppWithConfig({
           style={{
             width: simulatorResize.width,
             aspectRatio: frameAspectRatio,
-            transition: simulatorResize.isResizing
-              ? SIMULATOR_RESIZE_DRAG_TRANSITION
-              : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
-            willChange: simulatorResize.isResizing ? "width" : undefined,
+            transition:
+              simulatorResize.isResizing || simulatorResize.isInertia
+                ? SIMULATOR_RESIZE_DRAG_TRANSITION
+                : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
+            willChange:
+              simulatorResize.isResizing || simulatorResize.isInertia ? "width" : undefined,
           }}
           {...mediaDrop.dropZoneProps}
         >
@@ -671,7 +650,8 @@ function AppWithConfig({
               width: "100%",
               height: "100%",
               border: "none",
-              pointerEvents: simulatorResize.isResizing ? "none" : undefined,
+              pointerEvents:
+                simulatorResize.isResizing || simulatorResize.isInertia ? "none" : undefined,
             }}
             imageStyle={{
               borderRadius: imgBorderRadius,
@@ -701,34 +681,24 @@ function AppWithConfig({
               <span className="text-[13px] font-medium">Drop media or .ipa</span>
             </div>
           )}
-          <div
-            ref={simulatorResize.handleRef}
-            role="separator"
-            aria-label="Resize simulator"
-            aria-orientation="vertical"
-            aria-valuemin={Math.round(simulatorResize.minWidth)}
-            aria-valuemax={Math.round(simulatorResize.maxWidth)}
-            aria-valuenow={Math.round(simulatorResize.width)}
-            tabIndex={0}
-            title="Drag to resize"
-            onPointerDown={simulatorResize.onPointerDown}
-            onPointerMove={simulatorResize.onPointerMove}
-            onPointerUp={simulatorResize.onPointerEnd}
-            onPointerCancel={simulatorResize.onPointerEnd}
-            onLostPointerCapture={simulatorResize.onPointerEnd}
-            onKeyDown={simulatorResize.onKeyDown}
-            onPointerEnter={() => simulatorResize.setHandleHovered(true)}
-            onPointerLeave={() => simulatorResize.setHandleHovered(false)}
-            style={{
-              ...RESIZE_HANDLE_BASE,
-              ...(simulatorResize.handleActive ? RESIZE_HANDLE_ACTIVE : {}),
-            }}
-          >
-            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
-              <path d="M9 13L13 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-              <path d="M5 13L13 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
-          </div>
+          <SimulatorResizeCornerHandle
+            simulatorResize={simulatorResize}
+            deviceType={deviceType}
+            streamConfig={activeStreamConfig}
+            containerWidth={deviceRenderedWidth || simulatorResize.width}
+            containerHeight={
+              deviceRenderedHeight ||
+              (frameAspectRatioValue > 0 ? simulatorResize.width / frameAspectRatioValue : 0)
+            }
+          />
+          <SimulatorResizeSizeBadge
+            width={deviceRenderedWidth || simulatorResize.width}
+            height={
+              deviceRenderedHeight ||
+              (frameAspectRatioValue > 0 ? simulatorResize.width / frameAspectRatioValue : 0)
+            }
+            visible={simulatorResize.isResizing || simulatorResize.isInertia}
+          />
         </div>
       </div>
 

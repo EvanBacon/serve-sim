@@ -4,6 +4,7 @@ import {
   screenBorderRadius,
   simulatorAspectRatio,
   simulatorMaxWidth,
+  simulatorResizeCornerArc,
 } from "../simulator/deviceFrames";
 import {
   displayStreamConfig,
@@ -70,6 +71,17 @@ describe("simulator geometry helpers", () => {
     const portrait = screenBorderRadius("iphone", { width: 1320, height: 2868 });
     const landscape = screenBorderRadius("iphone", { width: 2868, height: 1320 });
     expect(landscape).toBe(portrait.split(" / ").reverse().join(" / "));
+  });
+
+  test("resize corner arc uses opposing sweep flags for d vs dFill", () => {
+    const arc = simulatorResizeCornerArc({
+      type: "iphone",
+      config: null,
+      containerWidth: 400,
+      containerHeight: 860,
+    });
+    expect(arc.d).toMatch(/A [\d.]+ [\d.]+ 0 0 1/);
+    expect(arc.dFill).toMatch(/A [\d.]+ [\d.]+ 0 0 0/);
   });
 
   test("maps visual landscape touch coordinates back to the raw portrait surface", () => {
