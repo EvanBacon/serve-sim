@@ -33,11 +33,8 @@ export function AxToolbarButton({
       }
     >
       <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3 8V5a2 2 0 0 1 2-2h3" />
-        <path d="M16 3h3a2 2 0 0 1 2 2v3" />
-        <path d="M21 16v3a2 2 0 0 1-2 2h-3" />
-        <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
-        <circle cx="12" cy="12" r="3.5" />
+        <path d="M12.034 12.681a.498.498 0 0 1 .647-.647l9 3.5a.5.5 0 0 1-.033.943l-3.444 1.068a1 1 0 0 0-.66.66l-1.067 3.443a.5.5 0 0 1-.943.033z" />
+        <path d="M21 11V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6" />
       </svg>
     </SimulatorToolbar.Button>
   );
