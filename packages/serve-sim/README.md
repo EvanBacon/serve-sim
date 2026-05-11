@@ -134,10 +134,10 @@ Create a `.claude/launch.json` and define a server:
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "ios",
+      "name": "Apple",
       "runtimeExecutable": "npx",
       "runtimeArgs": ["serve-sim"],
-      "url": "http://localhost:8081/.sim"
+      "url": "http://localhost:3200"
     }
   ]
 }
