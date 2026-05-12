@@ -4,6 +4,7 @@ declare global {
       url: string;
       streamUrl: string;
       wsUrl: string;
+      pid: number;
       port: number;
       device: string;
       basePath: string;

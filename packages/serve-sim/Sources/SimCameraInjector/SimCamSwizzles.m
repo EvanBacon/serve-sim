@@ -490,8 +490,12 @@ static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
     AVCaptureDevicePosition p = SimCamPositionOf(self);
     if (p == 0) p = AVCaptureDevicePositionFront;
     BOOL mirror = SimCamShouldMirror(p);
-    AVCaptureConnection *conn = [self connectionWithMediaType:AVMediaTypeVideo];
-    if (conn && conn.isVideoMirroringSupported) mirror = conn.isVideoMirrored;
+    if (SimCamGetMirrorMode() == SimCamMirrorAuto) {
+        AVCaptureConnection *conn = [self connectionWithMediaType:AVMediaTypeVideo];
+        if (conn && conn.isVideoMirroringSupported && !conn.automaticallyAdjustsVideoMirroring) {
+            mirror = conn.isVideoMirrored;
+        }
+    }
     CGImageRef cg = NULL;
     if (pb) {
         CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];

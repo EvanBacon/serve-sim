@@ -56,8 +56,16 @@ import {
 
 // ─── App ───
 
+type PreviewConfig = NonNullable<Window["__SIM_PREVIEW__"]>;
+
+function previewConfigKey(config: PreviewConfig | null): string {
+  return config
+    ? `${config.device}:${config.pid}:${config.streamUrl}:${config.wsUrl}`
+    : "";
+}
+
 function App() {
-  const config = window.__SIM_PREVIEW__;
+  const [config, setConfig] = useState<PreviewConfig | null>(() => window.__SIM_PREVIEW__ ?? null);
   const [streaming, setStreaming] = useState(false);
   const [devices, setDevices] = useState<SimDevice[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
@@ -84,6 +92,34 @@ function App() {
   }, []);
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
+
+  useEffect(() => {
+    const requestedDevice = new URLSearchParams(window.location.search).get("device");
+    const apiUrl = `${simEndpoint("api")}${requestedDevice ? `?device=${encodeURIComponent(requestedDevice)}` : ""}`;
+    let cancelled = false;
+
+    const syncConfig = async () => {
+      try {
+        const res = await fetch(apiUrl, { cache: "no-store" });
+        if (!res.ok) return;
+        const next = (await res.json()) as PreviewConfig | null;
+        if (cancelled) return;
+        setConfig((prev) => {
+          if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
+          if (next) window.__SIM_PREVIEW__ = next;
+          else delete window.__SIM_PREVIEW__;
+          return next;
+        });
+      } catch {}
+    };
+
+    void syncConfig();
+    const interval = setInterval(syncConfig, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   // Stream simctl logs into the browser console with colors + grouping
   useEffect(() => {
@@ -192,7 +228,7 @@ function App() {
 }
 
 interface AppWithConfigProps {
-  config: NonNullable<Window["__SIM_PREVIEW__"]>;
+  config: PreviewConfig;
   devices: SimDevice[];
   devicesLoading: boolean;
   devicesError: string | null;

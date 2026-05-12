@@ -58,6 +58,15 @@ function resolveServeSimBin(): string {
 const SERVE_SIM_BIN = resolveServeSimBin();
 const axStreamerCache = createAxStreamerCache();
 
+type ServeSimState = {
+  pid: number;
+  port: number;
+  device: string;
+  url: string;
+  streamUrl: string;
+  wsUrl: string;
+};
+
 // ─── Serve-sim state ───
 
 // Cache simctl's booted-device set briefly (1.5s). dev.ts calls
@@ -91,7 +100,7 @@ function getBootedUdids(): Set<string> | null {
   }
 }
 
-function readServeSimStates() {
+function readServeSimStates(): ServeSimState[] {
   let files: string[];
   try {
     files = readdirSync(STATE_DIR).filter(
@@ -101,11 +110,11 @@ function readServeSimStates() {
     return [];
   }
   const booted = getBootedUdids();
-  const states: any[] = [];
+  const states: ServeSimState[] = [];
   for (const f of files) {
     const path = join(STATE_DIR, f);
     try {
-      const state = JSON.parse(readFileSync(path, "utf-8"));
+      const state = JSON.parse(readFileSync(path, "utf-8")) as ServeSimState;
       try {
         process.kill(state.pid, 0);
       } catch {
@@ -127,6 +136,29 @@ function readServeSimStates() {
     } catch {}
   }
   return states;
+}
+
+function selectServeSimState(
+  states: ServeSimState[],
+  device?: string | null,
+): ServeSimState | null {
+  if (device) return states.find((state) => state.device === device) ?? null;
+  return states[0] ?? null;
+}
+
+function endpoint(path: string, device: string): string {
+  return `/${path}?device=${encodeURIComponent(device)}`;
+}
+
+function previewConfigForState(state: ServeSimState) {
+  return {
+    ...state,
+    basePath: "/",
+    logsEndpoint: endpoint("logs", state.device),
+    appStateEndpoint: endpoint("appstate", state.device),
+    axEndpoint: endpoint("ax", state.device),
+    serveSimBin: SERVE_SIM_BIN,
+  };
 }
 
 // ─── Client bundler with watch ───
@@ -266,16 +298,11 @@ function scheduleWatchedBuild() {
 
 // ─── HTML shell ───
 
-function buildHtml(): string {
+function buildHtml(selectedDevice?: string | null): string {
   const states = readServeSimStates();
-  const state = states[0] ?? null;
+  const state = selectServeSimState(states, selectedDevice);
   const configScript = state
-    ? `<script>window.__SIM_PREVIEW__=${JSON.stringify({
-        ...state,
-        logsEndpoint: "/logs",
-        axEndpoint: "/ax",
-        serveSimBin: SERVE_SIM_BIN,
-      })}</script>`
+    ? `<script>window.__SIM_PREVIEW__=${JSON.stringify(previewConfigForState(state))}</script>`
     : "";
 
   return `<!doctype html>
@@ -305,6 +332,7 @@ Bun.serve({
   idleTimeout: 255, // SSE / MJPEG streams are long-lived
   fetch(req) {
     const url = new URL(req.url);
+    const selectedDevice = url.searchParams.get("device");
 
     // Dev reload SSE
     if (url.pathname === "/__dev/reload") {
@@ -329,17 +357,19 @@ Bun.serve({
     // Serve-sim state API
     if (url.pathname === "/api") {
       const states = readServeSimStates();
-      return Response.json(states[0] ?? null, {
+      const state = selectServeSimState(states, selectedDevice);
+      return Response.json(state ? previewConfigForState(state) : null, {
         headers: { "Cache-Control": "no-store" },
       });
     }
 
     if (url.pathname === "/ax") {
       const states = readServeSimStates();
-      if (states.length === 0) {
+      const state = selectServeSimState(states, selectedDevice);
+      if (!state) {
         return new Response("No serve-sim device", { status: 404 });
       }
-      const ax = axStreamerCache.get(states[0].device, states[0].port);
+      const ax = axStreamerCache.get(state.device, state.port);
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue(":\n\n");
@@ -439,10 +469,11 @@ Bun.serve({
     // SSE logs
     if (url.pathname === "/logs") {
       const states = readServeSimStates();
-      if (states.length === 0) {
+      const state = selectServeSimState(states, selectedDevice);
+      if (!state) {
         return new Response("No serve-sim device", { status: 404 });
       }
-      const udid = states[0].device;
+      const udid = state.device;
       const stream = new ReadableStream({
         start(controller) {
           const child: ChildProcess = spawn("xcrun", [
@@ -485,10 +516,11 @@ Bun.serve({
     // SSE foreground-app changes (filtered in the CLI; browser just listens).
     if (url.pathname === "/appstate") {
       const states = readServeSimStates();
-      if (states.length === 0) {
+      const state = selectServeSimState(states, selectedDevice);
+      if (!state) {
         return new Response("No serve-sim device", { status: 404 });
       }
-      const udid = states[0].device;
+      const udid = state.device;
       const stream = new ReadableStream({
         start(controller) {
           const child: ChildProcess = spawn("xcrun", [
@@ -539,7 +571,7 @@ Bun.serve({
     }
 
     // Serve the HTML page (fresh on every request — picks up state + rebuild)
-    return new Response(buildHtml(), {
+    return new Response(buildHtml(selectedDevice), {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",

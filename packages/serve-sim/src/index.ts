@@ -1165,6 +1165,15 @@ function helperPidFile(udid: string): string {
   return join(SIMCAM_STATE_DIR, `${udid}.pid`);
 }
 
+function helperBundlesFile(udid: string): string {
+  return join(SIMCAM_STATE_DIR, `${udid}.bundles.json`);
+}
+
+interface InjectedBundlesState {
+  helperPid: number;
+  bundleIds: string[];
+}
+
 function helperSocketFile(udid: string): string {
   // POSIX sun_path is 104 chars on macOS — keep this short.
   const short = createHash("sha1").update(udid).digest("hex").slice(0, 12);
@@ -1204,6 +1213,35 @@ function isHelperAlive(udid: string): boolean {
   return Number.isFinite(pid) && isProcessAlive(pid) && existsSync(helperSocketFile(udid));
 }
 
+function readInjectedBundles(udid: string): string[] {
+  const path = helperBundlesFile(udid);
+  if (!existsSync(path)) return [];
+  let state: InjectedBundlesState;
+  try {
+    state = JSON.parse(readFileSync(path, "utf-8")) as InjectedBundlesState;
+  } catch {
+    return [];
+  }
+  let currentHelperPid: number | null = null;
+  try {
+    currentHelperPid = Number(readFileSync(helperPidFile(udid), "utf-8").trim()) || null;
+  } catch {}
+  if (currentHelperPid == null || state.helperPid !== currentHelperPid) return [];
+  return Array.isArray(state.bundleIds) ? state.bundleIds : [];
+}
+
+function recordInjectedBundle(udid: string, bundleId: string, helperPid: number): void {
+  const existing = readInjectedBundles(udid);
+  const bundleIds = existing.includes(bundleId) ? existing : [...existing, bundleId];
+  const next: InjectedBundlesState = { helperPid, bundleIds };
+  if (!existsSync(SIMCAM_STATE_DIR)) mkdirSync(SIMCAM_STATE_DIR, { recursive: true });
+  writeFileSync(helperBundlesFile(udid), JSON.stringify(next));
+}
+
+function clearInjectedBundles(udid: string): void {
+  try { unlinkSync(helperBundlesFile(udid)); } catch {}
+}
+
 function stopExistingHelper(udid: string) {
   const pf = helperPidFile(udid);
   if (!existsSync(pf)) return;
@@ -1215,6 +1253,7 @@ function stopExistingHelper(udid: string) {
     while (isProcessAlive(pid) && Date.now() - start < 1500) sleepSync(50);
   }
   try { unlinkSync(pf); } catch {}
+  clearInjectedBundles(udid);
 }
 
 function spawnCameraHelper(args: {
@@ -1246,6 +1285,7 @@ function spawnCameraHelper(args: {
   closeSync(out);
   if (!child.pid) throw new Error("failed to spawn camera helper");
   writeFileSync(helperPidFile(args.udid), String(child.pid));
+  clearInjectedBundles(args.udid);
   // Wait briefly until the helper has populated the shm header AND the
   // control socket is listening (proves it's healthy and ready for switch).
   const start = Date.now();
@@ -1477,9 +1517,20 @@ Examples:
   if (stopWebcam) {
     const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
+    const injectedBundles = readInjectedBundles(udid);
+    const terminated: string[] = [];
+    for (const b of injectedBundles) {
+      try {
+        execSync(`xcrun simctl terminate "${udid}" "${b}"`, { stdio: "ignore" });
+        terminated.push(b);
+      } catch {}
+    }
     stopExistingHelper(udid);
-    if (quiet) console.log(JSON.stringify({ udid, stopped: true }));
-    else console.log(`Stopped camera helper for ${udid}`);
+    if (quiet) console.log(JSON.stringify({ udid, stopped: true, terminated }));
+    else {
+      console.log(`Stopped camera helper for ${udid}`);
+      if (terminated.length > 0) console.log(`Terminated injected apps: ${terminated.join(", ")}`);
+    }
     return;
   }
 
@@ -1579,14 +1630,15 @@ Examples:
     }
     let helperPid: number | null = null;
     try { helperPid = Number(readFileSync(helperPidFile(udid), "utf-8").trim()) || null; } catch {}
+    const bundleIds = readInjectedBundles(udid);
     try {
       const reply = await sendHelperCommand(udid, { action: "status" });
-      console.log(JSON.stringify({ udid, alive: true, helperPid, ...reply }));
+      console.log(JSON.stringify({ udid, alive: true, helperPid, bundleIds, ...reply }));
     } catch (e: any) {
       // pid file + socket exist but the helper didn't reply — surface
       // alive:true so the UI can still skip "Inject + relaunch", and
       // include the error for diagnosis.
-      console.log(JSON.stringify({ udid, alive: true, helperPid, error: e?.message ?? String(e) }));
+      console.log(JSON.stringify({ udid, alive: true, helperPid, bundleIds, error: e?.message ?? String(e) }));
     }
     return;
   }
@@ -1682,6 +1734,8 @@ Examples:
 
   const pidMatch = stdoutBuf.trim().match(/:\s*(\d+)\s*$/);
   const pid = pidMatch ? Number(pidMatch[1]) : null;
+
+  if (helperPid) recordInjectedBundle(udid, bundleId, helperPid);
 
   const result = {
     udid,

@@ -352,7 +352,10 @@ AVCaptureDevice *SimCamFakeDeviceForPosition(AVCaptureDevicePosition p) {
 }
 
 - (BOOL)isVideoMirroringSupported { return YES; }
-- (BOOL)isVideoMirrored { return _videoMirrored; }
+- (BOOL)isVideoMirrored {
+    if (_automaticallyAdjustsVideoMirroring) return SimCamShouldMirror(_position);
+    return _videoMirrored;
+}
 - (void)setVideoMirrored:(BOOL)m {
     _videoMirrored = m;
     _automaticallyAdjustsVideoMirroring = NO;

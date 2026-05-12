@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   matchInstalledAppByDisplayName,
   parseForegroundAppLogMessage,
+  previewConfigForState,
   selectServeSimState,
   type ServeSimState,
 } from "../middleware";
@@ -36,6 +37,26 @@ describe("selectServeSimState", () => {
 
   test("returns null when the requested device is not running", () => {
     expect(selectServeSimState(states, "DEVICE-C")).toBeNull();
+  });
+});
+
+describe("previewConfigForState", () => {
+  test("returns the full client config shape with device-scoped endpoints", () => {
+    const state = states[1]!;
+    expect(previewConfigForState(state, "/preview", "/bin/serve-sim")).toEqual({
+      ...state,
+      basePath: "/preview",
+      logsEndpoint: "/preview/logs?device=DEVICE-B",
+      appStateEndpoint: "/preview/appstate?device=DEVICE-B",
+      axEndpoint: "/preview/ax?device=DEVICE-B",
+      devtoolsEndpoint: "/preview/devtools?device=DEVICE-B",
+      serveSimBin: "/bin/serve-sim",
+      gridApiEndpoint: "/preview/grid/api",
+      gridStartEndpoint: "/preview/grid/api/start",
+      gridShutdownEndpoint: "/preview/grid/api/shutdown",
+      gridMemoryEndpoint: "/preview/grid/api/memory",
+      previewEndpoint: "/preview",
+    });
   });
 });
 
