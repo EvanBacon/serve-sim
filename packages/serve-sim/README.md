@@ -137,7 +137,7 @@ Create a `.claude/launch.json` and define a server:
       "name": "Apple",
       "runtimeExecutable": "npx",
       "runtimeArgs": ["serve-sim"],
-      "url": "http://localhost:3200"
+      "port": 3200
     }
   ]
 }

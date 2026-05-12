@@ -43,7 +43,7 @@ describe("selectServeSimState", () => {
 describe("previewConfigForState", () => {
   test("returns the full client config shape with device-scoped endpoints", () => {
     const state = states[1]!;
-    expect(previewConfigForState(state, "/preview", "/bin/serve-sim")).toEqual({
+    expect(previewConfigForState(state, "/preview", "/bin/serve-sim", "token-xyz")).toEqual({
       ...state,
       basePath: "/preview",
       logsEndpoint: "/preview/logs?device=DEVICE-B",
@@ -56,6 +56,7 @@ describe("previewConfigForState", () => {
       gridShutdownEndpoint: "/preview/grid/api/shutdown",
       gridMemoryEndpoint: "/preview/grid/api/memory",
       previewEndpoint: "/preview",
+      execToken: "token-xyz",
     });
   });
 });

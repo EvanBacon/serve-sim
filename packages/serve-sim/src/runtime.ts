@@ -38,6 +38,13 @@ type ConnectMiddleware = (
 export async function servePreview(opts: {
   port: number;
   middleware: ConnectMiddleware;
+  /**
+   * Interface to bind. Defaults to `127.0.0.1` so the preview is reachable
+   * only from the developer's machine — the middleware exposes shell-exec
+   * routes that must not be reachable from other hosts. Pass an explicit
+   * value (e.g. `"0.0.0.0"`) to opt in to LAN exposure.
+   */
+  host?: string;
 }): Promise<PreviewServer> {
   const server = createHttpServer((req, res) => {
     opts.middleware(req, res, () => {
@@ -63,7 +70,7 @@ export async function servePreview(opts: {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(opts.port);
+    server.listen(opts.port, opts.host ?? "127.0.0.1");
   });
 
   return { stop: () => server.close() };

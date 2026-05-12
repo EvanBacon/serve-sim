@@ -692,6 +692,9 @@ function AppWithConfig({
             imageStyle={{
               borderRadius: imgBorderRadius,
               cornerShape: "superellipse(1.3)",
+              borderWidth: "1px",
+              borderStyle: "solid",
+              borderColor: "rgba(255, 255, 255, 0.2)",
             } as CSSProperties}
             hideControls
             onStreamingChange={setStreaming}

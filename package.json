@@ -1,6 +1,7 @@
 {
   "name": "serve-sim-repo",
   "private": true,
+  "license": "Apache-2.0",
   "scripts": {
     "build": "bun run --filter '*' build",
     "build:swift": "cd packages/serve-sim && ./build.sh",
