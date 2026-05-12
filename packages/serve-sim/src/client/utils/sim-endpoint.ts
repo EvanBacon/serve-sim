@@ -20,6 +20,8 @@ declare global {
       // shells out via `node <bin> camera ...` so it doesn't depend on the
       // `serve-sim` binary being on the user's PATH.
       serveSimBin?: string;
+      /** Bearer token required by the /exec shell-exec route. */
+      execToken?: string;
     };
   }
 }

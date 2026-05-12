@@ -3,6 +3,7 @@ import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException 
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer as createNetServer } from "net";
+import { randomBytes, timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import { createAxStreamerCache } from "./ax";
 
@@ -582,6 +583,27 @@ export interface SimMiddlewareOptions {
   basePath?: string;
   /** Pin this preview server to a specific simulator UDID. */
   device?: string;
+  /**
+   * Per-session bearer token gating the `/exec` shell-exec route.
+   * Auto-generated if omitted. The token is injected into the preview HTML
+   * so the in-page UI can call `/exec` same-origin; LAN attackers and
+   * cross-origin pages cannot read it.
+   */
+  execToken?: string;
+}
+
+function safeEqualString(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+function isJsonContentType(value: string | undefined): boolean {
+  if (!value) return false;
+  // `application/json; charset=utf-8` etc. — only the media type matters.
+  const mediaType = value.split(";", 1)[0]!.trim().toLowerCase();
+  return mediaType === "application/json";
 }
 
 /**
@@ -595,6 +617,10 @@ export interface SimMiddlewareOptions {
  */
 export function simMiddleware(options?: SimMiddlewareOptions) {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
+  // Per-process random token. Anyone who can read the preview HTML same-origin
+  // can call /exec; cross-origin pages and LAN clients cannot, because they
+  // can't read this value (it's only injected into the preview page's config).
+  const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
 
   return (req: SimReq, res: SimRes, next?: SimNext) => {
     const rawUrl: string = req.url ?? "";
@@ -643,6 +669,17 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       const state = selectServeSimState(states, selectedDevice);
       let html = loadHtml();
 
+      if (!state) {
+        // Empty-state UI still polls /exec (boot/list helpers), so the page
+        // needs the bearer token even before a helper attaches. Inject a
+        // minimal config with just the basePath + token.
+        const minimal = JSON.stringify({ basePath: base, execToken });
+        html = html.replace(
+          "<!--__SIM_PREVIEW_CONFIG__-->",
+          `<script>window.__SIM_PREVIEW__=${minimal}</script>`,
+        );
+      }
+
       if (state) {
         // Pass real serve-sim URLs directly. The client parses the MJPEG
         // stream via fetch() (CORS is fine — serve-sim sends Access-Control-Allow-Origin: *)
@@ -664,6 +701,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           gridShutdownEndpoint: gridApiBase + "/shutdown",
           gridMemoryEndpoint: gridApiBase + "/memory",
           previewEndpoint: base === "" ? "/" : base,
+          execToken,
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
@@ -962,15 +1000,61 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       return;
     }
 
-    // POST /exec — run a shell command on the host. The preview server binds
-    // to localhost only and is meant for local dev, so we shell through
-    // /bin/sh and return stdout/stderr/exitCode.
+    // POST /exec — run a shell command on the host. Gated by a per-process
+    // bearer token injected only into the same-origin preview HTML, with
+    // Content-Type + Origin checks to block CORS-simple CSRF (a malicious
+    // page POSTing `text/plain` JSON to a dev server bound to a public iface)
+    // and LAN attackers who can reach the port but can't read the token.
     if ((url === base + "/exec" || url === base + "/exec/") && req.method === "POST") {
+      // 1. Reject anything that isn't a JSON request, killing the
+      //    `enctype="text/plain"` CORS-simple form-POST path.
+      if (!isJsonContentType(req.headers["content-type"])) {
+        res.writeHead(415, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ stdout: "", stderr: "Unsupported Media Type", exitCode: 1 }));
+        return;
+      }
+      // 2. If the browser supplied an Origin, require it match this server.
+      //    Same-origin XHR from the preview page sets Origin to our own URL;
+      //    a cross-origin page's Origin won't match.
+      const origin = req.headers.origin;
+      if (origin) {
+        try {
+          const originHost = new URL(origin).host;
+          if (originHost !== req.headers.host) {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ stdout: "", stderr: "Cross-origin request blocked", exitCode: 1 }));
+            return;
+          }
+        } catch {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ stdout: "", stderr: "Invalid Origin", exitCode: 1 }));
+          return;
+        }
+      }
+      // 3. Require the per-session bearer token. Cross-origin pages cannot
+      //    read it from window.__SIM_PREVIEW__; non-browser callers must
+      //    have copied it from the CLI output.
+      const authHeader = req.headers.authorization ?? "";
+      const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+      if (!match || !safeEqualString(match[1]!.trim(), execToken)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ stdout: "", stderr: "Unauthorized", exitCode: 1 }));
+        return;
+      }
       let body = "";
+      let aborted = false;
       req.on("data", (chunk: Buffer | string) => {
         body += typeof chunk === "string" ? chunk : chunk.toString();
+        // Cheap belt-and-braces cap so a runaway POST can't OOM the dev server.
+        if (body.length > 4 * 1024 * 1024) {
+          aborted = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ stdout: "", stderr: "Payload Too Large", exitCode: 1 }));
+          req.destroy();
+        }
       });
       req.on("end", () => {
+        if (aborted) return;
         let command = "";
         try {
           command = (JSON.parse(body) as ExecRequestBody).command ?? "";

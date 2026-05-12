@@ -7,9 +7,12 @@ export interface ExecResult {
 }
 
 export async function execOnHost(command: string): Promise<ExecResult> {
+  const token = window.__SIM_PREVIEW__?.execToken;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(simEndpoint("exec"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ command }),
   });
   return res.json();

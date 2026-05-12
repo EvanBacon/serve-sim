@@ -1709,7 +1709,7 @@ Examples:
 
 // ─── Serve preview ───
 
-async function serve(servePort: number, devices: string[], portExplicit: boolean) {
+async function serve(servePort: number, devices: string[], portExplicit: boolean, host: string) {
   let targetDevice: string | undefined;
 
   if (devices.length > 0) {
@@ -1738,7 +1738,7 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   for (let i = 0; i < maxScan; i++) {
     const p = servePort + i;
     try {
-      await bindPreviewServer(p, middleware);
+      await bindPreviewServer(p, middleware, host);
       boundPort = p;
       bound = true;
       break;
@@ -1760,10 +1760,17 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
     process.exit(1);
   }
 
-  const networkIP = getLocalNetworkIP();
+  const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
+  const networkIP = exposedToLan ? getLocalNetworkIP() : null;
   console.log("");
   console.log(`  - Local:   http://localhost:${boundPort}`);
-  if (networkIP) console.log(`  - Network: http://${networkIP}:${boundPort}`);
+  if (networkIP) {
+    console.log(`  - Network: http://${networkIP}:${boundPort}`);
+    console.log("");
+    console.log("  ⚠️  LAN exposure enabled (--host). The /exec route is gated by");
+    console.log("     a session token, but any host that can reach this port can");
+    console.log("     attempt to read it — only enable on trusted networks.");
+  }
   console.log("");
 
   // Exit cleanly on Ctrl+C
@@ -1772,8 +1779,8 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
   await new Promise(() => {});
 }
 
-function bindPreviewServer(port: number, middleware: ReturnType<typeof import("./middleware").simMiddleware>) {
-  return servePreview({ port, middleware });
+function bindPreviewServer(port: number, middleware: ReturnType<typeof import("./middleware").simMiddleware>, host: string) {
+  return servePreview({ port, middleware, host });
 }
 
 function printHelp() {
@@ -1799,6 +1806,9 @@ Usage:
 
 Options:
   -p, --port <port>   Starting port (preview default: 3200, stream default: 3100)
+      --host <addr>   Interface to bind the preview server to (default: 127.0.0.1).
+                      Use 0.0.0.0 to expose on the LAN — only do this on trusted
+                      networks: the preview exposes a token-gated shell-exec route.
   -d, --detach        Spawn helper and exit (daemon mode)
   -q, --quiet         Suppress human-readable output, JSON only
       --no-preview    Skip the web preview server; stream in foreground only
@@ -1858,6 +1868,10 @@ let list = false;
 let kill = false;
 let help = false;
 let noPreview = false;
+// Bind to loopback by default. The preview exposes /exec; LAN binding requires
+// explicit opt-in via --host so a dev who has the package installed isn't
+// silently exposing arbitrary shell-exec to anyone on the same Wi-Fi.
+let host = "127.0.0.1";
 const positionalDevices: string[] = [];
 let listDevice: string | undefined;
 let killDevice: string | undefined;
@@ -1867,6 +1881,9 @@ for (let i = 0; i < argv.length; i++) {
   switch (arg) {
     case "--port": case "-p":
       startPort = parseInt(argv[++i] ?? "3100", 10);
+      break;
+    case "--host":
+      host = argv[++i] ?? "127.0.0.1";
       break;
     case "--detach": case "-d":
       detachMode = true;
@@ -1926,5 +1943,5 @@ if (detachMode) {
 } else if (noPreview) {
   await follow(positionalDevices, startPort ?? 3100, quiet);
 } else {
-  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined);
+  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined, host);
 }
