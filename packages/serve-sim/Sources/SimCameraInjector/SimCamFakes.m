@@ -53,6 +53,7 @@ void SimCamSetPosition(id obj, AVCaptureDevicePosition p) {
 #pragma mark - Camera-in-use sticky flag
 
 static atomic_int gSimCamCameraInUse = 0;
+static char kSimCamSessionUsingFakeCameraKey;
 
 BOOL SimCamCameraIsInUse(void) {
     return atomic_load_explicit(&gSimCamCameraInUse, memory_order_relaxed) > 0;
@@ -60,13 +61,25 @@ BOOL SimCamCameraIsInUse(void) {
 void SimCamMarkCameraInUse(void) {
     atomic_store_explicit(&gSimCamCameraInUse, 1, memory_order_relaxed);
 }
+void SimCamMarkSessionUsingFakeCamera(id session, BOOL usingFakeCamera) {
+    if (!session) return;
+    objc_setAssociatedObject(session,
+        &kSimCamSessionUsingFakeCameraKey,
+        usingFakeCamera ? @YES : nil,
+        OBJC_ASSOCIATION_RETAIN);
+}
+static BOOL SimCamSessionUsesFakeCamera(id session) {
+    if (!session) return NO;
+    if (![session isKindOfClass:[AVCaptureSession class]]) return NO;
+    return [objc_getAssociatedObject(session, &kSimCamSessionUsingFakeCameraKey) boolValue];
+}
 
 #pragma mark - AVF runtime-error notification suppression
 
-BOOL SimCamShouldSwallowAVFRuntimeError(NSNotificationName name) {
+BOOL SimCamShouldSwallowAVFRuntimeError(NSNotificationName name, id object) {
     if (!name) return NO;
-    if (!SimCamCameraIsInUse()) return NO;
-    return [name isEqualToString:AVCaptureSessionRuntimeErrorNotification];
+    if (![name isEqualToString:AVCaptureSessionRuntimeErrorNotification]) return NO;
+    return SimCamSessionUsesFakeCamera(object);
 }
 
 void SimCamLogSwallowedRuntimeError(NSString *via, id object, NSDictionary *userInfo) {

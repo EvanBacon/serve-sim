@@ -135,6 +135,10 @@ let clientJs = "";
 let clientError = "";
 let tailwindCss = "";
 const reloadClients = new Set<ReadableStreamDefaultController>();
+let lastTailwindContentSignature = "";
+let pendingClientBuild = false;
+let pendingTailwindBuild = false;
+let buildTimer: ReturnType<typeof setTimeout> | null = null;
 
 function signalReload() {
   for (const ctrl of reloadClients) {
@@ -169,6 +173,12 @@ async function buildClient() {
   signalReload();
 }
 
+function cssCommentEscape(value: string): string {
+  return value
+    .replace(/\*\//g, "* /")
+    .replace(/</g, "\\3C ");
+}
+
 async function buildTailwindCss() {
   const start = performance.now();
   try {
@@ -184,23 +194,75 @@ async function buildTailwindCss() {
     } else {
       const err = result.logs.map((l) => String(l)).join("\n");
       console.error("\x1b[31m✗\x1b[0m Tailwind build failed:\n" + err);
-      tailwindCss = `/* tailwind build failed: ${err.replace(/\*\//g, "* /")} */`;
+      tailwindCss = `/* tailwind build failed: ${cssCommentEscape(err)} */`;
     }
   } catch (e) {
     console.error("\x1b[31m✗\x1b[0m Tailwind build threw:", e);
-    tailwindCss = `/* tailwind build threw: ${String(e).replace(/\*\//g, "* /")} */`;
+    tailwindCss = `/* tailwind build threw: ${cssCommentEscape(String(e))} */`;
   }
   signalReload();
 }
 
 await Promise.all([buildClient(), buildTailwindCss()]);
+lastTailwindContentSignature = readTailwindContentSignature();
 
 watch(CLIENT_DIR, { recursive: true }, (_event, filename) => {
-  if (filename && /\.(tsx?|css)$/.test(filename)) {
-    buildClient();
-    buildTailwindCss();
-  }
+  if (!filename) return;
+  const name = String(filename);
+  if (!/\.(tsx?|css)$/.test(name)) return;
+  if (/\.tsx?$/.test(name)) pendingClientBuild = true;
+  if (/\.css$/.test(name)) pendingTailwindBuild = true;
+  scheduleWatchedBuild();
 });
+
+function listClientFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listClientFiles(path));
+    } else if (/\.(tsx?|jsx?|css)$/.test(entry.name)) {
+      files.push(path);
+    }
+  }
+  return files.sort();
+}
+
+function readTailwindContentSignature(): string {
+  const parts: string[] = [];
+  for (const path of listClientFiles(CLIENT_DIR)) {
+    const text = readFileSync(path, "utf-8");
+    if (/\.css$/.test(path)) {
+      parts.push(path, text);
+      continue;
+    }
+    const stringLiterals = text.match(/(["'`])(?:\\.|(?!\1)[\s\S])*\1/g) ?? [];
+    parts.push(path, stringLiterals.join("\n"));
+  }
+  return parts.join("\n");
+}
+
+function tailwindContentChanged(): boolean {
+  const next = readTailwindContentSignature();
+  if (next === lastTailwindContentSignature) return false;
+  lastTailwindContentSignature = next;
+  return true;
+}
+
+function scheduleWatchedBuild() {
+  if (buildTimer) clearTimeout(buildTimer);
+  buildTimer = setTimeout(() => {
+    buildTimer = null;
+    const shouldBuildClient = pendingClientBuild;
+    const contentChanged = tailwindContentChanged();
+    const shouldBuildTailwind =
+      pendingTailwindBuild || (pendingClientBuild && contentChanged);
+    pendingClientBuild = false;
+    pendingTailwindBuild = false;
+    if (shouldBuildClient) void buildClient();
+    if (shouldBuildTailwind) void buildTailwindCss();
+  }, 75);
+}
 
 // ─── HTML shell ───
 

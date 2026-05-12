@@ -26,10 +26,11 @@ void SimCamSetPosition(id obj, AVCaptureDevicePosition p);
 
 BOOL SimCamCameraIsInUse(void);
 void SimCamMarkCameraInUse(void);
+void SimCamMarkSessionUsingFakeCamera(id session, BOOL usingFakeCamera);
 
 #pragma mark - AVF runtime-error notification suppression
 
-BOOL SimCamShouldSwallowAVFRuntimeError(NSNotificationName name);
+BOOL SimCamShouldSwallowAVFRuntimeError(NSNotificationName name, id object);
 void SimCamLogSwallowedRuntimeError(NSString *via, id object, NSDictionary *userInfo);
 
 #pragma mark - Fake objects

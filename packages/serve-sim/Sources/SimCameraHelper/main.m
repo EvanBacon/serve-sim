@@ -376,6 +376,7 @@ static BOOL StartImageSource(NSString *path, NSString **err) {
     CGColorSpaceRelease(cs);
     size_t iw = CGImageGetWidth(img), ih = CGImageGetHeight(img);
     double sx = (double)gWidth / iw, sy = (double)gHeight / ih;
+    // Aspect-fit file sources so the full source frame remains visible.
     double s = MIN(sx, sy);
     double dw = iw * s, dh = ih * s;
     CGContextDrawImage(ctx, CGRectMake((gWidth - dw)/2.0, (gHeight - dh)/2.0, dw, dh), img);
@@ -434,7 +435,7 @@ static AVAssetReaderTrackOutput *MakeVideoOutput(AVAssetReader **outReader,
     return out;
 }
 
-// Aspect-fill a source pixel buffer into a transient BGRA buffer sized to
+// Aspect-fit a source pixel buffer into a transient BGRA buffer sized to
 // the shm region. We allocate once per call so the caller is free to free
 // the result without worrying about lifetime sharing.
 static uint8_t *RenderPixelBufferToShmSize(CVPixelBufferRef pb) {
@@ -466,6 +467,7 @@ static uint8_t *RenderPixelBufferToShmSize(CVPixelBufferRef pb) {
     CGDataProviderRelease(dp);
 
     double sx = (double)gWidth / srcW, sy = (double)gHeight / srcH;
+    // Keep video file playback letterboxed instead of cropping the source.
     double s = MIN(sx, sy);
     double dw = srcW * s, dh = srcH * s;
     CGContextDrawImage(ctx, CGRectMake((gWidth - dw)/2.0, (gHeight - dh)/2.0, dw, dh), img);

@@ -62,7 +62,7 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
 - (void)simcam_postNotificationName:(NSNotificationName)name
                              object:(id)object
                            userInfo:(NSDictionary *)userInfo {
-    if (SimCamShouldSwallowAVFRuntimeError(name)) {
+    if (SimCamShouldSwallowAVFRuntimeError(name, object)) {
         SimCamLogSwallowedRuntimeError(@"postNotificationName:object:userInfo:", object, userInfo);
         return;
     }
@@ -70,7 +70,7 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
 }
 
 - (void)simcam_postNotificationName:(NSNotificationName)name object:(id)object {
-    if (SimCamShouldSwallowAVFRuntimeError(name)) {
+    if (SimCamShouldSwallowAVFRuntimeError(name, object)) {
         SimCamLogSwallowedRuntimeError(@"postNotificationName:object:", object, nil);
         return;
     }
@@ -78,7 +78,7 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
 }
 
 - (void)simcam_postNotification:(NSNotification *)note {
-    if (SimCamShouldSwallowAVFRuntimeError(note.name)) {
+    if (SimCamShouldSwallowAVFRuntimeError(note.name, note.object)) {
         SimCamLogSwallowedRuntimeError(@"postNotification:", note.object, note.userInfo);
         return;
     }
@@ -211,6 +211,7 @@ static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
         AVCaptureDevicePosition p = SimCamPositionOf(input);
         SimCamSetPosition(self, p);
         SimCamMarkCameraInUse();
+        SimCamMarkSessionUsingFakeCamera(self, YES);
         NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
         if (![tracked containsObject:input]) [tracked addObject:input];
         simcam_log(@"addInput: fake input (%@) — tracked (count=%lu), skipping native add",
@@ -229,6 +230,7 @@ static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
         AVCaptureDevicePosition p = SimCamPositionOf(input);
         SimCamSetPosition(self, p);
         SimCamMarkCameraInUse();
+        SimCamMarkSessionUsingFakeCamera(self, YES);
         NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
         if (![tracked containsObject:input]) [tracked addObject:input];
         simcam_log(@"addInputWithNoConnections: fake input (%@) — tracked (count=%lu), skipping native add",
@@ -242,6 +244,7 @@ static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
     if (SimCamIsFakeInput(input)) {
         NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
         [tracked removeObject:input];
+        if (tracked.count == 0) SimCamMarkSessionUsingFakeCamera(self, NO);
         simcam_log(@"removeInput: fake input — untracked (count=%lu)",
             (unsigned long)tracked.count);
         return;

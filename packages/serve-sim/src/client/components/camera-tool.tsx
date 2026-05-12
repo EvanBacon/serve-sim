@@ -3,7 +3,7 @@ import { Chevron, PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
 
-type CamSource = "placeholder" | "image" | "video" | "webcam";
+export type CamSource = "placeholder" | "image" | "video" | "webcam";
 type CamMirror = "auto" | "on" | "off";
 interface CamWebcam { id: string; name: string }
 
@@ -47,11 +47,26 @@ export function isOversizedCameraVideo(file: {
   return isVideoFile(file) && file.size > CAMERA_LARGE_VIDEO_BYTES;
 }
 
-export function isHeicLikeName(input: { type?: string; name?: string }): boolean {
+export function isHeicLikeFile(input: { type?: string; name?: string }): boolean {
   const type = (input.type ?? "").toLowerCase();
   if (type === "image/heic" || type === "image/heif") return true;
   const name = (input.name ?? "").toLowerCase();
   return name.endsWith(".heic") || name.endsWith(".heif");
+}
+
+export function cameraSourceErrorMessage({
+  rawMessage,
+  lastFileIsHeic,
+  source,
+}: {
+  rawMessage: string;
+  lastFileIsHeic: boolean;
+  source: CamSource;
+}): string {
+  if (lastFileIsHeic && (source === "image" || source === "video")) {
+    return CAMERA_HEIC_ERROR;
+  }
+  return rawMessage;
 }
 
 export function CameraStatusPill({ state }: { state: CameraPillState }) {
@@ -307,11 +322,11 @@ export function CameraTool({
   }, [sourceMenuOpen, webcams.length, webcamLoading, refreshWebcams]);
 
   const reportSourceError = useCallback((rawMessage: string) => {
-    if (lastFileIsHeicRef.current && (source === "image" || source === "video")) {
-      setError(CAMERA_HEIC_ERROR);
-      return;
-    }
-    setError(rawMessage);
+    setError(cameraSourceErrorMessage({
+      rawMessage,
+      lastFileIsHeic: lastFileIsHeicRef.current,
+      source,
+    }));
   }, [source]);
 
   const pushSwitch = useCallback(async (
@@ -335,6 +350,7 @@ export function CameraTool({
       reportSourceError(res.stderr.trim() || res.stdout.trim() || `switch failed (${res.exitCode})`);
       return false;
     }
+    lastFileIsHeicRef.current = false;
     try {
       const json = JSON.parse(res.stdout.trim()) as { source?: string; arg?: string };
       setStatus(`Switched → ${json.source ?? nextSource}${json.arg ? ` (${json.arg})` : ""}`);
@@ -367,6 +383,7 @@ export function CameraTool({
         reportSourceError(res.stderr.trim() || res.stdout.trim() || `inject failed (${res.exitCode})`);
         return;
       }
+      lastFileIsHeicRef.current = false;
       try {
         const json = JSON.parse(res.stdout.trim()) as {
           source?: string; pid?: number; helperPid?: number;
@@ -460,9 +477,11 @@ export function CameraTool({
   }, [udid, cliPrefix]);
 
   const handleSourceFile = useCallback(async (file: File) => {
-    const isImage = file.type.startsWith("image/") || isHeicLikeName({ type: file.type, name: file.name });
+    const isHeic = isHeicLikeFile({ type: file.type, name: file.name });
+    const isImage = file.type.startsWith("image/") || isHeic;
     const isVideo = file.type.startsWith("video/") || isVideoFile({ type: file.type, name: file.name });
     if (!isImage && !isVideo) {
+      lastFileIsHeicRef.current = false;
       setError(`Unsupported file type: ${file.type || file.name}`);
       return;
     }
@@ -472,7 +491,7 @@ export function CameraTool({
     if (isOversizedCameraVideo({ type: file.type, name: file.name, size: file.size })) {
       setWarning(CAMERA_LARGE_VIDEO_WARNING);
     }
-    lastFileIsHeicRef.current = isHeicLikeName({ type: file.type, name: file.name });
+    lastFileIsHeicRef.current = isHeic;
     try {
       const ext = fileExtension(file);
       const tmpPath = await uploadFileToTmp(file, "serve-sim-camsrc", ext, execOnHost);
@@ -725,6 +744,7 @@ export function CameraTool({
                         onClick={() => {
                           setWebcamId(w.id);
                           setSource("webcam");
+                          lastFileIsHeicRef.current = false;
                           setSourceMenuOpen(false);
                         }}
                         title={w.name}

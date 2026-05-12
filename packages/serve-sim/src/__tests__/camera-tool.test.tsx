@@ -9,7 +9,8 @@ import {
   CAMERA_LARGE_VIDEO_BYTES,
   CAMERA_LARGE_VIDEO_WARNING,
   CAMERA_POLL_INTERVAL_MS,
-  isHeicLikeName,
+  cameraSourceErrorMessage,
+  isHeicLikeFile,
   isOversizedCameraVideo,
   nextCameraPillState,
 } from "../client/components/camera-tool";
@@ -53,21 +54,63 @@ describe("isOversizedCameraVideo", () => {
   });
 });
 
-describe("isHeicLikeName", () => {
+describe("isHeicLikeFile", () => {
   test("detects image/heic mime", () => {
-    expect(isHeicLikeName({ type: "image/heic", name: "x" })).toBe(true);
+    expect(isHeicLikeFile({ type: "image/heic", name: "x" })).toBe(true);
   });
   test("detects image/heif mime", () => {
-    expect(isHeicLikeName({ type: "image/heif", name: "x" })).toBe(true);
+    expect(isHeicLikeFile({ type: "image/heif", name: "x" })).toBe(true);
   });
   test("detects .heic extension when mime is empty", () => {
-    expect(isHeicLikeName({ type: "", name: "photo.HEIC" })).toBe(true);
+    expect(isHeicLikeFile({ type: "", name: "photo.HEIC" })).toBe(true);
   });
   test("detects .heif extension when mime is empty", () => {
-    expect(isHeicLikeName({ type: "", name: "photo.heif" })).toBe(true);
+    expect(isHeicLikeFile({ type: "", name: "photo.heif" })).toBe(true);
   });
   test("ignores jpeg", () => {
-    expect(isHeicLikeName({ type: "image/jpeg", name: "photo.jpg" })).toBe(false);
+    expect(isHeicLikeFile({ type: "image/jpeg", name: "photo.jpg" })).toBe(false);
+  });
+});
+
+describe("cameraSourceErrorMessage", () => {
+  test("maps HEIC image failures to actionable copy", () => {
+    expect(cameraSourceErrorMessage({
+      rawMessage: "could not decode image",
+      lastFileIsHeic: true,
+      source: "image",
+    })).toBe(CAMERA_HEIC_ERROR);
+  });
+
+  test("maps HEIC video/file failures while source is video", () => {
+    expect(cameraSourceErrorMessage({
+      rawMessage: "reader failed",
+      lastFileIsHeic: true,
+      source: "video",
+    })).toBe(CAMERA_HEIC_ERROR);
+  });
+
+  test("preserves non-HEIC file errors", () => {
+    expect(cameraSourceErrorMessage({
+      rawMessage: "reader failed",
+      lastFileIsHeic: false,
+      source: "video",
+    })).toBe("reader failed");
+  });
+
+  test("does not rewrite webcam errors with stale HEIC state", () => {
+    expect(cameraSourceErrorMessage({
+      rawMessage: "no matching camera",
+      lastFileIsHeic: true,
+      source: "webcam",
+    })).toBe("no matching camera");
+  });
+
+  test("does not rewrite placeholder errors with stale HEIC state", () => {
+    expect(cameraSourceErrorMessage({
+      rawMessage: "helper stopped",
+      lastFileIsHeic: true,
+      source: "placeholder",
+    })).toBe("helper stopped");
   });
 });
 
