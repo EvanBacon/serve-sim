@@ -17,6 +17,7 @@
   --color-danger: #f87171;
   --color-danger-soft: #fca5a5;
   --color-warning: #fbbf24;
+  --color-warning-soft: #fcd34d;
 
   /* Font families */
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;

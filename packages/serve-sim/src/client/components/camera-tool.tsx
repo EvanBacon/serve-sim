@@ -7,6 +7,147 @@ type CamSource = "placeholder" | "image" | "video" | "webcam";
 type CamMirror = "auto" | "on" | "off";
 interface CamWebcam { id: string; name: string }
 
+export type CameraPillState = "ready" | "active" | "disconnected";
+
+export const CAMERA_POLL_INTERVAL_MS = 3000;
+
+export const CAMERA_LARGE_VIDEO_BYTES = 200 * 1024 * 1024;
+export const CAMERA_LARGE_VIDEO_WARNING =
+  "Large video (>200 MB) — may stutter on shared memory";
+export const CAMERA_HEIC_ERROR =
+  "HEIC decode failed — export as JPEG or PNG and retry";
+
+export function nextCameraPillState(
+  current: CameraPillState,
+  pollAlive: boolean,
+): CameraPillState {
+  if (pollAlive) return "active";
+  if (current === "active") return "disconnected";
+  if (current === "disconnected") return "ready";
+  return current;
+}
+
+const VIDEO_EXTENSIONS = new Set([
+  "mp4", "m4v", "mov", "qt", "avi", "mkv", "webm", "mpg", "mpeg", "3gp", "3g2", "ts", "wmv",
+]);
+
+function isVideoFile(file: { type?: string; name?: string }): boolean {
+  if (file.type && file.type.startsWith("video/")) return true;
+  const name = (file.name ?? "").toLowerCase();
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return false;
+  return VIDEO_EXTENSIONS.has(name.slice(dot + 1));
+}
+
+export function isOversizedCameraVideo(file: {
+  type?: string;
+  name?: string;
+  size: number;
+}): boolean {
+  return isVideoFile(file) && file.size > CAMERA_LARGE_VIDEO_BYTES;
+}
+
+export function isHeicLikeName(input: { type?: string; name?: string }): boolean {
+  const type = (input.type ?? "").toLowerCase();
+  if (type === "image/heic" || type === "image/heif") return true;
+  const name = (input.name ?? "").toLowerCase();
+  return name.endsWith(".heic") || name.endsWith(".heif");
+}
+
+export function CameraStatusPill({ state }: { state: CameraPillState }) {
+  const label =
+    state === "active" ? "Active" : state === "disconnected" ? "Disconnected" : "Ready";
+  const dotClass =
+    state === "active"
+      ? "size-1.5 rounded-full bg-success-emerald [box-shadow:0_0_6px_rgba(74,222,128,0.7)]"
+      : state === "disconnected"
+        ? "size-1.5 rounded-full bg-danger-soft [box-shadow:0_0_6px_rgba(248,113,113,0.55)]"
+        : null;
+  return (
+    <span
+      className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none"
+      data-camera-pill-state={state}
+    >
+      {dotClass && <span className={dotClass} />}
+      {label}
+    </span>
+  );
+}
+
+export function CameraTestPatternHint() {
+  return (
+    <p
+      className="m-0 text-center text-[10px] leading-[1.5] text-white/45"
+      data-camera-test-pattern-hint
+    >
+      Test-pattern feed
+    </p>
+  );
+}
+
+interface CameraMediaPreviewProps {
+  mode: "placeholder" | "file" | "webcam" | "uploading";
+  fileName: string | null;
+  webcamName: string | null;
+  sourceKind: CamSource;
+}
+
+export function CameraMediaPreview({
+  mode,
+  fileName,
+  webcamName,
+  sourceKind,
+}: CameraMediaPreviewProps) {
+  if (mode === "uploading") {
+    return <span className="text-[11px] text-white/55">Uploading…</span>;
+  }
+  if (mode === "file") {
+    return (
+      <>
+        <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-white/55 bg-white/[0.06] border border-white/8 px-[7px] py-[2px] rounded-full">
+          {sourceKind === "video" ? "Video" : "Image"}
+        </div>
+        <span className="flex-1 min-w-0 truncate text-[12px] text-white/90 font-mono">
+          {fileName ?? ""}
+        </span>
+      </>
+    );
+  }
+  if (mode === "webcam") {
+    return (
+      <>
+        <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-white/55 bg-white/[0.06] border border-white/8 px-[7px] py-[2px] rounded-full">
+          Webcam
+        </div>
+        <span className="flex-1 min-w-0 truncate text-[12px] text-white/90 font-mono">
+          {webcamName ?? ""}
+        </span>
+      </>
+    );
+  }
+  return <span className="text-[12px] text-white/85 font-medium">Select or drop media</span>;
+}
+
+export function CameraInlineBanner({
+  kind,
+  message,
+}: {
+  kind: "error" | "warning";
+  message: string;
+}) {
+  const classes =
+    kind === "warning"
+      ? "bg-warning/10 border border-warning/25 text-warning-soft text-[11px] px-2 py-1.5 rounded-md break-words"
+      : "bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md break-words";
+  return (
+    <div className={classes} data-camera-banner-kind={kind} role={kind === "error" ? "alert" : "status"}>
+      {message}
+    </div>
+  );
+}
+
+// ─── Main component ────────────────────────────────────────────────────────
+
 export function CameraTool({
   udid,
   bundleId,
@@ -29,50 +170,110 @@ export function CameraTool({
   const [mirror, setMirror] = useState<CamMirror>("auto");
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [, setStatus] = useState<string | null>(null);
   const [injected, setInjected] = useState(false);
+  const [pillState, setPillState] = useState<CameraPillState>("ready");
   const [injectedBundleIds, setInjectedBundleIds] = useState<Set<string>>(() => new Set());
+  const lastFileIsHeicRef = useRef(false);
   const skipNextAutoSwapRef = useRef(false);
   const skipNextAutoMirrorRef = useRef(false);
 
   const cliPrefix = useMemo(() => {
     const bin = window.__SIM_PREVIEW__?.serveSimBin;
     if (!bin) return "serve-sim";
-    return /\.js$/.test(bin) ? `node ${shellEscape(bin)}` : shellEscape(bin);
+    if (/\.ts$/.test(bin)) return `bun ${shellEscape(bin)}`;
+    if (/\.js$/.test(bin)) return `node ${shellEscape(bin)}`;
+    return shellEscape(bin);
   }, []);
+
+  const fetchCameraStatus = useCallback(async () => {
+    const res = await execOnHost(`${cliPrefix} camera status -d ${udid}`);
+    if (res.exitCode !== 0) return null;
+    try {
+      return JSON.parse(res.stdout.trim()) as {
+        alive?: boolean;
+        source?: string;
+        arg?: string;
+        mirror?: string;
+        helperPid?: number;
+      };
+    } catch {
+      return null;
+    }
+  }, [cliPrefix, udid]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      try {
-        const res = await execOnHost(`${cliPrefix} camera status -d ${udid}`);
-        if (cancelled || res.exitCode !== 0) return;
-        const reply = JSON.parse(res.stdout.trim()) as {
-          alive?: boolean;
-          source?: string;
-          arg?: string;
-          mirror?: string;
-        };
-        if (!reply.alive) return;
-        skipNextAutoSwapRef.current = true;
-        skipNextAutoMirrorRef.current = true;
-        if (reply.source === "placeholder" || reply.source === "webcam" || reply.source === "image" || reply.source === "video") {
-          setSource(reply.source);
-        }
-        if ((reply.source === "image" || reply.source === "video") && reply.arg) {
-          setFilePath(reply.arg);
-          setDroppedFileName(reply.arg.split("/").pop() ?? null);
-        }
-        if (reply.source === "webcam" && reply.arg) setWebcamId(reply.arg);
-        if (reply.mirror === "auto" || reply.mirror === "on" || reply.mirror === "off") {
-          setMirror(reply.mirror);
-        }
-        setInjected(true);
-        setStatus(`Reattached → ${reply.source ?? "running helper"}${reply.arg ? ` (${reply.arg})` : ""}`);
-      } catch {}
+      const reply = await fetchCameraStatus();
+      if (cancelled || !reply) return;
+      if (!reply.alive) return;
+      skipNextAutoSwapRef.current = true;
+      skipNextAutoMirrorRef.current = true;
+      if (reply.source === "placeholder" || reply.source === "webcam" || reply.source === "image" || reply.source === "video") {
+        setSource(reply.source);
+      }
+      if ((reply.source === "image" || reply.source === "video") && reply.arg) {
+        setFilePath(reply.arg);
+        setDroppedFileName(reply.arg.split("/").pop() ?? null);
+      }
+      if (reply.source === "webcam" && reply.arg) setWebcamId(reply.arg);
+      if (reply.mirror === "auto" || reply.mirror === "on" || reply.mirror === "off") {
+        setMirror(reply.mirror);
+      }
+      setInjected(true);
+      setPillState("active");
+      setStatus(`Reattached → ${reply.source ?? "running helper"}${reply.arg ? ` (${reply.arg})` : ""}`);
     })();
     return () => { cancelled = true; };
-  }, [udid, cliPrefix]);
+  }, [udid, fetchCameraStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let inFlight = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const tick = async () => {
+      if (cancelled || inFlight) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      inFlight = true;
+      try {
+        const reply = await fetchCameraStatus();
+        if (cancelled) return;
+        const alive = !!reply?.alive;
+        setPillState((prev) => nextCameraPillState(prev, alive));
+        if (!alive) {
+          // Helper is gone — make sure subsequent injection takes the cold
+          // path and the source menu treats "Play" as a fresh launch.
+          setInjected((prevInjected) => {
+            if (!prevInjected) return prevInjected;
+            setInjectedBundleIds(new Set());
+            return false;
+          });
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    timer = setInterval(() => { void tick(); }, CAMERA_POLL_INTERVAL_MS);
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void tick();
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
+    };
+  }, [fetchCameraStatus]);
 
   const refreshWebcams = useCallback(async () => {
     setWebcamLoading(true);
@@ -100,8 +301,18 @@ export function CameraTool({
   }, [webcamId, cliPrefix]);
 
   useEffect(() => {
-    if (open && webcams.length === 0 && !webcamLoading) void refreshWebcams();
-  }, [open, webcams.length, webcamLoading, refreshWebcams]);
+    if (sourceMenuOpen && webcams.length === 0 && !webcamLoading) {
+      void refreshWebcams();
+    }
+  }, [sourceMenuOpen, webcams.length, webcamLoading, refreshWebcams]);
+
+  const reportSourceError = useCallback((rawMessage: string) => {
+    if (lastFileIsHeicRef.current && (source === "image" || source === "video")) {
+      setError(CAMERA_HEIC_ERROR);
+      return;
+    }
+    setError(rawMessage);
+  }, [source]);
 
   const pushSwitch = useCallback(async (
     nextSource: CamSource,
@@ -121,7 +332,7 @@ export function CameraTool({
     argv.push("-d", udid, "--quiet");
     const res = await execOnHost(`${cliPrefix} ${argv.join(" ")}`);
     if (res.exitCode !== 0) {
-      setError(res.stderr.trim() || res.stdout.trim() || `switch failed (${res.exitCode})`);
+      reportSourceError(res.stderr.trim() || res.stdout.trim() || `switch failed (${res.exitCode})`);
       return false;
     }
     try {
@@ -131,7 +342,7 @@ export function CameraTool({
       setStatus(`Switched → ${nextSource}`);
     }
     return true;
-  }, [udid, cliPrefix]);
+  }, [udid, cliPrefix, reportSourceError]);
 
   const inject = useCallback(async () => {
     if (!bundleId) return;
@@ -153,7 +364,7 @@ export function CameraTool({
       if (mirror !== "auto") flags.push(`--mirror`, mirror);
       const res = await execOnHost(`${cliPrefix} ${flags.join(" ")}`);
       if (res.exitCode !== 0) {
-        setError(res.stderr.trim() || res.stdout.trim() || `inject failed (${res.exitCode})`);
+        reportSourceError(res.stderr.trim() || res.stdout.trim() || `inject failed (${res.exitCode})`);
         return;
       }
       try {
@@ -169,11 +380,12 @@ export function CameraTool({
         setStatus(res.stdout.trim() || "Injected.");
       }
       setInjected(true);
+      setPillState("active");
       setInjectedBundleIds((prev) => prev.has(bundleId) ? prev : new Set(prev).add(bundleId));
     } finally {
       setPending(null);
     }
-  }, [bundleId, udid, source, filePath, webcamId, mirror, cliPrefix]);
+  }, [bundleId, udid, source, filePath, webcamId, mirror, cliPrefix, reportSourceError]);
 
   const autoSwapKey = injected
     ? `${source}::${source === "webcam" ? webcamId : ""}::${source === "image" || source === "video" ? filePath : ""}`
@@ -240,6 +452,7 @@ export function CameraTool({
       }
       setStatus("Camera helper stopped.");
       setInjected(false);
+      setPillState("ready");
       setInjectedBundleIds(new Set());
     } finally {
       setPending(null);
@@ -247,14 +460,19 @@ export function CameraTool({
   }, [udid, cliPrefix]);
 
   const handleSourceFile = useCallback(async (file: File) => {
-    const isImage = file.type.startsWith("image/");
-    const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/") || isHeicLikeName({ type: file.type, name: file.name });
+    const isVideo = file.type.startsWith("video/") || isVideoFile({ type: file.type, name: file.name });
     if (!isImage && !isVideo) {
       setError(`Unsupported file type: ${file.type || file.name}`);
       return;
     }
     setUploading(true);
     setError(null);
+    setWarning(null);
+    if (isOversizedCameraVideo({ type: file.type, name: file.name, size: file.size })) {
+      setWarning(CAMERA_LARGE_VIDEO_WARNING);
+    }
+    lastFileIsHeicRef.current = isHeicLikeName({ type: file.type, name: file.name });
     try {
       const ext = fileExtension(file);
       const tmpPath = await uploadFileToTmp(file, "serve-sim-camsrc", ext, execOnHost);
@@ -263,7 +481,8 @@ export function CameraTool({
       setFilePath(tmpPath);
       setStatus(`Loaded ${file.name}`);
     } catch (e: any) {
-      setError(e?.message ?? "Upload failed");
+      if (lastFileIsHeicRef.current) setError(CAMERA_HEIC_ERROR);
+      else setError(e?.message ?? "Upload failed");
     } finally {
       setUploading(false);
     }
@@ -283,6 +502,8 @@ export function CameraTool({
     setFilePath("");
     setDroppedFileName(null);
     setError(null);
+    setWarning(null);
+    lastFileIsHeicRef.current = false;
   }, []);
 
   const openFilePicker = useCallback(() => {
@@ -345,6 +566,20 @@ export function CameraTool({
     : { label: pending === "stop" ? "Stopping…" : "Stop", onClick: stopHelper, kind: "stop" };
   const primaryDisabled = !bundleId || pending !== null || uploading;
 
+  const isPlaceholder = source === "placeholder";
+  const showWebcam = source === "webcam";
+  const showFile = (source === "image" || source === "video") && !!droppedFileName;
+  const activeWebcamName = showWebcam
+    ? (webcams.find((w) => w.id === webcamId)?.name ?? webcamId ?? "Webcam")
+    : null;
+  const tileMode: CameraMediaPreviewProps["mode"] = uploading
+    ? "uploading"
+    : showFile
+      ? "file"
+      : showWebcam
+        ? "webcam"
+        : "placeholder";
+
   return (
     <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
       <button
@@ -354,14 +589,7 @@ export function CameraTool({
         aria-expanded={open}
       >
         <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Camera</span>
-        <span className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none">
-          {injected && (
-            <span
-              className="size-1.5 rounded-full bg-success-emerald [box-shadow:0_0_6px_rgba(74,222,128,0.7)]"
-            />
-          )}
-          {injected ? "Active" : source !== "placeholder" ? "Ready" : ""}
-        </span>
+        <CameraStatusPill state={pillState} />
         <Chevron open={open} />
       </button>
 
@@ -387,71 +615,52 @@ export function CameraTool({
             onChange={onFilePicked as any}
           />
 
-          {(() => {
-            const isPlaceholder = source === "placeholder";
-            const showWebcam = source === "webcam";
-            const showFile = (source === "image" || source === "video") && !!droppedFileName;
-            const activeWebcamName = showWebcam
-              ? (webcams.find((w) => w.id === webcamId)?.name ?? webcamId ?? "Webcam")
-              : null;
-            return (
-              <div
-                onClick={(e) => {
-                  if (!isPlaceholder) return;
-                  if ((e.target as HTMLElement).closest("[data-clear-media]")) return;
-                  openFilePicker();
-                }}
-                title={
-                  isPlaceholder
-                    ? "Click to select an image or video, or drop one here"
-                    : showWebcam
-                      ? `Source: ${activeWebcamName}`
-                      : `Source: ${droppedFileName ?? source}`
-                }
-                className={[
-                  "relative min-h-[44px] flex flex-row items-center justify-center gap-2.5 px-3.5 py-2.5 rounded-[7px] text-center transition-[border-color,background] duration-150",
-                  isPlaceholder
-                    ? "bg-white/[0.04] border border-dashed border-white/12"
-                    : "bg-white/[0.04] border border-white/8",
-                  isDragOver ? "!bg-[rgba(10,132,255,0.08)] !border-[rgba(10,132,255,0.6)]" : "",
-                  uploading ? "cursor-progress" : isPlaceholder ? "cursor-pointer" : "cursor-default",
-                ].join(" ")}
-              >
-                {uploading ? (
-                  <span className="text-[11px] text-white/55">Uploading…</span>
-                ) : showFile ? (
-                  <>
-                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-white/55 bg-white/[0.06] border border-white/8 px-[7px] py-[2px] rounded-full">
-                      {source === "video" ? "Video" : "Image"}
-                    </div>
-                    <span className="flex-1 min-w-0 truncate text-[12px] text-white/90 font-mono">{droppedFileName}</span>
-                  </>
-                ) : showWebcam ? (
-                  <>
-                    <div className="shrink-0 text-[9px] tracking-[0.1em] uppercase text-white/55 bg-white/[0.06] border border-white/8 px-[7px] py-[2px] rounded-full">Webcam</div>
-                    <span className="flex-1 min-w-0 truncate text-[12px] text-white/90 font-mono">{activeWebcamName}</span>
-                  </>
-                ) : (
-                  <span className="text-[12px] text-white/85 font-medium">Select or drop media</span>
-                )}
+          <div
+            onClick={(e) => {
+              if (!isPlaceholder) return;
+              if ((e.target as HTMLElement).closest("[data-clear-media]")) return;
+              openFilePicker();
+            }}
+            title={
+              isPlaceholder
+                ? "No source selected — Play uses a test-pattern feed. Click to pick an image/video, or drop one here."
+                : showWebcam
+                  ? `Source: ${activeWebcamName}`
+                  : `Source: ${droppedFileName ?? source}`
+            }
+            className={[
+              "relative min-h-[44px] flex flex-row items-center justify-center gap-2.5 px-3.5 py-2.5 rounded-[7px] text-center transition-[border-color,background] duration-150",
+              isPlaceholder
+                ? "bg-white/[0.04] border border-dashed border-white/12"
+                : "bg-white/[0.04] border border-white/8",
+              isDragOver ? "!bg-[rgba(10,132,255,0.08)] !border-[rgba(10,132,255,0.6)]" : "",
+              uploading ? "cursor-progress" : isPlaceholder ? "cursor-pointer" : "cursor-default",
+            ].join(" ")}
+          >
+            <CameraMediaPreview
+              mode={tileMode}
+              fileName={droppedFileName}
+              webcamName={activeWebcamName}
+              sourceKind={source}
+            />
 
-                {!isPlaceholder && !uploading && (
-                  <button
-                    data-clear-media
-                    onClick={(e) => { e.stopPropagation(); clearMedia(); }}
-                    className="shrink-0 w-5 h-5 flex items-center justify-center bg-transparent border-none text-white/55 hover:text-white/90 cursor-pointer p-0"
-                    aria-label="Clear source"
-                    title="Clear → placeholder"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-            );
-          })()}
+            {!isPlaceholder && !uploading && (
+              <button
+                data-clear-media
+                onClick={(e) => { e.stopPropagation(); clearMedia(); }}
+                className="shrink-0 w-5 h-5 flex items-center justify-center bg-transparent border-none text-white/55 hover:text-white/90 cursor-pointer p-0"
+                aria-label="Clear source"
+                title="Clear → placeholder"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            )}
+          </div>
+
+          {isPlaceholder && !uploading && <CameraTestPatternHint />}
 
           <div className="flex items-stretch gap-1.5">
             <div className="relative" data-camera-source-menu>
@@ -586,14 +795,10 @@ export function CameraTool({
             </div>
           </div>
 
-          {error && (
-            <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md break-words">
-              {error}
-            </div>
-          )}
+          {warning && <CameraInlineBanner kind="warning" message={warning} />}
+          {error && <CameraInlineBanner kind="error" message={error} />}
         </div>
       )}
     </div>
   );
 }
-

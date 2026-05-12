@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, existsSync, unlinkSync, watch } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import tailwindPlugin from "bun-plugin-tailwind";
 import { createAxStreamerCache } from "./src/ax";
 
 const RN_BUNDLE_IDS = new Set<string>([
@@ -45,6 +46,16 @@ const PORT = Number(process.env.PORT) || 3200;
 const STATE_DIR = join(tmpdir(), "serve-sim");
 const CLIENT_DIR = resolve(import.meta.dir, "src/client");
 const CLIENT_ENTRY = resolve(CLIENT_DIR, "client.tsx");
+const PKG_ROOT = resolve(import.meta.dir);
+const SERVE_SIM_BIN_CANDIDATES = [
+  join(PKG_ROOT, "src", "index.ts"),
+  join(PKG_ROOT, "dist", "serve-sim.js"),
+];
+function resolveServeSimBin(): string {
+  for (const p of SERVE_SIM_BIN_CANDIDATES) if (existsSync(p)) return p;
+  return "serve-sim";
+}
+const SERVE_SIM_BIN = resolveServeSimBin();
 const axStreamerCache = createAxStreamerCache();
 
 // ─── Serve-sim state ───
@@ -122,7 +133,18 @@ function readServeSimStates() {
 
 let clientJs = "";
 let clientError = "";
+let tailwindCss = "";
 const reloadClients = new Set<ReadableStreamDefaultController>();
+
+function signalReload() {
+  for (const ctrl of reloadClients) {
+    try {
+      ctrl.enqueue("data: reload\n\n");
+    } catch {
+      reloadClients.delete(ctrl);
+    }
+  }
+}
 
 async function buildClient() {
   const start = performance.now();
@@ -144,23 +166,39 @@ async function buildClient() {
     clientError = result.logs.map((l) => String(l)).join("\n");
     console.error("\x1b[31m✗\x1b[0m Build failed:\n" + clientError);
   }
-  // Signal connected browsers to reload
-  for (const ctrl of reloadClients) {
-    try {
-      ctrl.enqueue("data: reload\n\n");
-    } catch {
-      reloadClients.delete(ctrl);
-    }
-  }
+  signalReload();
 }
 
-// Initial build
-await buildClient();
+async function buildTailwindCss() {
+  const start = performance.now();
+  try {
+    const result = await Bun.build({
+      entrypoints: [resolve(CLIENT_DIR, "global.css")],
+      minify: false,
+      plugins: [tailwindPlugin],
+    });
+    if (result.success) {
+      tailwindCss = await result.outputs[0]!.text();
+      const ms = (performance.now() - start).toFixed(0);
+      console.log(`\x1b[32m✓\x1b[0m Bundled global.css (${(tailwindCss.length / 1024).toFixed(0)} KB) in ${ms}ms`);
+    } else {
+      const err = result.logs.map((l) => String(l)).join("\n");
+      console.error("\x1b[31m✗\x1b[0m Tailwind build failed:\n" + err);
+      tailwindCss = `/* tailwind build failed: ${err.replace(/\*\//g, "* /")} */`;
+    }
+  } catch (e) {
+    console.error("\x1b[31m✗\x1b[0m Tailwind build threw:", e);
+    tailwindCss = `/* tailwind build threw: ${String(e).replace(/\*\//g, "* /")} */`;
+  }
+  signalReload();
+}
 
-// Watch src/client/ for changes and rebuild
+await Promise.all([buildClient(), buildTailwindCss()]);
+
 watch(CLIENT_DIR, { recursive: true }, (_event, filename) => {
   if (filename && /\.(tsx?|css)$/.test(filename)) {
     buildClient();
+    buildTailwindCss();
   }
 });
 
@@ -174,6 +212,7 @@ function buildHtml(): string {
         ...state,
         logsEndpoint: "/logs",
         axEndpoint: "/ax",
+        serveSimBin: SERVE_SIM_BIN,
       })}</script>`
     : "";
 
@@ -183,6 +222,7 @@ function buildHtml(): string {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>serve-sim dev</title>
 <style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}</style>
+<style>${tailwindCss}</style>
 </head><body>
 <div id="root"></div>
 ${configScript}
@@ -256,6 +296,63 @@ Bun.serve({
           Connection: "keep-alive",
         },
       });
+    }
+
+    if (url.pathname === "/grid/api/start" && req.method === "POST") {
+      return req.json().then((body: any) => {
+        const udid: string = body?.udid ?? "";
+        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
+          return Response.json({ ok: false, error: "Invalid or missing udid" }, { status: 400 });
+        }
+        return new Promise<Response>((resolve) => {
+          const child = spawn("bun", [SERVE_SIM_BIN, "--detach", udid], {
+            stdio: ["ignore", "pipe", "pipe"],
+            detached: false,
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
+          child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
+          const timer = setTimeout(() => { try { child.kill("SIGTERM"); } catch {} }, 180_000);
+          child.on("close", (code) => {
+            clearTimeout(timer);
+            if (code === 0) {
+              resolve(Response.json({ ok: true, stdout: stdout.trim() }));
+            } else {
+              resolve(Response.json({
+                ok: false,
+                error: stderr.trim() || stdout.trim() || `serve-sim exited with code ${code}`,
+              }, { status: 500 }));
+            }
+          });
+        });
+      });
+    }
+
+    if (url.pathname === "/grid/api/shutdown" && req.method === "POST") {
+      return req.json().then((body: any) => {
+        const udid: string = body?.udid ?? "";
+        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
+          return Response.json({ ok: false, error: "Invalid or missing udid" }, { status: 400 });
+        }
+        bootedSnapshot = { at: 0, booted: null };
+        return new Promise<Response>((resolve) => {
+          execFile("xcrun", ["simctl", "shutdown", udid], { timeout: 30_000 }, (err, _stdout, stderr) => {
+            if (err) {
+              resolve(Response.json({
+                ok: false,
+                error: stderr?.toString().trim() || err.message,
+              }, { status: 500 }));
+            } else {
+              resolve(Response.json({ ok: true }));
+            }
+          });
+        });
+      });
+    }
+
+    if (url.pathname.startsWith("/grid/api/")) {
+      return Response.json({ ok: false, error: `Unknown dev endpoint: ${url.pathname}` }, { status: 404 });
     }
 
     // POST /exec — run a shell command and return stdout/stderr/exitCode.

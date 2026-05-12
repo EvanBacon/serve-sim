@@ -267,20 +267,30 @@ static void RenderPlaceholderFrame(uint8_t *out, uint64_t frameIdx) {
 }
 
 static void StartPlaceholderSource(void) {
+    static uint8_t *buf = NULL;
+    size_t need = (size_t)gWidth * gHeight * 4;
+    if (!buf) buf = calloc(1, need);
+    if (!buf) {
+        fprintf(stderr, "[serve-sim-camera] placeholder buf alloc failed (%zu bytes)\n", need);
+        return;
+    }
+
+    __block uint64_t frameIdx = 0;
+    RenderPlaceholderFrame(buf, frameIdx++);
+    PublishFrame(buf);
+
     gPlaceholderTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
         dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     uint64_t intervalNs = NSEC_PER_SEC / 30;
     dispatch_source_set_timer(gPlaceholderTimer,
-        dispatch_time(DISPATCH_TIME_NOW, 0), intervalNs, intervalNs / 10);
-    static uint8_t *buf = NULL;
-    size_t need = (size_t)gWidth * gHeight * 4;
-    if (!buf) buf = malloc(need);
-    __block uint64_t frameIdx = 0;
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)intervalNs), intervalNs, intervalNs / 10);
     dispatch_source_set_event_handler(gPlaceholderTimer, ^{
         RenderPlaceholderFrame(buf, frameIdx++);
         PublishFrame(buf);
     });
     dispatch_resume(gPlaceholderTimer);
+    fprintf(stderr, "[serve-sim-camera] placeholder source running @ 30fps (%ux%u, first frame seq=%llu)\n",
+        gWidth, gHeight, (unsigned long long)atomic_load(&gFrameSeq));
 }
 
 static void StopPlaceholderSource(void) {
@@ -364,10 +374,9 @@ static BOOL StartImageSource(NSString *path, NSString **err) {
     CGContextRef ctx = CGBitmapContextCreate(buf, gWidth, gHeight, 8, bpr, cs,
         kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
     CGColorSpaceRelease(cs);
-    // Aspect-fill the source image into the destination buffer.
     size_t iw = CGImageGetWidth(img), ih = CGImageGetHeight(img);
     double sx = (double)gWidth / iw, sy = (double)gHeight / ih;
-    double s = MAX(sx, sy);
+    double s = MIN(sx, sy);
     double dw = iw * s, dh = ih * s;
     CGContextDrawImage(ctx, CGRectMake((gWidth - dw)/2.0, (gHeight - dh)/2.0, dw, dh), img);
     CGContextRelease(ctx);
@@ -457,7 +466,7 @@ static uint8_t *RenderPixelBufferToShmSize(CVPixelBufferRef pb) {
     CGDataProviderRelease(dp);
 
     double sx = (double)gWidth / srcW, sy = (double)gHeight / srcH;
-    double s = MAX(sx, sy);
+    double s = MIN(sx, sy);
     double dw = srcW * s, dh = srcH * s;
     CGContextDrawImage(ctx, CGRectMake((gWidth - dw)/2.0, (gHeight - dh)/2.0, dw, dh), img);
     CGImageRelease(img);
@@ -820,14 +829,6 @@ int main(int argc, const char *argv[]) {
 
         gSourceQueue = dispatch_queue_create("simcam.helper.source", DISPATCH_QUEUE_SERIAL);
 
-        if (socketPath) {
-            if (OpenControlSocket(socketPath) < 0) {
-                fprintf(stderr, "[serve-sim-camera] control socket open failed: %s\n", socketPath);
-            } else {
-                fprintf(stderr, "[serve-sim-camera] control socket %s\n", socketPath);
-            }
-        }
-
         SimCamSourceKind k = ParseSourceName(initialSource);
         if (k == (SimCamSourceKind)-1) {
             fprintf(stderr, "[serve-sim-camera] unknown --source %s, defaulting to placeholder\n",
@@ -839,6 +840,14 @@ int main(int argc, const char *argv[]) {
             fprintf(stderr, "[serve-sim-camera] initial source failed: %s — falling back to placeholder\n",
                 err.UTF8String ?: "?");
             (void)SwitchSource(SimCamSourcePlaceholder, nil, NULL);
+        }
+
+        if (socketPath) {
+            if (OpenControlSocket(socketPath) < 0) {
+                fprintf(stderr, "[serve-sim-camera] control socket open failed: %s\n", socketPath);
+            } else {
+                fprintf(stderr, "[serve-sim-camera] control socket %s\n", socketPath);
+            }
         }
 
         signal(SIGINT, HandleSig);

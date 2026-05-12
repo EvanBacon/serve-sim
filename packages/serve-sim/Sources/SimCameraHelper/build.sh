@@ -9,7 +9,7 @@ BIN="$OUT_DIR/serve-sim-camera-helper"
 
 xcrun --sdk macosx clang \
     -arch arm64 -arch x86_64 \
-    -mmacosx-version-min=12.0 \
+    -mmacosx-version-min=14.0 \
     -isysroot "$SDK" \
     -fobjc-arc -fmodules \
     -framework Foundation \

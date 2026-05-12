@@ -22,12 +22,17 @@ xcrun --sdk iphonesimulator clang \
     -framework AVFoundation \
     -framework CoreImage \
     -framework CoreMedia \
+    -framework CoreMotion \
     -framework CoreVideo \
     -framework CoreGraphics \
     -framework QuartzCore \
     -install_name "@rpath/libSimCameraInjector.dylib" \
     -o "$DYLIB" \
-    "$HERE/SimCameraInjector.m"
+    "$HERE/SimCameraInjector.m" \
+    "$HERE/SimCamLog.m" \
+    "$HERE/SimCamFakes.m" \
+    "$HERE/SimCamFrameSource.m" \
+    "$HERE/SimCamSwizzles.m"
 
 echo "Built: $DYLIB"
 file "$DYLIB"

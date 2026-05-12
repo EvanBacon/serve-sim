@@ -1,0 +1,171 @@
+import { describe, expect, test } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  CameraStatusPill,
+  CameraTestPatternHint,
+  CameraMediaPreview,
+  CameraInlineBanner,
+  CAMERA_HEIC_ERROR,
+  CAMERA_LARGE_VIDEO_BYTES,
+  CAMERA_LARGE_VIDEO_WARNING,
+  CAMERA_POLL_INTERVAL_MS,
+  isHeicLikeName,
+  isOversizedCameraVideo,
+  nextCameraPillState,
+} from "../client/components/camera-tool";
+
+describe("nextCameraPillState", () => {
+  test("ready stays ready on dead poll", () => {
+    expect(nextCameraPillState("ready", false)).toBe("ready");
+  });
+  test("ready becomes active when poll says alive", () => {
+    expect(nextCameraPillState("ready", true)).toBe("active");
+  });
+  test("active degrades to disconnected on first dead poll", () => {
+    expect(nextCameraPillState("active", false)).toBe("disconnected");
+  });
+  test("active stays active when poll says alive", () => {
+    expect(nextCameraPillState("active", true)).toBe("active");
+  });
+  test("disconnected drops to ready on second consecutive dead poll", () => {
+    expect(nextCameraPillState("disconnected", false)).toBe("ready");
+  });
+  test("disconnected recovers to active if poll says alive again", () => {
+    expect(nextCameraPillState("disconnected", true)).toBe("active");
+  });
+});
+
+describe("isOversizedCameraVideo", () => {
+  test("flags videos above 200MB", () => {
+    expect(isOversizedCameraVideo({ type: "video/mp4", size: CAMERA_LARGE_VIDEO_BYTES + 1 })).toBe(true);
+  });
+  test("ignores videos at exactly 200MB (must exceed)", () => {
+    expect(isOversizedCameraVideo({ type: "video/mp4", size: CAMERA_LARGE_VIDEO_BYTES })).toBe(false);
+  });
+  test("ignores small videos", () => {
+    expect(isOversizedCameraVideo({ type: "video/mp4", size: 10 * 1024 * 1024 })).toBe(false);
+  });
+  test("ignores large images", () => {
+    expect(isOversizedCameraVideo({ type: "image/jpeg", size: CAMERA_LARGE_VIDEO_BYTES + 1 })).toBe(false);
+  });
+  test("falls back to extension for videos with missing mime", () => {
+    expect(isOversizedCameraVideo({ type: "", name: "clip.mov", size: CAMERA_LARGE_VIDEO_BYTES + 1 })).toBe(true);
+  });
+});
+
+describe("isHeicLikeName", () => {
+  test("detects image/heic mime", () => {
+    expect(isHeicLikeName({ type: "image/heic", name: "x" })).toBe(true);
+  });
+  test("detects image/heif mime", () => {
+    expect(isHeicLikeName({ type: "image/heif", name: "x" })).toBe(true);
+  });
+  test("detects .heic extension when mime is empty", () => {
+    expect(isHeicLikeName({ type: "", name: "photo.HEIC" })).toBe(true);
+  });
+  test("detects .heif extension when mime is empty", () => {
+    expect(isHeicLikeName({ type: "", name: "photo.heif" })).toBe(true);
+  });
+  test("ignores jpeg", () => {
+    expect(isHeicLikeName({ type: "image/jpeg", name: "photo.jpg" })).toBe(false);
+  });
+});
+
+describe("CAMERA_POLL_INTERVAL_MS", () => {
+  test("falls in the requested 2–5s window", () => {
+    expect(CAMERA_POLL_INTERVAL_MS).toBeGreaterThanOrEqual(2000);
+    expect(CAMERA_POLL_INTERVAL_MS).toBeLessThanOrEqual(5000);
+  });
+});
+
+describe("CameraStatusPill — UI state matrix", () => {
+  test("Ready state renders label 'Ready'", () => {
+    const html = renderToStaticMarkup(<CameraStatusPill state="ready" />);
+    expect(html).toContain("Ready");
+    expect(html).not.toContain("Active");
+    expect(html).not.toContain("Disconnected");
+  });
+
+  test("Active state renders 'Active' label and live indicator", () => {
+    const html = renderToStaticMarkup(<CameraStatusPill state="active" />);
+    expect(html).toContain("Active");
+    expect(html).not.toContain("Ready");
+    expect(html).toContain("rounded-full");
+  });
+
+  test("Disconnected state renders 'Disconnected' and a non-success dot", () => {
+    const html = renderToStaticMarkup(<CameraStatusPill state="disconnected" />);
+    expect(html).toContain("Disconnected");
+    expect(html).not.toContain("Active");
+  });
+});
+
+describe("CameraTestPatternHint (placeholder state, no source)", () => {
+  test("renders a visible 'Test-pattern feed' label", () => {
+    const html = renderToStaticMarkup(<CameraTestPatternHint />);
+    expect(html).toContain("Test-pattern feed");
+  });
+
+  test("uses subdued typography without low-opacity icons (text-only label)", () => {
+    const html = renderToStaticMarkup(<CameraTestPatternHint />);
+    expect(html).not.toContain("<svg");
+  });
+});
+
+describe("CameraMediaPreview — source states", () => {
+  test("placeholder mode shows 'Select or drop media' invitation", () => {
+    const html = renderToStaticMarkup(
+      <CameraMediaPreview mode="placeholder" fileName={null} webcamName={null} sourceKind="placeholder" />,
+    );
+    expect(html).toContain("Select or drop media");
+  });
+
+  test("image source shows the dropped file name and Image badge", () => {
+    const html = renderToStaticMarkup(
+      <CameraMediaPreview mode="file" fileName="hero.jpg" webcamName={null} sourceKind="image" />,
+    );
+    expect(html).toContain("hero.jpg");
+    expect(html).toContain("Image");
+  });
+
+  test("video source shows the dropped file name and Video badge", () => {
+    const html = renderToStaticMarkup(
+      <CameraMediaPreview mode="file" fileName="reel.mp4" webcamName={null} sourceKind="video" />,
+    );
+    expect(html).toContain("reel.mp4");
+    expect(html).toContain("Video");
+  });
+
+  test("webcam source shows the webcam name and Webcam badge", () => {
+    const html = renderToStaticMarkup(
+      <CameraMediaPreview mode="webcam" fileName={null} webcamName="MacBook Pro Camera" sourceKind="webcam" />,
+    );
+    expect(html).toContain("MacBook Pro Camera");
+    expect(html).toContain("Webcam");
+  });
+});
+
+describe("CameraInlineBanner — error / warning UI", () => {
+  test("danger banner renders the message and uses the danger token", () => {
+    const html = renderToStaticMarkup(
+      <CameraInlineBanner kind="error" message="helper crashed" />,
+    );
+    expect(html).toContain("helper crashed");
+    expect(html).toContain("danger");
+  });
+
+  test("warning banner surfaces the large-video copy verbatim", () => {
+    const html = renderToStaticMarkup(
+      <CameraInlineBanner kind="warning" message={CAMERA_LARGE_VIDEO_WARNING} />,
+    );
+    expect(CAMERA_LARGE_VIDEO_WARNING).toContain(">200 MB");
+    expect(html).toContain("Large video");
+    expect(html).toContain("may stutter on shared memory");
+  });
+
+  test("HEIC error message reads as the actionable copy", () => {
+    expect(CAMERA_HEIC_ERROR).toContain("HEIC decode failed");
+    expect(CAMERA_HEIC_ERROR).toContain("JPEG");
+    expect(CAMERA_HEIC_ERROR).toContain("PNG");
+  });
+});

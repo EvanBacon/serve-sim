@@ -1,0 +1,1007 @@
+#import "SimCamSwizzles.h"
+#import "SimCamFakes.h"
+#import "SimCamFrameSource.h"
+#import "SimCamLog.h"
+
+#import <AVFoundation/AVFoundation.h>
+#import <CoreImage/CoreImage.h>
+#import <CoreMedia/CoreMedia.h>
+#import <CoreMotion/CoreMotion.h>
+#import <CoreVideo/CoreVideo.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+#include <stdatomic.h>
+#include <execinfo.h>
+#include <dlfcn.h>
+#include <string.h>
+
+#pragma mark - Swizzling helpers
+
+static BOOL SwizzleClassMethod(Class cls, SEL orig, SEL swiz) {
+    Method o = class_getClassMethod(cls, orig);
+    Method s = class_getClassMethod(cls, swiz);
+    if (!o) {
+        simcam_log(@"swizzle FAILED: +[%@ %@] (orig method not found)",
+            NSStringFromClass(cls), NSStringFromSelector(orig));
+        return NO;
+    }
+    if (!s) {
+        simcam_log(@"swizzle FAILED: +[%@ %@] (replacement %@ not found)",
+            NSStringFromClass(cls), NSStringFromSelector(orig),
+            NSStringFromSelector(swiz));
+        return NO;
+    }
+    method_exchangeImplementations(o, s);
+    return YES;
+}
+static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
+    Method o = class_getInstanceMethod(cls, orig);
+    Method s = class_getInstanceMethod(cls, swiz);
+    if (!o) {
+        simcam_log(@"swizzle FAILED: -[%@ %@] (orig method not found)",
+            NSStringFromClass(cls), NSStringFromSelector(orig));
+        return NO;
+    }
+    if (!s) {
+        simcam_log(@"swizzle FAILED: -[%@ %@] (replacement %@ not found)",
+            NSStringFromClass(cls), NSStringFromSelector(orig),
+            NSStringFromSelector(swiz));
+        return NO;
+    }
+    method_exchangeImplementations(o, s);
+    return YES;
+}
+
+#pragma mark - NSNotificationCenter swizzle (suppress AVF runtime error)
+
+@interface NSNotificationCenter (SimCam)
+@end
+@implementation NSNotificationCenter (SimCam)
+
+- (void)simcam_postNotificationName:(NSNotificationName)name
+                             object:(id)object
+                           userInfo:(NSDictionary *)userInfo {
+    if (SimCamShouldSwallowAVFRuntimeError(name)) {
+        SimCamLogSwallowedRuntimeError(@"postNotificationName:object:userInfo:", object, userInfo);
+        return;
+    }
+    [self simcam_postNotificationName:name object:object userInfo:userInfo];
+}
+
+- (void)simcam_postNotificationName:(NSNotificationName)name object:(id)object {
+    if (SimCamShouldSwallowAVFRuntimeError(name)) {
+        SimCamLogSwallowedRuntimeError(@"postNotificationName:object:", object, nil);
+        return;
+    }
+    [self simcam_postNotificationName:name object:object];
+}
+
+- (void)simcam_postNotification:(NSNotification *)note {
+    if (SimCamShouldSwallowAVFRuntimeError(note.name)) {
+        SimCamLogSwallowedRuntimeError(@"postNotification:", note.object, note.userInfo);
+        return;
+    }
+    [self simcam_postNotification:note];
+}
+
+@end
+
+#pragma mark - AVCaptureDevice swizzles
+
+@interface AVCaptureDevice (SimCam)
+@end
+@implementation AVCaptureDevice (SimCam)
++ (AVCaptureDevice *)simcam_defaultDeviceWithDeviceType:(AVCaptureDeviceType)t
+                                              mediaType:(AVMediaType)m
+                                               position:(AVCaptureDevicePosition)p {
+    if ([m isEqualToString:AVMediaTypeVideo] || m == nil) {
+        AVCaptureDevicePosition resolved =
+            (p == AVCaptureDevicePositionBack) ? AVCaptureDevicePositionBack
+                                               : AVCaptureDevicePositionFront;
+        simcam_log(@"defaultDeviceWithDeviceType: %@ position: %d → fake",
+                   t, (int)resolved);
+        return SimCamFakeDeviceForPosition(resolved);
+    }
+    return [self simcam_defaultDeviceWithDeviceType:t mediaType:m position:p];
+}
++ (NSArray<AVCaptureDevice *> *)simcam_devicesWithMediaType:(AVMediaType)m {
+    if ([m isEqualToString:AVMediaTypeVideo]) {
+        return @[
+            SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront),
+            SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack),
+        ];
+    }
+    return [self simcam_devicesWithMediaType:m];
+}
++ (NSArray<AVCaptureDevice *> *)simcam_devices {
+    NSArray *real = [self simcam_devices];
+    NSArray *fakes = @[
+        SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront),
+        SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack),
+    ];
+    return [fakes arrayByAddingObjectsFromArray:real ?: @[]];
+}
+@end
+
+#pragma mark - AVCaptureDeviceDiscoverySession swizzles
+
+@interface AVCaptureDeviceDiscoverySession (SimCam)
+@end
+@implementation AVCaptureDeviceDiscoverySession (SimCam)
++ (AVCaptureDeviceDiscoverySession *)simcam_discoverySessionWithDeviceTypes:(NSArray<AVCaptureDeviceType> *)types
+                                                                  mediaType:(AVMediaType)m
+                                                                   position:(AVCaptureDevicePosition)p {
+    AVCaptureDeviceDiscoverySession *real =
+        [self simcam_discoverySessionWithDeviceTypes:types mediaType:m position:p];
+    if ([m isEqualToString:AVMediaTypeVideo] || m == nil) {
+        NSMutableArray *list = [NSMutableArray new];
+        if (p == AVCaptureDevicePositionUnspecified || p == AVCaptureDevicePositionFront)
+            [list addObject:SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront)];
+        if (p == AVCaptureDevicePositionUnspecified || p == AVCaptureDevicePositionBack)
+            [list addObject:SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack)];
+        @try {
+            [real setValue:list forKey:@"devices"];
+        } @catch (__unused id e) {
+            simcam_log(@"could not override discovery session devices");
+        }
+    }
+    return real;
+}
+@end
+
+#pragma mark - AVCaptureDeviceInput swizzle
+
+@interface AVCaptureDeviceInput (SimCam)
+@end
+@implementation AVCaptureDeviceInput (SimCam)
+- (instancetype)simcam_initWithDevice:(AVCaptureDevice *)device error:(NSError **)err {
+    if ([device isKindOfClass:[SimCamFakeDevice class]]) {
+        if (err) *err = nil;
+        struct objc_super sup = { self, [NSObject class] };
+        id obj = ((id (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, @selector(init));
+        if (obj) {
+            SimCamMarkFakeInput(obj, device);
+            SimCamSetPosition(obj, device.position);
+            SimCamMarkCameraInUse();
+        }
+        return obj;
+    }
+    return [self simcam_initWithDevice:device error:err];
+}
+- (AVCaptureDevice *)simcam_device {
+    AVCaptureDevice *fake = SimCamFakeInputDevice(self);
+    if (fake) return fake;
+    return [self simcam_device];
+}
+- (NSArray *)simcam_ports {
+    if (SimCamIsFakeInput(self)) return @[];
+    return [self simcam_ports];
+}
+@end
+
+#pragma mark - AVCaptureSession swizzles
+
+static char kSimCamSessionRunningKey;
+static char kSimCamSessionInputsKey;
+static char kSimCamSessionOutputsKey;
+
+static NSMutableArray *SimCamSessionTrackedInputs(AVCaptureSession *s) {
+    NSMutableArray *arr = objc_getAssociatedObject(s, &kSimCamSessionInputsKey);
+    if (!arr) {
+        arr = [NSMutableArray new];
+        objc_setAssociatedObject(s, &kSimCamSessionInputsKey, arr, OBJC_ASSOCIATION_RETAIN);
+    }
+    return arr;
+}
+static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
+    NSMutableArray *arr = objc_getAssociatedObject(s, &kSimCamSessionOutputsKey);
+    if (!arr) {
+        arr = [NSMutableArray new];
+        objc_setAssociatedObject(s, &kSimCamSessionOutputsKey, arr, OBJC_ASSOCIATION_RETAIN);
+    }
+    return arr;
+}
+
+@interface AVCaptureSession (SimCam)
+@end
+@implementation AVCaptureSession (SimCam)
+- (void)simcam_addInput:(AVCaptureInput *)input {
+    if (SimCamIsFakeInput(input)) {
+        AVCaptureDevicePosition p = SimCamPositionOf(input);
+        SimCamSetPosition(self, p);
+        SimCamMarkCameraInUse();
+        NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
+        if (![tracked containsObject:input]) [tracked addObject:input];
+        simcam_log(@"addInput: fake input (%@) — tracked (count=%lu), skipping native add",
+            p == AVCaptureDevicePositionBack ? @"back" : @"front",
+            (unsigned long)tracked.count);
+        return;
+    }
+    [self simcam_addInput:input];
+}
+- (BOOL)simcam_canAddInput:(AVCaptureInput *)input {
+    if (SimCamIsFakeInput(input)) return YES;
+    return [self simcam_canAddInput:input];
+}
+- (void)simcam_addInputWithNoConnections:(AVCaptureInput *)input {
+    if (SimCamIsFakeInput(input)) {
+        AVCaptureDevicePosition p = SimCamPositionOf(input);
+        SimCamSetPosition(self, p);
+        SimCamMarkCameraInUse();
+        NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
+        if (![tracked containsObject:input]) [tracked addObject:input];
+        simcam_log(@"addInputWithNoConnections: fake input (%@) — tracked (count=%lu), skipping native add",
+            p == AVCaptureDevicePositionBack ? @"back" : @"front",
+            (unsigned long)tracked.count);
+        return;
+    }
+    [self simcam_addInputWithNoConnections:input];
+}
+- (void)simcam_removeInput:(AVCaptureInput *)input {
+    if (SimCamIsFakeInput(input)) {
+        NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
+        [tracked removeObject:input];
+        simcam_log(@"removeInput: fake input — untracked (count=%lu)",
+            (unsigned long)tracked.count);
+        return;
+    }
+    [self simcam_removeInput:input];
+}
+- (void)simcam_addOutput:(AVCaptureOutput *)output {
+    SimCamSetPosition(output, SimCamPositionOf(self));
+    SimCamMarkCameraInUse();
+    NSMutableArray *tracked = SimCamSessionTrackedOutputs(self);
+    if (![tracked containsObject:output]) [tracked addObject:output];
+    simcam_log(@"addOutput: %@ (intercepted, tracked count=%lu, pos=%d)",
+        NSStringFromClass([output class]),
+        (unsigned long)tracked.count,
+        (int)SimCamPositionOf(self));
+}
+- (BOOL)simcam_canAddOutput:(AVCaptureOutput *)output { return YES; }
+- (void)simcam_addOutputWithNoConnections:(AVCaptureOutput *)output {
+    SimCamSetPosition(output, SimCamPositionOf(self));
+    SimCamMarkCameraInUse();
+    NSMutableArray *tracked = SimCamSessionTrackedOutputs(self);
+    if (![tracked containsObject:output]) [tracked addObject:output];
+    simcam_log(@"addOutputWithNoConnections: %@ (intercepted, tracked count=%lu, pos=%d)",
+        NSStringFromClass([output class]),
+        (unsigned long)tracked.count,
+        (int)SimCamPositionOf(self));
+}
+- (void)simcam_removeOutput:(AVCaptureOutput *)output {
+    NSMutableArray *tracked = SimCamSessionTrackedOutputs(self);
+    [tracked removeObject:output];
+    simcam_log(@"removeOutput: %@ — untracked (count=%lu)",
+        NSStringFromClass([output class]), (unsigned long)tracked.count);
+}
+- (void)simcam_beginConfiguration {
+    simcam_log(@"beginConfiguration intercepted (session=%p)", self);
+}
+- (void)simcam_commitConfiguration {
+    NSUInteger inCount =
+        ((NSArray *)objc_getAssociatedObject(self, &kSimCamSessionInputsKey)).count;
+    NSUInteger outCount =
+        ((NSArray *)objc_getAssociatedObject(self, &kSimCamSessionOutputsKey)).count;
+    simcam_log(@"commitConfiguration intercepted (session=%p, fakeInputs=%lu, fakeOutputs=%lu)",
+        self, (unsigned long)inCount, (unsigned long)outCount);
+}
+- (BOOL)simcam_canAddConnection:(AVCaptureConnection *)c { (void)c; return YES; }
+- (void)simcam_addConnection:(AVCaptureConnection *)c {
+    simcam_log(@"addConnection intercepted (session=%p, conn=%p)", self, c);
+}
+- (NSArray<AVCaptureInput *> *)simcam_inputs {
+    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionInputsKey);
+    NSArray *native = [self simcam_inputs];
+    if (tracked.count == 0) return native ?: @[];
+    if (native.count == 0) return [tracked copy];
+    NSMutableArray *merged = [tracked mutableCopy];
+    for (AVCaptureInput *n in native) {
+        if (![merged containsObject:n]) [merged addObject:n];
+    }
+    return [merged copy];
+}
+- (NSArray<AVCaptureOutput *> *)simcam_outputs {
+    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionOutputsKey);
+    NSArray *native = [self simcam_outputs];
+    if (tracked.count == 0) return native ?: @[];
+    if (native.count == 0) return [tracked copy];
+    NSMutableArray *merged = [tracked mutableCopy];
+    for (AVCaptureOutput *n in native) {
+        if (![merged containsObject:n]) [merged addObject:n];
+    }
+    return [merged copy];
+}
+- (NSArray<AVCaptureConnection *> *)simcam_connections {
+    NSMutableArray *trackedOut = objc_getAssociatedObject(self, &kSimCamSessionOutputsKey);
+    NSArray *native = [self simcam_connections];
+    if (trackedOut.count == 0) return native ?: @[];
+    NSMutableArray *merged = [NSMutableArray arrayWithCapacity:trackedOut.count + native.count];
+    for (AVCaptureOutput *o in trackedOut) {
+        AVCaptureConnection *c = SimCamFakeConnectionForOutput(o);
+        if (c) [merged addObject:c];
+    }
+    for (AVCaptureConnection *n in native) {
+        if (![merged containsObject:n]) [merged addObject:n];
+    }
+    return [merged copy];
+}
+- (void)simcam_startRunning {
+    objc_setAssociatedObject(self, &kSimCamSessionRunningKey, @YES, OBJC_ASSOCIATION_RETAIN);
+    SimCamMarkCameraInUse();
+    NSUInteger inCount =
+        ((NSArray *)objc_getAssociatedObject(self, &kSimCamSessionInputsKey)).count;
+    NSUInteger outCount =
+        ((NSArray *)objc_getAssociatedObject(self, &kSimCamSessionOutputsKey)).count;
+    simcam_log(@"startRunning intercepted (fake inputs=%lu outputs=%lu)",
+        (unsigned long)inCount, (unsigned long)outCount);
+    [[SimCamRegistry shared] startPumpingIfNeeded];
+    [self willChangeValueForKey:@"running"];
+    [self didChangeValueForKey:@"running"];
+    AVCaptureSession *strong = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:AVCaptureSessionDidStartRunningNotification
+                          object:strong];
+    });
+}
+- (void)simcam_stopRunning {
+    objc_setAssociatedObject(self, &kSimCamSessionRunningKey, @NO, OBJC_ASSOCIATION_RETAIN);
+    simcam_log(@"stopRunning intercepted");
+    [self willChangeValueForKey:@"running"];
+    [self didChangeValueForKey:@"running"];
+    AVCaptureSession *strong = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:AVCaptureSessionDidStopRunningNotification
+                          object:strong];
+    });
+}
+- (BOOL)simcam_isRunning {
+    NSNumber *v = objc_getAssociatedObject(self, &kSimCamSessionRunningKey);
+    return v.boolValue;
+}
+@end
+
+#pragma mark - AVCaptureVideoDataOutput swizzle
+
+@interface AVCaptureVideoDataOutput (SimCam)
+@end
+@implementation AVCaptureVideoDataOutput (SimCam)
+- (void)simcam_setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate
+                                 queue:(dispatch_queue_t)queue {
+    [self simcam_setSampleBufferDelegate:delegate queue:queue];
+    SimCamMarkCameraInUse();
+    if (delegate) {
+        [[SimCamRegistry shared] addOutput:self delegate:delegate queue:queue];
+    } else {
+        [[SimCamRegistry shared] removeOutput:self];
+        simcam_log(@"setSampleBufferDelegate nil — removed output %p", self);
+    }
+}
+@end
+
+#pragma mark - AVCaptureVideoPreviewLayer swizzle
+
+@interface AVCaptureVideoPreviewLayer (SimCam)
+@end
+@implementation AVCaptureVideoPreviewLayer (SimCam)
+- (void)simcam_setSession:(AVCaptureSession *)session {
+    [self simcam_setSession:session];
+    AVCaptureDevicePosition p = SimCamPositionOf(session);
+    SimCamSetPosition(self, p);
+    SimCamMarkCameraInUse();
+    [[SimCamRegistry shared] addPreviewLayer:self];
+}
+@end
+
+#pragma mark - AVCaptureDeviceFormat private-accessor swizzle
+
+@interface AVCaptureDeviceFormat (SimCamPrivate)
+- (id)figCaptureSourceVideoFormat;
+@end
+
+@interface AVCaptureDeviceFormat (SimCam)
+@end
+@implementation AVCaptureDeviceFormat (SimCam)
+- (id)simcam_figCaptureSourceVideoFormat {
+    if ([self isKindOfClass:[SimCamFakeFormat class]]) return nil;
+    return [self simcam_figCaptureSourceVideoFormat];
+}
+@end
+
+#pragma mark - AVCaptureOutput connection swizzles
+
+@interface AVCaptureOutput (SimCamConn)
+@end
+@implementation AVCaptureOutput (SimCamConn)
+- (AVCaptureConnection *)simcam_connectionWithMediaType:(AVMediaType)mediaType {
+    AVCaptureConnection *real = [self simcam_connectionWithMediaType:mediaType];
+    if (real) return real;
+    if (!SimCamCameraIsInUse()) return nil;
+    if (![mediaType isEqualToString:AVMediaTypeVideo]) return nil;
+    AVCaptureConnection *fake = SimCamFakeConnectionForOutput(self);
+    simcam_log(@"connectionWithMediaType:%@ → fake %p for %@ %p",
+        mediaType, fake, NSStringFromClass([self class]), self);
+    return fake;
+}
+- (NSArray<AVCaptureConnection *> *)simcam_connections {
+    NSArray *real = [self simcam_connections];
+    if (real.count > 0) return real;
+    if (!SimCamCameraIsInUse()) return real ?: @[];
+    AVCaptureConnection *fake = SimCamFakeConnectionForOutput(self);
+    return fake ? @[fake] : @[];
+}
+@end
+
+#pragma mark - AVCaptureOutput codec enumeration swizzle
+
+@interface AVCaptureOutput (SimCamPrivate)
++ (NSArray<AVVideoCodecType> *)availableVideoCodecTypesForSourceDevice:(AVCaptureDevice *)device
+                                                            sourceFormat:(AVCaptureDeviceFormat *)format
+                                                        outputDimensions:(CMVideoDimensions)dims
+                                                                fileType:(AVFileType)fileType
+                                                videoCodecTypesAllowList:(NSArray<AVVideoCodecType> *)allow;
+@end
+
+@interface AVCaptureOutput (SimCam)
+@end
+@implementation AVCaptureOutput (SimCam)
++ (NSArray<AVVideoCodecType> *)simcam_availableVideoCodecTypesForSourceDevice:(AVCaptureDevice *)device
+                                                                  sourceFormat:(AVCaptureDeviceFormat *)format
+                                                              outputDimensions:(CMVideoDimensions)dims
+                                                                      fileType:(AVFileType)fileType
+                                                       videoCodecTypesAllowList:(NSArray<AVVideoCodecType> *)allow {
+    BOOL fakeDevice = [device isKindOfClass:[SimCamFakeDevice class]];
+    BOOL fakeFormat = [format isKindOfClass:[SimCamFakeFormat class]];
+    BOOL nilArgs = (device == nil) && (format == nil);
+    if (fakeDevice || fakeFormat || nilArgs) {
+        simcam_log(@"availableVideoCodecTypes intercepted (device=%@ format=%@ allow=%lu)",
+            device ? NSStringFromClass([device class]) : @"<nil>",
+            format ? NSStringFromClass([format class]) : @"<nil>",
+            (unsigned long)allow.count);
+        NSArray *defaults = @[ AVVideoCodecTypeJPEG, AVVideoCodecTypeHEVC ];
+        if (allow.count == 0) return defaults;
+        NSMutableArray *filtered = [NSMutableArray new];
+        for (AVVideoCodecType t in defaults) if ([allow containsObject:t]) [filtered addObject:t];
+        return filtered.count > 0 ? [filtered copy] : defaults;
+    }
+    return [self simcam_availableVideoCodecTypesForSourceDevice:device
+                                                    sourceFormat:format
+                                                outputDimensions:dims
+                                                        fileType:fileType
+                                        videoCodecTypesAllowList:allow];
+}
+@end
+
+#pragma mark - AVCapturePhotoOutput swizzle
+
+@interface AVCapturePhotoOutput (SimCam)
+@end
+@implementation AVCapturePhotoOutput (SimCam)
+- (void)simcam_capturePhotoWithSettings:(AVCapturePhotoSettings *)settings
+                               delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    if (!delegate) return;
+    SimCamRegistry *reg = [SimCamRegistry shared];
+    CVPixelBufferRef pb = [reg currentPixelBuffer];
+    AVCaptureDevicePosition p = SimCamPositionOf(self);
+    if (p == 0) p = AVCaptureDevicePositionFront;
+    BOOL mirror = SimCamShouldMirror(p);
+    AVCaptureConnection *conn = [self connectionWithMediaType:AVMediaTypeVideo];
+    if (conn && conn.isVideoMirroringSupported) mirror = conn.isVideoMirrored;
+    CGImageRef cg = NULL;
+    if (pb) {
+        CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];
+        if (mirror) ci = [ci imageByApplyingOrientation:kCGImagePropertyOrientationUpMirrored];
+        static CIContext *ctx = nil; static dispatch_once_t once;
+        dispatch_once(&once, ^{ ctx = [CIContext contextWithOptions:nil]; });
+        cg = [ctx createCGImage:ci fromRect:ci.extent];
+        CVPixelBufferRelease(pb);
+    }
+    if (!cg) {
+        simcam_log(@"capturePhoto: no source frame, synthesizing 1x1 black");
+        size_t bpr = 4;
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef bmp = CGBitmapContextCreate(NULL, 1, 1, 8, bpr, cs,
+            kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+        CGContextSetFillColorWithColor(bmp, [UIColor blackColor].CGColor);
+        CGContextFillRect(bmp, CGRectMake(0, 0, 1, 1));
+        cg = CGBitmapContextCreateImage(bmp);
+        CGContextRelease(bmp);
+        CGColorSpaceRelease(cs);
+    }
+    SimCamFakePhoto *photo = [SimCamFakePhoto photoFromImage:cg
+                                                  jpegQuality:0.92
+                                                     mirrored:mirror];
+    if (cg) CGImageRelease(cg);
+    AVCaptureResolvedPhotoSettings *resolved = photo.resolvedSettings;
+    simcam_log(@"capturePhoto intercepted (pos=%d, mirror=%d, jpeg=%lu bytes, dims=%dx%d)",
+        (int)p, (int)mirror, (unsigned long)photo.fileDataRepresentation.length,
+        resolved.photoDimensions.width, resolved.photoDimensions.height);
+    AVCapturePhotoOutput *output = self;
+    SEL selWillBegin     = @selector(photoOutput:willBeginCaptureForResolvedSettings:);
+    SEL selWillCapture   = @selector(photoOutput:willCapturePhotoForResolvedSettings:);
+    SEL selDidProcess    = @selector(photoOutput:didFinishProcessingPhoto:error:);
+    SEL selDidCapture    = @selector(photoOutput:didCapturePhotoForResolvedSettings:);
+    SEL selDidFinish     = @selector(photoOutput:didFinishCaptureForResolvedSettings:error:);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([delegate respondsToSelector:selWillBegin]) {
+            ((void (*)(id, SEL, AVCapturePhotoOutput *, AVCaptureResolvedPhotoSettings *))
+                objc_msgSend)(delegate, selWillBegin, output, resolved);
+        }
+        if ([delegate respondsToSelector:selWillCapture]) {
+            ((void (*)(id, SEL, AVCapturePhotoOutput *, AVCaptureResolvedPhotoSettings *))
+                objc_msgSend)(delegate, selWillCapture, output, resolved);
+        }
+        BOOL delivered = NO;
+        if ([delegate respondsToSelector:selDidProcess]) {
+            ((void (*)(id, SEL, AVCapturePhotoOutput *, AVCapturePhoto *, NSError *))
+                objc_msgSend)(delegate, selDidProcess, output, photo, (NSError *)nil);
+            delivered = YES;
+        }
+        if ([delegate respondsToSelector:selDidCapture]) {
+            ((void (*)(id, SEL, AVCapturePhotoOutput *, AVCaptureResolvedPhotoSettings *))
+                objc_msgSend)(delegate, selDidCapture, output, resolved);
+        }
+        if ([delegate respondsToSelector:selDidFinish]) {
+            ((void (*)(id, SEL, AVCapturePhotoOutput *, AVCaptureResolvedPhotoSettings *, NSError *))
+                objc_msgSend)(delegate, selDidFinish, output, resolved, (NSError *)nil);
+        }
+        simcam_log(@"capturePhoto lifecycle complete (delivered photo=%d)", (int)delivered);
+    });
+}
+@end
+
+#pragma mark - NSData write redirect (expo-camera placeholder substitution)
+
+static BOOL SimCamLooksLikeCameraDropPath(NSString *path) {
+    if (!path.length) return NO;
+    if (![path containsString:@"/Camera/"]) return NO;
+    NSString *lower = path.lowercaseString;
+    return [lower hasSuffix:@".jpg"] || [lower hasSuffix:@".jpeg"];
+}
+
+@interface NSData (SimCam)
+@end
+@implementation NSData (SimCam)
+
+- (BOOL)simcam_writeToURL:(NSURL *)url
+                  options:(NSDataWritingOptions)opts
+                    error:(NSError **)err {
+    NSString *path = url.isFileURL ? url.path : nil;
+    if (SimCamLooksLikeCameraDropPath(path)) {
+        NSData *snap = [[SimCamRegistry shared] currentSnapshotJPEGAtQuality:0.92];
+        if (snap.length > 0) {
+            simcam_log(@"NSData writeToURL → substituted %lu→%lu bytes (%@)",
+                (unsigned long)self.length, (unsigned long)snap.length, path.lastPathComponent);
+            return [snap simcam_writeToURL:url options:opts error:err];
+        }
+    }
+    return [self simcam_writeToURL:url options:opts error:err];
+}
+
+- (BOOL)simcam_writeToFile:(NSString *)path
+                   options:(NSDataWritingOptions)opts
+                     error:(NSError **)err {
+    if (SimCamLooksLikeCameraDropPath(path)) {
+        NSData *snap = [[SimCamRegistry shared] currentSnapshotJPEGAtQuality:0.92];
+        if (snap.length > 0) {
+            simcam_log(@"NSData writeToFile → substituted %lu→%lu bytes (%@)",
+                (unsigned long)self.length, (unsigned long)snap.length, path.lastPathComponent);
+            return [snap simcam_writeToFile:path options:opts error:err];
+        }
+    }
+    return [self simcam_writeToFile:path options:opts error:err];
+}
+
+@end
+
+#pragma mark - UIGraphicsImageRenderer redirect (camera-placeholder generators)
+
+static BOOL SimCamCallerLooksLikeCameraPlaceholder(void) {
+    if (!SimCamCameraIsInUse()) return NO;
+
+    void *frames[12];
+    int n = backtrace(frames, 12);
+    if (n < 4) return NO;
+
+    static _Atomic uintptr_t cachedFrame = 0;
+    static _Atomic int cachedAnswer = -1;
+    uintptr_t topFrame = (uintptr_t)frames[3];
+    if (atomic_load_explicit(&cachedFrame, memory_order_relaxed) == topFrame) {
+        int v = atomic_load_explicit(&cachedAnswer, memory_order_relaxed);
+        if (v >= 0) return (BOOL)v;
+    }
+
+    BOOL match = NO;
+    int end = (n < 12) ? n : 12;
+    for (int i = 3; i < end; i++) {
+        Dl_info info;
+        if (dladdr(frames[i], &info) == 0 || !info.dli_sname) continue;
+        const char *name = info.dli_sname;
+        if (strstr(name, "generatePhoto") ||
+            strstr(name, "generatePicture") ||
+            strstr(name, "generateImage") ||
+            strstr(name, "placeholderPhoto") ||
+            strstr(name, "placeholderImage") ||
+            strstr(name, "simulatorPhoto") ||
+            strstr(name, "PictureForSimulator") ||
+            strstr(name, "PhotoForSimulator") ||
+            strstr(name, "ImageForSimulator") ||
+            strstr(name, "mockPhoto") ||
+            strstr(name, "fakePhoto")) { match = YES; break; }
+        if (strstr(name, "Camera") || strstr(name, "camera")) {
+            if (strstr(name, "Simulator") ||
+                strstr(name, "simulator") ||
+                strstr(name, "Placeholder") ||
+                strstr(name, "placeholder") ||
+                strstr(name, "generate")) { match = YES; break; }
+        }
+    }
+    atomic_store_explicit(&cachedFrame, topFrame, memory_order_relaxed);
+    atomic_store_explicit(&cachedAnswer, (int)match, memory_order_relaxed);
+    return match;
+}
+
+@interface UIGraphicsImageRenderer (SimCam)
+@end
+@implementation UIGraphicsImageRenderer (SimCam)
+- (UIImage *)simcam_imageWithActions:(void (NS_NOESCAPE ^)(UIGraphicsImageRendererContext *))actions {
+    if (SimCamCallerLooksLikeCameraPlaceholder()) {
+        NSData *jpeg = [[SimCamRegistry shared] currentSnapshotJPEGAtQuality:0.92];
+        if (jpeg.length > 0) {
+            UIImage *snap = [UIImage imageWithData:jpeg];
+            if (snap) {
+                simcam_log(@"UIGraphicsImageRenderer image: → live frame (jpeg %lu bytes)",
+                    (unsigned long)jpeg.length);
+                return snap;
+            }
+        }
+    }
+    return [self simcam_imageWithActions:actions];
+}
+@end
+
+#pragma mark - CoreMotion stubs
+
+static char kSimCamAccelTimerKey;
+static char kSimCamGyroTimerKey;
+static char kSimCamMagTimerKey;
+static char kSimCamDeviceMotionTimerKey;
+
+static void SimCamStartTimer(id manager, char *key, NSTimeInterval interval,
+                             dispatch_block_t tick) {
+    if (interval <= 0) interval = 0.1;
+    dispatch_source_t existing = objc_getAssociatedObject(manager, key);
+    if (existing) dispatch_source_cancel(existing);
+    dispatch_queue_t q = dispatch_queue_create("dev.servesim.simcam.motion",
+        DISPATCH_QUEUE_SERIAL);
+    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    uint64_t ns = (uint64_t)(interval * NSEC_PER_SEC);
+    dispatch_source_set_timer(t, DISPATCH_TIME_NOW, ns, ns / 10);
+    dispatch_source_set_event_handler(t, tick);
+    dispatch_resume(t);
+    objc_setAssociatedObject(manager, key, t, OBJC_ASSOCIATION_RETAIN);
+}
+
+static void SimCamStopTimer(id manager, char *key) {
+    dispatch_source_t t = objc_getAssociatedObject(manager, key);
+    if (t) {
+        dispatch_source_cancel(t);
+        objc_setAssociatedObject(manager, key, nil, OBJC_ASSOCIATION_RETAIN);
+    }
+}
+
+@interface CMMotionManager (SimCam)
+@end
+@implementation CMMotionManager (SimCam)
+
+- (BOOL)simcam_isAccelerometerAvailable { return YES; }
+- (BOOL)simcam_isGyroAvailable { return YES; }
+- (BOOL)simcam_isMagnetometerAvailable { return YES; }
+- (BOOL)simcam_isDeviceMotionAvailable { return YES; }
+
+- (BOOL)simcam_isAccelerometerActive {
+    return objc_getAssociatedObject(self, &kSimCamAccelTimerKey) != nil;
+}
+- (BOOL)simcam_isGyroActive {
+    return objc_getAssociatedObject(self, &kSimCamGyroTimerKey) != nil;
+}
+- (BOOL)simcam_isMagnetometerActive {
+    return objc_getAssociatedObject(self, &kSimCamMagTimerKey) != nil;
+}
+- (BOOL)simcam_isDeviceMotionActive {
+    return objc_getAssociatedObject(self, &kSimCamDeviceMotionTimerKey) != nil;
+}
+
+- (CMAccelerometerData *)simcam_accelerometerData { return SimCamSharedAccelerometerData(); }
+- (CMGyroData *)simcam_gyroData { return SimCamSharedGyroData(); }
+- (CMMagnetometerData *)simcam_magnetometerData { return SimCamSharedMagnetometerData(); }
+- (CMDeviceMotion *)simcam_deviceMotion { return SimCamSharedDeviceMotion(); }
+
+- (void)simcam_startAccelerometerUpdates {
+    if ([self simcam_isAccelerometerActive]) return;
+    SimCamStartTimer(self, &kSimCamAccelTimerKey,
+        self.accelerometerUpdateInterval, ^{});
+}
+- (void)simcam_startAccelerometerUpdatesToQueue:(NSOperationQueue *)queue
+                                     withHandler:(CMAccelerometerHandler)handler {
+    if (!handler) { [self simcam_startAccelerometerUpdates]; return; }
+    CMAccelerometerHandler block = [handler copy];
+    SimCamStartTimer(self, &kSimCamAccelTimerKey,
+        self.accelerometerUpdateInterval, ^{
+            CMAccelerometerData *data = SimCamSharedAccelerometerData();
+            if (queue) [queue addOperationWithBlock:^{ block(data, nil); }];
+            else block(data, nil);
+        });
+}
+- (void)simcam_stopAccelerometerUpdates {
+    SimCamStopTimer(self, &kSimCamAccelTimerKey);
+}
+
+- (void)simcam_startGyroUpdates {
+    if ([self simcam_isGyroActive]) return;
+    SimCamStartTimer(self, &kSimCamGyroTimerKey,
+        self.gyroUpdateInterval, ^{});
+}
+- (void)simcam_startGyroUpdatesToQueue:(NSOperationQueue *)queue
+                            withHandler:(CMGyroHandler)handler {
+    if (!handler) { [self simcam_startGyroUpdates]; return; }
+    CMGyroHandler block = [handler copy];
+    SimCamStartTimer(self, &kSimCamGyroTimerKey, self.gyroUpdateInterval, ^{
+        CMGyroData *data = SimCamSharedGyroData();
+        if (queue) [queue addOperationWithBlock:^{ block(data, nil); }];
+        else block(data, nil);
+    });
+}
+- (void)simcam_stopGyroUpdates {
+    SimCamStopTimer(self, &kSimCamGyroTimerKey);
+}
+
+- (void)simcam_startMagnetometerUpdates {
+    if ([self simcam_isMagnetometerActive]) return;
+    SimCamStartTimer(self, &kSimCamMagTimerKey,
+        self.magnetometerUpdateInterval, ^{});
+}
+- (void)simcam_startMagnetometerUpdatesToQueue:(NSOperationQueue *)queue
+                                    withHandler:(CMMagnetometerHandler)handler {
+    if (!handler) { [self simcam_startMagnetometerUpdates]; return; }
+    CMMagnetometerHandler block = [handler copy];
+    SimCamStartTimer(self, &kSimCamMagTimerKey, self.magnetometerUpdateInterval, ^{
+        CMMagnetometerData *data = SimCamSharedMagnetometerData();
+        if (queue) [queue addOperationWithBlock:^{ block(data, nil); }];
+        else block(data, nil);
+    });
+}
+- (void)simcam_stopMagnetometerUpdates {
+    SimCamStopTimer(self, &kSimCamMagTimerKey);
+}
+
+- (void)simcam_startDeviceMotionUpdates {
+    if ([self simcam_isDeviceMotionActive]) return;
+    SimCamStartTimer(self, &kSimCamDeviceMotionTimerKey,
+        self.deviceMotionUpdateInterval, ^{});
+}
+- (void)simcam_startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)frame {
+    (void)frame;
+    [self simcam_startDeviceMotionUpdates];
+}
+- (void)simcam_startDeviceMotionUpdatesToQueue:(NSOperationQueue *)queue
+                                    withHandler:(CMDeviceMotionHandler)handler {
+    if (!handler) { [self simcam_startDeviceMotionUpdates]; return; }
+    CMDeviceMotionHandler block = [handler copy];
+    SimCamStartTimer(self, &kSimCamDeviceMotionTimerKey,
+        self.deviceMotionUpdateInterval, ^{
+            CMDeviceMotion *data = SimCamSharedDeviceMotion();
+            if (queue) [queue addOperationWithBlock:^{ block(data, nil); }];
+            else block(data, nil);
+        });
+}
+- (void)simcam_startDeviceMotionUpdatesUsingReferenceFrame:(CMAttitudeReferenceFrame)frame
+                                                    toQueue:(NSOperationQueue *)queue
+                                                withHandler:(CMDeviceMotionHandler)handler {
+    (void)frame;
+    [self simcam_startDeviceMotionUpdatesToQueue:queue withHandler:handler];
+}
+- (void)simcam_stopDeviceMotionUpdates {
+    SimCamStopTimer(self, &kSimCamDeviceMotionTimerKey);
+}
+
+@end
+
+static void InstallCoreMotionSwizzles(void) {
+    Class mm = [CMMotionManager class];
+    if (!mm) return;
+    SwizzleInstanceMethod(mm, @selector(isAccelerometerAvailable),
+        @selector(simcam_isAccelerometerAvailable));
+    SwizzleInstanceMethod(mm, @selector(isGyroAvailable),
+        @selector(simcam_isGyroAvailable));
+    SwizzleInstanceMethod(mm, @selector(isMagnetometerAvailable),
+        @selector(simcam_isMagnetometerAvailable));
+    SwizzleInstanceMethod(mm, @selector(isDeviceMotionAvailable),
+        @selector(simcam_isDeviceMotionAvailable));
+    SwizzleInstanceMethod(mm, @selector(isAccelerometerActive),
+        @selector(simcam_isAccelerometerActive));
+    SwizzleInstanceMethod(mm, @selector(isGyroActive),
+        @selector(simcam_isGyroActive));
+    SwizzleInstanceMethod(mm, @selector(isMagnetometerActive),
+        @selector(simcam_isMagnetometerActive));
+    SwizzleInstanceMethod(mm, @selector(isDeviceMotionActive),
+        @selector(simcam_isDeviceMotionActive));
+    SwizzleInstanceMethod(mm, @selector(accelerometerData),
+        @selector(simcam_accelerometerData));
+    SwizzleInstanceMethod(mm, @selector(gyroData),
+        @selector(simcam_gyroData));
+    SwizzleInstanceMethod(mm, @selector(magnetometerData),
+        @selector(simcam_magnetometerData));
+    SwizzleInstanceMethod(mm, @selector(deviceMotion),
+        @selector(simcam_deviceMotion));
+    SwizzleInstanceMethod(mm, @selector(startAccelerometerUpdates),
+        @selector(simcam_startAccelerometerUpdates));
+    SwizzleInstanceMethod(mm, @selector(startAccelerometerUpdatesToQueue:withHandler:),
+        @selector(simcam_startAccelerometerUpdatesToQueue:withHandler:));
+    SwizzleInstanceMethod(mm, @selector(stopAccelerometerUpdates),
+        @selector(simcam_stopAccelerometerUpdates));
+    SwizzleInstanceMethod(mm, @selector(startGyroUpdates),
+        @selector(simcam_startGyroUpdates));
+    SwizzleInstanceMethod(mm, @selector(startGyroUpdatesToQueue:withHandler:),
+        @selector(simcam_startGyroUpdatesToQueue:withHandler:));
+    SwizzleInstanceMethod(mm, @selector(stopGyroUpdates),
+        @selector(simcam_stopGyroUpdates));
+    SwizzleInstanceMethod(mm, @selector(startMagnetometerUpdates),
+        @selector(simcam_startMagnetometerUpdates));
+    SwizzleInstanceMethod(mm, @selector(startMagnetometerUpdatesToQueue:withHandler:),
+        @selector(simcam_startMagnetometerUpdatesToQueue:withHandler:));
+    SwizzleInstanceMethod(mm, @selector(stopMagnetometerUpdates),
+        @selector(simcam_stopMagnetometerUpdates));
+    SwizzleInstanceMethod(mm, @selector(startDeviceMotionUpdates),
+        @selector(simcam_startDeviceMotionUpdates));
+    SwizzleInstanceMethod(mm, @selector(startDeviceMotionUpdatesUsingReferenceFrame:),
+        @selector(simcam_startDeviceMotionUpdatesUsingReferenceFrame:));
+    SwizzleInstanceMethod(mm, @selector(startDeviceMotionUpdatesToQueue:withHandler:),
+        @selector(simcam_startDeviceMotionUpdatesToQueue:withHandler:));
+    SwizzleInstanceMethod(mm,
+        @selector(startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:),
+        @selector(simcam_startDeviceMotionUpdatesUsingReferenceFrame:toQueue:withHandler:));
+    SwizzleInstanceMethod(mm, @selector(stopDeviceMotionUpdates),
+        @selector(simcam_stopDeviceMotionUpdates));
+    simcam_log(@"CoreMotion stubs installed (portrait, face-up)");
+}
+
+#pragma mark - Install
+
+void SimCamInstallSwizzles(void) {
+    Class dev = [AVCaptureDevice class];
+    SwizzleClassMethod(dev,
+        @selector(defaultDeviceWithDeviceType:mediaType:position:),
+        @selector(simcam_defaultDeviceWithDeviceType:mediaType:position:));
+    SwizzleClassMethod(dev,
+        @selector(devicesWithMediaType:),
+        @selector(simcam_devicesWithMediaType:));
+    SwizzleClassMethod(dev, @selector(devices), @selector(simcam_devices));
+
+    Class disc = [AVCaptureDeviceDiscoverySession class];
+    SwizzleClassMethod(disc,
+        @selector(discoverySessionWithDeviceTypes:mediaType:position:),
+        @selector(simcam_discoverySessionWithDeviceTypes:mediaType:position:));
+
+    Class input = [AVCaptureDeviceInput class];
+    SwizzleInstanceMethod(input,
+        @selector(initWithDevice:error:),
+        @selector(simcam_initWithDevice:error:));
+    SwizzleInstanceMethod(input, @selector(device), @selector(simcam_device));
+    SwizzleInstanceMethod(input, @selector(ports), @selector(simcam_ports));
+
+    Class sess = [AVCaptureSession class];
+    SwizzleInstanceMethod(sess, @selector(addInput:), @selector(simcam_addInput:));
+    SwizzleInstanceMethod(sess, @selector(canAddInput:), @selector(simcam_canAddInput:));
+    SwizzleInstanceMethod(sess, @selector(addOutput:), @selector(simcam_addOutput:));
+    SwizzleInstanceMethod(sess, @selector(canAddOutput:), @selector(simcam_canAddOutput:));
+    SwizzleInstanceMethod(sess, @selector(startRunning), @selector(simcam_startRunning));
+    SwizzleInstanceMethod(sess, @selector(stopRunning), @selector(simcam_stopRunning));
+    SwizzleInstanceMethod(sess, @selector(isRunning), @selector(simcam_isRunning));
+    SwizzleInstanceMethod(sess, @selector(inputs), @selector(simcam_inputs));
+    SwizzleInstanceMethod(sess, @selector(outputs), @selector(simcam_outputs));
+    SwizzleInstanceMethod(sess, @selector(connections), @selector(simcam_connections));
+    SwizzleInstanceMethod(sess,
+        @selector(addInputWithNoConnections:),
+        @selector(simcam_addInputWithNoConnections:));
+    SwizzleInstanceMethod(sess,
+        @selector(addOutputWithNoConnections:),
+        @selector(simcam_addOutputWithNoConnections:));
+    SwizzleInstanceMethod(sess, @selector(removeInput:), @selector(simcam_removeInput:));
+    SwizzleInstanceMethod(sess, @selector(removeOutput:), @selector(simcam_removeOutput:));
+    SwizzleInstanceMethod(sess,
+        @selector(beginConfiguration),
+        @selector(simcam_beginConfiguration));
+    SwizzleInstanceMethod(sess,
+        @selector(commitConfiguration),
+        @selector(simcam_commitConfiguration));
+    SwizzleInstanceMethod(sess,
+        @selector(addConnection:),
+        @selector(simcam_addConnection:));
+    SwizzleInstanceMethod(sess,
+        @selector(canAddConnection:),
+        @selector(simcam_canAddConnection:));
+
+    Class nc = [NSNotificationCenter class];
+    SwizzleInstanceMethod(nc,
+        @selector(postNotificationName:object:userInfo:),
+        @selector(simcam_postNotificationName:object:userInfo:));
+    SwizzleInstanceMethod(nc,
+        @selector(postNotificationName:object:),
+        @selector(simcam_postNotificationName:object:));
+    SwizzleInstanceMethod(nc,
+        @selector(postNotification:),
+        @selector(simcam_postNotification:));
+    simcam_log(@"NSNotificationCenter swizzles installed (AVCaptureSessionRuntimeErrorNotification gated)");
+
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVCaptureSessionRuntimeErrorNotification
+                    object:nil
+                     queue:nil
+                usingBlock:^(NSNotification *note) {
+        NSError *err = note.userInfo[AVCaptureSessionErrorKey];
+        simcam_log(@"DIAG runtime-error delivered (post swizzle MISSED) object=%@ code=%ld desc=%@",
+            NSStringFromClass([note.object class]),
+            (long)err.code,
+            err.localizedDescription ?: @"<nil>");
+    }];
+
+    Class out = [AVCaptureVideoDataOutput class];
+    SwizzleInstanceMethod(out,
+        @selector(setSampleBufferDelegate:queue:),
+        @selector(simcam_setSampleBufferDelegate:queue:));
+
+    Class outBase = [AVCaptureOutput class];
+    SwizzleInstanceMethod(outBase,
+        @selector(connectionWithMediaType:),
+        @selector(simcam_connectionWithMediaType:));
+    SwizzleInstanceMethod(outBase,
+        @selector(connections),
+        @selector(simcam_connections));
+
+    Class pl = [AVCaptureVideoPreviewLayer class];
+    SwizzleInstanceMethod(pl, @selector(setSession:), @selector(simcam_setSession:));
+
+    Class fmtClass = [AVCaptureDeviceFormat class];
+    SEL figFmtSel = NSSelectorFromString(@"figCaptureSourceVideoFormat");
+    SEL figFmtSwizSel = @selector(simcam_figCaptureSourceVideoFormat);
+    BOOL figOk = SwizzleInstanceMethod(fmtClass, figFmtSel, figFmtSwizSel);
+    simcam_log(@"swizzle -[AVCaptureDeviceFormat figCaptureSourceVideoFormat] → %@",
+        figOk ? @"installed" : @"FAILED");
+
+    Class outClass = [AVCaptureOutput class];
+    SEL availCodecsSel = NSSelectorFromString(
+        @"availableVideoCodecTypesForSourceDevice:sourceFormat:outputDimensions:fileType:videoCodecTypesAllowList:");
+    SEL availCodecsSwizSel = @selector(simcam_availableVideoCodecTypesForSourceDevice:sourceFormat:outputDimensions:fileType:videoCodecTypesAllowList:);
+    Method origAvailCodecs = class_getClassMethod(outClass, availCodecsSel);
+    Method swizAvailCodecs = class_getClassMethod(outClass, availCodecsSwizSel);
+    if (origAvailCodecs && swizAvailCodecs) {
+        method_exchangeImplementations(origAvailCodecs, swizAvailCodecs);
+        simcam_log(@"swizzle +[AVCaptureOutput availableVideoCodecTypes…] → installed");
+    } else {
+        simcam_log(@"swizzle +[AVCaptureOutput availableVideoCodecTypes…] FAILED (orig=%p swiz=%p)",
+            origAvailCodecs, swizAvailCodecs);
+    }
+
+    Class photoOut = [AVCapturePhotoOutput class];
+    SwizzleInstanceMethod(photoOut,
+        @selector(capturePhotoWithSettings:delegate:),
+        @selector(simcam_capturePhotoWithSettings:delegate:));
+
+    Class data = [NSData class];
+    SwizzleInstanceMethod(data,
+        @selector(writeToURL:options:error:),
+        @selector(simcam_writeToURL:options:error:));
+    SwizzleInstanceMethod(data,
+        @selector(writeToFile:options:error:),
+        @selector(simcam_writeToFile:options:error:));
+
+    Class renderer = [UIGraphicsImageRenderer class];
+    SwizzleInstanceMethod(renderer,
+        @selector(imageWithActions:),
+        @selector(simcam_imageWithActions:));
+
+    InstallCoreMotionSwizzles();
+}

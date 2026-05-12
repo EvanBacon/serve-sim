@@ -35,6 +35,8 @@
     "src/state.ts",
     "bin/serve-sim-bin",
     "Sources/SimCameraInjector/SimCameraInjector.m",
+    "Sources/SimCameraInjector/SimCam*.h",
+    "Sources/SimCameraInjector/SimCam*.m",
     "Sources/SimCameraInjector/include/SimCamShared.h",
     "Sources/SimCameraInjector/build.sh",
     "Sources/SimCameraHelper/main.m",
