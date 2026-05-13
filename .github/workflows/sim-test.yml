@@ -56,8 +56,22 @@ jobs:
           fi
           echo "Booting simulator $UDID"
           xcrun simctl boot "$UDID" || true
-          xcrun simctl bootstatus "$UDID" -b
           open -ga Simulator || true
+
+          # `simctl bootstatus -b` blocks until every first-launch migration
+          # finishes (~1-2min on cold CI). Our tests only need SpringBoard
+          # running — it owns the framebuffer surface and HID dispatch we
+          # exercise. Poll for it instead.
+          echo "Waiting for SpringBoard..."
+          for i in $(seq 1 120); do
+            if xcrun simctl spawn "$UDID" launchctl print system 2>/dev/null \
+                 | grep -q "com.apple.SpringBoard"; then
+              echo "SpringBoard up after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
           echo "udid=$UDID" >> $GITHUB_OUTPUT
 
       - name: serve-sim tests
