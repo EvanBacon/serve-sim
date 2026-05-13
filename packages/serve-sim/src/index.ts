@@ -5,6 +5,7 @@ import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
 import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
+import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
@@ -922,6 +923,70 @@ async function tap(args: string[]) {
       reject(new Error("WebSocket connection failed"));
     };
   });
+}
+
+async function typeText(args: string[]) {
+  let deviceArg: string | undefined;
+  let useStdin = false;
+  let inputFile: string | undefined;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--device" || a === "-d") {
+      deviceArg = args[++i];
+    } else if (a === "--stdin") {
+      useStdin = true;
+    } else if (a === "--file") {
+      inputFile = args[++i];
+    } else {
+      positional.push(a);
+    }
+  }
+
+  const sourceCount = [positional.length > 0, useStdin, inputFile != null].filter(Boolean).length;
+  if (sourceCount === 0 || sourceCount > 1) {
+    console.error("Usage: serve-sim type <text> [-d udid]");
+    console.error("       serve-sim type --stdin [-d udid]");
+    console.error("       serve-sim type --file <path> [-d udid]");
+    console.error("");
+    console.error("Only US-keyboard ASCII characters are supported (A-Z, a-z, 0-9,");
+    console.error("space, newline, tab, and standard punctuation).");
+    process.exit(1);
+  }
+
+  let text: string;
+  if (useStdin) {
+    text = readFileSync(0, "utf8");
+  } else if (inputFile) {
+    try {
+      text = readFileSync(inputFile, "utf8");
+    } catch (err) {
+      console.error(`Failed to read file '${inputFile}': ${(err as Error).message}`);
+      process.exit(1);
+    }
+  } else {
+    text = positional.join(" ");
+  }
+
+  let events;
+  try {
+    events = textToKeyEvents(text);
+  } catch (err) {
+    if (err instanceof UnsupportedCharacterError) {
+      console.error(err.message);
+      console.error("Supported: A-Z, a-z, 0-9, space, newline, tab, and standard punctuation.");
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  const state = readState(deviceArg);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim` first.");
+    process.exit(1);
+  }
+
+  await sendKeyEventsToWs(state.wsUrl, events);
 }
 
 async function rotate(args: string[]) {
@@ -1847,6 +1912,8 @@ Usage:
   serve-sim gesture '<json>' [-d udid]  Send a touch gesture
   serve-sim tap <x> <y> [-d udid]       Tap at normalized 0..1 coords
   serve-sim button [name] [-d udid]     Send a button press (default: home)
+  serve-sim type <text> [-d udid]       Type text (US keyboard only)
+                                        Use --stdin or --file <path> for input from stdin/file
   serve-sim rotate <orientation> [-d udid]
                                         Set device orientation
                                         (portrait|portrait_upside_down|landscape_left|landscape_right)
@@ -1896,6 +1963,10 @@ if (argv[0] === "tap") {
 }
 if (argv[0] === "button") {
   await button(argv.slice(1));
+  process.exit(0);
+}
+if (argv[0] === "type") {
+  await typeText(argv.slice(1));
   process.exit(0);
 }
 if (argv[0] === "rotate") {
