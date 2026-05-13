@@ -1,0 +1,68 @@
+name: serve-sim tests
+
+on:
+  pull_request:
+    paths:
+      - "packages/serve-sim/**"
+      - ".github/workflows/sim-test.yml"
+
+# Cancel superseded runs — pushing twice to the same PR shouldn't burn two
+# macOS slots in parallel.
+concurrency:
+  group: sim-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sim-test:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+
+      - name: Boot iOS simulator
+        id: boot-sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | node -e "
+            const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+            const iosRuntimes = Object.keys(data.devices).filter(r => r.includes('iOS'));
+            iosRuntimes.sort().reverse();
+            for (const runtime of iosRuntimes) {
+              for (const d of data.devices[runtime]) {
+                if (d.isAvailable && d.name.includes('iPhone')) {
+                  console.log(d.udid);
+                  process.exit(0);
+                }
+              }
+            }
+          ")
+          if [ -z "$UDID" ]; then
+            echo "No pre-created iOS simulator found; creating one from the latest runtime"
+            RUNTIME=$(xcrun simctl list runtimes -j | node -e "
+              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const ios = data.runtimes.filter(r => r.isAvailable && r.identifier.includes('iOS'));
+              ios.sort((a, b) => a.version.localeCompare(b.version));
+              console.log(ios[ios.length - 1].identifier);
+            ")
+            DEVICETYPE=$(xcrun simctl list devicetypes -j | node -e "
+              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const iphones = data.devicetypes.filter(d => d.identifier.includes('iPhone'));
+              console.log(iphones[iphones.length - 1].identifier);
+            ")
+            UDID=$(xcrun simctl create "ci-test-iphone" "$DEVICETYPE" "$RUNTIME")
+          fi
+          echo "Booting simulator $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          open -ga Simulator || true
+          echo "udid=$UDID" >> $GITHUB_OUTPUT
+
+      - name: serve-sim tests
+        run: bun test packages/serve-sim/src/__tests__/
+
+      - name: Shutdown simulator
+        if: always() && steps.boot-sim.outputs.udid != ''
+        run: xcrun simctl shutdown "${{ steps.boot-sim.outputs.udid }}" || true
