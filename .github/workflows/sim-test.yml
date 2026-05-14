@@ -26,21 +26,30 @@ jobs:
       - name: Boot iOS simulator
         id: boot-sim
         run: |
-          UDID=$(xcrun simctl list devices available -j | node -e "
-            const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-            const iosRuntimes = Object.keys(data.devices).filter(r => r.includes('iOS'));
-            iosRuntimes.sort().reverse();
-            for (const runtime of iosRuntimes) {
-              for (const d of data.devices[runtime]) {
-                if (d.isAvailable && d.name.includes('iPhone')) {
-                  console.log(d.udid);
-                  process.exit(0);
+          # Fast path: GitHub's macOS runner images pre-create iPhone
+          # simulators, so try booting one by name directly. `simctl list`
+          # enumerates every device/runtime and was costing 1.5-3min of
+          # cold-CoreSimulator first-touch — boot-by-name pays that once on a
+          # single device instead. The first available name wins; fall back
+          # to the full discovery+create path only if none boot.
+          UDID=""
+          for NAME in "iPhone 16 Pro" "iPhone 16" "iPhone 15 Pro" "iPhone 15"; do
+            echo "Trying to boot \"$NAME\"..."
+            if OUT=$(xcrun simctl boot "$NAME" 2>&1); then
+              UDID=$(xcrun simctl list devices booted -j | node -e "
+                const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+                for (const devs of Object.values(data.devices)) {
+                  for (const d of devs) { console.log(d.udid); process.exit(0); }
                 }
-              }
-            }
-          ")
+              ")
+              echo "Booted \"$NAME\" -> $UDID"
+              break
+            fi
+            echo "  skip: $OUT"
+          done
+
           if [ -z "$UDID" ]; then
-            echo "No pre-created iOS simulator found; creating one from the latest runtime"
+            echo "No pre-created iPhone simulator booted; creating one from the latest runtime"
             RUNTIME=$(xcrun simctl list runtimes -j | node -e "
               const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
               const ios = data.runtimes.filter(r => r.isAvailable && r.identifier.includes('iOS'));
@@ -53,9 +62,9 @@ jobs:
               console.log(iphones[iphones.length - 1].identifier);
             ")
             UDID=$(xcrun simctl create "ci-test-iphone" "$DEVICETYPE" "$RUNTIME")
+            xcrun simctl boot "$UDID" || true
           fi
-          echo "Booting simulator $UDID"
-          xcrun simctl boot "$UDID" || true
+
           xcrun simctl bootstatus "$UDID" -b
           open -ga Simulator || true
           echo "udid=$UDID" >> $GITHUB_OUTPUT
