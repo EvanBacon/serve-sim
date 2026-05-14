@@ -132,6 +132,18 @@ Sources:
 
 `serve-sim` can be used with dev servers, browser, and AI editors for more seamless integration.
 
+### Agent Skill
+
+An [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) ships in [`skills/serve-sim`](skills/serve-sim) — it teaches AI coding agents (Claude Code, Cursor, Codex CLI, Gemini CLI, and any host implementing the open Agent Skills standard) how to drive a simulator through the CLI: taps, gestures, hardware buttons, rotation, camera injection, and handing the stream off to the host's preview pane.
+
+```sh
+bunx add-skill EvanBacon/serve-sim
+# in Claude Code:
+/plugin marketplace add EvanBacon/serve-sim
+```
+
+See [`skills/serve-sim/README.md`](skills/serve-sim/README.md) for the full capability list.
+
 ### Claude Code Desktop
 
 Create a `.claude/launch.json` and define a server:
