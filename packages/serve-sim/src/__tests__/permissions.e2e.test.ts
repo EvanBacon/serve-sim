@@ -108,32 +108,37 @@ function locationAuth(bundleId: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+// Each case shells the built CLI a few times, and a cold `simctl privacy`
+// call (location) can take several seconds on a fresh CI sim — comfortably
+// past bun's 5s default. Give every hook and test a generous budget.
+const T = 30_000;
+
 describeIfSim("serve-sim permissions (real simulator)", () => {
   beforeAll(() => {
     // Start from a known-clean slate for the fake bundle.
     cli("reset", "all", FAKE_BUNDLE);
-  });
+  }, T);
 
   test("grant camera writes a TCC row with auth_value=2", () => {
     cli("grant", "camera", FAKE_BUNDLE);
     expect(tccAuthValue("kTCCServiceCamera")).toBe("2");
-  });
+  }, T);
 
   test("revoke camera flips auth_value to 0", () => {
     cli("revoke", "camera", FAKE_BUNDLE);
     expect(tccAuthValue("kTCCServiceCamera")).toBe("0");
-  });
+  }, T);
 
   test("reset camera removes the TCC row", () => {
     cli("grant", "camera", FAKE_BUNDLE);
     cli("reset", "camera", FAKE_BUNDLE);
     expect(tccAuthValue("kTCCServiceCamera")).toBe("");
-  });
+  }, T);
 
   test("grant photos --value limited writes auth_value=3", () => {
     cli("grant", "photos", FAKE_BUNDLE, "--value", "limited");
     expect(tccAuthValue("kTCCServicePhotos")).toBe("3");
-  });
+  }, T);
 
   test("grant notifications sets allowsNotifications=true in BulletinBoard", () => {
     cli("grant", "notifications", FAKE_BUNDLE);
@@ -141,38 +146,38 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
     expect(sectionInfoInnerXml()).toMatch(
       /<key>allowsNotifications<\/key>\s*<true\/>/,
     );
-  });
+  }, T);
 
   test("grant notifications --value critical sets criticalAlertSetting=2", () => {
     cli("grant", "notifications", FAKE_BUNDLE, "--value", "critical");
     expect(sectionInfoInnerXml()).toMatch(
       /<key>criticalAlertSetting<\/key>\s*<integer>2<\/integer>/,
     );
-  });
+  }, T);
 
   test("revoke notifications sets allowsNotifications=false", () => {
     cli("revoke", "notifications", FAKE_BUNDLE);
     expect(sectionInfoInnerXml()).toMatch(
       /<key>allowsNotifications<\/key>\s*<false\/>/,
     );
-  });
+  }, T);
 
   test("reset notifications removes the bundle entry", () => {
     cli("grant", "notifications", FAKE_BUNDLE);
     cli("reset", "notifications", FAKE_BUNDLE);
     expect(bulletinXml()).not.toContain(FAKE_BUNDLE);
-  });
+  }, T);
 
   test("grant location --value always writes Authorization=4", () => {
     cli("grant", "location", REAL_APP, "--value", "always");
     expect(locationAuth(REAL_APP)).toBe(4);
-  });
+  }, T);
 
   test("revoke location downgrades Authorization to never (1)", () => {
     cli("revoke", "location", REAL_APP);
     expect(locationAuth(REAL_APP)).toBe(1);
     cli("reset", "location", REAL_APP);
-  });
+  }, T);
 
   test("reset all clears the TCC and notification stores for the bundle", () => {
     cli("grant", "camera", FAKE_BUNDLE);
@@ -180,23 +185,19 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
     cli("reset", "all", FAKE_BUNDLE);
     expect(tccAuthValue("kTCCServiceCamera")).toBe("");
     expect(bulletinXml()).not.toContain(FAKE_BUNDLE);
-  });
+  }, T);
 
-  test(
-    "list reports state under the CLI's own permission names",
-    () => {
-      cli("grant", "camera", FAKE_BUNDLE);
-      cli("grant", "notifications", FAKE_BUNDLE);
-      cli("grant", "location", REAL_APP, "--value", "always");
-      const fake = JSON.parse(cli("list", FAKE_BUNDLE));
-      expect(fake.tcc.camera).toBe(2);
-      expect(fake.notifications.allowsNotifications).toBe(true);
-      const realOut = JSON.parse(cli("list", REAL_APP));
-      expect(realOut.udid).toBe(udid);
-      expect(realOut.location.Authorization).toBe(4);
-      cli("reset", "all", FAKE_BUNDLE);
-      cli("reset", "location", REAL_APP);
-    },
-    20000,
-  );
+  test("list reports state under the CLI's own permission names", () => {
+    cli("grant", "camera", FAKE_BUNDLE);
+    cli("grant", "notifications", FAKE_BUNDLE);
+    cli("grant", "location", REAL_APP, "--value", "always");
+    const fake = JSON.parse(cli("list", FAKE_BUNDLE));
+    expect(fake.tcc.camera).toBe(2);
+    expect(fake.notifications.allowsNotifications).toBe(true);
+    const realOut = JSON.parse(cli("list", REAL_APP));
+    expect(realOut.udid).toBe(udid);
+    expect(realOut.location.Authorization).toBe(4);
+    cli("reset", "all", FAKE_BUNDLE);
+    cli("reset", "location", REAL_APP);
+  }, T);
 });
