@@ -1,0 +1,80 @@
+{
+  "skill_name": "serve-sim",
+  "evals": [
+    {
+      "id": 1,
+      "name": "tap-then-home",
+      "prompt": "I'm running an iPhone 16 Pro simulator. Please tap the center of the screen and then send the app to background.",
+      "expected_behavior": [
+        "Verifies a simulator is booted before issuing commands.",
+        "Uses `npx serve-sim tap 0.5 0.5` (NOT `gesture` with begin/end) for the tap.",
+        "Uses `npx serve-sim button home` (or `swipe_home` on Face ID devices) to background the app.",
+        "Does NOT pass pixel coordinates."
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "camera-injection-rotate",
+      "prompt": "Test the camera flow of my app com.acme.MyApp. Inject this image as the camera feed (~/Pictures/test.png), force mirror off so any text in the image reads correctly, then rotate to landscape_left.",
+      "expected_behavior": [
+        "Checks macOS major version is 14+ before attempting camera injection.",
+        "Runs `npx serve-sim camera com.acme.MyApp --file ~/Pictures/test.png --mirror off` (or `--no-mirror`).",
+        "Runs `npx serve-sim rotate landscape_left`.",
+        "Verifies helper state via `npx serve-sim camera status -q`.",
+        "Tears down with `npx serve-sim camera --stop-webcam` when finished."
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "stream-and-pull-notification-center",
+      "prompt": "Stream my simulator so I can share the URL remotely. Then drag down from the top edge to open Notification Center.",
+      "expected_behavior": [
+        "Runs `npx serve-sim --detach -q` and surfaces the returned URL to the user.",
+        "Issues a gesture sequence (begin → move → end) with `edge: 2` (top), starting at low y (~0.02) and dragging down to y ~0.4.",
+        "Each gesture call uses `npx serve-sim gesture '<json>'` with valid normalized coordinates.",
+        "Does NOT use `tap` for this multi-step gesture."
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "blended-layers-debug",
+      "prompt": "I think my settings screen has too many blended layers — can you turn on the CoreAnimation blended overlay, grab a screenshot from the stream, and turn it off again?",
+      "expected_behavior": [
+        "Runs `npx serve-sim ca-debug blended on` (alias accepted; `debug_color_blended` also valid).",
+        "Captures a JPEG from `http://localhost:<port>/stream.mjpeg?raw=1` with a short curl timeout, or from the preview UI.",
+        "Runs `npx serve-sim ca-debug blended off` after capture.",
+        "Reports the path to the saved screenshot."
+      ],
+      "files": []
+    },
+    {
+      "id": 5,
+      "name": "ax-driven-tap",
+      "prompt": "There's a Submit button somewhere on the current screen. Tap it without me telling you where it is.",
+      "expected_behavior": [
+        "Fetches the accessibility tree from `/ax` on the stream server.",
+        "Locates an element whose label matches 'Submit' (case-insensitive).",
+        "Computes the element center, normalizes against `/config` width/height, and calls `npx serve-sim tap <nx> <ny>`.",
+        "If no matching element is found, reports that — does not guess coordinates."
+      ],
+      "files": []
+    },
+    {
+      "id": 6,
+      "name": "preview-handoff",
+      "prompt": "I've got my app running in the iPhone 16 Pro simulator. Stream it and show me the preview right here in this agent — don't make me open another window.",
+      "expected_behavior": [
+        "Runs `npx serve-sim --detach -q` and parses the returned JSON to extract the `url` field.",
+        "Surfaces the URL plainly in the response so the user has a manual fallback.",
+        "Inspects available tools for a preview/URL-opening capability (`preview_start`, `mcp__Claude_Preview__preview_start`, `browser_open`, etc.) and calls it with the URL if found.",
+        "If no such tool is available, explicitly tells the user that and instructs them to open the URL in their host's browser/preview pane.",
+        "Does NOT try to install, build, or launch the app — assumes the simulator + app are already running per the prompt.",
+        "Does NOT invent a host-specific tool name that doesn't exist in the current session."
+      ],
+      "files": []
+    }
+  ]
+}
