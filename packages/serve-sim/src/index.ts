@@ -7,6 +7,8 @@ import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
+import { findBootedDevice, resolveDevice } from "./device";
+import { permissions } from "./permissions";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -191,21 +193,6 @@ function helperSpawnEnv(): NodeJS.ProcessEnv {
 
 // ─── Device helpers ───
 
-function findBootedDevice(): string | null {
-  try {
-    const output = execSync("xcrun simctl list devices booted -j", { encoding: "utf-8" });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
-    };
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.state === "Booted") return device.udid;
-      }
-    }
-  } catch {}
-  return null;
-}
-
 /**
  * Pick a sensible default device to boot when the user runs `serve-sim` with
  * no booted simulator. Prefers an available iPhone on the newest iOS runtime.
@@ -247,25 +234,6 @@ function getDeviceName(udid: string): string | null {
     }
   } catch {}
   return null;
-}
-
-function resolveDevice(nameOrUDID: string): string {
-  if (/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(nameOrUDID)) {
-    return nameOrUDID;
-  }
-  try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
-    };
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.name.toLowerCase() === nameOrUDID.toLowerCase()) return device.udid;
-      }
-    }
-  } catch {}
-  console.error(`Could not resolve device: ${nameOrUDID}`);
-  process.exit(1);
 }
 
 function isDeviceBooted(udid: string): boolean {
@@ -1924,6 +1892,13 @@ Usage:
   serve-sim camera <bundle-id> [-d udid] [--image <path>] [--build]
                                         Inject a synthetic camera feed and
                                         launch the app (no build-time changes)
+  serve-sim permissions <grant|revoke|reset|list> <permission> <bundle-id>
+                                        Manage app permissions (camera, photos,
+                                        location, notifications, contacts, …).
+                                        grant location <id> --value always
+                                        reset all <id> clears every permission.
+                                        Manages the permission only, not push
+                                        delivery (use xcrun simctl push).
 
 Options:
   -p, --port <port>   Starting port (preview default: 3200, stream default: 3100)
@@ -1983,6 +1958,10 @@ if (argv[0] === "memory-warning") {
 }
 if (argv[0] === "camera") {
   await camera(argv.slice(1));
+  process.exit(0);
+}
+if (argv[0] === "permissions") {
+  await permissions(argv.slice(1));
   process.exit(0);
 }
 // Parse flags and positional args
