@@ -41,7 +41,7 @@ export function AppPermissionsTool({
       setError(null);
       try {
         const res = await execOnHost(
-          `${cliPrefix} permissions ${action} ${service} ${shellEscape(bundleId)} -d ${udid}`,
+          `${cliPrefix} permissions ${action} ${service} ${shellEscape(bundleId)} -d ${shellEscape(udid)}`,
         );
         if (res.exitCode !== 0) {
           setError(res.stderr.trim() || `serve-sim permissions failed (exit ${res.exitCode})`);
@@ -61,7 +61,7 @@ export function AppPermissionsTool({
     setError(null);
     try {
       const res = await execOnHost(
-        `${cliPrefix} permissions reset all ${shellEscape(bundleId)} -d ${udid}`,
+        `${cliPrefix} permissions reset all ${shellEscape(bundleId)} -d ${shellEscape(udid)}`,
       );
       if (res.exitCode !== 0) {
         setError(res.stderr.trim() || `serve-sim permissions failed (exit ${res.exitCode})`);

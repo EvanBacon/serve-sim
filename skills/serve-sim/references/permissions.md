@@ -18,8 +18,9 @@ npx serve-sim permissions list   [bundle-id] [-d <udid|name>]
 - `revoke` (alias: `deny`) — deny the permission.
 - `reset` — clear it so the app is prompted again next time. `reset all` clears
   every permission for the bundle id.
-- `list` — print current state as JSON (`tcc` map + `location`). Pass `-q` for
-  single-line JSON.
+- `list` — print current state as JSON: a `tcc` map (keyed by the same
+  permission names `grant`/`revoke`/`reset` accept), plus `location` and
+  `notifications`. Pass `-q` for single-line JSON.
 
 `<bundle-id>` is required for every verb except `list`. The app must be
 installed; `location` in particular silently no-ops on an uninstalled bundle.
@@ -96,5 +97,3 @@ npx serve-sim permissions reset all com.example.app
   need to be relaunched to observe the new state.
 - Use a real installed bundle id. Find one with
   `xcrun simctl listapps booted`.
-- `list` reads `TCC.db` and `clients.plist`; it does not report the
-  notification state.

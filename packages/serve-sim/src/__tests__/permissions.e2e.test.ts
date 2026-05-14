@@ -183,12 +183,14 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
   });
 
   test(
-    "list returns JSON reflecting the current state",
+    "list reports state under the CLI's own permission names",
     () => {
       cli("grant", "camera", FAKE_BUNDLE);
+      cli("grant", "notifications", FAKE_BUNDLE);
       cli("grant", "location", REAL_APP, "--value", "always");
-      const out = cli("list", FAKE_BUNDLE);
-      expect(JSON.parse(out).tcc.kTCCServiceCamera).toBe(2);
+      const fake = JSON.parse(cli("list", FAKE_BUNDLE));
+      expect(fake.tcc.camera).toBe(2);
+      expect(fake.notifications.allowsNotifications).toBe(true);
       const realOut = JSON.parse(cli("list", REAL_APP));
       expect(realOut.udid).toBe(udid);
       expect(realOut.location.Authorization).toBe(4);

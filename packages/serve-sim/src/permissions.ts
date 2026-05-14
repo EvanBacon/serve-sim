@@ -251,6 +251,12 @@ function writeTcc(
   }
 }
 
+// Reverse of TCC_SERVICES, so `list` reports the same permission names that
+// grant/revoke/reset accept rather than raw kTCCService* database keys.
+const TCC_NAME_BY_SERVICE: Record<string, string> = Object.fromEntries(
+  Object.entries(TCC_SERVICES).map(([name, service]) => [service, name]),
+);
+
 function readTcc(udid: string, bundleId?: string): Record<string, number> {
   const db = tccDbPath(udid);
   if (!existsSync(db)) return {};
@@ -262,7 +268,7 @@ function readTcc(udid: string, bundleId?: string): Record<string, number> {
   const result: Record<string, number> = {};
   for (const line of out.split("\n")) {
     const [service, authValue] = line.split("|");
-    if (service) result[service] = Number(authValue);
+    if (service) result[TCC_NAME_BY_SERVICE[service] ?? service] = Number(authValue);
   }
   return result;
 }
@@ -441,6 +447,41 @@ function setNotifications(
   }
 }
 
+function readNotifications(
+  udid: string,
+  bundleId: string | undefined,
+): { allowsNotifications: boolean; critical: boolean } | null {
+  if (!bundleId) return null;
+  const path = bulletinPlistPath(udid);
+  if (!existsSync(path)) return null;
+  let sectionInfo: string;
+  try {
+    sectionInfo = plutil(["-extract", "sectionInfo", "xml1", "-o", "-", path]);
+  } catch {
+    return null;
+  }
+  const m = sectionInfo.match(
+    new RegExp(
+      `<key>${bundleId.replace(/[.-]/g, "\\$&")}</key>\\s*<data>([\\s\\S]*?)</data>`,
+    ),
+  );
+  if (!m?.[1]) return null;
+  const tmp = makeTmpDir();
+  try {
+    const blob = join(tmp, "section-info.plist");
+    writeFileSync(blob, Buffer.from(m[1].replace(/\s/g, ""), "base64"));
+    const inner = plutil(["-convert", "xml1", "-o", "-", blob]);
+    return {
+      allowsNotifications: /<key>allowsNotifications<\/key>\s*<true\/>/.test(inner),
+      critical: /<key>criticalAlertSetting<\/key>\s*<integer>2<\/integer>/.test(inner),
+    };
+  } catch {
+    return null;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // ─── Dispatch ───
 
 function applyOne(
@@ -506,6 +547,7 @@ export async function permissions(args: string[]): Promise<void> {
       bundleId: parsed.bundleId ?? null,
       tcc: readTcc(udid, parsed.bundleId),
       location: readLocation(udid, parsed.bundleId),
+      notifications: readNotifications(udid, parsed.bundleId),
     };
     console.log(JSON.stringify(result, null, quiet ? 0 : 2));
     process.exit(0);
