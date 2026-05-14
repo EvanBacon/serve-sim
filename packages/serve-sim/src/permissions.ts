@@ -28,6 +28,7 @@ const TCC_SERVICES: Record<string, string> = {
   camera: "kTCCServiceCamera",
   microphone: "kTCCServiceMicrophone",
   photos: "kTCCServicePhotos",
+  "photos-add": "kTCCServicePhotosAdd",
   contacts: "kTCCServiceAddressBook",
   calendar: "kTCCServiceCalendar",
   reminders: "kTCCServiceReminders",

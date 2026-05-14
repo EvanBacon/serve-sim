@@ -8,6 +8,7 @@ export const PERMISSION_SERVICES: { key: string; label: string }[] = [
   { key: "reminders", label: "Reminders" },
   { key: "location", label: "Location" },
   { key: "location-always", label: "Location (Always)" },
+  { key: "notifications", label: "Notifications" },
   { key: "motion", label: "Motion" },
   { key: "media-library", label: "Media Library" },
   { key: "siri", label: "Siri" },

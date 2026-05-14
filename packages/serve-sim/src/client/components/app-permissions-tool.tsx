@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Chevron, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import {
@@ -19,6 +19,17 @@ export function AppPermissionsTool({
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
+  // The `serve-sim permissions` subcommand handles the stores `simctl privacy`
+  // can't (push notifications via BulletinBoard, location's `i<bundleId>:`
+  // clients.plist keys), so the UI drives it instead of calling simctl directly.
+  const cliPrefix = useMemo(() => {
+    const bin = window.__SIM_PREVIEW__?.serveSimBin;
+    if (!bin) return "serve-sim";
+    if (/\.ts$/.test(bin)) return `bun ${shellEscape(bin)}`;
+    if (/\.js$/.test(bin)) return `node ${shellEscape(bin)}`;
+    return shellEscape(bin);
+  }, []);
+
   // Reset assumed state whenever the foreground app changes.
   useEffect(() => { setState({}); setError(null); }, [bundleId]);
 
@@ -30,10 +41,10 @@ export function AppPermissionsTool({
       setError(null);
       try {
         const res = await execOnHost(
-          `xcrun simctl privacy ${udid} ${action} ${service} ${shellEscape(bundleId)}`,
+          `${cliPrefix} permissions ${action} ${service} ${shellEscape(bundleId)} -d ${udid}`,
         );
         if (res.exitCode !== 0) {
-          setError(res.stderr.trim() || `simctl privacy failed (exit ${res.exitCode})`);
+          setError(res.stderr.trim() || `serve-sim permissions failed (exit ${res.exitCode})`);
           return;
         }
         setState((s) => ({ ...s, [service]: action === "reset" ? undefined : action }));
@@ -41,7 +52,7 @@ export function AppPermissionsTool({
         setPending(null);
       }
     },
-    [udid, bundleId],
+    [cliPrefix, udid, bundleId],
   );
 
   const resetAll = useCallback(async () => {
@@ -50,17 +61,17 @@ export function AppPermissionsTool({
     setError(null);
     try {
       const res = await execOnHost(
-        `xcrun simctl privacy ${udid} reset all ${shellEscape(bundleId)}`,
+        `${cliPrefix} permissions reset all ${shellEscape(bundleId)} -d ${udid}`,
       );
       if (res.exitCode !== 0) {
-        setError(res.stderr.trim() || `simctl privacy failed (exit ${res.exitCode})`);
+        setError(res.stderr.trim() || `serve-sim permissions failed (exit ${res.exitCode})`);
         return;
       }
       setState({});
     } finally {
       setPending(null);
     }
-  }, [udid, bundleId]);
+  }, [cliPrefix, udid, bundleId]);
 
   if (!bundleId) {
     return (
@@ -150,7 +161,7 @@ export function AppPermissionsTool({
             onClick={resetAll}
             disabled={pending === "__all__"}
             className="bg-transparent border border-white/12 text-white/70 text-[10px] px-2 py-[3px] rounded-[5px] cursor-pointer uppercase tracking-[0.04em]"
-            title="xcrun simctl privacy reset all"
+            title="serve-sim permissions reset all"
           >
             {pending === "__all__" ? "…" : "Reset all"}
           </button>
