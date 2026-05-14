@@ -63,6 +63,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "bun-plugin-tailwind": "^0.1.2",
+    "commander": "^14.0.1",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

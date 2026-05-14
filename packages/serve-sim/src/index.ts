@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { Command } from "commander";
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
@@ -795,26 +796,10 @@ function killStreams(deviceArg?: string) {
   }
 }
 
-async function gesture(args: string[]) {
-  let deviceArg: string | undefined;
-  const filteredArgs: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--device" || args[i] === "-d") {
-      deviceArg = args[++i];
-    } else {
-      filteredArgs.push(args[i]!);
-    }
-  }
+async function gesture(jsonStr: string, deviceArg?: string) {
   const state = readState(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
-
-  const jsonStr = filteredArgs[0];
-  if (!jsonStr) {
-    console.error("Usage: serve-sim gesture '<json>'");
-    console.error('Example: serve-sim gesture \'{"type":"begin","x":0.5,"y":0.5}\'');
     process.exit(1);
   }
 
@@ -846,18 +831,9 @@ async function gesture(args: string[]) {
   });
 }
 
-async function tap(args: string[]) {
-  let deviceArg: string | undefined;
-  const positional: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--device" || args[i] === "-d") {
-      deviceArg = args[++i];
-    } else {
-      positional.push(args[i]!);
-    }
-  }
-  const x = positional[0] !== undefined ? Number(positional[0]) : NaN;
-  const y = positional[1] !== undefined ? Number(positional[1]) : NaN;
+async function tap(xArg: string, yArg: string, deviceArg?: string) {
+  const x = Number(xArg);
+  const y = Number(yArg);
   if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
     console.error("Usage: serve-sim tap <x> <y> [-d udid]");
     console.error("  x, y are normalized 0..1 of the simulator screen");
@@ -893,23 +869,13 @@ async function tap(args: string[]) {
   });
 }
 
-async function typeText(args: string[]) {
-  let deviceArg: string | undefined;
-  let useStdin = false;
-  let inputFile: string | undefined;
-  const positional: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === "--device" || a === "-d") {
-      deviceArg = args[++i];
-    } else if (a === "--stdin") {
-      useStdin = true;
-    } else if (a === "--file") {
-      inputFile = args[++i];
-    } else {
-      positional.push(a);
-    }
-  }
+async function typeText(
+  positional: string[],
+  opts: { device?: string; stdin?: boolean; file?: string },
+) {
+  const deviceArg = opts.device;
+  const useStdin = opts.stdin ?? false;
+  const inputFile = opts.file;
 
   const sourceCount = [positional.length > 0, useStdin, inputFile != null].filter(Boolean).length;
   if (sourceCount === 0 || sourceCount > 1) {
@@ -957,23 +923,13 @@ async function typeText(args: string[]) {
   await sendKeyEventsToWs(state.wsUrl, events);
 }
 
-async function rotate(args: string[]) {
-  let deviceArg: string | undefined;
-  const filteredArgs: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--device" || args[i] === "-d") {
-      deviceArg = args[++i];
-    } else {
-      filteredArgs.push(args[i]!);
-    }
-  }
+async function rotate(orientation: string, deviceArg?: string) {
   const state = readState(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
     process.exit(1);
   }
 
-  const orientation = filteredArgs[0];
   const valid = new Set([
     "portrait",
     "portrait_upside_down",
@@ -1007,23 +963,12 @@ async function rotate(args: string[]) {
   });
 }
 
-async function button(args: string[]) {
-  let deviceArg: string | undefined;
-  const filteredArgs: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--device" || args[i] === "-d") {
-      deviceArg = args[++i];
-    } else {
-      filteredArgs.push(args[i]!);
-    }
-  }
+async function button(buttonName = "home", deviceArg?: string) {
   const state = readState(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
     process.exit(1);
   }
-
-  const buttonName = filteredArgs[0] ?? "home";
 
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl);
@@ -1048,18 +993,8 @@ async function button(args: string[]) {
 // Send a CoreAnimation debug option toggle to the helper, which invokes
 // -[SimDevice setCADebugOption:enabled:] (CoreSimulator private category).
 // The known option strings are the ones Simulator.app uses: see Protocol.swift.
-async function caDebug(args: string[]) {
-  let deviceArg: string | undefined;
-  const filtered: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--device" || args[i] === "-d") {
-      deviceArg = args[++i];
-    } else {
-      filtered.push(args[i]!);
-    }
-  }
-  const option = filtered[0];
-  const stateArg = (filtered[1] ?? "").toLowerCase();
+async function caDebug(option: string, stateRaw: string, deviceArg?: string) {
+  const stateArg = (stateRaw ?? "").toLowerCase();
   const enabled = stateArg === "on" || stateArg === "1" || stateArg === "true";
   const aliases: Record<string, string> = {
     blended: "debug_color_blended",
@@ -1103,11 +1038,7 @@ async function caDebug(args: string[]) {
 }
 
 // Ask the helper to invoke -[SimDevice simulateMemoryWarning].
-async function memoryWarning(args: string[]) {
-  let deviceArg: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--device" || args[i] === "-d") deviceArg = args[++i];
-  }
+async function memoryWarning(deviceArg?: string) {
   const stateFile = readState(deviceArg);
   if (!stateFile) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
@@ -1870,182 +1801,141 @@ function bindPreviewServer(port: number, middleware: ReturnType<typeof import(".
   return servePreview({ port, middleware, host });
 }
 
-function printHelp() {
-  console.log(`
-serve-sim - Stream iOS Simulator to the browser
-
-Usage:
-  serve-sim [device...]                 Start preview server (default: localhost:3200)
-  serve-sim --no-preview [device...]    Stream in foreground without a preview server
-  serve-sim gesture '<json>' [-d udid]  Send a touch gesture
-  serve-sim tap <x> <y> [-d udid]       Tap at normalized 0..1 coords
-  serve-sim button [name] [-d udid]     Send a button press (default: home)
-  serve-sim type <text> [-d udid]       Type text (US keyboard only)
-                                        Use --stdin or --file <path> for input from stdin/file
-  serve-sim rotate <orientation> [-d udid]
-                                        Set device orientation
-                                        (portrait|portrait_upside_down|landscape_left|landscape_right)
-  serve-sim ca-debug <option> <on|off> [-d udid]
-                                        Toggle a CoreAnimation debug render flag
-                                        (blended|copies|misaligned|offscreen|slow-animations)
-  serve-sim memory-warning [-d udid]    Simulate a memory warning on the device
-  serve-sim camera <bundle-id> [-d udid] [--image <path>] [--build]
-                                        Inject a synthetic camera feed and
-                                        launch the app (no build-time changes)
-  serve-sim permissions <grant|revoke|reset|list> <permission> <bundle-id>
-                                        Manage app permissions (camera, photos,
-                                        location, notifications, contacts, …).
-                                        grant location <id> --value always
-                                        reset all <id> clears every permission.
-                                        Manages the permission only, not push
-                                        delivery (use xcrun simctl push).
-
-Options:
-  -p, --port <port>   Starting port (preview default: 3200, stream default: 3100)
-      --host <addr>   Interface to bind the preview server to (default: 127.0.0.1).
-                      Use 0.0.0.0 to expose on the LAN — only do this on trusted
-                      networks: the preview exposes a token-gated shell-exec route.
-  -d, --detach        Spawn helper and exit (daemon mode)
-  -q, --quiet         Suppress human-readable output, JSON only
-      --no-preview    Skip the web preview server; stream in foreground only
-      --list [device] List running streams
-      --kill [device] Kill running stream(s)
-  -h, --help          Show this help
-
-Examples:
-  serve-sim                             Open simulator preview at localhost:3200
-  serve-sim -p 8080                     Preview on a custom port
-  serve-sim --no-preview                Auto-detect booted sim, stream in foreground
-  serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
-  serve-sim --detach                    Start streaming in background (daemon)
-  serve-sim --list                      Show all running streams
-  serve-sim --kill                      Stop all streams
-`);
-}
-
 // ─── Main ───
 
-const argv = process.argv.slice(2);
+const program = new Command();
 
-// Subcommands: gesture and button
-if (argv[0] === "gesture") {
-  await gesture(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "tap") {
-  await tap(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "button") {
-  await button(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "type") {
-  await typeText(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "rotate") {
-  await rotate(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "ca-debug") {
-  await caDebug(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "memory-warning") {
-  await memoryWarning(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "camera") {
-  await camera(argv.slice(1));
-  process.exit(0);
-}
-if (argv[0] === "permissions") {
-  await permissions(argv.slice(1));
-  process.exit(0);
-}
-// Parse flags and positional args
-let startPort: number | undefined;
-let detachMode = false;
-let quiet = false;
-let list = false;
-let kill = false;
-let help = false;
-let noPreview = false;
-// Bind to loopback by default. The preview exposes /exec; LAN binding requires
-// explicit opt-in via --host so a dev who has the package installed isn't
-// silently exposing arbitrary shell-exec to anyone on the same Wi-Fi.
-let host = "127.0.0.1";
-const positionalDevices: string[] = [];
-let listDevice: string | undefined;
-let killDevice: string | undefined;
+program
+  .name("serve-sim")
+  .description("Stream iOS Simulator to the browser")
+  .helpOption("-h, --help", "Show this help")
+  // The default command: start the preview server (or stream / list / kill).
+  .argument("[devices...]", "Simulator(s) to target (udid or name; default: booted)")
+  .option("-p, --port <port>", "Starting port (preview default: 3200, stream default: 3100)", (v) => parseInt(v, 10))
+  .option(
+    "--host <addr>",
+    "Interface to bind the preview server to. Use 0.0.0.0 to expose on the " +
+      "LAN — only on trusted networks: the preview exposes a token-gated " +
+      "shell-exec route.",
+    "127.0.0.1",
+  )
+  .option("--detach", "Spawn helper and exit (daemon mode)")
+  .option("-q, --quiet", "Suppress human-readable output, JSON only")
+  .option("--no-preview", "Skip the web preview server; stream in foreground only")
+  .option("-l, --list [device]", "List running streams")
+  .option("-k, --kill [device]", "Kill running stream(s)")
+  .addHelpText(
+    "after",
+    `
+Examples:
+  serve-sim                              Open simulator preview at localhost:3200
+  serve-sim -p 8080                      Preview on a custom port
+  serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
+  serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
+  serve-sim --detach                     Start streaming in background (daemon)
+  serve-sim --list                       Show all running streams
+  serve-sim --kill                       Stop all streams`,
+  )
+  .action(async (devices: string[], opts) => {
+    if (opts.list !== undefined) {
+      listStreams(typeof opts.list === "string" ? opts.list : undefined);
+      return;
+    }
+    if (opts.kill !== undefined) {
+      killStreams(typeof opts.kill === "string" ? opts.kill : undefined);
+      return;
+    }
+    const startPort: number | undefined = opts.port;
+    if (opts.detach) {
+      const states = await detach(devices, startPort ?? 3100);
+      printStatesJSON(states);
+    } else if (opts.preview === false) {
+      await follow(devices, startPort ?? 3100, !!opts.quiet);
+    } else {
+      await serve(startPort ?? 3200, devices, startPort !== undefined, opts.host);
+    }
+  });
 
-for (let i = 0; i < argv.length; i++) {
-  const arg = argv[i]!;
-  switch (arg) {
-    case "--port": case "-p":
-      startPort = parseInt(argv[++i] ?? "3100", 10);
-      break;
-    case "--host":
-      host = argv[++i] ?? "127.0.0.1";
-      break;
-    case "--detach": case "-d":
-      detachMode = true;
-      break;
-    case "--quiet": case "-q":
-      quiet = true;
-      break;
-    case "--no-preview":
-      noPreview = true;
-      break;
-    case "--list": case "-l":
-      list = true;
-      // Optional device arg after --list
-      if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) {
-        listDevice = argv[++i];
-      }
-      break;
-    case "--kill": case "-k":
-      kill = true;
-      // Optional device arg after --kill
-      if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) {
-        killDevice = argv[++i];
-      }
-      break;
-    case "--help": case "-h": case "help":
-      help = true;
-      break;
-    default:
-      if (!arg.startsWith("-")) {
-        positionalDevices.push(arg);
-      } else {
-        console.error(`Unknown flag: ${arg}`);
-        printHelp();
-        process.exit(1);
-      }
-  }
-}
+const deviceOpt = ["-d, --device <udid>", "Target a specific simulator (udid or name)"] as const;
 
-if (help) {
-  printHelp();
-  process.exit(0);
-}
+program
+  .command("gesture")
+  .description("Send a touch gesture")
+  .argument("<json>", 'Gesture JSON, e.g. \'{"type":"begin","x":0.5,"y":0.5}\'')
+  .option(...deviceOpt)
+  .action((json: string, opts) => gesture(json, opts.device));
 
-if (list) {
-  listStreams(listDevice);
-  process.exit(0);
-}
+program
+  .command("tap")
+  .description("Tap at normalized 0..1 coords")
+  .argument("<x>", "X coord, normalized 0..1")
+  .argument("<y>", "Y coord, normalized 0..1")
+  .option(...deviceOpt)
+  .action((x: string, y: string, opts) => tap(x, y, opts.device));
 
-if (kill) {
-  killStreams(killDevice);
-  process.exit(0);
-}
+program
+  .command("button")
+  .description("Send a hardware button press")
+  .argument("[name]", "Button name", "home")
+  .option(...deviceOpt)
+  .action((name: string, opts) => button(name, opts.device));
 
-if (detachMode) {
-  const states = await detach(positionalDevices, startPort ?? 3100);
-  printStatesJSON(states);
-} else if (noPreview) {
-  await follow(positionalDevices, startPort ?? 3100, quiet);
-} else {
-  await serve(startPort ?? 3200, positionalDevices, startPort !== undefined, host);
-}
+program
+  .command("type")
+  .description("Type text (US keyboard only)")
+  .argument("[text...]", "Text to type")
+  .option(...deviceOpt)
+  .option("--stdin", "Read text from stdin")
+  .option("--file <path>", "Read text from a file")
+  .action((text: string[], opts) =>
+    typeText(text, { device: opts.device, stdin: opts.stdin, file: opts.file }),
+  );
+
+program
+  .command("rotate")
+  .description(
+    "Set device orientation " +
+      "(portrait|portrait_upside_down|landscape_left|landscape_right)",
+  )
+  .argument("<orientation>")
+  .option(...deviceOpt)
+  .action((orientation: string, opts) => rotate(orientation, opts.device));
+
+program
+  .command("ca-debug")
+  .description(
+    "Toggle a CoreAnimation debug render flag " +
+      "(blended|copies|misaligned|offscreen|slow-animations)",
+  )
+  .argument("<option>")
+  .argument("<state>", "on|off")
+  .option(...deviceOpt)
+  .action((option: string, state: string, opts) => caDebug(option, state, opts.device));
+
+program
+  .command("memory-warning")
+  .description("Simulate a memory warning on the device")
+  .option(...deviceOpt)
+  .action((opts) => memoryWarning(opts.device));
+
+// `camera` and `permissions` keep their own dedicated argument parsers (the
+// camera verb has nested sub-verbs and source flags; permissions has a
+// unit-tested parser module). Register them as passthrough commands so they
+// still appear in `--help` and route to those parsers verbatim.
+program
+  .command("camera")
+  .description("Inject a synthetic camera feed and launch an app (see `camera --help`)")
+  .allowUnknownOption(true)
+  .helpOption(false)
+  .argument("[args...]")
+  .action((args: string[]) => camera(args));
+
+program
+  .command("permissions")
+  .description("Manage app permissions (see `permissions` with no args for usage)")
+  .allowUnknownOption(true)
+  .helpOption(false)
+  .argument("[args...]")
+  .action((args: string[]) => permissions(args));
+
+await program.parseAsync(process.argv);
