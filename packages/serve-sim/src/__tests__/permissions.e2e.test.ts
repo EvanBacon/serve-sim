@@ -75,10 +75,10 @@ function sectionInfoInnerXml(): string {
   });
   const m = xml.match(
     new RegExp(
-      `<key>${FAKE_BUNDLE.replace(/[.\-]/g, "\\$&")}</key>\\s*<data>([\\s\\S]*?)</data>`,
+      `<key>${FAKE_BUNDLE.replace(/[.-]/g, "\\$&")}</key>\\s*<data>([\\s\\S]*?)</data>`,
     ),
   );
-  if (!m) throw new Error(`no sectionInfo entry for ${FAKE_BUNDLE}`);
+  if (!m?.[1]) throw new Error(`no sectionInfo entry for ${FAKE_BUNDLE}`);
   const blob = Buffer.from(m[1].replace(/\s/g, ""), "base64");
   const tmp = join(libDir(), "..", `.serve-sim-e2e-${Date.now()}.plist`);
   require("fs").writeFileSync(tmp, blob);
@@ -99,7 +99,7 @@ function locationAuth(bundleId: string): number | null {
   });
   const m = xml.match(
     new RegExp(
-      `<key>i${bundleId.replace(/[.\-]/g, "\\$&")}:</key>\\s*<dict>[\\s\\S]*?` +
+      `<key>i${bundleId.replace(/[.-]/g, "\\$&")}:</key>\\s*<dict>[\\s\\S]*?` +
         `<key>Authorization</key>\\s*<integer>(\\d+)</integer>`,
     ),
   );

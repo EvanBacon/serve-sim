@@ -86,7 +86,7 @@ export interface ParsedArgs {
   device?: string;
 }
 
-const BUNDLE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9.\-]*$/;
+const BUNDLE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*$/;
 
 export function parsePermissionsArgs(
   args: string[],
@@ -97,6 +97,7 @@ export function parsePermissionsArgs(
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
+    if (a === undefined) continue;
     if (a === "-d" || a === "--device") {
       device = args[++i];
       if (!device) return { error: "Missing value for -d/--device" };
@@ -349,7 +350,7 @@ function readLocation(
   }
   const m = xml.match(
     new RegExp(
-      `<key>i${bundleId.replace(/[.\-]/g, "\\$&")}:</key>\\s*<dict>[\\s\\S]*?` +
+      `<key>i${bundleId.replace(/[.-]/g, "\\$&")}:</key>\\s*<dict>[\\s\\S]*?` +
         `<key>Authorization</key>\\s*<integer>(\\d+)</integer>`,
     ),
   );
