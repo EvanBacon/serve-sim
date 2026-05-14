@@ -2,7 +2,6 @@ import { execFileSync } from "child_process";
 import {
   chmodSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -303,22 +302,36 @@ function makeTmpDir(): string {
 
 // ─── Location writer ───
 
-const LOCATION_AUTH: Record<string, number> = { never: 1, inuse: 2, always: 4 };
-
-const EMPTY_PLIST =
-  '<?xml version="1.0" encoding="UTF-8"?>\n' +
-  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" ' +
-  '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n' +
-  '<plist version="1.0"><dict/></plist>\n';
-
-function ensureLocationPlist(udid: string): string {
-  const path = locationdPlistPath(udid);
-  mkdirSync(join(path, ".."), { recursive: true });
-  if (!existsSync(path)) {
-    writeFileSync(path, EMPTY_PLIST);
-    plutil(["-convert", "binary1", path]);
+// locationd owns clients.plist and keys app entries with an `i<bundleId>:`
+// scheme — the trailing colon is part of the key, so neither plutil (dot
+// paths) nor PlistBuddy (colon paths) can address it, and a hand-written
+// plain-bundle-id entry is ignored. `simctl privacy` understands the format
+// and is reliable specifically for location, so delegate to it here.
+function setLocation(
+  udid: string,
+  bundleId: string,
+  mode: "grant" | "revoke" | "reset",
+  value: string | undefined,
+): void {
+  let action = "grant";
+  let service = "location";
+  if (mode === "reset") {
+    action = "reset";
+  } else if (mode === "revoke" || value === "never") {
+    action = "revoke";
+  } else if (value === "always") {
+    service = "location-always";
   }
-  return path;
+  try {
+    execFileSync("xcrun", ["simctl", "privacy", udid, action, service, bundleId], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (e: any) {
+    throw new Error(
+      `simctl privacy ${action} ${service} failed: ` +
+        String(e?.stderr ?? e?.message ?? e).trim(),
+    );
+  }
 }
 
 function readLocation(
@@ -328,44 +341,19 @@ function readLocation(
   if (!bundleId) return null;
   const path = locationdPlistPath(udid);
   if (!existsSync(path)) return null;
-  const out = plistBuddy(path, [`Print :${bundleId}:Authorization`], {
-    ignoreErrors: true,
-  }).trim();
-  const n = Number(out);
-  return out && !Number.isNaN(n) ? { Authorization: n } : null;
-}
-
-function setLocation(
-  udid: string,
-  bundleId: string,
-  mode: "grant" | "revoke" | "reset",
-  value: string | undefined,
-): void {
-  const path = ensureLocationPlist(udid);
-  // Clear any existing entry first so grant/revoke is idempotent.
-  plistBuddy(path, [`Delete :${bundleId}`, "Save"], { ignoreErrors: true });
-  if (mode !== "reset") {
-    const level = mode === "revoke" ? "never" : (value ?? "inuse");
-    const auth = LOCATION_AUTH[level];
-    plistBuddy(path, [
-      `Add :${bundleId} dict`,
-      `Add :${bundleId}:Authorization integer ${auth}`,
-      `Add :${bundleId}:AuthorizationUpgradeAvailable bool false`,
-      `Add :${bundleId}:SupportedAuthorizationMask integer 7`,
-      `Add :${bundleId}:BundleId string ${bundleId}`,
-      `Add :${bundleId}:Whitelisted bool false`,
-      "Save",
-    ]);
-  }
-  // locationd reads clients.plist on (re)launch. Stopping it forces a reload
-  // the next time an app requests location, without rebooting the simulator.
+  let xml: string;
   try {
-    execFileSync(
-      "xcrun",
-      ["simctl", "spawn", udid, "launchctl", "stop", "com.apple.locationd"],
-      { stdio: "ignore" },
-    );
-  } catch {}
+    xml = plutil(["-convert", "xml1", "-o", "-", path]);
+  } catch {
+    return null;
+  }
+  const m = xml.match(
+    new RegExp(
+      `<key>i${bundleId.replace(/[.\-]/g, "\\$&")}:</key>\\s*<dict>[\\s\\S]*?` +
+        `<key>Authorization</key>\\s*<integer>(\\d+)</integer>`,
+    ),
+  );
+  return m ? { Authorization: Number(m[1]) } : null;
 }
 
 // ─── Notifications writer ───

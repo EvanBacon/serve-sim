@@ -11,6 +11,9 @@ import { join } from "path";
 // `xcrun simctl privacy`, which is the whole reason this command exists.
 
 const FAKE_BUNDLE = "com.serve-sim.permissions-e2e";
+// Location goes through `simctl privacy`, which no-ops on a bundle id that
+// isn't installed — so location assertions need a real stock app.
+const REAL_APP = "com.apple.mobilecal";
 const PKG_DIR = join(import.meta.dir, "../..");
 const CLI = join(PKG_DIR, "dist/serve-sim.js");
 
@@ -86,10 +89,21 @@ function sectionInfoInnerXml(): string {
   }
 }
 
-function locationXml(): string {
+// locationd keys entries as `i<bundleId>:`; pull the Authorization integer out
+// of that entry's dict.
+function locationAuth(bundleId: string): number | null {
   const plist = join(libDir(), "Caches/locationd/clients.plist");
-  if (!existsSync(plist)) return "";
-  return execSync(`plutil -convert xml1 -o - "${plist}"`, { encoding: "utf-8" });
+  if (!existsSync(plist)) return null;
+  const xml = execSync(`plutil -convert xml1 -o - "${plist}"`, {
+    encoding: "utf-8",
+  });
+  const m = xml.match(
+    new RegExp(
+      `<key>i${bundleId.replace(/[.\-]/g, "\\$&")}:</key>\\s*<dict>[\\s\\S]*?` +
+        `<key>Authorization</key>\\s*<integer>(\\d+)</integer>`,
+    ),
+  );
+  return m ? Number(m[1]) : null;
 }
 
 describeIfSim("serve-sim permissions (real simulator)", () => {
@@ -151,39 +165,37 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
   });
 
   test("grant location --value always writes Authorization=4", () => {
-    cli("grant", "location", FAKE_BUNDLE, "--value", "always");
-    expect(locationXml()).toMatch(
-      new RegExp(
-        `<key>${FAKE_BUNDLE}</key>[\\s\\S]*?<key>Authorization</key>\\s*<integer>4</integer>`,
-      ),
-    );
+    cli("grant", "location", REAL_APP, "--value", "always");
+    expect(locationAuth(REAL_APP)).toBe(4);
   });
 
   test("revoke location downgrades Authorization to never (1)", () => {
-    cli("revoke", "location", FAKE_BUNDLE);
-    expect(locationXml()).toMatch(
-      new RegExp(
-        `<key>${FAKE_BUNDLE}</key>[\\s\\S]*?<key>Authorization</key>\\s*<integer>1</integer>`,
-      ),
-    );
+    cli("revoke", "location", REAL_APP);
+    expect(locationAuth(REAL_APP)).toBe(1);
+    cli("reset", "location", REAL_APP);
   });
 
-  test("reset all clears every store for the bundle", () => {
+  test("reset all clears the TCC and notification stores for the bundle", () => {
     cli("grant", "camera", FAKE_BUNDLE);
     cli("grant", "notifications", FAKE_BUNDLE);
-    cli("grant", "location", FAKE_BUNDLE, "--value", "always");
     cli("reset", "all", FAKE_BUNDLE);
     expect(tccAuthValue("kTCCServiceCamera")).toBe("");
     expect(bulletinXml()).not.toContain(FAKE_BUNDLE);
-    expect(locationXml()).not.toContain(FAKE_BUNDLE);
   });
 
-  test("list returns JSON reflecting the current state", () => {
-    cli("grant", "camera", FAKE_BUNDLE);
-    const out = cli("list", FAKE_BUNDLE);
-    const parsed = JSON.parse(out);
-    expect(parsed.udid).toBe(udid);
-    expect(parsed.tcc.kTCCServiceCamera).toBe(2);
-    cli("reset", "all", FAKE_BUNDLE);
-  });
+  test(
+    "list returns JSON reflecting the current state",
+    () => {
+      cli("grant", "camera", FAKE_BUNDLE);
+      cli("grant", "location", REAL_APP, "--value", "always");
+      const out = cli("list", FAKE_BUNDLE);
+      expect(JSON.parse(out).tcc.kTCCServiceCamera).toBe(2);
+      const realOut = JSON.parse(cli("list", REAL_APP));
+      expect(realOut.udid).toBe(udid);
+      expect(realOut.location.Authorization).toBe(4);
+      cli("reset", "all", FAKE_BUNDLE);
+      cli("reset", "location", REAL_APP);
+    },
+    20000,
+  );
 });
