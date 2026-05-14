@@ -60,12 +60,15 @@ xcrun simctl openurl booted "myapp://products/42"
 # 2. Wait briefly for the app to handle the deep link
 sleep 1
 
-# 3. Verify the frontmost app is yours
-curl -s "http://localhost:3100/foreground" | jq
+# 3. Resolve the stream endpoint — do not hardcode :3100, it may differ
+PORT=$(npx serve-sim --list -q | jq -r '.[0].streamUrl' | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+
+# 4. Verify the frontmost app is yours
+curl -s "http://localhost:${PORT}/foreground" | jq
 # Expect: {"bundleId":"com.acme.myapp","pid":12345}
 
-# 4. Verify the screen by reading the accessibility tree
-curl -s "http://localhost:3100/ax" | jq '.[] | select(.label | test("Product #42"))'
+# 5. Verify the screen by reading the accessibility tree
+curl -s "http://localhost:${PORT}/ax" | jq '.[] | select(.label | test("Product #42"))'
 ```
 
 ## Workflow 3: Test a camera capture flow
@@ -103,14 +106,17 @@ npx serve-sim ca-debug blended on
 # 2. Navigate to the screen of interest (via openurl, taps, etc.)
 xcrun simctl openurl booted "myapp://settings"
 
-# 3. Grab a screenshot from the MJPEG stream
-curl -s "http://localhost:3100/stream.mjpeg?raw=1" \
+# 3. Resolve the stream endpoint — do not hardcode :3100, it may differ
+PORT=$(npx serve-sim --list -q | jq -r '.[0].streamUrl' | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+
+# 4. Grab a screenshot from the MJPEG stream
+curl -s "http://localhost:${PORT}/stream.mjpeg?raw=1" \
   --max-time 1 -o /tmp/blended.jpg
 
-# 4. Inspect — red regions are blended (expensive); green is opaque (good)
+# 5. Inspect — red regions are blended (expensive); green is opaque (good)
 open /tmp/blended.jpg
 
-# 5. Turn off
+# 6. Turn off
 npx serve-sim ca-debug blended off
 ```
 
@@ -148,6 +154,8 @@ In a Node agent:
 import WebSocket from "ws";
 import { encodeSingleTouch, encodeMultiTouch } from "serve-sim-client/touch-codec";
 
+// 3100 is the default stream port — discover the real one with
+// `serve-sim --list -q` (.streamUrl) when it may differ.
 const ws = new WebSocket("ws://localhost:3100/ws");
 await new Promise((r) => ws.once("open", r));
 
