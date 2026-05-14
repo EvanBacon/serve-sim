@@ -23,6 +23,12 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
 
+      # The permissions e2e test drives the built CLI (dist/serve-sim.js), so
+      # build it up front rather than from inside the test.
+      - name: Build serve-sim
+        run: bun run build.ts
+        working-directory: packages/serve-sim
+
       - name: Boot iOS simulator
         id: boot-sim
         run: |

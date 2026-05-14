@@ -37,7 +37,9 @@ function bootedUdid(): string | null {
 }
 
 const udid = bootedUdid();
-const describeIfSim = udid ? describe : describe.skip;
+// Needs both a booted iOS sim and the built CLI. CI builds serve-sim before
+// running this directory; locally, run `bun run build.ts` first or it skips.
+const describeIfSim = udid && existsSync(CLI) ? describe : describe.skip;
 
 function cli(...args: string[]): string {
   return execFileSync("node", [CLI, "permissions", ...args], { encoding: "utf-8" });
@@ -108,9 +110,6 @@ function locationAuth(bundleId: string): number | null {
 
 describeIfSim("serve-sim permissions (real simulator)", () => {
   beforeAll(() => {
-    if (!existsSync(CLI)) {
-      execSync("bun run build.ts", { cwd: PKG_DIR, stdio: "inherit" });
-    }
     // Start from a known-clean slate for the fake bundle.
     cli("reset", "all", FAKE_BUNDLE);
   });

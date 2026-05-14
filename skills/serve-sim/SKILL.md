@@ -1,6 +1,6 @@
 ---
 name: serve-sim
-description: Controls a running iOS, iPad, or Apple Watch Simulator via the serve-sim CLI (npx serve-sim) and streams it into the host agent's preview pane. Use whenever the user wants an AI agent to view or drive an Apple Simulator — streaming to preview, taps at normalized coordinates, multi-touch gestures, hardware buttons, rotation, memory warnings, CoreAnimation debug, synthetic camera injection, or media drag-drop. Triggers include "serve-sim", "iOS simulator", "Apple simulator", "iPad simulator", "Apple Watch simulator", "stream the simulator", "show the simulator in preview", "view the simulator here", "open simulator in preview", "simulator gestures", "tap on the simulator", "rotate the simulator", "inject camera feed", or any request to drive or display an Apple Simulator visually. Do NOT use for Android emulators, building/installing an iOS app (use xcodebuild), booting a simulator from scratch (use xcrun simctl boot), in-app React Native runtime debugging (use rn-debugger), or real iOS hardware.
+description: Controls a running iOS, iPad, or Apple Watch Simulator via the serve-sim CLI (npx serve-sim) and streams it into the host agent's preview pane. Use whenever the user wants an AI agent to view or drive an Apple Simulator — streaming to preview, taps at normalized coordinates, multi-touch gestures, hardware buttons, rotation, memory warnings, CoreAnimation debug, synthetic camera injection, media drag-drop, or managing app privacy permissions. Triggers include "serve-sim", "iOS simulator", "Apple simulator", "iPad simulator", "Apple Watch simulator", "stream the simulator", "show the simulator in preview", "view the simulator here", "open simulator in preview", "simulator gestures", "tap on the simulator", "rotate the simulator", "inject camera feed", "grant simulator permissions", "allow push notifications in the simulator", or any request to drive or display an Apple Simulator visually. Do NOT use for Android emulators, building/installing an iOS app (use xcodebuild), booting a simulator from scratch (use xcrun simctl boot), in-app React Native runtime debugging (use rn-debugger), or real iOS hardware.
 license: Apache-2.0
 ---
 
@@ -16,6 +16,7 @@ Drive an Apple Simulator (iOS, iPad, Apple Watch) from an agent using the [serve
 - The user wants to **toggle CoreAnimation debug overlays** (off-screen rendering, blended layers, slow animations) for performance work.
 - The user wants to **simulate a memory warning** or **rotate the device** programmatically.
 - The user wants to **read the simulator's accessibility tree** to find UI elements without pixel hunting.
+- The user wants to **grant, revoke, or reset an app's privacy permissions** — camera, photos, location, contacts, or **push notifications**.
 
 ## When NOT to use
 
@@ -79,6 +80,7 @@ Key invariants the agent must respect:
 | CoreAnimation debug | `npx serve-sim ca-debug <option> <on\|off>` | Options: `blended`, `copies`, `misaligned`, `offscreen`, `slow-animations`. See [references/ca-debug.md](references/ca-debug.md). |
 | Inject camera feed | `npx serve-sim camera <bundle-id> [--file <path>\|--webcam [name]]` | (Re)launches the app with the camera dylib attached. macOS 14+ only. See [references/camera.md](references/camera.md). |
 | Hot-swap camera source | `npx serve-sim camera switch <placeholder\|webcam\|file> [arg]` | No app relaunch. |
+| Manage app permissions | `npx serve-sim permissions <grant\|revoke\|reset\|list> <permission> <bundle-id>` | Camera, photos, location, **push notifications**, contacts, etc. See [references/permissions.md](references/permissions.md). |
 | Read accessibility tree | `curl http://localhost:3100/ax` | Returns axe-style JSON. See [references/endpoints.md](references/endpoints.md) for all endpoints. |
 
 Most subcommands accept `-d <udid|name>` to target a specific device when several are booted.
@@ -170,6 +172,7 @@ Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
 - [references/gestures.md](references/gestures.md) — exact gesture JSON shapes, edge values, multi-touch, drag/swipe recipes.
 - [references/buttons-rotation.md](references/buttons-rotation.md) — the six valid buttons and the four orientations, with behavioral notes.
 - [references/camera.md](references/camera.md) — synthetic camera injection: placeholder, file, webcam, mirror modes, hot-swap.
+- [references/permissions.md](references/permissions.md) — granting/revoking app privacy permissions, including push notifications.
 - [references/ca-debug.md](references/ca-debug.md) — the five CoreAnimation debug flags and when each one helps.
 - [references/endpoints.md](references/endpoints.md) — HTTP and WebSocket endpoints for agents that bypass the CLI.
 - [references/workflows.md](references/workflows.md) — end-to-end recipes for UI automation, camera testing, deep-link flows.
