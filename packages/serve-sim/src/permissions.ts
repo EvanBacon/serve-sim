@@ -409,10 +409,20 @@ function setNotifications(
 ): void {
   const path = bulletinPlistPath(udid);
   if (!existsSync(path)) {
-    throw new Error(
-      `BulletinBoard plist not found for ${udid}. The simulator may still be ` +
-        `booting — wait for it to finish and retry.\n  ${path}`,
-    );
+    // The plist appears shortly after SpringBoard starts. `reset` on a store
+    // that doesn't exist yet is a no-op (nothing to clear); grant/revoke wait
+    // briefly for it before giving up.
+    if (mode === "reset") return;
+    const deadline = Date.now() + 5000;
+    while (!existsSync(path) && Date.now() < deadline) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+    if (!existsSync(path)) {
+      throw new Error(
+        `BulletinBoard plist not found for ${udid}. The simulator may still ` +
+          `be booting — wait for it to finish and retry.\n  ${path}`,
+      );
+    }
   }
 
   // VersionedSectionInfo.plist is held immutable so SpringBoard doesn't clobber
