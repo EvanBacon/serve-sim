@@ -41,7 +41,7 @@ A booted simulator is required for most subcommands. Check with `xcrun simctl li
 
 ## Mental model
 
-```
+```text
 ┌──────────────┐  simctl io  ┌─────────────────┐  MJPEG / WS  ┌─────────┐
 │ iOS Simulator│ ──────────► │ serve-sim-bin   │ ───────────► │ Browser │
 └──────────────┘   (Swift)   │ (per-device)    │              └─────────┘
