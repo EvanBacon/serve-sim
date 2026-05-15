@@ -6,6 +6,7 @@ import { createServer as createNetServer } from "net";
 import { randomBytes, timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import { createAxStreamerCache } from "./ax";
+import { debugMw } from "./debug";
 
 type SimReq = IncomingMessage;
 type SimRes = ServerResponse;
@@ -211,6 +212,7 @@ function readServeSimStates(): ServeSimState[] {
       try {
         process.kill(state.pid, 0);
       } catch {
+        debugMw("helper pid=%d gone, removing %s", state.pid, path);
         try { unlinkSync(path); } catch {}
         continue;
       }
@@ -219,6 +221,11 @@ function readServeSimStates(): ServeSimState[] {
       // preview stuck on "Connecting...". Recycle the stale state so the
       // caller can spawn a fresh helper bound to whatever is booted.
       if (booted && !booted.has(state.device)) {
+        debugMw(
+          "recycling stale helper pid=%d (device %s no longer booted)",
+          state.pid,
+          state.device,
+        );
         try { process.kill(state.pid, "SIGTERM"); } catch {}
         try { unlinkSync(path); } catch {}
         continue;
@@ -986,6 +993,12 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     if (url === base + "/api") {
       const states = readServeSimStates();
       const state = selectServeSimState(states, selectedDevice);
+      debugMw(
+        "GET /api selectedDevice=%s states=%d chose=%s",
+        selectedDevice ?? "(any)",
+        states.length,
+        state ? `${state.device}@${state.port}` : "none",
+      );
       res.writeHead(200, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",

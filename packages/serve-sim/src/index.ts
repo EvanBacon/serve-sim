@@ -10,6 +10,7 @@ import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from ".
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { findBootedDevice, resolveDevice } from "./device";
 import { permissions } from "./permissions";
+import { debugCli, debugHelper, debugState } from "./debug";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -87,12 +88,16 @@ function getBootedUdids(): Set<string> | null {
 
 function readStateFile(file: string): ServerState | null {
   try {
-    if (!existsSync(file)) return null;
+    if (!existsSync(file)) {
+      debugState("state file missing %s", file);
+      return null;
+    }
     const state = JSON.parse(readFileSync(file, "utf-8")) as ServerState;
     try {
       process.kill(state.pid, 0);
     } catch {
       // Helper process is gone — drop the file.
+      debugState("helper pid %d dead, removing stale state %s", state.pid, file);
       unlinkSync(file);
       return null;
     }
@@ -103,6 +108,11 @@ function readStateFile(file: string): ServerState | null {
     // recycle here so --detach / --list always return a working stream.
     const booted = getBootedUdids();
     if (booted && !booted.has(state.device)) {
+      debugState(
+        "helper pid %d bound to non-booted device %s — killing stale helper",
+        state.pid,
+        state.device,
+      );
       console.error(
         `[serve-sim] Helper pid ${state.pid} is bound to device ${state.device} which is no longer booted — killing stale helper.`,
       );
@@ -110,8 +120,10 @@ function readStateFile(file: string): ServerState | null {
       try { unlinkSync(file); } catch {}
       return null;
     }
+    debugState("state ok pid=%d device=%s port=%d", state.pid, state.device, state.port);
     return state;
-  } catch {
+  } catch (err) {
+    debugState("readStateFile threw for %s: %o", file, err);
     return null;
   }
 }
@@ -128,12 +140,15 @@ function readAllStates(): ServerState[] {
 function writeState(state: ServerState) {
   ensureStateDir();
   writeFileSync(stateFileForDevice(state.device), JSON.stringify(state, null, 2));
+  debugState("wrote state pid=%d device=%s port=%d", state.pid, state.device, state.port);
 }
 
 function clearState(udid?: string) {
   if (udid) {
+    debugState("clearState device=%s", udid);
     try { unlinkSync(stateFileForDevice(udid)); } catch {}
   } else {
+    debugState("clearState (all)");
     for (const file of listStateFiles()) {
       try { unlinkSync(file); } catch {}
     }
@@ -382,30 +397,61 @@ async function waitForHelperReady(
   isAlive: () => boolean,
 ): Promise<{ ready: boolean; log: string }> {
   let ready = false;
+  const startedAt = Date.now();
+  debugHelper("waitForHelperReady pid=%d url=%s", pid, url);
 
   // Poll /health
   for (let i = 0; i < 30; i++) {
-    if (!isAlive()) break;
+    if (!isAlive()) {
+      debugHelper("helper pid=%d died during /health polling (attempt %d)", pid, i);
+      break;
+    }
     try {
       const res = await fetch(`${url}/health`);
-      if (res.ok) { ready = true; break; }
+      if (res.ok) {
+        ready = true;
+        debugHelper("helper pid=%d /health ok after %dms", pid, Date.now() - startedAt);
+        break;
+      }
     } catch {}
     await new Promise((r) => setTimeout(r, 100));
   }
 
+  if (!ready) {
+    debugHelper("helper pid=%d /health never responded (%dms)", pid, Date.now() - startedAt);
+  }
+
   if (ready) {
     // Wait for capture to start or process to exit
-    const captureDeadline = Date.now() + 8_000;
+    const captureStartedAt = Date.now();
+    const captureDeadline = captureStartedAt + 8_000;
+    let captureSawStart = false;
     while (Date.now() < captureDeadline) {
       await new Promise((r) => setTimeout(r, 200));
       if (!isAlive()) {
+        debugHelper("helper pid=%d died while awaiting Capture started", pid);
         ready = false;
         break;
       }
       try {
         const log = readFileSync(logFile, "utf-8");
-        if (log.includes("Capture started")) break;
+        if (log.includes("Capture started")) {
+          captureSawStart = true;
+          debugHelper(
+            "helper pid=%d saw 'Capture started' after %dms",
+            pid,
+            Date.now() - captureStartedAt,
+          );
+          break;
+        }
       } catch {}
+    }
+    if (ready && !captureSawStart) {
+      debugHelper(
+        "helper pid=%d ready but never logged 'Capture started' within %dms — stream may not produce frames",
+        pid,
+        Date.now() - captureStartedAt,
+      );
     }
   }
 
@@ -486,21 +532,30 @@ async function startHelper(
   port: number,
   opts: { detach: boolean },
 ): Promise<{ pid: number; child?: ChildProcess }> {
+  debugHelper("startHelper udid=%s port=%d detach=%s", udid, port, opts.detach);
   await ensureBooted(udid);
 
   const host = "127.0.0.1";
   const helperPath = findHelperBinary();
   const logFile = join(STATE_DIR, `server-${udid}.log`);
+  debugHelper("helper binary=%s logFile=%s", helperPath, logFile);
   const spawnOpts: SpawnHelperOptions = { helperPath, udid, port, host, logFile };
 
   let lastLog = "";
   const MAX_ATTEMPTS = 2;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    debugHelper("spawn attempt %d/%d", attempt, MAX_ATTEMPTS);
     killPortHolder(port);
 
     if (opts.detach) {
       const result = await spawnHelperDetached(spawnOpts);
+      debugHelper(
+        "spawnHelperDetached result ready=%s pid=%d exited=%s",
+        result.ready,
+        result.pid,
+        result.exited,
+      );
       if (result.ready) {
         const state: ServerState = {
           pid: result.pid,
@@ -517,6 +572,11 @@ async function startHelper(
       lastLog = result.log;
     } else {
       const result = await spawnHelperAttached(spawnOpts);
+      debugHelper(
+        "spawnHelperAttached result ready=%s pid=%d",
+        result.ready,
+        result.child.pid,
+      );
       if (result.ready) {
         const state: ServerState = {
           pid: result.child.pid!,
@@ -547,6 +607,7 @@ async function startHelper(
 
 /** Foreground follow mode (default). Stays attached, cleans up on Ctrl+C. */
 async function follow(devices: string[], startPort: number, quiet: boolean) {
+  debugCli("follow devices=%o startPort=%d", devices, startPort);
   const udids = devices.length > 0
     ? devices.map(resolveDevice)
     : (() => {
@@ -646,6 +707,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
   // Monitor children — exit when all die (helper crashed / exited on its own)
   for (const [udid, child] of children) {
     child.on("exit", (code) => {
+      debugHelper("child exit udid=%s pid=%d code=%s", udid, child.pid, code);
       if (shuttingDown) return;
       if (!quiet) console.error(`[${udid}] Helper exited (code ${code})`);
       clearState(udid);
@@ -673,6 +735,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
 
 /** Detach mode (--detach). Spawns helpers and returns their states. */
 async function detach(devices: string[], startPort: number): Promise<ServerState[]> {
+  debugCli("detach devices=%o startPort=%d", devices, startPort);
   const udids = devices.length > 0
     ? devices.map(resolveDevice)
     : (() => {

@@ -60,8 +60,10 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/debug": "^4.1.13",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "debug": "^4.4.3",
     "bun-plugin-tailwind": "^0.1.2",
     "commander": "^14.0.1",
     "preact": "^10.29.1",
