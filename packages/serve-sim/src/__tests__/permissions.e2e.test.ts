@@ -110,8 +110,9 @@ function locationAuth(bundleId: string): number | null {
 
 // Each case shells the built CLI a few times, and a cold `simctl privacy`
 // call (location) can take several seconds on a fresh CI sim — comfortably
-// past bun's 5s default. Give every hook and test a generous budget.
-const T = 30_000;
+// past bun's 5s default. The beforeAll reset-all also cascades through every
+// permission while the sim is fully cold, so the budget has to cover that.
+const T = 90_000;
 
 describeIfSim("serve-sim permissions (real simulator)", () => {
   beforeAll(() => {

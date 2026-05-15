@@ -15,7 +15,7 @@ const CLI_PATH = join(import.meta.dir, "../../src/index.ts");
 const AX_RESPONSE_BUDGET_MS = process.env.CI ? 10_000 : 5_000;
 // The Swift helper returns 503 while the simulator's AX framework is still
 // warming up after boot. Poll past that startup window before failing.
-const AX_READY_BUDGET_MS = process.env.CI ? 30_000 : 10_000;
+const AX_READY_BUDGET_MS = process.env.CI ? 60_000 : 10_000;
 const AX_READY_POLL_INTERVAL_MS = 500;
 
 function firstBootedIosSim(): string | null {
