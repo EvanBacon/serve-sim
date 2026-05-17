@@ -877,6 +877,8 @@ static void InstallCoreMotionSwizzles(void) {
 
 #pragma mark - Install
 
+static void SimCamInstallPickerSwizzles(void); // defined below
+
 void SimCamInstallSwizzles(void) {
     Class dev = [AVCaptureDevice class];
     SwizzleClassMethod(dev,
@@ -1011,4 +1013,257 @@ void SimCamInstallSwizzles(void) {
         @selector(simcam_imageWithActions:));
 
     InstallCoreMotionSwizzles();
+    SimCamInstallPickerSwizzles();
+}
+
+#pragma mark - UIImagePickerController native-UI bridge
+
+// UIImagePickerController with sourceType=.camera renders Apple's own UI
+// in the simulator (CAMPreviewView, CAMDynamicShutterControl, flash & switch
+// buttons, etc.) but its viewfinder shows a gray "no camera" placeholder
+// (CAMSnapshotView) and the shutter is permanently disabled because there's
+// no real camera. We make the picker work by, on viewDidAppear:
+//
+//   1. Hiding CAMSnapshotView so our frames (already being pushed into the
+//      picker's AVCaptureVideoPreviewLayer via the existing setSession:
+//      swizzle) show through.
+//   2. Capturing CAMPreviewView's aspect so the captured photo can be
+//      center-cropped to match the live framing.
+//   3. Wrapping CAMDynamicShutterControl.delegate to catch
+//      shutterControlTouchAttemptedWhileDisabled: (fired even on a disabled
+//      shutter) and deliver our current frame to picker.delegate.
+//
+// All private class names are looked up by string with try/catch — if Apple
+// renames them in a future iOS, the picker degrades to "back to gray + no
+// shutter" rather than crashing.
+//
+// Credit: this is the approach pioneered by tddworks/baguette's SimCamInject.
+
+static NSString *const SimCamPickerUTImage = @"public.image";
+
+// Set during the view-tree walk so SimCamShutterDelegateWrapper can reach
+// the host picker without changing its delegate-protocol signature.
+static __weak UIImagePickerController *gSimCamCurrentPicker = nil;
+static const void *kSimCamShutterWrappedDelegateKey = &kSimCamShutterWrappedDelegateKey;
+
+static UIImage *SimCamPickerSnapshotImageMirrored(BOOL mirror) {
+    CVPixelBufferRef pb = [[SimCamRegistry shared] currentPixelBuffer];
+    if (!pb) return nil;
+    CIImage *ci = [CIImage imageWithCVPixelBuffer:pb];
+    if (mirror) ci = [ci imageByApplyingOrientation:kCGImagePropertyOrientationUpMirrored];
+    static CIContext *ctx = nil; static dispatch_once_t once;
+    dispatch_once(&once, ^{ ctx = [CIContext contextWithOptions:nil]; });
+    CGImageRef cg = [ctx createCGImage:ci fromRect:ci.extent];
+    CVPixelBufferRelease(pb);
+    if (!cg) return nil;
+    UIImage *img = [UIImage imageWithCGImage:cg];
+    CGImageRelease(cg);
+    return img;
+}
+
+static void SimCamDeliverFrameToPicker(UIImagePickerController *picker) {
+    if (!picker) return;
+    AVCaptureDevicePosition pos =
+        (picker.cameraDevice == UIImagePickerControllerCameraDeviceFront)
+        ? AVCaptureDevicePositionFront
+        : AVCaptureDevicePositionBack;
+    BOOL mirror = SimCamShouldMirror(pos);
+    UIImage *image = SimCamPickerSnapshotImageMirrored(mirror);
+    if (!image) {
+        simcam_log(@"picker shutter: no frame available — skipping delivery");
+        return;
+    }
+    id<UIImagePickerControllerDelegate, UINavigationControllerDelegate> delegate =
+        (id<UIImagePickerControllerDelegate, UINavigationControllerDelegate>)picker.delegate;
+    if (![delegate respondsToSelector:@selector(imagePickerController:didFinishPickingMediaWithInfo:)]) {
+        simcam_log(@"picker shutter: delegate %@ doesn't implement didFinishPickingMediaWithInfo:",
+            NSStringFromClass([(id)delegate class]));
+        return;
+    }
+    NSDictionary *info = @{
+        UIImagePickerControllerOriginalImage: image,
+        UIImagePickerControllerMediaType: SimCamPickerUTImage,
+    };
+    simcam_log(@"picker shutter → delivering %.0fx%.0f to %@",
+        image.size.width, image.size.height,
+        NSStringFromClass([(id)delegate class]));
+    [delegate imagePickerController:picker didFinishPickingMediaWithInfo:info];
+}
+
+// Wraps CAMDynamicShutterControl's delegate. In the simulator the shutter
+// is always disabled (no real camera), so taps come through as
+// shutterControlTouchAttemptedWhileDisabled: rather than the usual
+// short-press selector. Catch both and deliver a frame; forward everything
+// else to the original delegate via message forwarding so Apple's chrome
+// keeps working.
+@interface SimCamShutterDelegateWrapper : NSObject
+@property (nonatomic, weak) id originalDelegate;
+@property (nonatomic, weak) UIImagePickerController *picker;
+@property (nonatomic, assign) BOOL hasDelivered;
+@end
+
+@implementation SimCamShutterDelegateWrapper
+- (void)shutterControlTouchAttemptedWhileDisabled:(id)control {
+    if (self.hasDelivered) return;
+    self.hasDelivered = YES;
+    simcam_log(@"intercepted shutterControlTouchAttemptedWhileDisabled");
+    SimCamDeliverFrameToPicker(self.picker);
+}
+- (void)dynamicShutterControlDidShortPress:(id)control {
+    if (self.hasDelivered) return;
+    self.hasDelivered = YES;
+    simcam_log(@"intercepted dynamicShutterControlDidShortPress");
+    SimCamDeliverFrameToPicker(self.picker);
+}
+- (BOOL)respondsToSelector:(SEL)sel {
+    return [super respondsToSelector:sel] || [self.originalDelegate respondsToSelector:sel];
+}
+- (id)forwardingTargetForSelector:(SEL)sel {
+    if ([self.originalDelegate respondsToSelector:sel]) return self.originalDelegate;
+    return nil;
+}
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
+    NSMethodSignature *sig = [super methodSignatureForSelector:sel];
+    if (sig) return sig;
+    return [(NSObject *)self.originalDelegate methodSignatureForSelector:sel];
+}
+@end
+
+static void SimCamWalkPickerTree(UIView *view) {
+    NSString *cls = NSStringFromClass([view class]);
+
+    // CAMPreviewView is where Apple shows the live viewfinder. On iOS 26
+    // simulator it's force-hidden (no camera), and its inner CALayers have
+    // nil contents (the AVCaptureVideoPreviewLayer was created but never
+    // attached because the system errored). Unhide the view, hide the
+    // "Live Preview" UILabel placeholder, and register the empty content
+    // CALayer with the pump so our frames stream into it.
+    if ([cls isEqualToString:@"CAMPreviewView"]) {
+        if (view.hidden) {
+            view.hidden = NO;
+            simcam_log(@"un-hid CAMPreviewView (%@)", NSStringFromCGRect(view.frame));
+        }
+        // Hide the "Live Preview" placeholder label that Apple ships in the
+        // sim build. Real device doesn't have it; simulator does.
+        for (UIView *sub in view.subviews) {
+            if ([sub isKindOfClass:[UILabel class]] && !sub.hidden) {
+                sub.hidden = YES;
+                simcam_log(@"hid CAMPreviewView UILabel placeholder");
+            }
+        }
+        // Register the full-size content layer with the pump so it gets
+        // frames pushed into it via setContents:. Tag with the picker's
+        // current cameraDevice so SimCamShouldMirror picks the right axis
+        // (front → mirrored, back → not).
+        for (CALayer *sub in view.layer.sublayers) {
+            if (CGRectEqualToRect(sub.frame, view.bounds) ||
+                (sub.frame.size.width >= view.bounds.size.width * 0.95 &&
+                 sub.frame.size.height >= view.bounds.size.height * 0.95)) {
+                AVCaptureDevicePosition pos = AVCaptureDevicePositionBack;
+                if (gSimCamCurrentPicker.cameraDevice ==
+                    UIImagePickerControllerCameraDeviceFront) {
+                    pos = AVCaptureDevicePositionFront;
+                }
+                SimCamSetPosition(sub, pos);
+                [[SimCamRegistry shared] addPreviewLayer:(AVCaptureVideoPreviewLayer *)sub];
+                simcam_log(@"registered CAMPreviewView content layer %@ pos=%d",
+                    NSStringFromClass([sub class]), (int)pos);
+                break;
+            }
+        }
+    }
+
+    // CAMSnapshotView is a full-screen sibling that covers everything with
+    // a gray "viewfinder closed" image. Hide it so the preview shows.
+    if ([cls isEqualToString:@"CAMSnapshotView"] && !view.hidden) {
+        view.hidden = YES;
+        simcam_log(@"hid CAMSnapshotView to clear gray cover");
+    }
+
+    // CAMDynamicShutterControl — wrap its delegate so taps on the
+    // (disabled) shutter still deliver a frame. Apple reuses the same
+    // control instance across picker presentations, so re-seat picker and
+    // reset hasDelivered on every walk; otherwise the second shot would be
+    // silently dropped.
+    if ([cls isEqualToString:@"CAMDynamicShutterControl"] && gSimCamCurrentPicker) {
+        @try {
+            SimCamShutterDelegateWrapper *existing =
+                objc_getAssociatedObject(view, kSimCamShutterWrappedDelegateKey);
+            id currentDelegate = [view valueForKey:@"delegate"];
+            if (existing) {
+                existing.picker = gSimCamCurrentPicker;
+                existing.hasDelivered = NO;
+                if (currentDelegate != existing) {
+                    existing.originalDelegate = currentDelegate;
+                    [view setValue:existing forKey:@"delegate"];
+                    simcam_log(@"re-seated shutter wrapper (orig: %@)",
+                               NSStringFromClass([currentDelegate class]));
+                }
+            } else {
+                SimCamShutterDelegateWrapper *wrapper = [SimCamShutterDelegateWrapper new];
+                wrapper.originalDelegate = currentDelegate;
+                wrapper.picker = gSimCamCurrentPicker;
+                objc_setAssociatedObject(view, kSimCamShutterWrappedDelegateKey, wrapper,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [view setValue:wrapper forKey:@"delegate"];
+                simcam_log(@"hijacked %@.delegate (orig: %@)",
+                           cls, NSStringFromClass([currentDelegate class]));
+            }
+        } @catch (NSException *e) {
+            simcam_log(@"failed to hijack shutter delegate: %@", e);
+        }
+    }
+
+    for (UIView *child in view.subviews) SimCamWalkPickerTree(child);
+}
+
+@interface UIImagePickerController (SimCam)
+@end
+@implementation UIImagePickerController (SimCam)
+
++ (BOOL)simcam_isSourceTypeAvailable:(UIImagePickerControllerSourceType)t {
+    if (t == UIImagePickerControllerSourceTypeCamera) return YES;
+    return [self simcam_isSourceTypeAvailable:t];
+}
++ (NSArray<NSString *> *)simcam_availableMediaTypesForSourceType:(UIImagePickerControllerSourceType)t {
+    if (t == UIImagePickerControllerSourceTypeCamera) return @[SimCamPickerUTImage];
+    return [self simcam_availableMediaTypesForSourceType:t];
+}
++ (NSArray<NSNumber *> *)simcam_availableCaptureModesForCameraDevice:(UIImagePickerControllerCameraDevice)d {
+    (void)d; return @[ @(UIImagePickerControllerCameraCaptureModePhoto) ];
+}
++ (BOOL)simcam_isCameraDeviceAvailable:(UIImagePickerControllerCameraDevice)d { (void)d; return YES; }
++ (BOOL)simcam_isFlashAvailableForCameraDevice:(UIImagePickerControllerCameraDevice)d { (void)d; return NO; }
+
+- (void)simcam_viewDidAppear:(BOOL)animated {
+    [self simcam_viewDidAppear:animated];
+    if (self.sourceType != UIImagePickerControllerSourceTypeCamera) return;
+    gSimCamCurrentPicker = self;
+    SimCamWalkPickerTree(self.view);
+    gSimCamCurrentPicker = nil;
+}
+
+@end
+
+static void SimCamInstallPickerSwizzles(void) {
+    Class picker = [UIImagePickerController class];
+    SwizzleClassMethod(picker,
+        @selector(isSourceTypeAvailable:),
+        @selector(simcam_isSourceTypeAvailable:));
+    SwizzleClassMethod(picker,
+        @selector(availableMediaTypesForSourceType:),
+        @selector(simcam_availableMediaTypesForSourceType:));
+    SwizzleClassMethod(picker,
+        @selector(availableCaptureModesForCameraDevice:),
+        @selector(simcam_availableCaptureModesForCameraDevice:));
+    SwizzleClassMethod(picker,
+        @selector(isCameraDeviceAvailable:),
+        @selector(simcam_isCameraDeviceAvailable:));
+    SwizzleClassMethod(picker,
+        @selector(isFlashAvailableForCameraDevice:),
+        @selector(simcam_isFlashAvailableForCameraDevice:));
+    SwizzleInstanceMethod(picker,
+        @selector(viewDidAppear:),
+        @selector(simcam_viewDidAppear:));
+    simcam_log(@"UIImagePickerController swizzles installed");
 }
