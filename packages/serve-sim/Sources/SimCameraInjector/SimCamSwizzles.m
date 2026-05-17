@@ -1080,12 +1080,21 @@ static void SimCamDeliverFrameToPicker(UIImagePickerController *picker) {
             NSStringFromClass([(id)delegate class]));
         return;
     }
-    NSDictionary *info = @{
+    NSMutableDictionary *info = [NSMutableDictionary dictionaryWithDictionary:@{
         UIImagePickerControllerOriginalImage: image,
         UIImagePickerControllerMediaType: SimCamPickerUTImage,
-    };
-    simcam_log(@"picker shutter → delivering %.0fx%.0f to %@",
-        image.size.width, image.size.height,
+    }];
+    // With allowsEditing, Apple shows an edit screen before delivery and
+    // populates editedImage + cropRect. We skip the edit UI, but pass the
+    // image through both keys with a full-image crop so apps that read
+    // editedImage don't get nil.
+    if (picker.allowsEditing) {
+        info[UIImagePickerControllerEditedImage] = image;
+        info[UIImagePickerControllerCropRect] =
+            [NSValue valueWithCGRect:CGRectMake(0, 0, image.size.width, image.size.height)];
+    }
+    simcam_log(@"picker shutter → delivering %.0fx%.0f (edit=%d) to %@",
+        image.size.width, image.size.height, (int)picker.allowsEditing,
         NSStringFromClass([(id)delegate class]));
     [delegate imagePickerController:picker didFinishPickingMediaWithInfo:info];
 }
@@ -1246,24 +1255,29 @@ static void SimCamWalkPickerTree(UIView *view) {
 @end
 
 static void SimCamInstallPickerSwizzles(void) {
-    Class picker = [UIImagePickerController class];
-    SwizzleClassMethod(picker,
-        @selector(isSourceTypeAvailable:),
-        @selector(simcam_isSourceTypeAvailable:));
-    SwizzleClassMethod(picker,
-        @selector(availableMediaTypesForSourceType:),
-        @selector(simcam_availableMediaTypesForSourceType:));
-    SwizzleClassMethod(picker,
-        @selector(availableCaptureModesForCameraDevice:),
-        @selector(simcam_availableCaptureModesForCameraDevice:));
-    SwizzleClassMethod(picker,
-        @selector(isCameraDeviceAvailable:),
-        @selector(simcam_isCameraDeviceAvailable:));
-    SwizzleClassMethod(picker,
-        @selector(isFlashAvailableForCameraDevice:),
-        @selector(simcam_isFlashAvailableForCameraDevice:));
-    SwizzleInstanceMethod(picker,
-        @selector(viewDidAppear:),
-        @selector(simcam_viewDidAppear:));
-    simcam_log(@"UIImagePickerController swizzles installed");
+    // method_exchangeImplementations is its own inverse — a second call
+    // would un-install. Guard with dispatch_once.
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class picker = [UIImagePickerController class];
+        SwizzleClassMethod(picker,
+            @selector(isSourceTypeAvailable:),
+            @selector(simcam_isSourceTypeAvailable:));
+        SwizzleClassMethod(picker,
+            @selector(availableMediaTypesForSourceType:),
+            @selector(simcam_availableMediaTypesForSourceType:));
+        SwizzleClassMethod(picker,
+            @selector(availableCaptureModesForCameraDevice:),
+            @selector(simcam_availableCaptureModesForCameraDevice:));
+        SwizzleClassMethod(picker,
+            @selector(isCameraDeviceAvailable:),
+            @selector(simcam_isCameraDeviceAvailable:));
+        SwizzleClassMethod(picker,
+            @selector(isFlashAvailableForCameraDevice:),
+            @selector(simcam_isFlashAvailableForCameraDevice:));
+        SwizzleInstanceMethod(picker,
+            @selector(viewDidAppear:),
+            @selector(simcam_viewDidAppear:));
+        simcam_log(@"UIImagePickerController swizzles installed");
+    });
 }
