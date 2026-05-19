@@ -257,6 +257,38 @@ function endpoint(base: string, path: string, device: string): string {
   return `${value}?device=${encodeURIComponent(device)}`;
 }
 
+/**
+ * Rewrite the helper URLs in a state so they point at the hostname the request
+ * came in on. The helper binds on `*:<port>`, so once the host portion matches
+ * the dev-server origin, a remote viewer (LAN, or tunnel exposing the helper
+ * port under the same hostname) can reach the stream. Loopback callers get
+ * the state untouched.
+ */
+export function rewriteStateForRequestHost(
+  state: ServeSimState,
+  hostHeader: string | undefined,
+): ServeSimState {
+  if (!hostHeader) return state;
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${hostHeader}`).hostname;
+  } catch {
+    return state;
+  }
+  // `URL.hostname` keeps brackets around IPv6 literals, so the IPv6 loopback
+  // comparison is against the bracketed form rather than `::1`.
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") {
+    return state;
+  }
+  const rewrite = (s: string) => s.replace("127.0.0.1", hostname);
+  return {
+    ...state,
+    url: rewrite(state.url),
+    streamUrl: rewrite(state.streamUrl),
+    wsUrl: rewrite(state.wsUrl),
+  };
+}
+
 export function previewConfigForState(
   state: ServeSimState,
   base: string,
@@ -725,7 +757,8 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       }
 
       if (state) {
-        const config = JSON.stringify(previewConfigForState(state, base, serveSimBinPath(), execToken));
+        const remoteState = rewriteStateForRequestHost(state, req.headers?.host);
+        const config = JSON.stringify(previewConfigForState(remoteState, base, serveSimBinPath(), execToken));
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
       }
@@ -755,17 +788,18 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       const sims = listAllSimulators();
       const devices = sims.map((d) => {
         const helper = helperByUdid.get(d.udid);
+        const remoteHelper = helper ? rewriteStateForRequestHost(helper, req.headers?.host) : null;
         return {
           device: d.udid,
           name: d.name,
           runtime: d.runtime,
           state: d.state,
-          helper: helper
+          helper: remoteHelper
             ? {
-                port: helper.port,
-                url: helper.url,
-                streamUrl: helper.streamUrl,
-                wsUrl: helper.wsUrl,
+                port: remoteHelper.port,
+                url: remoteHelper.url,
+                streamUrl: remoteHelper.streamUrl,
+                wsUrl: remoteHelper.wsUrl,
               }
             : null,
         };
@@ -1003,7 +1037,8 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       });
-      res.end(JSON.stringify(state ? previewConfigForState(state, base, serveSimBinPath(), execToken) : null));
+      const remoteState = state ? rewriteStateForRequestHost(state, req.headers?.host) : null;
+      res.end(JSON.stringify(remoteState ? previewConfigForState(remoteState, base, serveSimBinPath(), execToken) : null));
       return;
     }
 

@@ -3,6 +3,7 @@ import {
   matchInstalledAppByDisplayName,
   parseForegroundAppLogMessage,
   previewConfigForState,
+  rewriteStateForRequestHost,
   selectServeSimState,
   type ServeSimState,
 } from "../middleware";
@@ -57,6 +58,38 @@ describe("previewConfigForState", () => {
       gridMemoryEndpoint: "/preview/grid/api/memory",
       previewEndpoint: "/preview",
       execToken: "token-xyz",
+    });
+  });
+});
+
+describe("rewriteStateForRequestHost", () => {
+  const state = states[0]!;
+
+  test("returns the state unchanged when host header is missing", () => {
+    expect(rewriteStateForRequestHost(state, undefined)).toBe(state);
+  });
+
+  test("returns the state unchanged when the request is loopback", () => {
+    expect(rewriteStateForRequestHost(state, "localhost:8081")).toBe(state);
+    expect(rewriteStateForRequestHost(state, "127.0.0.1:8081")).toBe(state);
+    expect(rewriteStateForRequestHost(state, "[::1]:8081")).toBe(state);
+  });
+
+  test("rewrites the host portion for a LAN viewer, keeping the helper port", () => {
+    expect(rewriteStateForRequestHost(state, "192.168.1.42:8081")).toEqual({
+      ...state,
+      url: "http://192.168.1.42:3100",
+      streamUrl: "http://192.168.1.42:3100/stream.mjpeg",
+      wsUrl: "ws://192.168.1.42:3100/ws",
+    });
+  });
+
+  test("rewrites the host portion for a tunneled hostname (no port)", () => {
+    expect(rewriteStateForRequestHost(state, "tunnel.example.com")).toEqual({
+      ...state,
+      url: "http://tunnel.example.com:3100",
+      streamUrl: "http://tunnel.example.com:3100/stream.mjpeg",
+      wsUrl: "ws://tunnel.example.com:3100/ws",
     });
   });
 });
