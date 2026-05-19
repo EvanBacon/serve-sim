@@ -83,6 +83,11 @@ export interface ServeSimState {
 }
 
 const axStreamerCache = createAxStreamerCache();
+
+// Hard cap on the SSE line-assembly buffer for child-process stdout.
+// A malformed log entry without a newline can't grow this beyond 1 MB;
+// the partial line is dropped rather than retained indefinitely.
+const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
 let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
 // Known bundle IDs that are always React Native shells (used as a fallback
@@ -1023,6 +1028,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "X-Accel-Buffering": "no",
       });
       res.write(":\n\n");
+      axStreamerCache.prune(states.map((s) => s.device));
       const ax = axStreamerCache.get(state.device, state.port);
       const removeClient = ax.addClient(res);
       req.on("close", removeClient);
@@ -1138,10 +1144,17 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           buf = buf.slice(nl + 1);
           if (line) res.write("data: " + line + "\n\n");
         }
+        // Drop a runaway partial line so a malformed/never-terminated
+        // log entry can't grow `buf` without bound.
+        if (buf.length > SSE_LINE_BUFFER_LIMIT) buf = "";
       });
 
+      child.on("error", () => { try { res.end(); } catch {} });
       child.on("close", () => res.end());
-      req.on("close", () => child.kill());
+      req.on("close", () => {
+        child.stdout?.destroy();
+        child.kill();
+      });
       return;
     }
 
@@ -1225,11 +1238,17 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           if (!event) continue;
           emitApp(event.bundleId, event.pid);
         }
+        if (buf.length > SSE_LINE_BUFFER_LIMIT) buf = "";
       });
 
+      child.on("error", () => {
+        closed = true;
+        try { res.end(); } catch {}
+      });
       child.on("close", () => res.end());
       req.on("close", () => {
         closed = true;
+        child.stdout?.destroy();
         child.kill();
       });
       return;

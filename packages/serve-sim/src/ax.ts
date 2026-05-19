@@ -159,6 +159,7 @@ function sseMessage(payload: unknown) {
 interface AxStreamer {
   addClient(res: { write(chunk: string): void }): () => void;
   setPort(port: number): void;
+  dispose(): void;
 }
 
 function createAxStreamer({ port }: { port: number }): AxStreamer {
@@ -168,15 +169,16 @@ function createAxStreamer({ port }: { port: number }): AxStreamer {
   let pollIntervalMs = POLL_INTERVAL_MS;
   let polling = false;
   let currentPort = port;
+  let disposed = false;
 
   const schedule = () => {
-    if (clients.size === 0 || timer) return;
+    if (disposed || clients.size === 0 || timer) return;
     timer = setTimeout(poll, pollIntervalMs);
   };
 
   const poll = async () => {
     timer = null;
-    if (polling || clients.size === 0) {
+    if (disposed || polling || clients.size === 0) {
       schedule();
       return;
     }
@@ -206,7 +208,7 @@ function createAxStreamer({ port }: { port: number }): AxStreamer {
 
   return {
     setPort(nextPort: number) {
-      if (nextPort === currentPort) return;
+      if (disposed || nextPort === currentPort) return;
       currentPort = nextPort;
       latestMessage = null;
       // Avoid sitting on the unavailable-backoff interval (15s) when the
@@ -219,6 +221,7 @@ function createAxStreamer({ port }: { port: number }): AxStreamer {
       void poll();
     },
     addClient(res) {
+      if (disposed) return () => {};
       clients.add(res);
       if (latestMessage) res.write(latestMessage);
       void poll();
@@ -230,10 +233,26 @@ function createAxStreamer({ port }: { port: number }): AxStreamer {
         }
       };
     },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      clients.clear();
+      latestMessage = null;
+    },
   };
 }
 
-export function createAxStreamerCache() {
+export interface AxStreamerCache {
+  get(udid: string, port: number): AxStreamer;
+  prune(activeUdids: Iterable<string>): void;
+  size(): number;
+}
+
+export function createAxStreamerCache(): AxStreamerCache {
   const streamers = new Map<string, AxStreamer>();
 
   return {
@@ -252,6 +271,24 @@ export function createAxStreamerCache() {
       const streamer = createAxStreamer({ port });
       streamers.set(udid, streamer);
       return streamer;
+    },
+    /**
+     * Drop streamers for simulators no longer present in `activeUdids`.
+     * Without this, the cache grew append-only across a server's lifetime
+     * as devices were booted/erased/reset, each entry holding a poll
+     * timer, last-snapshot buffer, and SSE client set.
+     */
+    prune(activeUdids) {
+      const active = activeUdids instanceof Set ? activeUdids : new Set(activeUdids);
+      for (const [udid, streamer] of streamers) {
+        if (!active.has(udid)) {
+          streamer.dispose();
+          streamers.delete(udid);
+        }
+      }
+    },
+    size() {
+      return streamers.size;
     },
   };
 }
