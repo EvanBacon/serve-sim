@@ -1,6 +1,6 @@
 ---
 name: serve-sim
-description: Controls a running iOS, iPad, or Apple Watch Simulator via the serve-sim CLI (npx serve-sim) and streams it into the host agent's preview pane. Use whenever the user wants an AI agent to view or drive an Apple Simulator — streaming to preview, taps at normalized coordinates, multi-touch gestures, hardware buttons, rotation, memory warnings, CoreAnimation debug, synthetic camera injection, media drag-drop, or managing app privacy permissions. Triggers include "serve-sim", "iOS simulator", "Apple simulator", "iPad simulator", "Apple Watch simulator", "stream the simulator", "show the simulator in preview", "view the simulator here", "open simulator in preview", "simulator gestures", "tap on the simulator", "rotate the simulator", "inject camera feed", "grant simulator permissions", "allow push notifications in the simulator", or any request to drive or display an Apple Simulator visually. Do NOT use for Android emulators, building/installing an iOS app (use xcodebuild), booting a simulator from scratch (use xcrun simctl boot), in-app React Native runtime debugging (use rn-debugger), or real iOS hardware.
+description: Control and stream a running iOS, iPad, or Apple Watch Simulator with npx serve-sim. Use for simulator preview, taps, gestures, hardware buttons, rotation, camera injection, permissions, accessibility, and CoreAnimation debug.
 license: Apache-2.0
 ---
 
