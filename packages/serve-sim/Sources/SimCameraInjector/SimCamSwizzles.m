@@ -49,7 +49,22 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
             NSStringFromSelector(swiz));
         return NO;
     }
-    method_exchangeImplementations(o, s);
+    // `orig` may be inherited rather than implemented directly on `cls` (e.g.
+    // on iOS 26 UIImagePickerController no longer overrides viewDidAppear:).
+    // A plain method_exchangeImplementations would then mutate the *superclass*
+    // Method, clobbering that selector for every subclass — and our `swiz`
+    // selector only exists on `cls`, so unrelated controllers crash with
+    // "unrecognized selector simcam_…". Install the override directly on `cls`
+    // instead: add `orig` pointing at the swizzled IMP, and if that succeeds
+    // (no direct impl existed) repoint `swiz` at the inherited original so the
+    // [self simcam_…] call still reaches it.
+    IMP origIMP = method_getImplementation(o);
+    IMP swizIMP = method_getImplementation(s);
+    if (class_addMethod(cls, orig, swizIMP, method_getTypeEncoding(s))) {
+        class_replaceMethod(cls, swiz, origIMP, method_getTypeEncoding(o));
+    } else {
+        method_exchangeImplementations(o, s);
+    }
     return YES;
 }
 
