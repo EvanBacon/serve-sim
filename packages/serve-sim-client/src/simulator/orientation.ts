@@ -5,6 +5,30 @@ export const HID_EDGE_TOP = 2;
 export const HID_EDGE_BOTTOM = 3;
 export const HID_EDGE_RIGHT = 4;
 
+/**
+ * Bottom fraction of the display treated as the home-indicator hot zone, in
+ * normalized (0–1) display coordinates. A drag that *starts* here is tagged
+ * with `HID_EDGE_BOTTOM` so iOS routes it to the interactive swipe-to-home
+ * recognizer.
+ *
+ * Kept narrow (bottom 7%). The previous 0.88 (bottom 12%) reached up into
+ * Safari's bottom URL bar, so swiping up on the URL bar to reveal the tab
+ * overview was misread as swipe-to-home. iOS only uses the flag for swipe
+ * disambiguation, so a tighter band still lets the genuine home gesture
+ * through while leaving URL-bar swipes as plain touches.
+ */
+export const HOME_INDICATOR_BAND_NORM = 0.93;
+
+/**
+ * Returns `HID_EDGE_BOTTOM` when a display-space touch beginning at normalized
+ * `y` falls inside the home-indicator hot zone, otherwise `undefined`. Edge
+ * remapping for non-portrait orientations is handled downstream by
+ * {@link rawEdgeForDisplayEdge}.
+ */
+export function homeIndicatorEdge(y: number): number | undefined {
+  return y >= HOME_INDICATOR_BAND_NORM ? HID_EDGE_BOTTOM : undefined;
+}
+
 export function isLandscapeOrientation(
   orientation?: SimulatorOrientation | null,
 ): boolean {

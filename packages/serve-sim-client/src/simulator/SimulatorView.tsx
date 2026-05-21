@@ -9,6 +9,7 @@ import {
 import type { StreamConfig } from "../types.js";
 import {
   HID_EDGE_BOTTOM,
+  homeIndicatorEdge,
   rawEdgeForDisplayEdge,
   rawPointForDisplayPoint,
   streamDisplayGeometry,
@@ -66,9 +67,9 @@ export interface SimulatorViewProps {
  * Connects directly to the serve-sim server (not through the gateway).
  *
  * Touch input is forwarded as normalized (0–1) coordinates over WebSocket.
- * Drags starting in the bottom 12% of the image (y > 0.88) are sent with
- * `edge: 3` (IndigoHIDEdge bottom), which iOS routes to the system gesture
- * recognizer for interactive swipe-to-home on Face ID devices.
+ * Drags starting in the home-indicator hot zone (see HOME_INDICATOR_BAND_NORM)
+ * are sent with `edge: 3` (IndigoHIDEdge bottom), which iOS routes to the
+ * system gesture recognizer for interactive swipe-to-home on Face ID devices.
  */
 export function SimulatorView({
   url,
@@ -745,9 +746,10 @@ export function SimulatorView({
             }
 
             showTouchIndicator(x, y);
-            if (y > 0.88) {
+            const edge = homeIndicatorEdge(y);
+            if (edge !== undefined) {
               edgeGestureRef.current = true;
-              sendTouch({ type: "begin", x, y, edge: HID_EDGE_BOTTOM });
+              sendTouch({ type: "begin", x, y, edge });
             } else {
               edgeGestureRef.current = false;
               handleTouch("begin", e);
@@ -896,9 +898,10 @@ export function SimulatorView({
             const x = (touch.clientX - rect.left) / rect.width;
             const y = (touch.clientY - rect.top) / rect.height;
             showTouchIndicator(x, y);
-            if (y > 0.88) {
+            const edge = homeIndicatorEdge(y);
+            if (edge !== undefined) {
               edgeGestureRef.current = true;
-              sendTouch({ type: "begin", x, y, edge: HID_EDGE_BOTTOM });
+              sendTouch({ type: "begin", x, y, edge });
             } else {
               edgeGestureRef.current = false;
               sendTouch({ type: "begin", x, y });
