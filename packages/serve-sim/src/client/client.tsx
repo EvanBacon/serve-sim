@@ -514,6 +514,11 @@ function AppWithConfig({
   }, [simFocused, sendWs]);
 
   useEffect(() => {
+    // tvOS: keyboard navigation is owned by SimulatorView's remote-button
+    // handler (it sends remote_* button events). Letting this generic
+    // keystroke pass-through fire in parallel was duplicating each press —
+    // tolerable for arrows but Enter no longer registered as a select.
+    if (deviceType === "tv") return;
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
@@ -553,7 +558,7 @@ function AppWithConfig({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device, rotateBy]);
+  }, [sendWs, config.device, rotateBy, deviceType]);
 
   const switchToDevice = useCallback(async (d: SimDevice) => {
     if (switching || d.udid === config.device) return;

@@ -756,8 +756,12 @@ export function SimulatorView({
           style={{
             position: "absolute",
             inset: 0,
-            cursor: FINGER_CURSOR,
+            cursor: isTv ? "default" : FINGER_CURSOR,
             touchAction: "none",
+            // Apple TV doesn't accept finger input; suppress mouse/touch
+            // forwarding so clicks on the stream don't fire spurious touch
+            // events into the sim (which were resetting the screen to home).
+            pointerEvents: isTv ? "none" : undefined,
           }}
           onMouseDown={(e) => {
             e.preventDefault();
