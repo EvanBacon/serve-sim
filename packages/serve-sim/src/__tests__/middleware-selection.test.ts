@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   matchInstalledAppByDisplayName,
+  normalizeRequestPlatform,
   parseForegroundAppLogMessage,
   previewConfigForState,
   rewriteStateForRequestHost,
@@ -59,6 +60,20 @@ describe("previewConfigForState", () => {
       previewEndpoint: "/preview",
       execToken: "token-xyz",
     });
+  });
+});
+
+describe("normalizeRequestPlatform", () => {
+  test("defaults missing platform to ios", () => {
+    expect(normalizeRequestPlatform(undefined)).toBe("ios");
+    expect(normalizeRequestPlatform(null)).toBe("ios");
+  });
+
+  test("accepts only known platforms", () => {
+    expect(normalizeRequestPlatform("ios")).toBe("ios");
+    expect(normalizeRequestPlatform("android")).toBe("android");
+    expect(normalizeRequestPlatform("andorid")).toBeNull();
+    expect(normalizeRequestPlatform(1)).toBeNull();
   });
 });
 

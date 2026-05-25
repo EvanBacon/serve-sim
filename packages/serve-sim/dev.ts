@@ -158,8 +158,9 @@ function endpoint(path: string, device: string): string {
   return `/${path}?device=${encodeURIComponent(device)}`;
 }
 
-function platformFromBody(value: unknown): Platform {
-  return value === "android" ? "android" : "ios";
+function platformFromBody(value: unknown): Platform | null {
+  if (value == null) return "ios";
+  return value === "ios" || value === "android" ? value : null;
 }
 
 function isValidDeviceId(value: string, platform: Platform): boolean {
@@ -420,6 +421,9 @@ Bun.serve({
       return req.json().then((body: any) => {
         const udid: string = body?.udid ?? "";
         const platform = platformFromBody(body?.platform);
+        if (!platform) {
+          return Response.json({ ok: false, error: "Invalid platform" }, { status: 400 });
+        }
         if (!isValidDeviceId(udid, platform)) {
           return Response.json({ ok: false, error: "Invalid or missing device id" }, { status: 400 });
         }
@@ -457,6 +461,9 @@ Bun.serve({
       return req.json().then((body: any) => {
         const udid: string = body?.udid ?? "";
         const platform = platformFromBody(body?.platform);
+        if (!platform) {
+          return Response.json({ ok: false, error: "Invalid platform" }, { status: 400 });
+        }
         if (!isValidDeviceId(udid, platform)) {
           return Response.json({ ok: false, error: "Invalid or missing device id" }, { status: 400 });
         }

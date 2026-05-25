@@ -73,8 +73,9 @@ type SimctlAllList = {
   devices: Record<string, Array<Omit<SimctlDevice, "runtime">>>;
 };
 
-type ShutdownRequestBody = { udid?: string; platform?: "ios" | "android" };
-type StartRequestBody = { udid?: string; platform?: "ios" | "android" };
+type DevicePlatform = "ios" | "android";
+type ShutdownRequestBody = { udid?: string; platform?: unknown };
+type StartRequestBody = { udid?: string; platform?: unknown };
 type ReleaseRequestBody = { targetId?: string };
 type HighlightRequestBody = { targetId?: string; on?: boolean };
 type ExecRequestBody = { command?: string };
@@ -83,7 +84,7 @@ export interface ServeSimState {
   pid: number;
   port: number;
   device: string;
-  platform?: "ios" | "android";
+  platform?: DevicePlatform;
   name?: string;
   runtime?: string;
   url: string;
@@ -122,6 +123,11 @@ const NON_UI_BUNDLE_RE = /(WidgetRenderer|ExtensionHost|\.extension(\.|$)|Servic
 
 function isUserFacingBundle(bundleId: string): boolean {
   return !NON_UI_BUNDLE_RE.test(bundleId);
+}
+
+export function normalizeRequestPlatform(value: unknown): DevicePlatform | null {
+  if (value == null) return "ios";
+  return value === "ios" || value === "android" ? value : null;
 }
 
 export function parseForegroundAppLogMessage(message: string): { bundleId: string; pid: number } | null {
@@ -872,11 +878,17 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       });
       req.on("end", () => {
         let udid = "";
-        let platform: "ios" | "android" = "ios";
+        let platform: DevicePlatform = "ios";
         try {
           const parsed = JSON.parse(body) as ShutdownRequestBody;
           udid = parsed.udid ?? "";
-          platform = parsed.platform ?? "ios";
+          const parsedPlatform = normalizeRequestPlatform(parsed.platform);
+          if (!parsedPlatform) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "Invalid platform" }));
+            return;
+          }
+          platform = parsedPlatform;
         } catch {}
         if (!udid || !/^[A-Za-z0-9_.:-]+$/.test(udid)) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -931,11 +943,17 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       });
       req.on("end", () => {
         let udid = "";
-        let platform: "ios" | "android" = "ios";
+        let platform: DevicePlatform = "ios";
         try {
           const parsed = JSON.parse(body) as StartRequestBody;
           udid = parsed.udid ?? "";
-          platform = parsed.platform ?? "ios";
+          const parsedPlatform = normalizeRequestPlatform(parsed.platform);
+          if (!parsedPlatform) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "Invalid platform" }));
+            return;
+          }
+          platform = parsedPlatform;
         } catch {}
         if (!udid || !/^[A-Za-z0-9_.:-]+$/.test(udid)) {
           res.writeHead(400, { "Content-Type": "application/json" });
