@@ -8,7 +8,7 @@ import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
-import { findBootedDevice, resolveDevice } from "./device";
+import { findBootedDevice, resolveDevice, isTvLowResolution } from "./device";
 import { permissions } from "./permissions";
 import { debugCli, debugHelper, debugState } from "./debug";
 
@@ -213,12 +213,29 @@ function helperSpawnEnv(): NodeJS.ProcessEnv {
  * Pick a sensible default device to boot when the user runs `serve-sim` with
  * no booted simulator. Prefers an available iPhone on the newest iOS runtime.
  */
-function pickDefaultDevice(): { udid: string; name: string } | null {
+function pickDefaultDevice(opts: { tv?: boolean } = {}): { udid: string; name: string } | null {
   try {
     const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string; isAvailable?: boolean }>>;
     };
+    if (opts.tv) {
+      const tvRuntimes = Object.keys(data.devices)
+        .filter((k) => /SimRuntime\.tvOS-/i.test(k))
+        .sort((a, b) => {
+          const va = (a.match(/tvOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
+          const vb = (b.match(/tvOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
+          return (vb[0] ?? 0) - (va[0] ?? 0) || (vb[1] ?? 0) - (va[1] ?? 0);
+        });
+      for (const runtime of tvRuntimes) {
+        const devices = data.devices[runtime] ?? [];
+        const appleTV = devices.find(
+          (d) => d.isAvailable !== false && isTvLowResolution(d.name),
+        );
+        if (appleTV) return { udid: appleTV.udid, name: appleTV.name };
+      }
+      return null;
+    }
     const iosRuntimes = Object.keys(data.devices)
       .filter((k) => /SimRuntime\.iOS-/i.test(k))
       .sort((a, b) => {
@@ -606,16 +623,17 @@ async function startHelper(
 // ─── Commands ───
 
 /** Foreground follow mode (default). Stays attached, cleans up on Ctrl+C. */
-async function follow(devices: string[], startPort: number, quiet: boolean) {
-  debugCli("follow devices=%o startPort=%d", devices, startPort);
+async function follow(devices: string[], startPort: number, quiet: boolean, tv = false) {
+  debugCli("follow devices=%o startPort=%d tv=%s", devices, startPort, tv);
   const udids = devices.length > 0
     ? devices.map(resolveDevice)
     : (() => {
-        const booted = findBootedDevice();
+        const booted = findBootedDevice({ tv });
         if (booted) return [booted];
-        const fallback = pickDefaultDevice();
+        const fallback = pickDefaultDevice({ tv });
         if (!fallback) {
-          console.error("No device specified and no available iOS simulator found.");
+          const kind = tv ? "1080p tvOS" : "iOS";
+          console.error(`No device specified and no available ${kind} simulator found.`);
           process.exit(1);
         }
         if (!quiet) {
@@ -734,16 +752,17 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
 }
 
 /** Detach mode (--detach). Spawns helpers and returns their states. */
-async function detach(devices: string[], startPort: number): Promise<ServerState[]> {
-  debugCli("detach devices=%o startPort=%d", devices, startPort);
+async function detach(devices: string[], startPort: number, tv = false): Promise<ServerState[]> {
+  debugCli("detach devices=%o startPort=%d tv=%s", devices, startPort, tv);
   const udids = devices.length > 0
     ? devices.map(resolveDevice)
     : (() => {
-        const booted = findBootedDevice();
+        const booted = findBootedDevice({ tv });
         if (booted) return [booted];
-        const fallback = pickDefaultDevice();
+        const fallback = pickDefaultDevice({ tv });
         if (!fallback) {
-          console.error("No device specified and no available iOS simulator found.");
+          const kind = tv ? "1080p tvOS" : "iOS";
+          console.error(`No device specified and no available ${kind} simulator found.`);
           process.exit(1);
         }
         return [fallback.udid];
@@ -1790,11 +1809,11 @@ Examples:
 
 // ─── Serve preview ───
 
-async function serve(servePort: number, devices: string[], portExplicit: boolean, host: string) {
+async function serve(servePort: number, devices: string[], portExplicit: boolean, host: string, tv = false) {
   let targetDevice: string | undefined;
 
   if (devices.length > 0) {
-    const states = await detach(devices, 3100);
+    const states = await detach(devices, 3100, tv);
     targetDevice = states[0]?.device;
   } else {
     // Ensure a serve-sim stream is running (start one if not)
@@ -1803,7 +1822,7 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
       targetDevice = existing[0]?.device;
     } else {
       console.log("Starting simulator stream...");
-      const states = await detach(devices, 3100);
+      const states = await detach(devices, 3100, tv);
       targetDevice = states[0]?.device;
     }
   }
@@ -1885,6 +1904,7 @@ program
   .option("--detach", "Spawn helper and exit (daemon mode)")
   .option("-q, --quiet", "Suppress human-readable output, JSON only")
   .option("--no-preview", "Skip the web preview server; stream in foreground only")
+  .option("--tv", "Target a tvOS (Apple TV) simulator instead of iOS. Restricted to 1080p models for streaming performance.")
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -1909,13 +1929,14 @@ Examples:
       return;
     }
     const startPort: number | undefined = opts.port;
+    const tv = !!opts.tv;
     if (opts.detach) {
-      const states = await detach(devices, startPort ?? 3100);
+      const states = await detach(devices, startPort ?? 3100, tv);
       printStatesJSON(states);
     } else if (opts.preview === false) {
-      await follow(devices, startPort ?? 3100, !!opts.quiet);
+      await follow(devices, startPort ?? 3100, !!opts.quiet, tv);
     } else {
-      await serve(startPort ?? 3200, devices, startPort !== undefined, opts.host);
+      await serve(startPort ?? 3200, devices, startPort !== undefined, opts.host, tv);
     }
   });
 

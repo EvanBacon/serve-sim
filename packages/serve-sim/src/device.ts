@@ -1,11 +1,30 @@
 import { execSync } from "child_process";
 
+export interface FindBootedOptions {
+  /**
+   * When true, prefer a booted tvOS simulator and exclude full-resolution 4K
+   * models so the streaming frame rate stays high. The "(at 1080p)" 4K
+   * variants are kept because they output a 1080p framebuffer.
+   */
+  tv?: boolean;
+}
+
 /**
- * UDID of a booted simulator, or null if none is booted. Prefers an iOS device
- * — a machine may also have a booted watchOS/tvOS sim, which `serve-sim`'s
- * tooling doesn't target.
+ * True for Apple TV simulators whose framebuffer is 1080p — i.e. plain
+ * "Apple TV" / older numbered "Apple TV 15", and the "(at 1080p)" 4K variants.
+ * Filters out the full-resolution 4K (3840×2160) sims, which choke the encoder.
  */
-export function findBootedDevice(): string | null {
+export function isTvLowResolution(name: string): boolean {
+  if (!/apple\s*tv/i.test(name)) return false;
+  if (!/4K/i.test(name)) return true;
+  return /1080p?\b/i.test(name);
+}
+
+/**
+ * UDID of a booted simulator, or null if none is booted. By default prefers an
+ * iOS device; pass `{ tv: true }` to prefer a 1080p tvOS device instead.
+ */
+export function findBootedDevice(opts: FindBootedOptions = {}): string | null {
   try {
     const output = execSync("xcrun simctl list devices booted -j", { encoding: "utf-8" });
     const data = JSON.parse(output) as {
@@ -15,7 +34,13 @@ export function findBootedDevice(): string | null {
     for (const [runtime, devices] of Object.entries(data.devices)) {
       for (const device of devices) {
         if (device.state !== "Booted") continue;
+        if (opts.tv) {
+          if (!/tvOS/i.test(runtime)) continue;
+          if (!isTvLowResolution(device.name)) continue;
+          return device.udid;
+        }
         if (/iOS/i.test(runtime)) return device.udid;
+        if (/tvOS/i.test(runtime)) continue;
         fallback ??= device.udid;
       }
     }
