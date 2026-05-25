@@ -9,7 +9,7 @@ import {
   isLandscapeConfig,
 } from "./orientation.js";
 
-export type DeviceType = "iphone" | "ipad" | "watch" | "vision";
+export type DeviceType = "iphone" | "ipad" | "watch" | "vision" | "tv";
 
 export function getDeviceType(name?: string | null): DeviceType {
   if (!name) return "iphone";
@@ -17,6 +17,7 @@ export function getDeviceType(name?: string | null): DeviceType {
   if (lower.includes("ipad")) return "ipad";
   if (lower.includes("watch")) return "watch";
   if (lower.includes("vision")) return "vision";
+  if (lower.includes("apple tv")) return "tv";
   return "iphone";
 }
 
@@ -26,6 +27,8 @@ export const DEVICE_FRAMES = {
   ipad: { width: 430, height: 605, bezelX: 16, bezelY: 16, innerRadius: 12 },
   watch: { width: 274, height: 322, bezelX: 12, bezelY: 12, innerRadius: 79 },
   vision: { width: 640, height: 400, bezelX: 12, bezelY: 12, innerRadius: 32 },
+  // Apple TV outputs to a television; render the stream borderless.
+  tv: { width: 960, height: 540, bezelX: 0, bezelY: 0, innerRadius: 0 },
 } as const;
 
 // Legacy named exports for backwards compat
@@ -78,6 +81,11 @@ export const SIMULATOR_SCREENS: Record<string, { width: number; height: number }
   "Apple Watch SE (40mm)": { width: 324, height: 394 },
   // Apple Vision Pro
   "Apple Vision Pro": { width: 1920, height: 1080 },
+  // Apple TV — only 1080p variants are supported by serve-sim --tv; the
+  // full-resolution 4K (3840×2160) sims are filtered out for streaming perf.
+  "Apple TV": { width: 1920, height: 1080 },
+  "Apple TV 4K (3rd generation) (at 1080p)": { width: 1920, height: 1080 },
+  "Apple TV 4K (at 1080p) (2nd generation)": { width: 1920, height: 1080 },
 };
 
 export function simulatorAspectRatio(
@@ -117,6 +125,8 @@ export function simulatorMaxWidth(
         return 580;
       case "watch":
         return 200;
+      case "tv":
+        return 960;
       default:
         return 620;
     }
@@ -128,6 +138,10 @@ export function simulatorMaxWidth(
       return 200;
     case "vision":
       return 580;
+    case "tv":
+      // Apple TV is always landscape; "portrait" never applies but give a
+      // sane value so callers don't see NaN propagation.
+      return 960;
     default:
       return 320;
   }
