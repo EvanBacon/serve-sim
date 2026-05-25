@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/fbf890f4-c8c7-4684-82be-d677b8a188f8
 - Simulator logs are forwarded to the browser for browser-use MCP tools to read from.
 - Drag and drop videos and images to add them to the simulator device. 
 - Keyboard commands and hot keys are forwarded to the simulator, including CMD+SHIFT+H to go home.
-- Apple Watch, iPad, and iOS support.
+- Apple Watch, iPad, iOS, and **Apple TV** support. See [TV.md](TV.md) for the tvOS-specific Siri-remote and text-input docs.
 
 ## Why?
 
