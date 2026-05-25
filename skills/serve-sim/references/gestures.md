@@ -1,5 +1,7 @@
 # Gestures reference
 
+> **tvOS note:** Apple TV has no touchscreen. Neither `tap` nor `gesture` reaches a tvOS sim — drive it with `serve-sim button remote_*` instead (see [buttons-rotation.md](buttons-rotation.md)). Everything in this document is iOS-only.
+
 ## Contents
 
 - Coordinate system

@@ -48,11 +48,11 @@ The `/ws` endpoint accepts binary frames. Two formats are in use today:
 
 A JSON channel also exists with these message-type bytes; refer to the helper source if you need them:
 
-- `0x03` — JSON touch event (legacy)
-- `0x04` — JSON button event
-- `0x05` — JSON multi-touch event (legacy)
-- `0x06` — JSON keyboard event (`{type: down|up, usage: u32}`, USB HID Usage Page 0x07)
-- `0x07` — JSON orientation event
+- `0x03` — JSON touch event (legacy) — **iOS only**, tvOS has no touchscreen
+- `0x04` — JSON button event: `{button: string, holdMs?: number}`. The optional `holdMs` is honored only by tvOS Siri-remote buttons with a discrete long-press: `remote_select`, `remote_play_pause`, `remote_menu`.
+- `0x05` — JSON multi-touch event (legacy) — **iOS only**
+- `0x06` — JSON keyboard event (`{type: down|up, usage: u32}`, USB HID Usage Page 0x07). Used by the preview UI for typing into iOS apps; the web preview suppresses this transport for tvOS sims so it doesn't double-fire alongside the `remote_*` button path.
+- `0x07` — JSON orientation event — **iOS only** (Apple Watch / Apple TV don't rotate)
 - `0x08` — JSON CoreAnimation debug toggle
 - `0x09` — empty body, triggers memory warning
 

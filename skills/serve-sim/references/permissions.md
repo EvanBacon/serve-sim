@@ -1,5 +1,7 @@
 # App permissions reference
 
+> **tvOS note:** The permissions subcommand was tested only against iOS sims. The TCC database schema and push-notification state layout on tvOS differ from iOS, so the read/write paths in this command are not guaranteed to work on a tvOS sim. If the user needs permissions tooling on Apple TV, treat it as untested and verify before relying on the result.
+
 `npx serve-sim permissions` manages an installed app's privacy permissions on
 the booted simulator. It is modelled on AppleSimulatorUtils but writes the
 underlying state stores directly, because `xcrun simctl privacy` is timing-

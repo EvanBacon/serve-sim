@@ -1,5 +1,7 @@
 # Camera injection reference
 
+> **tvOS note:** Camera injection is not supported on Apple TV simulators. tvOS apps rarely use `AVCaptureDevice`, and the injection path has only been validated against iOS sims. If the user asks to inject a camera feed into a tvOS app, surface that limitation.
+
 ## Contents
 
 - What camera injection does

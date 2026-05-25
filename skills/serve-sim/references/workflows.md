@@ -11,6 +11,7 @@ Recipes for common end-to-end agent tasks. These compose the primitives document
 - Workflow 5: Reset and re-test (clean slate)
 - Workflow 6: Drive a multi-step gesture reliably
 - Workflow 7: Show the simulator stream in the host's preview
+- Workflow 8: Drive a tvOS / Apple TV simulator
 
 ## Workflow 1: Tap on a UI element by accessibility label
 
@@ -218,3 +219,52 @@ The skill knows how to make a URL exist (`serve-sim --detach`). The host knows h
 - Is there a `preview_start`-like tool in your current toolset? Call it.
 - No such tool? Print the URL plainly and instruct the user how to open it.
 - Did the preview tool reject the URL or fail? Fall back to printing.
+
+## Workflow 8: Drive a tvOS / Apple TV simulator
+
+Apple TV simulators need `--tv` and a different input vocabulary (Siri-remote buttons, no touchscreen). The pattern below boots a tvOS sim into an app, navigates with the remote, and verifies playback.
+
+```sh
+# 1. Confirm a tvOS sim is booted. If not, the user must boot one:
+#    xcrun simctl boot "Apple TV 4K (3rd generation) (at 1080p)"
+xcrun simctl list devices booted | grep -i "Apple TV"
+
+# 2. Start serve-sim with --tv. Auto-selection picks a 1080p Apple TV; 4K-
+#    at-native-resolution sims are filtered out to keep frame rate up.
+URL=$(npx serve-sim --tv --detach -q | jq -r '.url')
+echo "preview: $URL"
+
+# 3. Open the app you want to drive (replace bundle id with the real one).
+xcrun simctl launch booted com.acme.media
+
+# 4. Navigate with the remote. All directional + select use the keyboard
+#    HID path; menu/home/play_pause/siri go through the Consumer Page.
+npx serve-sim button remote_down
+npx serve-sim button remote_down
+npx serve-sim button remote_right
+npx serve-sim button remote_select        # opens the focused item
+
+# 5. Inside a media player, toggle playback or jump out via the TV button.
+npx serve-sim button remote_play_pause
+npx serve-sim button remote_tv             # return to home
+
+# 6. Long-press for context menus / wiggle mode / jump-to-home.
+npx serve-sim button remote_select --hold       # default 1500ms
+npx serve-sim button remote_menu --hold 1000    # jumps to home instead of stepping back
+
+# 7. Verify by reading the accessibility tree (works on tvOS).
+curl -s "$URL%/.sim/api" | jq -r '.streamUrl'  # discover the helper port
+curl -s http://localhost:3100/ax | jq '.children[0].AXLabel'
+
+# 8. Cleanup
+npx serve-sim --kill
+```
+
+**Don't do on tvOS:**
+- `serve-sim tap` / `serve-sim gesture` — Apple TV has no touchscreen.
+- iOS hardware buttons (`home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`) — they don't reach a tvOS sim. Use `remote_tv` for home and `remote_siri` for Siri.
+- `serve-sim rotate` — Apple TV is always landscape.
+- `serve-sim camera <bundle-id>` — camera injection isn't supported on tvOS.
+- Treat `serve-sim permissions` results as authoritative on tvOS — the TCC layout differs and the subcommand was validated only against iOS.
+
+See [buttons-rotation.md](buttons-rotation.md) for the full Siri-remote button vocabulary and long-press behaviors.
