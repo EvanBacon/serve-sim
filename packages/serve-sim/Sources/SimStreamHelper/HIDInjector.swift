@@ -41,6 +41,11 @@ final class HIDInjector {
     private typealias IndigoDigitalCrownFunc = @convention(c) (Double) -> UnsafeMutableRawPointer?
     private var digitalCrownFunc: IndigoDigitalCrownFunc?
 
+    // IndigoHIDMessageForHIDArbitrary(int target, uint32_t usagePage, uint32_t usage, uint32_t direction) -> IndigoMessage*
+    // direction: 1 = down, 2 = up
+    private typealias IndigoHIDArbitraryFunc = @convention(c) (Int32, UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
+    private var hidArbitraryFunc: IndigoHIDArbitraryFunc?
+
     func setup(deviceUDID: String) throws {
         _ = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW)
         _ = dlopen("/Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit", RTLD_NOW)
@@ -76,6 +81,13 @@ final class HIDInjector {
             print("[hid] IndigoHIDMessageForDigitalCrownEvent loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForDigitalCrownEvent not found")
+        }
+
+        if let arbPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForHIDArbitrary") {
+            self.hidArbitraryFunc = unsafeBitCast(arbPtr, to: IndigoHIDArbitraryFunc.self)
+            print("[hid] IndigoHIDMessageForHIDArbitrary loaded")
+        } else {
+            print("[hid] Warning: IndigoHIDMessageForHIDArbitrary not found")
         }
 
         guard let hidClass = NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") else {
@@ -195,12 +207,12 @@ final class HIDInjector {
     // idb target constant (third arg)
     private static let buttonTargetHardware: Int32 = 0x33
 
-    private func sendHIDButton(eventSource: Int32, direction: Int32) {
+    private func sendHIDButton(eventSource: Int32, direction: Int32, target: Int32 = buttonTargetHardware) {
         guard let client = hidClient, let sendSel = sendSel, let buttonFunc = buttonFunc else { return }
 
         // IndigoHIDMessageForButton returns a ready-to-send message
         // idb uses it directly with malloc_size to determine length
-        guard let msg = buttonFunc(eventSource, direction, Self.buttonTargetHardware) else {
+        guard let msg = buttonFunc(eventSource, direction, target) else {
             print("[hid] IndigoHIDMessageForButton returned nil")
             return
         }
@@ -335,9 +347,63 @@ final class HIDInjector {
             sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonDown)
             sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonUp)
 
+        // Apple TV / Siri remote. Directional keys ride the keyboard HID
+        // path (which tvOS's focus engine listens to); the discrete remote
+        // buttons (TV/menu/play-pause/volume/siri) go through
+        // IndigoHIDMessageForButton on the remote target.
+        case "remote_up":          pressKey(usage: 0x52)
+        case "remote_down":        pressKey(usage: 0x51)
+        case "remote_left":        pressKey(usage: 0x50)
+        case "remote_right":       pressKey(usage: 0x4F)
+        case "remote_select":      pressKey(usage: 0x28) // Return
+        case "remote_menu":        pressConsumer(usage: 0x46) // Menu Escape
+        case "remote_tv":          pressConsumer(usage: 0x223) // AC Home
+        case "remote_play_pause":  pressConsumer(usage: 0xCD) // Play/Pause
+        case "remote_volume_up":   pressConsumer(usage: 0xE9) // Volume Increment
+        case "remote_volume_down": pressConsumer(usage: 0xEA) // Volume Decrement
+        case "remote_siri":        pressConsumer(usage: 0xCF) // Voice Command
+
         default:
             print("[hid] Unknown button: \(button)")
         }
+    }
+
+    /// Press-and-release helper for the keyboard HID path. Used by Siri remote
+    /// mappings — a single sendButton call yields a complete keystroke.
+    private func pressKey(usage: UInt32) {
+        sendKey(type: "down", usage: usage)
+        sendKey(type: "up", usage: usage)
+    }
+
+    /// Send a USB HID Consumer/Generic event (e.g. media keys like Play/Pause)
+    /// via IndigoHIDMessageForHIDArbitrary — the route Simulator.app uses to
+    /// translate Mac media keys into simulator events. `direction` is 1 for
+    /// press, 2 for release.
+    private func sendHIDArbitrary(target: Int32, usagePage: UInt32, usage: UInt32, direction: UInt32) {
+        guard let client = hidClient, let sendSel = sendSel, let arbFunc = hidArbitraryFunc else {
+            print("[hid] IndigoHIDMessageForHIDArbitrary unavailable")
+            return
+        }
+        guard let msg = arbFunc(target, usagePage, usage, direction) else {
+            print("[hid] IndigoHIDMessageForHIDArbitrary returned nil (page=0x\(String(usagePage, radix: 16)) usage=0x\(String(usage, radix: 16)) dir=\(direction))")
+            return
+        }
+        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
+        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
+            free(msg)
+            return
+        }
+        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
+        sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
+    }
+
+    /// Press-and-release a USB HID Consumer-page key (media keys, AC controls).
+    /// Used for the Siri-remote buttons (target 0x15 routes them to tvOS's
+    /// remote subsystem).
+    private static let consumerTarget: Int32 = 0x15
+    private func pressConsumer(usage: UInt32) {
+        sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 1)
+        sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 2)
     }
 
     // MARK: - SimDevice private control
