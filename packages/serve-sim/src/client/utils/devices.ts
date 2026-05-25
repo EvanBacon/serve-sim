@@ -31,7 +31,8 @@ export function deviceKind(name: string): number {
   if (n.includes("ipad")) return 1;
   if (n.includes("watch")) return 2;
   if (n.includes("vision")) return 3;
-  return 4;
+  if (n.includes("apple tv")) return 4;
+  return 5;
 }
 
 export function runtimeOrder(runtime: string): number {
@@ -40,5 +41,6 @@ export function runtimeOrder(runtime: string): number {
   if (r.startsWith("ipados")) return 1;
   if (r.startsWith("watchos")) return 2;
   if (r.startsWith("visionos") || r.startsWith("xros")) return 3;
-  return 4;
+  if (r.startsWith("tvos")) return 4;
+  return 5;
 }

@@ -503,9 +503,9 @@ function listAllSimulators(): SimctlDevice[] {
     const data = JSON.parse(output) as SimctlAllList;
     const out: SimctlDevice[] = [];
     for (const [runtime, devices] of Object.entries(data.devices)) {
-      // Keep this to touch-capable simulator families that serve-sim can frame
-      // and inject into. tvOS is intentionally left out for now.
-      if (!/SimRuntime\.(iOS|watchOS|visionOS|xrOS)-/i.test(runtime)) continue;
+      // Touch-capable simulator families plus tvOS (driven via keyboard HID and
+      // the Siri-remote button shims in HIDInjector.swift).
+      if (!/SimRuntime\.(iOS|watchOS|visionOS|xrOS|tvOS)-/i.test(runtime)) continue;
       for (const d of devices) {
         if (d.isAvailable === false) continue;
         out.push({ ...d, runtime: runtime.replace(/^.*SimRuntime\./, "") });
