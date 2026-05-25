@@ -360,6 +360,9 @@ function AppWithConfig({
   const frameAspectRatioValue = frameDisplayConfig
     ? frameDisplayConfig.width / frameDisplayConfig.height
     : 1;
+  // Android input is sent over the control WebSocket, so keep emulator-style
+  // buttons available while the video decoder is still catching up.
+  const toolbarStreaming = isAndroid ? !!config.device : streaming;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -723,7 +726,7 @@ function AppWithConfig({
           deviceUdid={config.device}
           deviceName={selectedDevice?.name ?? null}
           deviceRuntime={selectedDevice?.runtime ?? null}
-          streaming={streaming}
+          streaming={toolbarStreaming}
         >
           <DevicePicker
             devices={devices}

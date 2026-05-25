@@ -1,4 +1,4 @@
-import { type GridDevice, gridPreviewHref } from "../utils/grid";
+import { canShutdownDevice, canStartDevice, type GridDevice, gridPreviewHref } from "../utils/grid";
 import { PlatformBadge } from "./platform-badge";
 
 export function GridTile({
@@ -23,6 +23,17 @@ export function GridTile({
   const helper = device.helper;
   const isBooted = device.state === "Booted";
   const platform = device.platform ?? "ios";
+  const canPowerOff = canShutdownDevice(platform, device.device);
+  const canStopOrShutdown = !!helper || (canPowerOff && isBooted);
+  const canStart = canStartDevice(device);
+  const stopLabel = platform === "android" && !canPowerOff
+    ? "Stop Android stream"
+    : `Shutdown ${platform === "android" ? "Android emulator" : "simulator"}`;
+  const startLabel = !canStart
+    ? device.state === "Unauthorized" ? "Unauthorized" : "Unavailable"
+    : starting
+    ? (isBooted ? "Starting..." : "Booting...")
+    : (isBooted ? "Start stream" : "Boot & start");
   const status = helper
     ? "● live"
     : starting
@@ -44,11 +55,11 @@ export function GridTile({
       className="grid-tile relative flex flex-col bg-[#111] rounded-[10px] overflow-hidden no-underline text-inherit border border-[#2a2a2a] [transition:border-color_120ms]"
       style={{ outline: `1px solid ${ringColor}` }}
     >
-      {(helper || isBooted) && (
+      {canStopOrShutdown && (
         <button
           type="button"
-          title={shuttingDown ? "Shutting down…" : `Shutdown ${platform === "android" ? "Android device" : "simulator"}`}
-          aria-label={`Shutdown ${platform === "android" ? "Android device" : "simulator"}`}
+          title={shuttingDown ? "Stopping..." : stopLabel}
+          aria-label={stopLabel}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -83,16 +94,16 @@ export function GridTile({
               style={{ borderTopColor: "rgba(155,201,155,0.95)" }}
             />
           ) : (
-            <div className="text-[28px] opacity-50">{isBooted ? "▣" : "▢"}</div>
+            <div className="text-[28px] text-[#777]">{isBooted ? "▣" : "▢"}</div>
           )}
           {error ? <div className="text-danger text-[11px] font-mono">{error}</div> : null}
           <button
             type="button"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart(); }}
-            disabled={starting}
-            className={`px-3 py-1.5 rounded-md border border-[#333] text-[11px] font-mono ${starting ? "bg-[#1a1a1a] text-white/55 cursor-default" : "bg-[#1d2a1d] text-success cursor-pointer"}`}
+            disabled={starting || !canStart}
+            className={`px-3 py-1.5 rounded-md border border-[#333] text-[11px] font-mono ${starting || !canStart ? "bg-[#1a1a1a] text-white/55 cursor-default" : "bg-[#1d2a1d] text-success cursor-pointer"}`}
           >
-            {starting ? (isBooted ? "Starting…" : "Booting…") : (isBooted ? "Start stream" : "Boot & start")}
+            {startLabel}
           </button>
         </div>
       )}

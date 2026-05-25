@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { deviceKind, runtimeOrder, type SimDevice } from "../utils/devices";
+import { canShutdownDevice } from "../utils/grid";
 import { PlatformBadge } from "./platform-badge";
 
 // Inline dropdown — no shadcn / hugeicons dependency so the serve-sim client
@@ -97,6 +98,7 @@ export function DevicePicker({
               {devs.map((d) => {
                 const isStopping = stoppingUdids.has(d.udid);
                 const isBooted = d.state === "Booted";
+                const canStop = canShutdownDevice(d.platform, d.udid);
                 return (
                   <div
                     key={d.udid}
@@ -109,7 +111,7 @@ export function DevicePicker({
                     />
                     <PlatformBadge platform={d.platform} compact />
                     <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{d.name}</span>
-                    {isBooted && (
+                    {isBooted && canStop && (
                       <span
                         role="button"
                         onClick={(e) => { e.stopPropagation(); if (!isStopping) onStop(d.udid); }}

@@ -252,6 +252,11 @@ function readServeSimStates(): ServeSimState[] {
   return states;
 }
 
+function stopServeSimState(state: ServeSimState): void {
+  try { process.kill(state.pid, "SIGTERM"); } catch {}
+  try { unlinkSync(join(STATE_DIR, `server-${state.device}.json`)); } catch {}
+}
+
 export function selectServeSimState(
   states: ServeSimState[],
   device?: string | null,
@@ -858,9 +863,8 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       return;
     }
 
-    // Shutdown a booted simulator. Any running helper for the device is reaped
-    // by readServeSimStates() on the next /grid/api poll (it kills helpers
-    // whose backing simulator is no longer in the booted set).
+    // Shutdown a booted simulator/emulator. Physical Android devices cannot be
+    // powered off here, but a live stream can still be stopped safely.
     if (url === base + "/grid/api/shutdown" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk: Buffer | string) => {
@@ -883,6 +887,13 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         // and prunes any helper bound to this now-shutdown device.
         bootedSnapshot = { at: 0, booted: null };
         if (platform === "android") {
+          const state = readServeSimStates().find((s) => s.device === udid && (s.platform ?? "ios") === "android");
+          if (state && !udid.startsWith("emulator-")) {
+            stopServeSimState(state);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, stopped: true, shutdown: false }));
+            return;
+          }
           try {
             shutdownAndroidDevice(udid);
             res.writeHead(200, { "Content-Type": "application/json" });

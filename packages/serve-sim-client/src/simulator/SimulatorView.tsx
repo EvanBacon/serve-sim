@@ -234,6 +234,7 @@ export function SimulatorView({
       if (!connectedRef.current) {
         clearTimeout(watchdog);
         setConnected(true);
+        onStreamingChangeRef.current?.(true);
         setError(null);
       }
     });
@@ -285,6 +286,7 @@ export function SimulatorView({
         clearTimeout(slowWatchdog);
         clearTimeout(errorWatchdog);
         setConnected(true);
+        onStreamingChangeRef.current?.(true);
         setError(null);
       }
     });
@@ -488,14 +490,13 @@ export function SimulatorView({
     };
   }, [url, streamUrl, relayMode, updateScreenConfig, wsUrlProp]);
 
-  // FPS counter + stale-frame detection for relay mode.
-  // Unlike non-relay mode (where WS close flips connected=false), relay mode
-  // only knows the stream is alive when frames arrive. Without this, killing
-  // the upstream helper leaves the UI stuck on "live" forever.
+  // FPS counter + stale-frame detection for MJPEG relay mode. Android H.264 can
+  // legitimately pause decoded frames on an idle screen after the first image.
   useEffect(() => {
     if (!relayMode) return;
-    const STALE_MS = videoRelayMode ? 8000 : 2000;
+    const STALE_MS = 2000;
     const checkStaleness = () => {
+      if (videoRelayMode) return;
       const last = lastFrameAtRef.current;
       if (!last || !connectedRef.current) return;
       if (Date.now() - last > STALE_MS) setConnected(false);
@@ -803,34 +804,34 @@ export function SimulatorView({
               touchAction: "none",
             }}
             onMouseDown={(e) => {
-            e.preventDefault();
-            const rect = getInputRect();
-            if (!rect) return;
-            const x = (e.clientX - rect.left) / rect.width;
-            const y = (e.clientY - rect.top) / rect.height;
+              e.preventDefault();
+              const rect = getInputRect();
+              if (!rect) return;
+              const x = (e.clientX - rect.left) / rect.width;
+              const y = (e.clientY - rect.top) / rect.height;
 
-            if (e.altKey) {
-              // Multi-touch mode: begin gesture
-              multiTouchActiveRef.current = true;
-              multiTouchShiftRef.current = e.shiftKey;
-              const fingers = { x1: x, y1: y, x2: 1.0 - x, y2: 1.0 - y };
-              // For pan mode, lock the offset between fingers
-              panOffsetRef.current = { dx: 1.0 - x - x, dy: 1.0 - y - y };
-              setFingerIndicators(fingers);
-              sendMultiTouch({ type: "begin", ...fingers });
-              return;
-            }
+              if (e.altKey) {
+                // Multi-touch mode: begin gesture
+                multiTouchActiveRef.current = true;
+                multiTouchShiftRef.current = e.shiftKey;
+                const fingers = { x1: x, y1: y, x2: 1.0 - x, y2: 1.0 - y };
+                // For pan mode, lock the offset between fingers
+                panOffsetRef.current = { dx: 1.0 - x - x, dy: 1.0 - y - y };
+                setFingerIndicators(fingers);
+                sendMultiTouch({ type: "begin", ...fingers });
+                return;
+              }
 
-            showTouchIndicator(x, y);
-            const edge = homeIndicatorEdge(y);
-            if (edge !== undefined) {
-              edgeGestureRef.current = true;
-              sendTouch({ type: "begin", x, y, edge });
-            } else {
-              edgeGestureRef.current = false;
-              handleTouch("begin", e);
-            }
-          }}
+              showTouchIndicator(x, y);
+              const edge = homeIndicatorEdge(y);
+              if (edge !== undefined) {
+                edgeGestureRef.current = true;
+                sendTouch({ type: "begin", x, y, edge });
+              } else {
+                edgeGestureRef.current = false;
+                handleTouch("begin", e);
+              }
+            }}
           onMouseMove={(e) => {
             const rect = getInputRect();
             if (!rect) return;

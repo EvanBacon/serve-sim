@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { androidInputTextArg, parseAdbDevices, parseWmSize } from "../android-device";
+import {
+  androidInputTextArg,
+  parseAdbDevices,
+  parseWmSize,
+  shutdownAndroidDevice,
+} from "../android-device";
 import { androidKeyCodeForHidUsage, parsePngDimensions } from "../android-helper";
 
 describe("Android device parsing", () => {
@@ -40,6 +45,10 @@ ZY22 offline usb:336592896X product:oriole model:Pixel_6 device:oriole
   test("escapes text for adb input text", () => {
     expect(androidInputTextArg("Hi there 100%")).toBe("Hi%sthere%s100%25");
     expect(androidInputTextArg("a&b")).toBe("a\\&b");
+  });
+
+  test("refuses to power off physical Android devices", () => {
+    expect(() => shutdownAndroidDevice("ZY22")).toThrow("Physical Android devices");
   });
 });
 

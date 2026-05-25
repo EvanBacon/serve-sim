@@ -163,6 +163,10 @@ function readAllStates(): ServerState[] {
   return states;
 }
 
+function stateMatchesPlatform(state: ServerState, platform: Platform | "auto"): boolean {
+  return platform === "auto" || (state.platform ?? "ios") === platform;
+}
+
 function writeState(state: ServerState) {
   ensureStateDir();
   writeFileSync(stateFileForDevice(state.device), JSON.stringify(state, null, 2));
@@ -1195,8 +1199,8 @@ async function typeText(
     console.error("       serve-sim type --stdin [-d udid]");
     console.error("       serve-sim type --file <path> [-d udid]");
     console.error("");
-    console.error("Only US-keyboard ASCII characters are supported (A-Z, a-z, 0-9,");
-    console.error("space, newline, tab, and standard punctuation).");
+    console.error("iOS typing supports US-keyboard ASCII characters (A-Z, a-z, 0-9,");
+    console.error("space, newline, tab, and standard punctuation). Android uses adb input text.");
     process.exit(1);
   }
 
@@ -1214,18 +1218,6 @@ async function typeText(
     text = positional.join(" ");
   }
 
-  let events;
-  try {
-    events = textToKeyEvents(text);
-  } catch (err) {
-    if (err instanceof UnsupportedCharacterError) {
-      console.error(err.message);
-      console.error("Supported: A-Z, a-z, 0-9, space, newline, tab, and standard punctuation.");
-      process.exit(1);
-    }
-    throw err;
-  }
-
   const state = readStateForDeviceArg(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
@@ -1235,6 +1227,18 @@ async function typeText(
   if ((state.platform ?? "ios") === "android") {
     adb(["-s", state.device, "shell", "input", "text", androidInputTextArg(text)], { timeout: 15_000 });
     return;
+  }
+
+  let events;
+  try {
+    events = textToKeyEvents(text);
+  } catch (err) {
+    if (err instanceof UnsupportedCharacterError) {
+      console.error(err.message);
+      console.error("Supported on iOS: A-Z, a-z, 0-9, space, newline, tab, and standard punctuation.");
+      process.exit(1);
+    }
+    throw err;
   }
 
   await sendKeyEventsToWs(state.wsUrl, events);
@@ -2058,9 +2062,9 @@ async function serve(
     targetDevice = states[0]?.device;
   } else {
     // Ensure a serve-sim stream is running (start one if not)
-    const existing = readAllStates();
-    if (existing.length > 0) {
-      targetDevice = existing[0]?.device;
+    const existing = readAllStates().find((state) => stateMatchesPlatform(state, platform));
+    if (existing) {
+      targetDevice = existing.device;
     } else {
       console.log(platform === "android" ? "Starting Android stream..." : "Starting simulator stream...");
       const states = await detach(devices, 3100, platform);

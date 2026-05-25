@@ -251,6 +251,15 @@ function rotationForOrientation(orientation: SimulatorOrientation): number {
   }
 }
 
+function isSimulatorOrientation(value: string): value is SimulatorOrientation {
+  return (
+    value === "portrait" ||
+    value === "portrait_upside_down" ||
+    value === "landscape_left" ||
+    value === "landscape_right"
+  );
+}
+
 function parseForegroundPackage(dumpsysWindow: string): string | null {
   const focus = /mCurrentFocus=.*?\s+u\d+\s+([A-Za-z0-9_.]+)\//.exec(dumpsysWindow)
     ?? /mFocusedApp=.*?\s+u\d+\s+([A-Za-z0-9_.]+)\//.exec(dumpsysWindow);
@@ -485,7 +494,9 @@ export async function runAndroidHelper({
         inputShell.write(`input keyevent ${keyCode}`);
       }
     } else if (type === 0x07) {
-      const orientation = String(body.orientation ?? "portrait") as SimulatorOrientation;
+      const requestedOrientation = String(body.orientation ?? "portrait");
+      if (!isSimulatorOrientation(requestedOrientation)) return;
+      const orientation = requestedOrientation;
       const rotation = rotationForOrientation(orientation);
       config = { ...config, orientation };
       inputShell.write("settings put system accelerometer_rotation 0");

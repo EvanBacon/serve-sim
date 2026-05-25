@@ -16,6 +16,18 @@ export interface MemoryReport {
   estimatedAdditional: number;
 }
 
+type DeviceActionTarget = Pick<GridDevice, "platform" | "state" | "runtime">;
+
+export function canStartDevice(device: DeviceActionTarget): boolean {
+  if ((device.platform ?? "ios") !== "android") return true;
+  if (device.state === "Booted") return true;
+  return device.state === "Shutdown" && /Android Emulator/i.test(device.runtime);
+}
+
+export function canShutdownDevice(platform: GridDevice["platform"], deviceId: string): boolean {
+  return (platform ?? "ios") !== "android" || deviceId.startsWith("emulator-");
+}
+
 export function formatGridBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0 B";
   const gb = n / (1024 * 1024 * 1024);

@@ -293,13 +293,10 @@ export async function ensureAndroidBooted(target: AndroidTarget, logFile?: strin
 }
 
 export function shutdownAndroidDevice(serial: string): void {
-  if (serial.startsWith("emulator-")) {
-    try {
-      adb(["-s", serial, "emu", "kill"], { timeout: 5_000 });
-      return;
-    } catch {}
+  if (!serial.startsWith("emulator-")) {
+    throw new Error("Physical Android devices cannot be shut down by serve-sim.");
   }
-  adb(["-s", serial, "shell", "reboot", "-p"], { timeout: 5_000 });
+  adb(["-s", serial, "emu", "kill"], { timeout: 5_000 });
 }
 
 export function parseWmSize(stdout: string): { width: number; height: number } | null {

@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { deviceKind, runtimeOrder, type SimDevice } from "../utils/devices";
+import { canStartDevice } from "../utils/grid";
 import { simEndpoint } from "../utils/sim-endpoint";
 import { PlatformBadge } from "./platform-badge";
 
@@ -117,15 +118,21 @@ export function BootEmptyState({
           {error && <div className="px-2.5 py-1.5 text-danger text-[11px]">{error}</div>}
           {startError && <div className="px-2.5 py-1.5 text-danger text-[11px]">{startError}</div>}
           {!loading && !error && devices.length === 0 && (
-          <div className="p-3 text-white/40 text-[11px] text-center">No available simulators or Android emulators found</div>
+            <div className="p-3 text-white/40 text-[11px] text-center">No available simulators or Android devices found</div>
           )}
           {sortedGroups.map(([runtime, devs]) => (
             <div key={runtime}>
               <div className="px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold text-white/40 uppercase tracking-[0.08em]">{runtime}</div>
               {devs.map((d) => {
                 const isStarting = startingUdid === d.udid;
-                const disabled = startingUdid !== null && !isStarting;
+                const canStart = canStartDevice(d);
+                const disabled = !canStart || (startingUdid !== null && !isStarting);
                 const isBooted = d.state === "Booted";
+                const actionLabel = !canStart
+                  ? d.state === "Unauthorized" ? "Unauthorized" : "Unavailable"
+                  : isStarting
+                  ? (isBooted ? "Starting..." : "Booting...")
+                  : (isBooted ? "Start stream" : "Boot & stream");
                 return (
                   <div
                     key={d.udid}
@@ -139,9 +146,7 @@ export function BootEmptyState({
                     <PlatformBadge platform={d.platform} compact />
                     <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-left">{d.name}</span>
                     <span className={`text-[10px] ${isStarting ? "text-accent" : "text-white/55"}`}>
-                      {isStarting
-                        ? (isBooted ? "Starting..." : "Booting...")
-                        : (isBooted ? "Start stream" : "Boot & stream")}
+                      {actionLabel}
                     </span>
                   </div>
                 );
