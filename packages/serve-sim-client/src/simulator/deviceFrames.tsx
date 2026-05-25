@@ -9,7 +9,7 @@ import {
   isLandscapeConfig,
 } from "./orientation.js";
 
-export type DeviceType = "iphone" | "ipad" | "watch" | "vision";
+export type DeviceType = "iphone" | "ipad" | "watch" | "vision" | "android";
 
 export function getDeviceType(name?: string | null): DeviceType {
   if (!name) return "iphone";
@@ -17,6 +17,7 @@ export function getDeviceType(name?: string | null): DeviceType {
   if (lower.includes("ipad")) return "ipad";
   if (lower.includes("watch")) return "watch";
   if (lower.includes("vision")) return "vision";
+  if (lower.includes("pixel") || lower.includes("android") || lower.includes("sdk")) return "android";
   return "iphone";
 }
 
@@ -26,6 +27,7 @@ export const DEVICE_FRAMES = {
   ipad: { width: 430, height: 605, bezelX: 16, bezelY: 16, innerRadius: 12 },
   watch: { width: 274, height: 322, bezelX: 12, bezelY: 12, innerRadius: 79 },
   vision: { width: 640, height: 400, bezelX: 12, bezelY: 12, innerRadius: 32 },
+  android: { width: 420, height: 880, bezelX: 14, bezelY: 14, innerRadius: 36 },
 } as const;
 
 // Legacy named exports for backwards compat
@@ -115,6 +117,8 @@ export function simulatorMaxWidth(
         return 720;
       case "vision":
         return 580;
+      case "android":
+        return 620;
       case "watch":
         return 200;
       default:
@@ -128,6 +132,8 @@ export function simulatorMaxWidth(
       return 200;
     case "vision":
       return 580;
+    case "android":
+      return 320;
     default:
       return 320;
   }
@@ -241,6 +247,8 @@ export function DeviceFrameChrome({ type = "iphone", streaming = false }: { type
       return <WatchFrameChrome streaming={streaming} />;
     case "vision":
       return <VisionProFrameChrome streaming={streaming} />;
+    case "android":
+      return <AndroidFrameChrome streaming={streaming} />;
     default:
       return <PhoneFrameChrome streaming={streaming} />;
   }
@@ -460,6 +468,48 @@ function VisionProFrameChrome({ streaming = false }: { streaming?: boolean }) {
       {/* Front sensors (EyeSight display area indicator) */}
       <ellipse cx={w / 2} cy={h / 2} rx={w / 2 - 30} ry={h / 2 - 24} stroke="#4a4a4d" strokeWidth="0.5" opacity="0.3"
         style={{ opacity: streaming ? 0 : 0.3, transition: 'opacity 0.3s ease' }}
+      />
+    </svg>
+  );
+}
+
+function AndroidFrameChrome({ streaming = false }: { streaming?: boolean }) {
+  const w = DEVICE_FRAMES.android.width;
+  const h = DEVICE_FRAMES.android.height;
+  const outerRx = 46;
+  const innerRx = 40;
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: '100%' }} fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="android-glow0" x="0" y="0" width={w} height={h} filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+          <feFlood floodOpacity="0" result="BackgroundImageFix" />
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+          <feGaussianBlur stdDeviation="0.5" result="blur" />
+        </filter>
+      </defs>
+      <rect x="0.833" y="0.833" width={w - 1.666} height={h - 1.666} rx={outerRx} stroke="#37373a" strokeWidth="1.666" />
+      <rect x="3.5" y="3.5" width={w - 7} height={h - 7} rx={innerRx} stroke="#454548" strokeWidth="4" />
+      <g opacity="0.9" filter="url(#android-glow0)">
+        <rect x="1.5" y="1.5" width={w - 3} height={h - 3} rx={outerRx - 1} stroke="#545458" strokeWidth="1.666" />
+      </g>
+      <circle
+        cx={w / 2}
+        cy={22}
+        r="5"
+        fill="#111"
+        stroke="#343438"
+        strokeWidth="1"
+        style={{ opacity: streaming ? 0 : 1, transition: 'opacity 0.3s ease' }}
+      />
+      <rect
+        x={(w - 116) / 2}
+        y={h - 20}
+        width="116"
+        height="4"
+        rx="2"
+        fill="white"
+        style={{ opacity: streaming ? 0 : 0.55, transition: 'opacity 0.3s ease' }}
       />
     </svg>
   );

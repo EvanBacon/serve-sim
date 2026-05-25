@@ -21,6 +21,7 @@ export function GridTile({
 }) {
   const helper = device.helper;
   const isBooted = device.state === "Booted";
+  const platform = device.platform ?? "ios";
   const status = helper
     ? "● live"
     : starting
@@ -45,8 +46,8 @@ export function GridTile({
       {(helper || isBooted) && (
         <button
           type="button"
-          title={shuttingDown ? "Shutting down…" : "Shutdown simulator"}
-          aria-label="Shutdown simulator"
+          title={shuttingDown ? "Shutting down…" : `Shutdown ${platform === "android" ? "Android device" : "simulator"}`}
+          aria-label={`Shutdown ${platform === "android" ? "Android device" : "simulator"}`}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -58,7 +59,12 @@ export function GridTile({
           ×
         </button>
       )}
-      {helper ? (
+      {helper && platform === "android" ? (
+        <div className="flex-1 min-h-0 flex items-center justify-center p-3 flex-col gap-2 text-white/70 text-[12px] text-center bg-black pointer-events-none">
+          <div className="text-[24px] text-white">▣</div>
+          <div className="font-mono">H.264 stream</div>
+        </div>
+      ) : helper ? (
         <div className="flex-1 min-h-0 flex items-center justify-center p-2 bg-black pointer-events-none">
           <img
             src={helper.streamUrl}

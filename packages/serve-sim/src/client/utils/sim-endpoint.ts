@@ -7,6 +7,9 @@ declare global {
       pid: number;
       port: number;
       device: string;
+      platform?: "ios" | "android";
+      name?: string;
+      runtime?: string;
       basePath: string;
       logsEndpoint?: string;
       axEndpoint?: string;

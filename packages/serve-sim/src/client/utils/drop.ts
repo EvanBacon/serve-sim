@@ -2,8 +2,8 @@ import type { ExecResult } from "./exec";
 
 // ─── File drop (drag media/ipa onto the simulator) ───
 //
-// Media → `xcrun simctl addmedia`   (Photos)
-// .ipa  → `xcrun simctl install`    (install app on simulator)
+// Media → `xcrun simctl addmedia` / Android Downloads + media scan
+// .ipa/.apk → app install on simulator/emulator
 //
 // Files are streamed to /tmp over /exec in base64-chunked bash `echo | base64 -d`
 // calls. No sonner dep here, so uploads surface in an inline toast list.
@@ -25,7 +25,7 @@ export const DROP_MEDIA_MIME_TYPES = new Set([
 export const DROP_CHUNK_SIZE = 262144;
 export const DROP_MAX_FILE_SIZE = 500 * 1024 * 1024;
 
-export type DropKind = "media" | "ipa";
+export type DropKind = "media" | "ipa" | "apk";
 
 export function fileExtension(file: File): string {
   const name = file.name;
@@ -36,7 +36,9 @@ export function fileExtension(file: File): string {
 }
 
 export function dropKindFor(file: File): DropKind | null {
-  if (fileExtension(file) === "ipa") return "ipa";
+  const ext = fileExtension(file);
+  if (ext === "ipa") return "ipa";
+  if (ext === "apk") return "apk";
   if (DROP_MEDIA_MIME_TYPES.has(file.type)) return "media";
   return null;
 }
@@ -79,14 +81,15 @@ export async function uploadDroppedFile(
   kind: DropKind,
   exec: (command: string) => Promise<ExecResult>,
   udid: string,
+  platform: "ios" | "android",
   onProgress: (progress: number | null) => void,
 ) {
   if (file.size > DROP_MAX_FILE_SIZE) {
     throw new Error("File too large (max 500MB)");
   }
 
-  const ext = kind === "ipa" ? "ipa" : fileExtension(file);
-  const prefix = kind === "ipa" ? "serve-sim-install" : "serve-sim-upload";
+  const ext = kind === "ipa" || kind === "apk" ? kind : fileExtension(file);
+  const prefix = kind === "ipa" || kind === "apk" ? "serve-sim-install" : "serve-sim-upload";
   const tmpPath = `/tmp/${prefix}-${crypto.randomUUID()}.${ext}`;
 
   try {
@@ -112,12 +115,16 @@ export async function uploadDroppedFile(
 
     // install/addmedia gives no progress signal — flip to indeterminate.
     onProgress(null);
-    const cmd = kind === "ipa"
-      ? `xcrun simctl install ${udid} ${tmpPath}`
-      : `xcrun simctl addmedia ${udid} ${tmpPath}`;
+    const cmd = platform === "android"
+      ? kind === "apk"
+        ? `adb -s ${udid} install -r ${tmpPath}`
+        : `bash -c 'adb -s ${udid} push ${tmpPath} /sdcard/Download/ && adb -s ${udid} shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Download/${tmpPath.split("/").pop()}'`
+      : kind === "ipa"
+        ? `xcrun simctl install ${udid} ${tmpPath}`
+        : `xcrun simctl addmedia ${udid} ${tmpPath}`;
     const result = await exec(cmd);
     if (result.exitCode !== 0) {
-      const label = kind === "ipa" ? "install" : "addmedia";
+      const label = kind === "ipa" || kind === "apk" ? "install" : "addmedia";
       throw new Error(result.stderr || `${label} failed (exit ${result.exitCode})`);
     }
   } finally {

@@ -50,6 +50,8 @@ export interface SimulatorViewProps {
   subscribeFrame?: (cb: (blobUrl: string) => void) => () => void;
   /** Relay mode: latest blob URL JPEG frame from the relay (used for initial render) */
   streamFrame?: string | null;
+  /** Relay mode: subscribe to decoded video frames. Callback must draw synchronously. */
+  subscribeVideoFrame?: (cb: (frame: any) => void) => () => void;
   /** Relay mode: screen config from relay */
   streamConfig?: StreamConfig | null;
   /** Called when the rendered stream reports new dimensions or orientation. */
@@ -85,6 +87,7 @@ export function SimulatorView({
   enableDigitalCrown,
   subscribeFrame,
   streamFrame: _streamFrame,
+  subscribeVideoFrame,
   streamConfig,
   onScreenConfigChange,
   hideControls,
@@ -92,8 +95,10 @@ export function SimulatorView({
   connectionQuality,
 }: SimulatorViewProps) {
   const relayMode = !!onStreamTouch;
+  const videoRelayMode = relayMode && !!subscribeVideoFrame;
   const imgRef = useRef<HTMLImageElement | null>(null);
   const relayImgRef = useRef<HTMLImageElement | null>(null);
+  const relayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const inputLayerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -187,7 +192,7 @@ export function SimulatorView({
   connectedRef.current = connected;
   const prevBlobUrlRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!relayMode || !subscribeFrame) return;
+    if (!relayMode || videoRelayMode || !subscribeFrame) return;
     // Startup watchdog: flag the stream as broken if no frame arrives within
     // the window. Catches the silent-failure mode where the helper accepts
     // the MJPEG connection but its underlying simulator was shut down —
@@ -224,7 +229,43 @@ export function SimulatorView({
         prevBlobUrlRef.current = null;
       }
     };
-  }, [relayMode, subscribeFrame]);
+  }, [relayMode, videoRelayMode, subscribeFrame]);
+
+  useEffect(() => {
+    if (!videoRelayMode || !subscribeVideoFrame) return;
+    const STARTUP_MS = 6000;
+    const watchdog = setTimeout(() => {
+      if (!connectedRef.current) {
+        setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
+      }
+    }, STARTUP_MS);
+
+    const unsubscribe = subscribeVideoFrame((frame) => {
+      const width = Number(frame.displayWidth || frame.codedWidth || 0);
+      const height = Number(frame.displayHeight || frame.codedHeight || 0);
+      const canvas = relayCanvasRef.current;
+      const ctx = canvas?.getContext("2d", { alpha: false });
+      if (!canvas || !ctx || width <= 0 || height <= 0) return;
+
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      ctx.drawImage(frame, 0, 0, width, height);
+      updateScreenConfig({ width, height });
+
+      frameCountRef.current++;
+      lastFrameAtRef.current = Date.now();
+      if (!connectedRef.current) {
+        clearTimeout(watchdog);
+        setConnected(true);
+        setError(null);
+      }
+    });
+
+    return () => {
+      clearTimeout(watchdog);
+      unsubscribe?.();
+    };
+  }, [videoRelayMode, subscribeVideoFrame, updateScreenConfig]);
 
   const sendTouch = useCallback(
     (touch: {
@@ -448,8 +489,9 @@ export function SimulatorView({
   }, [relayMode]);
 
   const getViewElement = useCallback(() => {
+    if (videoRelayMode) return relayCanvasRef.current;
     return relayMode ? relayImgRef.current : imgRef.current;
-  }, [relayMode]);
+  }, [relayMode, videoRelayMode]);
 
   const getInputRect = useCallback(() => {
     return surfaceRef.current?.getBoundingClientRect()
@@ -692,21 +734,9 @@ export function SimulatorView({
             cornerShape: clipStyle?.cornerShape,
           } as CSSProperties}
         >
-        <img
-          ref={imgRef}
-          src={relayMode ? undefined : streamUrl}
-          draggable={false}
-          onLoad={(e) => {
-            const el = e.currentTarget;
-            if (el.naturalWidth > 0 && el.naturalHeight > 0) {
-              updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
-            }
-          }}
-          style={relayMode ? { display: "none" } : streamImageStyle}
-        />
-        {relayMode && (
           <img
-            ref={relayImgRef}
+            ref={imgRef}
+            src={relayMode ? undefined : streamUrl}
             draggable={false}
             onLoad={(e) => {
               const el = e.currentTarget;
@@ -714,19 +744,37 @@ export function SimulatorView({
                 updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
               }
             }}
-            style={streamImageStyle}
+            style={relayMode ? { display: "none" } : streamImageStyle}
           />
-        )}
-        {/* Interactive overlay — captures all pointer events */}
-        <div
-          ref={inputLayerRef}
-          style={{
-            position: "absolute",
-            inset: 0,
-            cursor: FINGER_CURSOR,
-            touchAction: "none",
-          }}
-          onMouseDown={(e) => {
+          {relayMode && !videoRelayMode && (
+            <img
+              ref={relayImgRef}
+              draggable={false}
+              onLoad={(e) => {
+                const el = e.currentTarget;
+                if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                  updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
+                }
+              }}
+              style={streamImageStyle}
+            />
+          )}
+          {videoRelayMode && (
+            <canvas
+              ref={relayCanvasRef}
+              style={streamImageStyle}
+            />
+          )}
+          {/* Interactive overlay — captures all pointer events */}
+          <div
+            ref={inputLayerRef}
+            style={{
+              position: "absolute",
+              inset: 0,
+              cursor: FINGER_CURSOR,
+              touchAction: "none",
+            }}
+            onMouseDown={(e) => {
             e.preventDefault();
             const rect = getInputRect();
             if (!rect) return;

@@ -1,5 +1,9 @@
 import { execSync } from "child_process";
 
+export function isIosUdid(value: string): boolean {
+  return /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(value);
+}
+
 /**
  * UDID of a booted simulator, or null if none is booted. Prefers an iOS device
  * — a machine may also have a booted watchOS/tvOS sim, which `serve-sim`'s
@@ -26,11 +30,10 @@ export function findBootedDevice(): string | null {
 
 /**
  * Resolve a device name or UDID to a UDID. A UDID is returned as-is; a name is
- * matched case-insensitively against `simctl list devices`. Exits the process
- * with a clear error when the name cannot be resolved.
+ * matched case-insensitively against `simctl list devices`.
  */
-export function resolveDevice(nameOrUDID: string): string {
-  if (/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(nameOrUDID)) {
+export function tryResolveDevice(nameOrUDID: string): string | null {
+  if (isIosUdid(nameOrUDID)) {
     return nameOrUDID;
   }
   try {
@@ -44,6 +47,16 @@ export function resolveDevice(nameOrUDID: string): string {
       }
     }
   } catch {}
+  return null;
+}
+
+/**
+ * Resolve a device name or UDID to a UDID. Exits the process with a clear
+ * error when the name cannot be resolved.
+ */
+export function resolveDevice(nameOrUDID: string): string {
+  const resolved = tryResolveDevice(nameOrUDID);
+  if (resolved) return resolved;
   console.error(`Could not resolve device: ${nameOrUDID}`);
   process.exit(1);
 }

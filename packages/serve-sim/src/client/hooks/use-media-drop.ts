@@ -5,6 +5,7 @@ import type { ExecResult } from "../utils/exec";
 export function useMediaDrop({
   exec,
   udid,
+  platform = "ios",
   enabled,
   onUploadStart,
   onUploadProgress,
@@ -13,6 +14,7 @@ export function useMediaDrop({
 }: {
   exec: (command: string) => Promise<ExecResult>;
   udid: string | undefined;
+  platform?: "ios" | "android";
   enabled: boolean;
   onUploadStart: (name: string, kind: DropKind) => string;
   onUploadProgress: (id: string, progress: number | null) => void;
@@ -36,19 +38,19 @@ export function useMediaDrop({
 
       for (const file of files) {
         const kind = dropKindFor(file);
-        if (!kind) {
+        if (!kind || (platform === "ios" && kind === "apk") || (platform === "android" && kind === "ipa")) {
           onUnsupported(file);
           continue;
         }
         const id = onUploadStart(file.name, kind);
-        uploadDroppedFile(file, kind, exec, udid, (p) => onUploadProgress(id, p))
+        uploadDroppedFile(file, kind, exec, udid, platform, (p) => onUploadProgress(id, p))
           .then(() => onUploadEnd(id, true))
           .catch((err) =>
             onUploadEnd(id, false, err instanceof Error ? err.message : "Upload failed"),
           );
       }
     },
-    [enabled, udid, exec, onUploadStart, onUploadProgress, onUploadEnd, onUnsupported],
+    [enabled, udid, platform, exec, onUploadStart, onUploadProgress, onUploadEnd, onUnsupported],
   );
 
   const onDragOver = useCallback(

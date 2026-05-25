@@ -53,24 +53,26 @@ export function GridPanel({
   );
 
   const start = useCallback(
-    async (udid: string) => {
+    async (device: GridDevice) => {
       if (!startEndpoint) return;
+      const udid = device.device;
       setPending((p) => ({ ...p, [udid]: true }));
       setErrors((e) => ({ ...e, [udid]: null }));
       try {
         const res = await fetch(startEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid }),
+          body: JSON.stringify({ udid, platform: device.platform ?? "ios" }),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok || !json.ok) {
           setErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
           return;
         }
-        const ready = await waitForHelper(udid);
+        const startedDevice = json.device ?? udid;
+        const ready = await waitForHelper(startedDevice);
         if (ready) {
-          window.location.assign(gridPreviewHref(previewEndpoint, udid));
+          window.location.assign(gridPreviewHref(previewEndpoint, startedDevice));
           return;
         }
         setErrors((e) => ({ ...e, [udid]: "Helper did not register in time" }));
@@ -97,15 +99,16 @@ export function GridPanel({
   }, [devices, currentUdid, previewEndpoint]);
 
   const shutdown = useCallback(
-    async (udid: string) => {
+    async (device: GridDevice) => {
       if (!shutdownEndpoint) return;
+      const udid = device.device;
       setShuttingDown((s) => ({ ...s, [udid]: true }));
       setErrors((e) => ({ ...e, [udid]: null }));
       try {
         const res = await fetch(shutdownEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid }),
+          body: JSON.stringify({ udid, platform: device.platform ?? "ios" }),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok || !json.ok) {
@@ -124,7 +127,7 @@ export function GridPanel({
   return (
     <Panel open={open} width={width}>
       <PanelHeader>
-        <PanelTitle>Simulators</PanelTitle>
+        <PanelTitle>Devices</PanelTitle>
         <div className="flex items-center gap-2">
           <GridCapacityBanner report={memory} />
           <PanelCloseButton onClick={onClose} />
@@ -132,7 +135,7 @@ export function GridPanel({
       </PanelHeader>
       <div className="flex-1 min-h-0 overflow-y-auto p-3.5 grid auto-rows-[minmax(300px,auto)] gap-3 content-start grid-cols-[repeat(auto-fill,minmax(200px,1fr))]">
         {devices === null ? null : devices.length === 0 ? (
-          <div className="col-span-full bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">No iOS simulators available.</div>
+          <div className="col-span-full bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">No simulators or Android emulators available.</div>
         ) : (
           devices.map((d) => (
             <GridTile
@@ -143,8 +146,8 @@ export function GridPanel({
               starting={!!pending[d.device]}
               shuttingDown={!!shuttingDown[d.device]}
               error={errors[d.device] ?? null}
-              onStart={() => start(d.device)}
-              onShutdown={() => shutdown(d.device)}
+              onStart={() => start(d)}
+              onShutdown={() => shutdown(d)}
             />
           ))
         )}

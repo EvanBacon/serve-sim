@@ -49,21 +49,28 @@ export function BootEmptyState({
       const startReq = fetch(startUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ udid: d.udid }),
+        body: JSON.stringify({ udid: d.udid, platform: d.platform ?? "ios" }),
       })
         .then(async (res) => {
           const json = await res.json().catch(() => ({} as any));
           if (!res.ok || !json.ok) {
             throw new Error(json.error ?? `HTTP ${res.status}`);
           }
+          return json.device as string | undefined;
         });
 
       const navigated = await Promise.race([
         navigateWhenReady,
-        startReq.then(() => "started" as const),
+        startReq.then((device) => device ?? ("started" as const)),
       ]);
 
       if (navigated === true) return;
+      if (typeof navigated === "string" && navigated !== "started" && navigated !== d.udid) {
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.set("device", navigated);
+        window.location.assign(nextUrl.toString());
+        return;
+      }
       const ready = await navigateWhenReady;
       if (ready) return;
       throw new Error("serve-sim started but no stream state appeared");
@@ -96,7 +103,7 @@ export function BootEmptyState({
       <div className="flex flex-col items-center gap-3 text-center">
         <h1 className="text-[18px] m-0 text-white/90">No serve-sim stream running</h1>
         <p className="text-white/55 text-[14px] max-w-120">
-          Pick a simulator to boot, or start one yourself with{" "}
+          Pick a device to boot, or start one yourself with{" "}
           <code className="bg-[#222] px-1.5 py-0.5 rounded text-[13px]">bunx serve-sim --detach</code>.
         </p>
         <div className="w-full max-w-90 mt-2 bg-panel border border-white/12 rounded-[10px] p-1 font-mono text-[13px] text-white/90 text-left max-h-[70vh] overflow-y-auto min-h-0">
@@ -109,7 +116,7 @@ export function BootEmptyState({
           {error && <div className="px-2.5 py-1.5 text-danger text-[11px]">{error}</div>}
           {startError && <div className="px-2.5 py-1.5 text-danger text-[11px]">{startError}</div>}
           {!loading && !error && devices.length === 0 && (
-            <div className="p-3 text-white/40 text-[11px] text-center">No available simulators found</div>
+          <div className="p-3 text-white/40 text-[11px] text-center">No available simulators or Android emulators found</div>
           )}
           {sortedGroups.map(([runtime, devs]) => (
             <div key={runtime}>

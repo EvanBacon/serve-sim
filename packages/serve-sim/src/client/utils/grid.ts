@@ -1,5 +1,6 @@
 export interface GridDevice {
   device: string;
+  platform?: "ios" | "android";
   name: string;
   runtime: string;
   state: string;
