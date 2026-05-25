@@ -252,11 +252,15 @@ npx serve-sim button remote_tv             # return to home
 npx serve-sim button remote_select --hold       # default 1500ms
 npx serve-sim button remote_menu --hold 1000    # jumps to home instead of stepping back
 
-# 7. Verify by reading the accessibility tree (works on tvOS).
+# 7. Type into a focused text field. Navigate focus to the field with the
+#    remote buttons first, then send characters via the CLI:
+npx serve-sim type "hello world"
+
+# 8. Verify by reading the accessibility tree (works on tvOS).
 curl -s "$URL%/.sim/api" | jq -r '.streamUrl'  # discover the helper port
 curl -s http://localhost:3100/ax | jq '.children[0].AXLabel'
 
-# 8. Cleanup
+# 9. Cleanup
 npx serve-sim --kill
 ```
 

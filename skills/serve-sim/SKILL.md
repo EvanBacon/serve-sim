@@ -154,7 +154,7 @@ npx serve-sim button remote_play_pause --hold 800
 
 ### Web preview keyboard map
 
-When the preview is showing a tvOS sim, these keys fire remote events:
+When the preview is showing a tvOS sim, these keys fire Siri-remote events:
 
 | Key | Sends |
 |---|---|
@@ -164,15 +164,23 @@ When the preview is showing a tvOS sim, these keys fire remote events:
 | `PlayPause` (Mac media key) | `remote_play_pause` |
 | `AppleTV` | `remote_tv` |
 
-Two web-preview behaviors are turned off automatically for tvOS:
-- The generic iOS keyboard pass-through (typing into iOS text fields). Letting it fire in parallel duplicated each keypress, and Enter no longer registered as a select.
-- Mouse/touch forwarding on the stream surface. Apple TV has no touchscreen, and clicks were being interpreted by the helper's mouse-NSEvent path and bouncing the sim back to the home screen.
+Every other key (letters, digits, Space, Backspace, Tab, …) is forwarded as a USB HID keyboard event so it can reach a focused tvOS text-input field — including the on-screen keyboard in Settings, account fields, search bars, etc.
+
+Mouse/touch forwarding on the stream surface is turned off automatically for tvOS. Apple TV has no touchscreen, and clicks were being interpreted by the helper's mouse-NSEvent path and bouncing the sim back to the home screen.
+
+### Typing text
+
+Both transports reach a focused text field on tvOS:
+
+- The web preview forwards keystrokes for any non-navigation key (see above).
+- `npx serve-sim type "hello"` sends the same USB HID keyboard events from the CLI without needing the browser.
+
+If a text field is **not** focused, the keystrokes still land at the helper but tvOS has nowhere to route them — focus a field first by navigating to it with the remote buttons.
 
 ### What doesn't work on tvOS
 
 - **`tap` and `gesture`** — no touchscreen on Apple TV.
 - **iOS hardware buttons** (`home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`) — they target iOS hardware buttons. Use `remote_tv` for home and `remote_siri` for Siri.
-- **`type` (text typing)** — the keyboard pass-through is gated off for tvOS in the web preview; the `serve-sim type` CLI still sends USB HID keyboard events, which can reach the tvOS sim, but tvOS's text-entry surfaces are sparse so this is rarely useful.
 - **`rotate`** — Apple TV is always landscape.
 - **`serve-sim camera`** — tvOS apps rarely use AVFoundation; not actively supported.
 - **`serve-sim permissions`** — the TCC layout on tvOS differs from iOS; the permissions subcommand was tested against iOS only.
