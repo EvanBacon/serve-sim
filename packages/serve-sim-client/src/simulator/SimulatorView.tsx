@@ -558,6 +558,7 @@ export function SimulatorView({
       Enter: "remote_select",
       Escape: "remote_menu",
       PlayPause: "remote_play_pause",
+      AppleTV: "remote_tv",
     };
     const onKey = (e: KeyboardEvent) => {
       const button = map[e.key];
