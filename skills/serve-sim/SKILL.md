@@ -1,12 +1,14 @@
 ---
 name: serve-sim
-description: Control and stream a running iOS, iPad, or Apple Watch Simulator with npx serve-sim. Use for simulator preview, taps, gestures, hardware buttons, rotation, camera injection, permissions, accessibility, and CoreAnimation debug.
+description: Control and stream a running iOS, iPad, Apple Watch, or Apple TV Simulator with npx serve-sim. Use for simulator preview, taps, gestures, hardware buttons, Siri-remote navigation, rotation, camera injection, permissions, accessibility, and CoreAnimation debug.
 license: Apache-2.0
 ---
 
 # serve-sim
 
-Drive an Apple Simulator (iOS, iPad, Apple Watch) from an agent using the [serve-sim](https://github.com/EvanBacon/serve-sim) CLI. serve-sim spawns a Swift helper that captures the simulator framebuffer via `simctl io`, exposes it as an MJPEG stream plus a binary WebSocket input channel, and serves a React preview UI on top. This skill teaches an agent the exact CLI surface, the gesture JSON shape, the gotchas, and the recommended workflows.
+Drive an Apple Simulator (iOS, iPad, Apple Watch, Apple TV) from an agent using the [serve-sim](https://github.com/EvanBacon/serve-sim) CLI. serve-sim spawns a Swift helper that captures the simulator framebuffer via `simctl io`, exposes it as an MJPEG stream plus a binary WebSocket input channel, and serves a React preview UI on top. This skill teaches an agent the exact CLI surface, the gesture JSON shape, the gotchas, and the recommended workflows.
+
+> **Apple TV / tvOS** is opt-in via `--tv`. See the [Apple TV (tvOS) support](#apple-tv-tvos-support) section below — input semantics differ enough from iOS (no touchscreen, separate remote-button transport) that the agent should read that section before driving a tvOS sim.
 
 ## When to use
 
@@ -67,14 +69,14 @@ Key invariants the agent must respect:
 
 | Goal | Command | Notes |
 |---|---|---|
-| Start preview server | `npx serve-sim [device]` | Default preview at `http://localhost:3200`, stream at `:3100`. Foreground process. |
+| Start preview server | `npx serve-sim [device]` | Default preview at `http://localhost:3200`, stream at `:3100`. Foreground process. Add `--tv` to target a tvOS sim. |
 | Start headless / daemon | `npx serve-sim --detach [device]` | Returns JSON with `pid`, `port`, `url`. Use for agent loops. |
 | Show stream in host's preview | `npx serve-sim --detach -q` → hand off `url` to host preview tool | See "Showing the stream in your agent's preview" section. |
 | List running streams | `npx serve-sim --list` | Add `-q` for JSON-only output. |
 | Stop all helpers | `npx serve-sim --kill` | Pass `[device]` to stop a specific one. |
 | Single tap | `npx serve-sim tap <x> <y>` | `<x> <y>` in `0..1`. **Use this, not `gesture`, for plain taps.** See "Critical gotcha" below. |
 | Multi-step gesture | `npx serve-sim gesture '<json>'` | See [references/gestures.md](references/gestures.md). |
-| Hardware button | `npx serve-sim button <name>` | Names: `home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`. See [references/buttons-rotation.md](references/buttons-rotation.md). |
+| Hardware button | `npx serve-sim button <name> [--hold [ms]]` | iOS names: `home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`. tvOS Siri-remote names: `remote_up`/`down`/`left`/`right`, `remote_select`, `remote_menu`, `remote_tv`, `remote_play_pause`, `remote_volume_up`/`down`, `remote_siri`. `--hold [ms]` (default 1500) only honored for `remote_select` / `remote_play_pause` / `remote_menu`. See [references/buttons-rotation.md](references/buttons-rotation.md) and [Apple TV (tvOS) support](#apple-tv-tvos-support). |
 | Rotate device | `npx serve-sim rotate <orientation>` | `portrait`, `portrait_upside_down`, `landscape_left`, `landscape_right`. |
 | Simulate memory warning | `npx serve-sim memory-warning` | Equivalent to Debug → Simulate Memory Warning. |
 | CoreAnimation debug | `npx serve-sim ca-debug <option> <on\|off>` | Options: `blended`, `copies`, `misaligned`, `offscreen`, `slow-animations`. See [references/ca-debug.md](references/ca-debug.md). |
@@ -102,6 +104,79 @@ npx serve-sim --list                                # show all running streams
 ```
 
 If the user has only one booted simulator, omit `-d` entirely. The skill should prefer auto-detection over hard-coding device names.
+
+## Apple TV (tvOS) support
+
+tvOS is opt-in via a top-level `--tv` flag. Apple TV simulators don't share much input surface with iOS — no touchscreen, different button transport — so serve-sim's iOS-default behaviors stay iOS-only unless `--tv` is passed.
+
+### Starting up
+
+```sh
+npx serve-sim --tv                  # preview server, picks the booted tvOS sim
+npx serve-sim --tv --detach -q      # daemon mode, JSON output
+npx serve-sim --tv -d "Apple TV"    # explicit device by name
+```
+
+When `--tv` is set, auto-selection prefers a 1080p Apple TV sim and skips full-resolution 4K models — the 3840×2160 framebuffer chokes the H.264 encoder. The "(at 1080p)" 4K variants are kept since they output a 1080p framebuffer. Pass `-d <name>` to override.
+
+Without `--tv`, `findBootedDevice()` still prefers an iOS sim and ignores booted tvOS sims, so existing iOS workflows are unaffected.
+
+### Siri-remote buttons
+
+`button` accepts these Siri-remote names alongside the iOS button set:
+
+| Name | What it does |
+|---|---|
+| `remote_up` / `remote_down` / `remote_left` / `remote_right` | Directional focus navigation |
+| `remote_select` | Confirm focused item |
+| `remote_menu` | Back / step one screen up |
+| `remote_tv` | Apple TV / Home button — return to home screen |
+| `remote_play_pause` | Toggle video playback |
+| `remote_volume_up` / `remote_volume_down` | Volume — accepted but the tvOS sim doesn't model speaker volume |
+| `remote_siri` | Open the voice command UI |
+
+Directional keys + `remote_select` route through USB HID Keyboard Page (the tvOS focus engine listens to keyboard events natively). The discrete remote buttons (`menu`, `tv`, `play_pause`, `volume_*`, `siri`) go through USB HID Consumer Page via `IndigoHIDMessageForHIDArbitrary` on the tvOS remote target. The disassembled `IndigoHIDMessageForButton` source codes from Simulator.app all funnel through a generic back/home path and don't address individual remote buttons — the Consumer-page transport is the only one that dispatches per-button events.
+
+### Long press
+
+`button --hold [ms]` holds the press for `ms` (default 1500). Only the buttons with a discrete tvOS long-press gesture honor it; everything else silently ignores `--hold`.
+
+| Button | Long-press effect |
+|---|---|
+| `remote_select` | Focus context menu / wiggle mode |
+| `remote_play_pause` | Older Siri-remote sleep gesture (and some app-specific behaviors) |
+| `remote_menu` | Jump to home instead of stepping one screen back |
+
+```sh
+npx serve-sim button remote_select --hold        # 1500ms hold
+npx serve-sim button remote_play_pause --hold 800
+```
+
+### Web preview keyboard map
+
+When the preview is showing a tvOS sim, these keys fire remote events:
+
+| Key | Sends |
+|---|---|
+| Arrow keys | `remote_up` / `down` / `left` / `right` |
+| Enter / Return | `remote_select` |
+| Escape | `remote_menu` |
+| `PlayPause` (Mac media key) | `remote_play_pause` |
+| `AppleTV` | `remote_tv` |
+
+Two web-preview behaviors are turned off automatically for tvOS:
+- The generic iOS keyboard pass-through (typing into iOS text fields). Letting it fire in parallel duplicated each keypress, and Enter no longer registered as a select.
+- Mouse/touch forwarding on the stream surface. Apple TV has no touchscreen, and clicks were being interpreted by the helper's mouse-NSEvent path and bouncing the sim back to the home screen.
+
+### What doesn't work on tvOS
+
+- **`tap` and `gesture`** — no touchscreen on Apple TV.
+- **iOS hardware buttons** (`home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`) — they target iOS hardware buttons. Use `remote_tv` for home and `remote_siri` for Siri.
+- **`type` (text typing)** — the keyboard pass-through is gated off for tvOS in the web preview; the `serve-sim type` CLI still sends USB HID keyboard events, which can reach the tvOS sim, but tvOS's text-entry surfaces are sparse so this is rarely useful.
+- **`rotate`** — Apple TV is always landscape.
+- **`serve-sim camera`** — tvOS apps rarely use AVFoundation; not actively supported.
+- **`serve-sim permissions`** — the TCC layout on tvOS differs from iOS; the permissions subcommand was tested against iOS only.
+- **`remote_volume_up` / `remote_volume_down`** — the keystroke lands but the tvOS sim doesn't model speaker volume, so the press is a no-op.
 
 ## Output modes
 
@@ -162,7 +237,7 @@ Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
 - **Do not use `gesture` for plain taps.** Use `tap`. See "Critical gotcha" above.
 - **Do not assume `npx serve-sim` is already running.** Verify with `--list` or by checking `$TMPDIR/serve-sim/server-{udid}.json`. If absent, start it explicitly.
 - **Do not skip the prerequisites check** on the first invocation in a session. Wrong macOS version, missing Xcode CLI tools, or Node <18 produce confusing errors downstream.
-- **Do not invent button names.** Only these six are valid: `home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`. See [references/buttons-rotation.md](references/buttons-rotation.md) for the source-of-truth list.
+- **Do not invent button names.** For iOS, only these six are valid: `home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`. For tvOS (`--tv` mode), use the `remote_*` set documented in [Apple TV (tvOS) support](#apple-tv-tvos-support) — the iOS hardware buttons don't reach an Apple TV. See [references/buttons-rotation.md](references/buttons-rotation.md) for the source-of-truth list.
 - **Do not parse the non-quiet human output.** Use `-q` for JSON.
 - **Do not leave camera helpers running** across unrelated tasks. Stop them with `npx serve-sim camera --stop-webcam` when done.
 - **Do not guess coordinates when an accessibility lookup returns no match.** If you fetched the AX tree (e.g. `GET /ax`) to find a target element and the query returned no result, fail loudly — tapping a guessed spot is almost always worse than reporting "target not found" back to the user. See [references/workflows.md](references/workflows.md) workflow 1 for the guard pattern.
