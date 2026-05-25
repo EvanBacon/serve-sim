@@ -60,6 +60,12 @@ export interface SimulatorViewProps {
   onStreamingChange?: (streaming: boolean) => void;
   /** Connection quality indicator: green (good), yellow (degraded), red (poor). */
   connectionQuality?: "good" | "degraded" | "poor" | null;
+  /**
+   * Device kind hint used to drive input behavior. For "tv", arrow keys / Enter /
+   * Escape / Space are forwarded as Siri-remote button presses, and pointer-based
+   * touch input is suppressed (an Apple TV doesn't accept finger taps).
+   */
+  deviceType?: "iphone" | "ipad" | "watch" | "vision" | "tv";
 }
 
 /**
@@ -90,8 +96,10 @@ export function SimulatorView({
   hideControls,
   onStreamingChange,
   connectionQuality,
+  deviceType,
 }: SimulatorViewProps) {
   const relayMode = !!onStreamTouch;
+  const isTv = deviceType === "tv";
   const imgRef = useRef<HTMLImageElement | null>(null);
   const relayImgRef = useRef<HTMLImageElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -536,6 +544,30 @@ export function SimulatorView({
       window.removeEventListener("keyup", onKeyUp);
     };
   }, []);
+
+  // Apple TV: forward arrow / Enter / Escape / Space as Siri-remote buttons.
+  // tvOS apps focus-navigate via these keys, so giving the page focus and
+  // sending keystrokes is enough to drive the UI.
+  useEffect(() => {
+    if (!isTv) return;
+    const map: Record<string, string> = {
+      ArrowUp: "remote_up",
+      ArrowDown: "remote_down",
+      ArrowLeft: "remote_left",
+      ArrowRight: "remote_right",
+      Enter: "remote_select",
+      Escape: "remote_menu",
+      PlayPause: "remote_play_pause",
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const button = map[e.key];
+      if (!button) return;
+      e.preventDefault();
+      sendButton(button);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isTv, sendButton]);
 
   // Show preview indicators when Alt is held but no gesture is active
   useEffect(() => {

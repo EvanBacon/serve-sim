@@ -739,6 +739,7 @@ function AppWithConfig({
             streamFrame={mjpeg.frame}
             streamConfig={activeStreamConfig}
             enableDigitalCrown={deviceType === "watch"}
+            deviceType={deviceType}
             onScreenConfigChange={onScreenConfigChange}
           />
           {axOverlayEnabled && <AxDomOverlay />}
