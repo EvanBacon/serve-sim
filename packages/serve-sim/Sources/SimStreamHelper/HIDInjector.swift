@@ -297,8 +297,12 @@ final class HIDInjector {
         sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
     }
 
-    func sendButton(button: String, deviceUDID: String) {
-        print("[hid] Sending button: \(button)")
+    func sendButton(button: String, deviceUDID: String, holdMs: UInt32? = nil) {
+        if let holdMs {
+            print("[hid] Sending button: \(button) (hold \(holdMs)ms)")
+        } else {
+            print("[hid] Sending button: \(button)")
+        }
 
         switch button {
         case "home":
@@ -355,10 +359,10 @@ final class HIDInjector {
         case "remote_down":        pressKey(usage: 0x51)
         case "remote_left":        pressKey(usage: 0x50)
         case "remote_right":       pressKey(usage: 0x4F)
-        case "remote_select":      pressKey(usage: 0x28) // Return
-        case "remote_menu":        pressConsumer(usage: 0x46) // Menu Escape
+        case "remote_select":      pressKey(usage: 0x28, holdMs: holdMs) // Return
+        case "remote_menu":        pressConsumer(usage: 0x46, holdMs: holdMs) // Menu Escape
         case "remote_tv":          pressConsumer(usage: 0x223) // AC Home
-        case "remote_play_pause":  pressConsumer(usage: 0xCD) // Play/Pause
+        case "remote_play_pause":  pressConsumer(usage: 0xCD, holdMs: holdMs) // Play/Pause
         case "remote_volume_up":   pressConsumer(usage: 0xE9) // Volume Increment
         case "remote_volume_down": pressConsumer(usage: 0xEA) // Volume Decrement
         case "remote_siri":        pressConsumer(usage: 0xCF) // Voice Command
@@ -369,10 +373,20 @@ final class HIDInjector {
     }
 
     /// Press-and-release helper for the keyboard HID path. Used by Siri remote
-    /// mappings — a single sendButton call yields a complete keystroke.
-    private func pressKey(usage: UInt32) {
-        sendKey(type: "down", usage: usage)
-        sendKey(type: "up", usage: usage)
+    /// mappings — a single sendButton call yields a complete keystroke. When
+    /// `holdMs` is provided, the press is held on the buttonQueue so the
+    /// caller's thread isn't blocked.
+    private func pressKey(usage: UInt32, holdMs: UInt32? = nil) {
+        if let holdMs {
+            buttonQueue.async { [self] in
+                sendKey(type: "down", usage: usage)
+                Thread.sleep(forTimeInterval: Double(holdMs) / 1000.0)
+                sendKey(type: "up", usage: usage)
+            }
+        } else {
+            sendKey(type: "down", usage: usage)
+            sendKey(type: "up", usage: usage)
+        }
     }
 
     /// Send a USB HID Consumer/Generic event (e.g. media keys like Play/Pause)
@@ -401,9 +415,17 @@ final class HIDInjector {
     /// Used for the Siri-remote buttons (target 0x15 routes them to tvOS's
     /// remote subsystem).
     private static let consumerTarget: Int32 = 0x15
-    private func pressConsumer(usage: UInt32) {
-        sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 1)
-        sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 2)
+    private func pressConsumer(usage: UInt32, holdMs: UInt32? = nil) {
+        if let holdMs {
+            buttonQueue.async { [self] in
+                sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 1)
+                Thread.sleep(forTimeInterval: Double(holdMs) / 1000.0)
+                sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 2)
+            }
+        } else {
+            sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 1)
+            sendHIDArbitrary(target: Self.consumerTarget, usagePage: 0x0C, usage: usage, direction: 2)
+        }
     }
 
     // MARK: - SimDevice private control

@@ -1045,7 +1045,7 @@ async function rotate(orientation: string, deviceArg?: string) {
   });
 }
 
-async function button(buttonName = "home", deviceArg?: string) {
+async function button(buttonName = "home", deviceArg?: string, holdMs?: number) {
   const state = readState(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
@@ -1057,12 +1057,17 @@ async function button(buttonName = "home", deviceArg?: string) {
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify({ button: buttonName }));
+      const payload: { button: string; holdMs?: number } = { button: buttonName };
+      if (holdMs && holdMs > 0) payload.holdMs = holdMs;
+      const json = new TextEncoder().encode(JSON.stringify(payload));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x04;
       msg.set(json, 1);
       ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
+      // Wait for the helper to finish the hold before closing the socket,
+      // otherwise its writeFailed will abort the in-flight up event.
+      const closeAfter = 50 + (holdMs ?? 0);
+      setTimeout(() => { ws.close(); resolve(); }, closeAfter);
     };
 
     ws.onerror = () => {
@@ -1962,7 +1967,21 @@ program
   .description("Send a hardware button press")
   .argument("[name]", "Button name", "home")
   .option(...deviceOpt)
-  .action((name: string, opts) => button(name, opts.device));
+  .option(
+    "--hold [ms]",
+    "Hold the button down for this many ms before releasing (default 1500). Only honored for buttons with a discrete tvOS long-press: remote_select, remote_play_pause, remote_menu.",
+  )
+  .action((name: string, opts) => {
+    let holdMs: number | undefined;
+    if (opts.hold !== undefined) {
+      holdMs = opts.hold === true ? 1500 : parseInt(String(opts.hold), 10);
+      if (!Number.isFinite(holdMs) || holdMs <= 0) {
+        console.error(`Invalid --hold value: ${opts.hold}`);
+        process.exit(1);
+      }
+    }
+    return button(name, opts.device, holdMs);
+  });
 
 program
   .command("type")

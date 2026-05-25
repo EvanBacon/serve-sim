@@ -21,6 +21,11 @@ struct TouchEventPayload: Codable {
 
 struct ButtonEventPayload: Codable {
     let button: String  // "home"
+    /// Optional press duration in milliseconds. When set, the helper holds the
+    /// button down for this long before releasing. Only honored by buttons
+    /// that have a discrete "long press" gesture on tvOS (remote_select,
+    /// remote_play_pause, remote_menu).
+    let holdMs: UInt32?
 }
 
 struct MultiTouchEventPayload: Codable {
