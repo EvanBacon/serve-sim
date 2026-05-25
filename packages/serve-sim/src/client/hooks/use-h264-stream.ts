@@ -16,6 +16,16 @@ function videoStreamUrl(streamUrl: string): string {
   return url.toString();
 }
 
+export function preserveStreamOrientation(
+  prev: StreamConfig | null,
+  next: StreamConfig,
+): StreamConfig {
+  if (next.orientation === undefined && prev?.orientation) {
+    return { ...next, orientation: prev.orientation };
+  }
+  return next;
+}
+
 export function useH264Stream(streamUrl: string | null, enabled = true) {
   const [config, setConfig] = useState<StreamConfig | null>(null);
   const [supported, setSupported] = useState<boolean | null>(null);
@@ -60,16 +70,17 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
     const applyConfig = (next: StreamConfig) => {
       if (next.width <= 0 || next.height <= 0) return;
       const prev = configRef.current;
+      const normalized = preserveStreamOrientation(prev, next);
       if (
         prev &&
-        prev.width === next.width &&
-        prev.height === next.height &&
-        prev.orientation === next.orientation
+        prev.width === normalized.width &&
+        prev.height === normalized.height &&
+        prev.orientation === normalized.orientation
       ) {
         return;
       }
-      configRef.current = next;
-      setConfig(next);
+      configRef.current = normalized;
+      setConfig(normalized);
     };
 
     const fetchConfig = () => {

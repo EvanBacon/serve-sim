@@ -1,4 +1,4 @@
-import type { ExecResult } from "./exec";
+import { shellEscape, type ExecResult } from "./exec";
 
 // ─── File drop (drag media/ipa onto the simulator) ───
 //
@@ -50,6 +50,10 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function base64WriteCommand(chunk: string, op: ">" | ">>", path: string): string {
+  return `bash -c ${shellEscape(`echo ${chunk} | base64 -d ${op} ${shellEscape(path)}`)}`;
+}
+
 // Stream a file to /tmp via the /exec base64 chunk loop. Used by the camera
 // panel to stage image/video sources for `serve-sim camera --file`.
 // Caller is responsible for the lifetime of the temp file.
@@ -68,7 +72,7 @@ export async function uploadFileToTmp(
   for (let offset = 0; offset < b64.length; offset += DROP_CHUNK_SIZE) {
     const chunk = b64.slice(offset, offset + DROP_CHUNK_SIZE);
     const op = offset === 0 ? ">" : ">>";
-    const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
+    const result = await exec(base64WriteCommand(chunk, op, tmpPath));
     if (result.exitCode !== 0) {
       throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
     }
@@ -101,7 +105,7 @@ export async function uploadDroppedFile(
     for (let offset = 0; offset < b64.length; offset += DROP_CHUNK_SIZE) {
       const chunk = b64.slice(offset, offset + DROP_CHUNK_SIZE);
       const op = offset === 0 ? ">" : ">>";
-      const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
+      const result = await exec(base64WriteCommand(chunk, op, tmpPath));
       if (result.exitCode !== 0) {
         throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
       }
@@ -115,19 +119,34 @@ export async function uploadDroppedFile(
 
     // install/addmedia gives no progress signal — flip to indeterminate.
     onProgress(null);
-    const cmd = platform === "android"
-      ? kind === "apk"
-        ? `adb -s ${udid} install -r ${tmpPath}`
-        : `bash -c 'adb -s ${udid} push ${tmpPath} /sdcard/Download/ && adb -s ${udid} shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///sdcard/Download/${tmpPath.split("/").pop()}'`
-      : kind === "ipa"
-        ? `xcrun simctl install ${udid} ${tmpPath}`
-        : `xcrun simctl addmedia ${udid} ${tmpPath}`;
-    const result = await exec(cmd);
-    if (result.exitCode !== 0) {
+    const runCommand = async (cmd: string) => {
+      const result = await exec(cmd);
+      if (result.exitCode === 0) return;
       const label = kind === "ipa" || kind === "apk" ? "install" : "addmedia";
       throw new Error(result.stderr || `${label} failed (exit ${result.exitCode})`);
+    };
+
+    const escapedUdid = shellEscape(udid);
+    const escapedTmpPath = shellEscape(tmpPath);
+    if (platform === "android") {
+      if (kind === "apk") {
+        await runCommand(`adb -s ${escapedUdid} install -r ${escapedTmpPath}`);
+      } else {
+        const basename = tmpPath.split("/").pop()!;
+        const devicePath = `/sdcard/Download/${basename}`;
+        await runCommand(`adb -s ${escapedUdid} push ${escapedTmpPath} ${shellEscape(devicePath)}`);
+        await runCommand(
+          `adb -s ${escapedUdid} shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d ${shellEscape(`file://${devicePath}`)}`,
+        );
+      }
+    } else {
+      await runCommand(
+        kind === "ipa"
+          ? `xcrun simctl install ${escapedUdid} ${escapedTmpPath}`
+          : `xcrun simctl addmedia ${escapedUdid} ${escapedTmpPath}`,
+      );
     }
   } finally {
-    exec(`bash -c 'rm -f ${tmpPath}'`).catch(() => {});
+    exec(`rm -f ${shellEscape(tmpPath)}`).catch(() => {});
   }
 }

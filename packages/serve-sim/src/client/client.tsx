@@ -351,7 +351,8 @@ function AppWithConfig({
   const h264 = useH264Stream(config.streamUrl, androidVideoEnabled);
   const mjpeg = useMjpegStream(config.streamUrl, !androidVideoEnabled || h264.supported === false);
   const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
-  const activeStreamConfig = liveStreamConfig ?? h264.config ?? mjpeg.config ?? fallbackScreenSize(deviceType, selectedDevice?.name);
+  const confirmedStreamConfig = h264.config ?? mjpeg.config;
+  const activeStreamConfig = liveStreamConfig ?? confirmedStreamConfig ?? fallbackScreenSize(deviceType, selectedDevice?.name);
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
   const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
   const frameAspectRatio = simulatorAspectRatio(activeStreamConfig);
@@ -443,17 +444,21 @@ function AppWithConfig({
   }, [config.streamUrl]);
 
   useEffect(() => {
-    const confirmedConfig = mjpeg.config;
-    if (!confirmedConfig) return;
+    if (!confirmedStreamConfig) return;
     setLiveStreamConfig((prev) =>
       prev &&
-      prev.width === confirmedConfig.width &&
-      prev.height === confirmedConfig.height &&
-      prev.orientation === confirmedConfig.orientation
+      prev.width === confirmedStreamConfig.width &&
+      prev.height === confirmedStreamConfig.height &&
+      prev.orientation === confirmedStreamConfig.orientation
         ? prev
         : null,
     );
-  }, [mjpeg.config, mjpeg.config?.width, mjpeg.config?.height, mjpeg.config?.orientation]);
+  }, [
+    confirmedStreamConfig,
+    confirmedStreamConfig?.width,
+    confirmedStreamConfig?.height,
+    confirmedStreamConfig?.orientation,
+  ]);
 
   const sendKey = useCallback((type: "down" | "up", usage: number) => {
     sendWs(0x06, { type, usage });

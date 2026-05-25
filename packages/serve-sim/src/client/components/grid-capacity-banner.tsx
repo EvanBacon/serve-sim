@@ -12,7 +12,7 @@ export function GridCapacityBanner({ report }: { report: MemoryReport | null }) 
   return (
     <div className="inline-flex items-center gap-1.5 px-2 py-[3px] rounded-full bg-[#101010] border border-[#222] font-mono text-[11px] text-white/70 leading-none">
       <span className="size-1.5 rounded-[3px] shrink-0" style={{ background: dotColor }} />
-      <span>{runningSimulators}/{capacity} devices</span>
+      <span>{runningSimulators}/{capacity} iOS sims</span>
       <span className="text-white/40">·</span>
       <span className="text-white/55">{formatGridBytes(availableBytes)} free</span>
       <span aria-hidden className="ml-0.5 w-7 h-[3px] bg-[#1c1c1c] rounded-[2px] overflow-hidden inline-block">
