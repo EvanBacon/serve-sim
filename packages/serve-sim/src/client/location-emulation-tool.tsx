@@ -297,10 +297,14 @@ export function LocationEmulationTool({
       setError(null);
       return;
     }
-    void exec(cmd).then((res) => {
-      if (res.exitCode !== 0) setError(parseLocationError(res.stderr) || null);
-      else setError(null);
-    });
+    void exec(cmd)
+      .then((res) => {
+        if (res.exitCode !== 0) setError(parseLocationError(res.stderr) || null);
+        else setError(null);
+      })
+      .catch((err: unknown) => {
+        setError(parseLocationError(locationErrorText(err)) || null);
+      });
   }, [exec, udid, platform]);
 
   const onTrailChange = useCallback((id: string) => {
@@ -909,4 +913,9 @@ function parseLocationError(stderr: string): string {
   const m = trimmed.match(/Reason:\s*(.+)$/m);
   if (m) return m[1]!;
   return trimmed.split("\n").slice(-1)[0] ?? trimmed;
+}
+
+function locationErrorText(err: unknown): string {
+  const value = err as { stderr?: unknown; message?: unknown };
+  return String(value?.stderr || value?.message || err || "");
 }

@@ -651,12 +651,18 @@ function AppWithConfig({
     try {
       const device = devices.find((d) => d.udid === udid);
       const shutdownEndpoint = window.__SIM_PREVIEW__?.gridShutdownEndpoint ?? simEndpoint("grid/api/shutdown");
-      await fetch(shutdownEndpoint, {
+      const res = await fetch(shutdownEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ udid, platform: device?.platform ?? "ios" }),
       });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || `Failed to stop device (${res.status})`);
+      }
       await fetchDevices();
+    } catch (err) {
+      console.error("[serve-sim] Failed to stop device", err);
     } finally {
       setStoppingUdids((prev) => {
         const next = new Set(prev);

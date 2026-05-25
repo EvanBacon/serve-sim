@@ -8,6 +8,9 @@ const FRAME_DURATION_US = 16_667;
 const MAX_DECODE_QUEUE = 2;
 const RETRY_DELAY_MS = 500;
 const STREAM_STALL_MS = 5000;
+const STARTUP_BYTE_TIMEOUT_MS = 3000;
+const STARTUP_FRAME_TIMEOUT_MS = 6000;
+const STARTUP_FAILURE_LIMIT = 3;
 
 function videoStreamUrl(streamUrl: string): string {
   const url = new URL(streamUrl);
@@ -65,6 +68,8 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let decoder: any = null;
     let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    let startupFailures = 0;
+    let hasDecodedFrame = false;
     const baseUrl = streamUrl.replace(/\/stream\.mjpeg$/, "");
 
     const applyConfig = (next: StreamConfig) => {
@@ -112,6 +117,16 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
       void closeDecoder();
     };
 
+    const recordStartupFailure = () => {
+      if (stopped || controller.signal.aborted) return true;
+      startupFailures++;
+      if (startupFailures >= STARTUP_FAILURE_LIMIT) {
+        markUnsupported();
+        return true;
+      }
+      return false;
+    };
+
     const scheduleRetry = (delayMs = RETRY_DELAY_MS) => {
       if (stopped || controller.signal.aborted || retryTimer) return;
       retryTimer = setTimeout(() => {
@@ -128,6 +143,8 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
     };
 
     const emitFrame = (frame: any) => {
+      hasDecodedFrame = true;
+      startupFailures = 0;
       const width = Number(frame.displayWidth || frame.codedWidth || 0);
       const height = Number(frame.displayHeight || frame.codedHeight || 0);
       if (width > 0 && height > 0) {
@@ -148,14 +165,25 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
       let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
       let readDecoder: any = null;
       let lastByteAt = Date.now();
+      let sawBytes = false;
+      let startupFailureRecorded = false;
+      let startupByteTimer: ReturnType<typeof setTimeout> | null = null;
+      let startupFrameTimer: ReturnType<typeof setTimeout> | null = null;
       let stallTimer: ReturnType<typeof setInterval> | null = null;
       await closeDecoder();
+
+      const recordReadStartupFailure = () => {
+        if (startupFailureRecorded) return stopped || controller.signal.aborted;
+        startupFailureRecorded = true;
+        return recordStartupFailure();
+      };
 
       try {
         decoder = new VideoDecoderCtor({
           output: emitFrame,
           error: (err: unknown) => {
             console.warn("[android-video]", err);
+            if (!hasDecodedFrame && recordReadStartupFailure()) return;
             restartStream();
           },
         });
@@ -195,20 +223,36 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
 
         const res = await fetch(videoStreamUrl(streamUrl), { signal: controller.signal });
         if (!res.ok || !res.body) {
-          if (res.status === 404 || res.status === 415) markUnsupported();
-          scheduleRetry();
+          if (res.status === 404 || res.status === 415) {
+            markUnsupported();
+          } else if (!recordReadStartupFailure()) {
+            scheduleRetry();
+          }
           return;
         }
 
         reader = res.body.getReader();
         activeReader = reader;
+        startupByteTimer = setTimeout(() => {
+          if (sawBytes || stopped || controller.signal.aborted) return;
+          if (!recordReadStartupFailure()) restartStream();
+        }, STARTUP_BYTE_TIMEOUT_MS);
+        startupFrameTimer = setTimeout(() => {
+          if (hasDecodedFrame || stopped || controller.signal.aborted) return;
+          if (!recordReadStartupFailure()) restartStream();
+        }, STARTUP_FRAME_TIMEOUT_MS);
         stallTimer = setInterval(() => {
           if (Date.now() - lastByteAt > STREAM_STALL_MS) restartStream();
         }, 1000);
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          if (value) {
+          if (value?.byteLength) {
+            sawBytes = true;
+            if (startupByteTimer) {
+              clearTimeout(startupByteTimer);
+              startupByteTimer = null;
+            }
             lastByteAt = Date.now();
             parser.push(value);
           }
@@ -217,7 +261,10 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
         parser.flush();
       } catch {
         // Aborted or network error; retry below unless cleanup is in progress.
+        if (!sawBytes) recordReadStartupFailure();
       } finally {
+        if (startupByteTimer) clearTimeout(startupByteTimer);
+        if (startupFrameTimer) clearTimeout(startupFrameTimer);
         if (stallTimer) clearInterval(stallTimer);
         if (reader && activeReader === reader) activeReader = null;
         await closeDecoder(readDecoder);

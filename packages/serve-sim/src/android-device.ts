@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { join } from "path";
 
 export type AndroidTargetState = "Booted" | "Shutdown" | "Offline" | "Unauthorized" | "Unknown";
+export type AndroidBootStatus = "booted" | "not_booted" | "unknown";
 
 export interface AndroidTarget {
   platform: "android";
@@ -196,12 +197,35 @@ export function findBootedAndroidDevice(): string | null {
   return listRunningAndroidDevices().find((device) => device.state === "Booted")?.device ?? null;
 }
 
-export function isAndroidDeviceBooted(serial: string): boolean {
-  try {
-    return adb(["-s", serial, "get-state"], { timeout: 1500 }).trim() === "device";
-  } catch {
-    return false;
+export function androidBootStatusFromAdbGetState(stdout: string): AndroidBootStatus {
+  return stdout.trim() === "device" ? "booted" : "not_booted";
+}
+
+export function androidBootStatusFromAdbError(err: unknown): AndroidBootStatus {
+  const error = err as { message?: unknown; stdout?: unknown; stderr?: unknown };
+  const text = [error.stderr, error.stdout, error.message]
+    .map((value) => Buffer.isBuffer(value) ? value.toString("utf-8") : String(value ?? ""))
+    .join("\n");
+  if (
+    /device ['"]?[^'"\n]+['"]? not found/i.test(text) ||
+    /no devices\/emulators found/i.test(text) ||
+    /\b(device offline|offline|unauthorized)\b/i.test(text)
+  ) {
+    return "not_booted";
   }
+  return "unknown";
+}
+
+export function androidDeviceBootStatus(serial: string): AndroidBootStatus {
+  try {
+    return androidBootStatusFromAdbGetState(adb(["-s", serial, "get-state"], { timeout: 1500 }));
+  } catch (err) {
+    return androidBootStatusFromAdbError(err);
+  }
+}
+
+export function isAndroidDeviceBooted(serial: string): boolean {
+  return androidDeviceBootStatus(serial) === "booted";
 }
 
 export function resolveRunningAndroidDevice(nameOrSerial: string): AndroidTarget | null {

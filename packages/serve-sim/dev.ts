@@ -11,6 +11,7 @@ import { tmpdir } from "os";
 import { join, resolve } from "path";
 import tailwindPlugin from "bun-plugin-tailwind";
 import { createAxStreamerCache } from "./src/ax";
+import { androidDeviceBootStatus, shutdownAndroidDevice } from "./src/android-device";
 
 const RN_BUNDLE_IDS = new Set<string>([
   "host.exp.Exponent",
@@ -62,10 +63,15 @@ type ServeSimState = {
   pid: number;
   port: number;
   device: string;
+  platform?: "ios" | "android";
+  name?: string;
+  runtime?: string;
   url: string;
   streamUrl: string;
   wsUrl: string;
 };
+
+type Platform = "ios" | "android";
 
 // ─── Serve-sim state ───
 
@@ -124,7 +130,9 @@ function readServeSimStates(): ServeSimState[] {
       // Helper alive but bound to a shutdown simulator — the Swift helper
       // keeps accepting MJPEG connections and /health returns OK, but no
       // frames ever flow. Recycle so a fresh helper is spawned on demand.
-      if (booted && !booted.has(state.device)) {
+      const platform = state.platform ?? "ios";
+      const androidGone = platform === "android" && androidDeviceBootStatus(state.device) === "not_booted";
+      if ((platform === "ios" && booted && !booted.has(state.device)) || androidGone) {
         console.error(
           `\x1b[33m[serve-sim] Recycling stale helper pid ${state.pid} — device ${state.device} is no longer booted.\x1b[0m`,
         );
@@ -150,6 +158,22 @@ function endpoint(path: string, device: string): string {
   return `/${path}?device=${encodeURIComponent(device)}`;
 }
 
+function platformFromBody(value: unknown): Platform {
+  return value === "android" ? "android" : "ios";
+}
+
+function isValidDeviceId(value: string, platform: Platform): boolean {
+  if (!value) return false;
+  return platform === "android"
+    ? /^[A-Za-z0-9_.:-]+$/.test(value)
+    : /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(value);
+}
+
+function stopServeSimState(state: ServeSimState): void {
+  try { process.kill(state.pid, "SIGTERM"); } catch {}
+  try { unlinkSync(join(STATE_DIR, `server-${state.device}.json`)); } catch {}
+}
+
 function previewConfigForState(state: ServeSimState) {
   return {
     ...state,
@@ -157,6 +181,8 @@ function previewConfigForState(state: ServeSimState) {
     logsEndpoint: endpoint("logs", state.device),
     appStateEndpoint: endpoint("appstate", state.device),
     axEndpoint: endpoint("ax", state.device),
+    gridStartEndpoint: "/grid/api/start",
+    gridShutdownEndpoint: "/grid/api/shutdown",
     serveSimBin: SERVE_SIM_BIN,
   };
 }
@@ -393,11 +419,12 @@ Bun.serve({
     if (url.pathname === "/grid/api/start" && req.method === "POST") {
       return req.json().then((body: any) => {
         const udid: string = body?.udid ?? "";
-        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
-          return Response.json({ ok: false, error: "Invalid or missing udid" }, { status: 400 });
+        const platform = platformFromBody(body?.platform);
+        if (!isValidDeviceId(udid, platform)) {
+          return Response.json({ ok: false, error: "Invalid or missing device id" }, { status: 400 });
         }
         return new Promise<Response>((resolve) => {
-          const child = spawn("bun", [SERVE_SIM_BIN, "--detach", udid], {
+          const child = spawn("bun", [SERVE_SIM_BIN, "--detach", "--platform", platform, udid], {
             stdio: ["ignore", "pipe", "pipe"],
             detached: false,
           });
@@ -409,7 +436,12 @@ Bun.serve({
           child.on("close", (code) => {
             clearTimeout(timer);
             if (code === 0) {
-              resolve(Response.json({ ok: true, stdout: stdout.trim() }));
+              let device = udid;
+              try {
+                const parsed = JSON.parse(stdout.trim());
+                device = parsed.device ?? device;
+              } catch {}
+              resolve(Response.json({ ok: true, stdout: stdout.trim(), device }));
             } else {
               resolve(Response.json({
                 ok: false,
@@ -424,10 +456,27 @@ Bun.serve({
     if (url.pathname === "/grid/api/shutdown" && req.method === "POST") {
       return req.json().then((body: any) => {
         const udid: string = body?.udid ?? "";
-        if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
-          return Response.json({ ok: false, error: "Invalid or missing udid" }, { status: 400 });
+        const platform = platformFromBody(body?.platform);
+        if (!isValidDeviceId(udid, platform)) {
+          return Response.json({ ok: false, error: "Invalid or missing device id" }, { status: 400 });
         }
         bootedSnapshot = { at: 0, booted: null };
+        if (platform === "android") {
+          const state = readServeSimStates().find((s) => s.device === udid && (s.platform ?? "ios") === "android");
+          if (state && !udid.startsWith("emulator-")) {
+            stopServeSimState(state);
+            return Response.json({ ok: true, stopped: true, shutdown: false });
+          }
+          try {
+            shutdownAndroidDevice(udid);
+            return Response.json({ ok: true });
+          } catch (err) {
+            return Response.json({
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            }, { status: 500 });
+          }
+        }
         return new Promise<Response>((resolve) => {
           execFile("xcrun", ["simctl", "shutdown", udid], { timeout: 30_000 }, (err, _stdout, stderr) => {
             if (err) {

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  androidBootStatusFromAdbError,
+  androidBootStatusFromAdbGetState,
   androidInputTextArg,
   parseAdbDevices,
   parseWmSize,
@@ -45,6 +47,16 @@ ZY22 offline usb:336592896X product:oriole model:Pixel_6 device:oriole
   test("escapes text for adb input text", () => {
     expect(androidInputTextArg("Hi there 100%")).toBe("Hi%sthere%s100%25");
     expect(androidInputTextArg("a&b")).toBe("a\\&b");
+  });
+
+  test("distinguishes confirmed shutdown from unknown adb failures", () => {
+    expect(androidBootStatusFromAdbGetState("device\n")).toBe("booted");
+    expect(androidBootStatusFromAdbGetState("offline\n")).toBe("not_booted");
+    expect(androidBootStatusFromAdbError({
+      stderr: Buffer.from("error: device 'emulator-5554' not found"),
+    })).toBe("not_booted");
+    expect(androidBootStatusFromAdbError(new Error("adb get-state timed out"))).toBe("unknown");
+    expect(androidBootStatusFromAdbError(new Error("adb not found"))).toBe("unknown");
   });
 
   test("refuses to power off physical Android devices", () => {

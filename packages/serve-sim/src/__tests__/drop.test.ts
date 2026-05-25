@@ -47,4 +47,29 @@ describe("uploadDroppedFile", () => {
       /^adb -s 'emulator-5554' shell am broadcast -a android\.intent\.action\.MEDIA_SCANNER_SCAN_FILE -d 'file:\/\/\/sdcard\/Download\/serve-sim-upload-[^']+\.jpg'$/.test(command),
     )).toBe(true);
   });
+
+  test("rejects platform-incompatible app packages before uploading", async () => {
+    const commands: string[] = [];
+    const exec = createExecRecorder(commands);
+
+    await expect(uploadDroppedFile(
+      new File(["ipa"], "app.ipa"),
+      "ipa",
+      exec,
+      "emulator-5554",
+      "android",
+      () => {},
+    )).rejects.toThrow("IPA files are not supported on android");
+
+    await expect(uploadDroppedFile(
+      new File(["apk"], "app.apk"),
+      "apk",
+      exec,
+      "A-B-C",
+      "ios",
+      () => {},
+    )).rejects.toThrow("APK files are not supported on ios");
+
+    expect(commands).toEqual([]);
+  });
 });

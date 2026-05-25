@@ -50,9 +50,9 @@ export function useMjpegStream(streamUrl: string | null, enabled = true) {
     const configInterval = setInterval(fetchConfig, 1000);
 
     // Read the MJPEG stream and extract JPEG frames.
-    // ?raw=1 tells the server to use Content-Type application/octet-stream
-    // instead of multipart/x-mixed-replace; WebKit refuses to expose
-    // multipart bodies to fetch()'s ReadableStream.
+    // ?raw=1 requests application/octet-stream transport while preserving
+    // Content-Length frame boundaries; WebKit refuses to expose multipart
+    // bodies to fetch()'s ReadableStream.
     const fetchUrlObj = new URL(streamUrl);
     fetchUrlObj.searchParams.set("raw", "1");
     const fetchUrl = fetchUrlObj.toString();

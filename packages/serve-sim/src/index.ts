@@ -12,9 +12,9 @@ import { findBootedDevice, resolveDevice, tryResolveDevice } from "./device";
 import {
   adb,
   androidInputTextArg,
+  androidDeviceBootStatus,
   ensureAndroidBooted,
   findBootedAndroidDevice,
-  isAndroidDeviceBooted,
   pickDefaultAndroidTarget,
   resolveAndroidTarget,
   resolveRunningAndroidDevice,
@@ -132,7 +132,7 @@ function readStateFile(file: string): ServerState | null {
     // recycle here so --detach / --list always return a working stream.
     const platform = state.platform ?? "ios";
     const booted = platform === "ios" ? getBootedUdids() : null;
-    const androidGone = platform === "android" && !isAndroidDeviceBooted(state.device);
+    const androidGone = platform === "android" && androidDeviceBootStatus(state.device) === "not_booted";
     if ((booted && !booted.has(state.device)) || androidGone) {
       debugState(
         "helper pid %d bound to non-booted device %s — killing stale helper",
@@ -459,12 +459,13 @@ function resolveSelfCommand(): { command: string; baseArgs: string[] } {
   return { command: process.execPath, baseArgs: [] };
 }
 
-/** Wait for the helper to become ready (health check + capture started). */
+/** Wait for the helper to become ready (health check + optional capture start). */
 async function waitForHelperReady(
   pid: number,
   url: string,
   logFile: string,
   isAlive: () => boolean,
+  opts: { waitForCapture?: boolean } = {},
 ): Promise<{ ready: boolean; log: string }> {
   let ready = false;
   const startedAt = Date.now();
@@ -491,7 +492,7 @@ async function waitForHelperReady(
     debugHelper("helper pid=%d /health never responded (%dms)", pid, Date.now() - startedAt);
   }
 
-  if (ready) {
+  if (ready && opts.waitForCapture !== false) {
     // Wait for capture to start or process to exit
     const captureStartedAt = Date.now();
     const captureDeadline = captureStartedAt + 8_000;
@@ -680,6 +681,7 @@ async function startAndroidHelper(
 ): Promise<{ pid: number; child?: ChildProcess; target: StreamTarget }> {
   debugHelper("startAndroidHelper target=%s port=%d detach=%s", target.device, port, opts.detach);
   const host = "127.0.0.1";
+  ensureStateDir();
   const bootLogFile = join(STATE_DIR, `android-boot-${target.device.replace(/[^A-Za-z0-9_.-]/g, "_")}.log`);
   const booted = await ensureAndroidBooted(
     target.android ?? {
@@ -697,7 +699,6 @@ async function startAndroidHelper(
   const logFile = join(STATE_DIR, `server-${serial}.log`);
   const url = `http://${host}:${port}`;
   const { command, baseArgs } = resolveSelfCommand();
-  ensureStateDir();
 
   const spawnOnce = async (): Promise<{ ready: boolean; pid: number; child?: ChildProcess; log: string }> => {
     const logFd = openSync(logFile, "w");
@@ -719,6 +720,7 @@ async function startAndroidHelper(
       url,
       logFile,
       () => !childExited && isProcessAlive(childPid),
+      { waitForCapture: false },
     );
     return { ready, pid: childPid, child: opts.detach ? undefined : child, log };
   };

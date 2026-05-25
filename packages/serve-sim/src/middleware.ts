@@ -8,9 +8,9 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { createAxStreamerCache } from "./ax";
 import { debugMw } from "./debug";
 import {
+  androidDeviceBootStatus,
   findAdb,
   listAndroidTargets,
-  isAndroidDeviceBooted,
   shutdownAndroidDevice,
 } from "./android-device";
 
@@ -235,7 +235,7 @@ function readServeSimStates(): ServeSimState[] {
       // preview stuck on "Connecting...". Recycle the stale state so the
       // caller can spawn a fresh helper bound to whatever is booted.
       const platform = state.platform ?? "ios";
-      const androidGone = platform === "android" && !isAndroidDeviceBooted(state.device);
+      const androidGone = platform === "android" && androidDeviceBootStatus(state.device) === "not_booted";
       if ((platform === "ios" && booted && !booted.has(state.device)) || androidGone) {
         debugMw(
           "recycling stale helper pid=%d (device %s no longer booted)",

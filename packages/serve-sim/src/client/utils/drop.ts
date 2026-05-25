@@ -88,6 +88,10 @@ export async function uploadDroppedFile(
   platform: "ios" | "android",
   onProgress: (progress: number | null) => void,
 ) {
+  if ((platform === "ios" && kind === "apk") || (platform === "android" && kind === "ipa")) {
+    throw new Error(`${kind.toUpperCase()} files are not supported on ${platform}`);
+  }
+
   if (file.size > DROP_MAX_FILE_SIZE) {
     throw new Error("File too large (max 500MB)");
   }

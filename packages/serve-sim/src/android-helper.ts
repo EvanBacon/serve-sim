@@ -651,12 +651,14 @@ export async function runAndroidHelper({
     }
 
     if (url.pathname === "/stream.mjpeg") {
-      const raw = url.searchParams.get("raw") === "1";
+      // `raw=1` is a fetch transport mode: keep Content-Length frame
+      // boundaries, but avoid multipart Content-Type handling in browsers.
+      const octetFramed = url.searchParams.get("raw") === "1";
       res.writeHead(200, {
         "Access-Control-Allow-Origin": "*",
         "Cache-Control": "no-cache, no-store",
         "Connection": "keep-alive",
-        "Content-Type": raw
+        "Content-Type": octetFramed
           ? "application/octet-stream"
           : `multipart/x-mixed-replace; boundary=${STREAM_BOUNDARY}`,
       });
