@@ -122,6 +122,9 @@ export function SimulatorView({
   }, []);
   const [fps, setFps] = useState(0);
   const frameCountRef = useRef(0);
+  const lastFrameAtRef = useRef(0);
+  const hasReceivedFrameRef = useRef(false);
+  const [hasReceivedFrame, setHasReceivedFrame] = useState(false);
   const [showSlowOverlay, setShowSlowOverlay] = useState(false);
   const slowOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -150,7 +153,11 @@ export function SimulatorView({
 
   useEffect(() => {
     screenSizeRef.current = null;
+    lastFrameAtRef.current = 0;
+    hasReceivedFrameRef.current = false;
     setScreenSize(null);
+    setConnected(false);
+    setHasReceivedFrame(false);
   }, [url]);
 
   const updateScreenConfig = useCallback((config: StreamConfig | null | undefined) => {
@@ -206,6 +213,10 @@ export function SimulatorView({
     const unsubscribe = subscribeFrame((blobUrl) => {
       frameCountRef.current++;
       lastFrameAtRef.current = Date.now();
+      if (!hasReceivedFrameRef.current) {
+        hasReceivedFrameRef.current = true;
+        setHasReceivedFrame(true);
+      }
       const img = relayImgRef.current;
       if (img) {
         // Revoke the previous blob URL to avoid memory leaks
@@ -254,6 +265,10 @@ export function SimulatorView({
 
       frameCountRef.current++;
       lastFrameAtRef.current = Date.now();
+      if (!hasReceivedFrameRef.current) {
+        hasReceivedFrameRef.current = true;
+        setHasReceivedFrame(true);
+      }
       if (!connectedRef.current) {
         clearTimeout(watchdog);
         setConnected(true);
@@ -463,10 +478,9 @@ export function SimulatorView({
   // Unlike non-relay mode (where WS close flips connected=false), relay mode
   // only knows the stream is alive when frames arrive. Without this, killing
   // the upstream helper leaves the UI stuck on "live" forever.
-  const lastFrameAtRef = useRef(0);
   useEffect(() => {
     if (!relayMode) return;
-    const STALE_MS = 2000;
+    const STALE_MS = videoRelayMode ? 8000 : 2000;
     const checkStaleness = () => {
       const last = lastFrameAtRef.current;
       if (!last || !connectedRef.current) return;
@@ -486,7 +500,7 @@ export function SimulatorView({
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [relayMode]);
+  }, [relayMode, videoRelayMode]);
 
   const getViewElement = useCallback(() => {
     if (videoRelayMode) return relayCanvasRef.current;
@@ -1056,7 +1070,7 @@ export function SimulatorView({
             />
           </>
         )}
-        {!connected && !error && (
+        {!connected && !error && !hasReceivedFrame && (
           <div style={{...overlayStyle, ...(imageStyle || {})}}>
             <span style={{ color: "#888", fontSize: 14 }}>Connecting...</span>
           </div>

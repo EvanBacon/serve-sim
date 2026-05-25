@@ -6,6 +6,8 @@ type VideoFrameSubscriber = (frame: any) => void;
 
 const FRAME_DURATION_US = 16_667;
 const MAX_DECODE_QUEUE = 2;
+const RETRY_DELAY_MS = 500;
+const STREAM_STALL_MS = 5000;
 
 function videoStreamUrl(streamUrl: string): string {
   const url = new URL(streamUrl);
@@ -52,6 +54,7 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
     let stopped = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let decoder: any = null;
+    let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     const baseUrl = streamUrl.replace(/\/stream\.mjpeg$/, "");
 
     const applyConfig = (next: StreamConfig) => {
@@ -78,10 +81,10 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
     fetchConfig();
     const configInterval = setInterval(fetchConfig, 1000);
 
-    const closeDecoder = async () => {
-      if (!decoder) return;
-      const current = decoder;
-      decoder = null;
+    const closeDecoder = async (target?: any) => {
+      const current = target ?? decoder;
+      if (!current) return;
+      if (!target || decoder === target) decoder = null;
       try {
         if (current.state !== "closed") current.close();
       } catch {}
@@ -98,12 +101,19 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
       void closeDecoder();
     };
 
-    const scheduleRetry = () => {
+    const scheduleRetry = (delayMs = RETRY_DELAY_MS) => {
       if (stopped || controller.signal.aborted || retryTimer) return;
       retryTimer = setTimeout(() => {
         retryTimer = null;
         void readStream();
-      }, 250);
+      }, delayMs);
+    };
+
+    const restartStream = () => {
+      if (stopped || controller.signal.aborted) return;
+      void activeReader?.cancel().catch(() => {});
+      void closeDecoder();
+      scheduleRetry();
     };
 
     const emitFrame = (frame: any) => {
@@ -124,6 +134,10 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
     const readStream = async () => {
       let timestamp = 0;
       let sawKeyFrame = false;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+      let readDecoder: any = null;
+      let lastByteAt = Date.now();
+      let stallTimer: ReturnType<typeof setInterval> | null = null;
       await closeDecoder();
 
       try {
@@ -131,9 +145,10 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
           output: emitFrame,
           error: (err: unknown) => {
             console.warn("[android-video]", err);
-            markUnsupported();
+            restartStream();
           },
         });
+        readDecoder = decoder;
         try {
           decoder.configure({
             codec: "avc1.42E01E",
@@ -152,7 +167,8 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
           sawKeyFrame = true;
           const chunkTimestamp = timestamp;
           timestamp += FRAME_DURATION_US;
-          if (decoder?.decodeQueueSize >= MAX_DECODE_QUEUE && accessUnit.type !== "key") return;
+          if (!decoder || decoder.state === "closed") return;
+          if (decoder.decodeQueueSize >= MAX_DECODE_QUEUE && accessUnit.type !== "key") return;
           try {
             decoder.decode(new EncodedVideoChunkCtor({
               type: accessUnit.type,
@@ -162,7 +178,7 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
             }));
           } catch (err) {
             console.warn("[android-video]", err);
-            markUnsupported();
+            restartStream();
           }
         });
 
@@ -173,17 +189,27 @@ export function useH264Stream(streamUrl: string | null, enabled = true) {
           return;
         }
 
-        const reader = res.body.getReader();
+        reader = res.body.getReader();
+        activeReader = reader;
+        stallTimer = setInterval(() => {
+          if (Date.now() - lastByteAt > STREAM_STALL_MS) restartStream();
+        }, 1000);
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          if (value) parser.push(value);
+          if (value) {
+            lastByteAt = Date.now();
+            parser.push(value);
+          }
         }
+        if (activeReader === reader) activeReader = null;
         parser.flush();
       } catch {
         // Aborted or network error; retry below unless cleanup is in progress.
       } finally {
-        await closeDecoder();
+        if (stallTimer) clearInterval(stallTimer);
+        if (reader && activeReader === reader) activeReader = null;
+        await closeDecoder(readDecoder);
         scheduleRetry();
       }
     };
