@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { deviceKind, runtimeOrder, type SimDevice } from "../utils/devices";
+import { PlatformBadge } from "./platform-badge";
 
 // Inline dropdown — no shadcn / hugeicons dependency so the serve-sim client
 // stays self-contained.
@@ -81,7 +82,8 @@ export function DevicePicker({
                   className="size-1.5 rounded-full shrink-0"
                   style={{ background: selected.state === "Booted" ? "#4ade80" : "#444" }}
                 />
-                <span className="flex-1">{selected.name}</span>
+                <PlatformBadge platform={selected.platform} compact />
+                <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{selected.name}</span>
               </div>
               <div className="h-px bg-white/8 my-1" />
             </>
@@ -105,7 +107,8 @@ export function DevicePicker({
                       className="size-1.5 rounded-full shrink-0"
                       style={{ background: isBooted ? "#4ade80" : "#444" }}
                     />
-                    <span className="flex-1">{d.name}</span>
+                    <PlatformBadge platform={d.platform} compact />
+                    <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{d.name}</span>
                     {isBooted && (
                       <span
                         role="button"

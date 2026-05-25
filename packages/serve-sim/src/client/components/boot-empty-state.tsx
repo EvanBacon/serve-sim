@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { deviceKind, runtimeOrder, type SimDevice } from "../utils/devices";
 import { simEndpoint } from "../utils/sim-endpoint";
+import { PlatformBadge } from "./platform-badge";
 
 // ─── Empty state: pick a simulator to boot ───
 //
@@ -108,7 +109,7 @@ export function BootEmptyState({
         </p>
         <div className="w-full max-w-90 mt-2 bg-panel border border-white/12 rounded-[10px] p-1 font-mono text-[13px] text-white/90 text-left max-h-[70vh] overflow-y-auto min-h-0">
           <div className="flex items-center justify-between px-2.5 py-1.5 text-[11px] text-white/65">
-            <span className="font-semibold">Simulators</span>
+            <span className="font-semibold">Devices</span>
             <button onClick={onRefresh} disabled={loading} className="bg-transparent border-none text-accent text-[11px] cursor-pointer p-0">
               {loading ? "..." : "Refresh"}
             </button>
@@ -135,7 +136,8 @@ export function BootEmptyState({
                       className="size-1.5 rounded-full shrink-0"
                       style={{ background: isBooted ? "#4ade80" : "#444" }}
                     />
-                    <span className="flex-1 text-left">{d.name}</span>
+                    <PlatformBadge platform={d.platform} compact />
+                    <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-left">{d.name}</span>
                     <span className={`text-[10px] ${isStarting ? "text-accent" : "text-white/55"}`}>
                       {isStarting
                         ? (isBooted ? "Starting..." : "Booting...")

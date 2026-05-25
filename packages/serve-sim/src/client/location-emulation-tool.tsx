@@ -1,11 +1,9 @@
 // Location emulation panel + lightweight 3D trail viz.
 //
-// Drives `xcrun simctl location <udid> set <lat>,<lng>` on a fixed cadence
-// while a requestAnimationFrame loop advances the player position along a
-// pre-densified route. The route is rendered to a 2D canvas with a manual
-// orbiting orthographic camera — same family as Any Distance's RouteScene
-// (extruded ribbon + ground plane shadow) but flat-shaded so we don't pull
-// in WebGL or a 3D library.
+// Drives the platform-specific location command on a fixed cadence while a
+// requestAnimationFrame loop advances the player position along a pre-densified
+// route. The route is rendered to a 2D canvas with a manual orbiting
+// orthographic camera.
 
 import {
   memo,
@@ -38,6 +36,11 @@ import {
   StopGlyph,
   WalkGlyph,
 } from "./icons";
+import {
+  locationClearCommand,
+  locationSetCommand,
+  type LocationPlatform,
+} from "./utils/location-commands";
 
 const TRAIL_MORPH_MS = 650;
 
@@ -83,9 +86,11 @@ const INITIAL_PLAYBACK: PlaybackState = { status: "idle", arc: 0, elapsedMs: 0 }
 export function LocationEmulationTool({
   udid,
   exec,
+  platform = "ios",
 }: {
   udid: string;
   exec: ExecFn;
+  platform?: LocationPlatform;
 }) {
   const [open, setOpen] = useState(false);
   const [trailId, setTrailId] = useState<string>(DEFAULT_TRAILS[0]!.id);
@@ -214,10 +219,12 @@ export function LocationEmulationTool({
     return () => clearInterval(id);
   }, []);
 
-  // ── simctl bridge ────────────────────────────────────────────────────────
-  // Push the current lat/lng to the simulator on a fixed cadence whenever
-  // we're playing. Skipped while paused/idle so the simulator can hold its
-  // last position. On stop we run `... clear`.
+  // ── Host location bridge ────────────────────────────────────────────────
+  // Push the current lat/lng to the device on a fixed cadence whenever we're
+  // playing. Skipped while paused/idle so the device can hold its last
+  // position. On stop, iOS can clear the override; Android emulator location
+  // has no matching clear command, so we restore the session origin when we
+  // have one.
   useEffect(() => {
     if (playback.status !== "playing") return;
     let cancelled = false;
@@ -230,11 +237,11 @@ export function LocationEmulationTool({
       if (now - lastPushed < LOCATION_PUSH_INTERVAL_MS) return;
       lastPushed = now;
       const pt = pointAtDistance(trailRef.current, arcRef.current);
-      const cmd = `xcrun simctl location ${udid} set ${pt.lat.toFixed(7)},${pt.lng.toFixed(7)}`;
+      const cmd = locationSetCommand(platform, udid, pt);
       inflight = exec(cmd).then((res) => {
         if (cancelled) return;
         if (res.exitCode !== 0) {
-          setError(parseSimctlError(res.stderr) || "simctl location set failed");
+          setError(parseLocationError(res.stderr) || "Location update failed");
         } else {
           setError(null);
         }
@@ -249,7 +256,7 @@ export function LocationEmulationTool({
       cancelled = true;
       clearInterval(id);
     };
-  }, [playback.status, udid, exec]);
+  }, [playback.status, udid, exec, platform]);
 
   // ── Controls ─────────────────────────────────────────────────────────────
   const onPlayPause = useCallback(() => {
@@ -284,13 +291,17 @@ export function LocationEmulationTool({
     const origin = sessionOriginRef.current;
     sessionOriginRef.current = null;
     const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
+      ? locationSetCommand(platform, udid, origin)
+      : locationClearCommand(platform, udid);
+    if (!cmd) {
+      setError(null);
+      return;
+    }
     void exec(cmd).then((res) => {
-      if (res.exitCode !== 0) setError(parseSimctlError(res.stderr) || null);
+      if (res.exitCode !== 0) setError(parseLocationError(res.stderr) || null);
       else setError(null);
     });
-  }, [exec, udid]);
+  }, [exec, udid, platform]);
 
   const onTrailChange = useCallback((id: string) => {
     setTrailId(id);
@@ -305,10 +316,11 @@ export function LocationEmulationTool({
     if (statusRef.current === "idle") return;
     const origin = sessionOriginRef.current;
     const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
+      ? locationSetCommand(platform, udid, origin)
+      : locationClearCommand(platform, udid);
+    if (!cmd) return;
     void exec(cmd).catch(() => {});
-  }, [exec, udid]);
+  }, [exec, udid, platform]);
 
   // ── Render ───────────────────────────────────────────────────────────────
   const playing = playback.status === "playing";
@@ -387,7 +399,7 @@ export function LocationEmulationTool({
               onClick={onStop}
               className="lem-ghost flex items-center justify-center gap-1.5 py-2 px-3 border border-white/12 rounded-[7px] text-[12px] font-medium bg-transparent text-white/85 cursor-pointer font-[inherit]"
               disabled={playback.status === "idle" && playback.arc === 0}
-              title="Stop and clear simulated location"
+              title={platform === "android" ? "Stop simulated location" : "Stop and clear simulated location"}
             >
               <StopGlyph />
               <span>Stop</span>
@@ -890,7 +902,7 @@ function formatElevation(meters: number): string {
   return `${meters.toFixed(0)} m`;
 }
 
-function parseSimctlError(stderr: string): string {
+function parseLocationError(stderr: string): string {
   const trimmed = stderr.trim();
   if (!trimmed) return "";
   // Strip the leading "An error was encountered processing the command" noise.
@@ -898,4 +910,3 @@ function parseSimctlError(stderr: string): string {
   if (m) return m[1]!;
   return trimmed.split("\n").slice(-1)[0] ?? trimmed;
 }
-

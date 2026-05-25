@@ -1,4 +1,5 @@
 import { type GridDevice, gridPreviewHref } from "../utils/grid";
+import { PlatformBadge } from "./platform-badge";
 
 export function GridTile({
   device,
@@ -95,8 +96,11 @@ export function GridTile({
           </button>
         </div>
       )}
-      <div className="px-2.5 py-1.5 border-t border-[#222] text-[11px] font-mono text-white/70 flex justify-between gap-2">
-        <span className="overflow-hidden text-ellipsis whitespace-nowrap">{device.name}</span>
+      <div className="px-2.5 py-1.5 border-t border-[#222] text-[11px] font-mono text-white/70 flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <PlatformBadge platform={platform} compact />
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{device.name}</span>
+        </span>
         <span className="whitespace-nowrap" style={{ color: statusColor }}>
           {status}
           {helper ? <span className="text-white/40"> :{helper.port}</span> : null}

@@ -21,12 +21,14 @@ import {
 } from "serve-sim-client/simulator";
 
 import { ReloadIcon } from "./icons";
+import { AndroidDeviceControls } from "./components/android-device-controls";
 import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
 import { BootEmptyState } from "./components/boot-empty-state";
 import { DevicePicker } from "./components/device-picker";
 import { GridPanel } from "./components/grid-panel";
+import { PlatformBadge } from "./components/platform-badge";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
 import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
@@ -310,27 +312,42 @@ function AppWithConfig({
         }
       : null
   );
+  const platform = selectedDevice?.platform ?? config.platform ?? "ios";
+  const isAndroid = platform === "android";
+  const supportsAx = !isAndroid;
+  const supportsWebKitDevtools = !isAndroid;
 
   useEffect(() => {
     document.title = selectedDevice?.name
-      ? `${selectedDevice.platform === "android" ? "Android" : "Simulator"} - ${selectedDevice.name}`
+      ? `${platform === "android" ? "Android" : "Simulator"} - ${selectedDevice.name}`
       : "Device Preview";
-  }, [selectedDevice?.name, selectedDevice?.platform]);
+  }, [selectedDevice?.name, platform]);
 
   const deviceType: DeviceType = getDeviceType(selectedDevice?.name);
-  const devtools = useWebKitDevtools(config.devtoolsEndpoint ?? simEndpoint("devtools"), devtoolsOpen);
+  const effectiveDevtoolsOpen = supportsWebKitDevtools && devtoolsOpen;
+  const devtools = useWebKitDevtools(
+    supportsWebKitDevtools ? (config.devtoolsEndpoint ?? simEndpoint("devtools")) : undefined,
+    effectiveDevtoolsOpen,
+  );
 
   useEffect(() => {
-    if (!devtoolsOpen) return;
+    if (!effectiveDevtoolsOpen) return;
     if (selectedDevtoolsTargetId && devtools.targets.some((target) => target.id === selectedDevtoolsTargetId)) return;
     setSelectedDevtoolsTargetId(devtools.targets.length === 1 ? devtools.targets[0]!.id : null);
-  }, [devtoolsOpen, devtools.targets, selectedDevtoolsTargetId, setSelectedDevtoolsTargetId]);
+  }, [effectiveDevtoolsOpen, devtools.targets, selectedDevtoolsTargetId, setSelectedDevtoolsTargetId]);
 
   useEffect(() => {
     setSelectedDevtoolsTargetId(null);
   }, [config.device, setSelectedDevtoolsTargetId]);
 
-  const androidVideoEnabled = config.platform === "android";
+  useEffect(() => {
+    if (!isAndroid) return;
+    setAxOverlayEnabled(false);
+    setDevtoolsOpen(false);
+    setSelectedDevtoolsTargetId(null);
+  }, [isAndroid, setAxOverlayEnabled, setDevtoolsOpen, setSelectedDevtoolsTargetId]);
+
+  const androidVideoEnabled = isAndroid;
   const h264 = useH264Stream(config.streamUrl, androidVideoEnabled);
   const mjpeg = useMjpegStream(config.streamUrl, !androidVideoEnabled || h264.supported === false);
   const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
@@ -555,7 +572,7 @@ function AppWithConfig({
         }
         return;
       }
-      if ((config.platform ?? "ios") === "ios" && e.code === "KeyA" && e.metaKey && e.shiftKey) {
+      if (platform === "ios" && e.code === "KeyA" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) {
           execOnHost(`xcrun simctl ui ${config.device} appearance`).then((r) => {
@@ -580,7 +597,7 @@ function AppWithConfig({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device, config.platform, rotateBy]);
+  }, [sendWs, config.device, platform, rotateBy]);
 
   const switchToDevice = useCallback(async (d: SimDevice) => {
     if (switching || d.udid === config.device) return;
@@ -606,7 +623,7 @@ function AppWithConfig({
   const mediaDrop = useMediaDrop({
     exec: execOnHost,
     udid: config.device,
-    platform: config.platform ?? "ios",
+    platform,
     enabled: streaming,
     onUploadStart: uploads.add,
     onUploadProgress: uploads.setProgress,
@@ -650,7 +667,7 @@ function AppWithConfig({
   });
 
   // Only shift the simulator when the panel would otherwise collide with it.
-  const panelWidthPx = devtoolsOpen
+  const panelWidthPx = effectiveDevtoolsOpen
     ? devtoolsPanelWidth
     : gridOpen
     ? gridPanelWidth
@@ -675,7 +692,7 @@ function AppWithConfig({
   }
 
   return (
-    <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
+    <AxStateProvider endpoint={supportsAx && axOverlayEnabled ? config?.axEndpoint : undefined}>
     <div
       className="flex flex-col items-center justify-center h-screen bg-page py-6 pl-6 gap-3 font-system box-border"
       style={{
@@ -712,7 +729,18 @@ function AppWithConfig({
             onRefresh={fetchDevices}
             onSelect={switchToDevice}
             onStop={stopDevice}
-            trigger={<SimulatorToolbar.Title />}
+            trigger={
+              <SimulatorToolbar.Title
+                name={(
+                  <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <PlatformBadge platform={platform} compact />
+                    <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                      {selectedDevice?.name ?? "Device"}
+                    </span>
+                  </span>
+                )}
+              />
+            }
           />
           <SimulatorToolbar.Actions>
             {currentApp?.isReactNative && (
@@ -724,14 +752,20 @@ function AppWithConfig({
                 <ReloadIcon />
               </SimulatorToolbar.Button>
             )}
-            <SimulatorToolbar.HomeButton
-              onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-            />
-            <AxToolbarButton
-              overlayEnabled={axOverlayEnabled}
-              streaming={streaming}
-              onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
-            />
+            {isAndroid ? (
+              <AndroidDeviceControls onButton={onStreamButton} />
+            ) : (
+              <SimulatorToolbar.HomeButton
+                onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
+              />
+            )}
+            {supportsAx && (
+              <AxToolbarButton
+                overlayEnabled={axOverlayEnabled}
+                streaming={streaming}
+                onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+              />
+            )}
             <SimulatorToolbar.RotateButton title="Rotate device" />
           </SimulatorToolbar.Actions>
         </SimulatorToolbar>
@@ -779,7 +813,7 @@ function AppWithConfig({
             enableDigitalCrown={deviceType === "watch"}
             onScreenConfigChange={onScreenConfigChange}
           />
-          {axOverlayEnabled && <AxDomOverlay />}
+          {supportsAx && axOverlayEnabled && <AxDomOverlay />}
           {mediaDrop.isDragOver && (
             <div
               className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-accent bg-[rgba(99,102,241,0.12)] backdrop-blur-[2px] text-accent pointer-events-none z-20"
@@ -790,7 +824,7 @@ function AppWithConfig({
                 <polyline points="17 8 12 3 7 8" />
                 <line x1="12" y1="3" x2="12" y2="15" />
               </svg>
-              <span className="text-[13px] font-medium">Drop media or {config.platform === "android" ? ".apk" : ".ipa"}</span>
+              <span className="text-[13px] font-medium">Drop media or {platform === "android" ? ".apk" : ".ipa"}</span>
             </div>
           )}
           <SimulatorResizeCornerHandle
@@ -865,7 +899,7 @@ function AppWithConfig({
 
       {/* Right-edge sidebar rail. */}
       <div
-        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-white/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || devtoolsOpen || gridOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
+        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-white/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || effectiveDevtoolsOpen || gridOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
       >
         <button
           onClick={() => {
@@ -883,23 +917,25 @@ function AppWithConfig({
             <line x1="15" y1="4" x2="15" y2="20" />
           </svg>
         </button>
-        <button
-          onClick={() => {
-            setPanelOpen(false);
-            setGridOpen(false);
-            setDevtoolsOpen((o) => !o);
-          }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
-          aria-label="Open WebKit DevTools"
-          aria-pressed={devtoolsOpen}
-          title="WebKit DevTools"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
-            <path d="M2 12h20" />
-          </svg>
-        </button>
+        {supportsWebKitDevtools && (
+          <button
+            onClick={() => {
+              setPanelOpen(false);
+              setGridOpen(false);
+              setDevtoolsOpen((o) => !o);
+            }}
+            className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+            aria-label="Open WebKit DevTools"
+            aria-pressed={effectiveDevtoolsOpen}
+            title="WebKit DevTools"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+              <path d="M2 12h20" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={() => {
             setPanelOpen(false);
@@ -925,6 +961,7 @@ function AppWithConfig({
         onClose={() => setPanelOpen(false)}
         udid={config.device}
         currentApp={currentApp}
+        platform={platform}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
         width={toolsPanelWidth}
@@ -946,27 +983,31 @@ function AppWithConfig({
         panelWidth={gridPanelWidth}
         visible={gridOpen}
         onPointerDown={onGridResize}
-        ariaLabel="Resize simulators panel"
+        ariaLabel="Resize devices panel"
       />
 
-      <WebKitDevtoolsPanel
-        open={devtoolsOpen}
-        onClose={() => setDevtoolsOpen(false)}
-        udid={config.device}
-        targets={devtools.targets}
-        selectedTargetId={selectedDevtoolsTargetId}
-        onSelectTarget={setSelectedDevtoolsTargetId}
-        loading={devtools.loading}
-        error={devtools.error}
-        onRefresh={() => void devtools.refresh()}
-        width={devtoolsPanelWidth}
-      />
-      <ResizeHandle
-        panelWidth={devtoolsPanelWidth}
-        visible={devtoolsOpen}
-        onPointerDown={onDevtoolsResize}
-        ariaLabel="Resize WebKit DevTools panel"
-      />
+      {supportsWebKitDevtools && (
+        <>
+          <WebKitDevtoolsPanel
+            open={effectiveDevtoolsOpen}
+            onClose={() => setDevtoolsOpen(false)}
+            udid={config.device}
+            targets={devtools.targets}
+            selectedTargetId={selectedDevtoolsTargetId}
+            onSelectTarget={setSelectedDevtoolsTargetId}
+            loading={devtools.loading}
+            error={devtools.error}
+            onRefresh={() => void devtools.refresh()}
+            width={devtoolsPanelWidth}
+          />
+          <ResizeHandle
+            panelWidth={devtoolsPanelWidth}
+            visible={effectiveDevtoolsOpen}
+            onPointerDown={onDevtoolsResize}
+            ariaLabel="Resize WebKit DevTools panel"
+          />
+        </>
+      )}
 
       {/* Status bar */}
       <div className="flex items-center gap-2.5 text-[12px] font-mono text-white/40">

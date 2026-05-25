@@ -2,13 +2,16 @@ import { useEffect, useState, type ReactNode } from "react";
 import { type AppDetails, fetchAppDetails } from "../utils/app-icon";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { Chevron } from "../icons";
+import { PlatformBadge, platformLabel, type DevicePlatform } from "./platform-badge";
 
 export function AppDetectionTool({
   udid,
   currentApp,
+  platform = "ios",
 }: {
   udid: string;
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
+  platform?: DevicePlatform;
 }) {
   const [details, setDetails] = useState<AppDetails | null>(null);
   const [open, setOpen] = useState(false);
@@ -16,12 +19,14 @@ export function AppDetectionTool({
   useEffect(() => {
     if (!currentApp) { setDetails(null); return; }
     let cancelled = false;
-    setDetails({
+    const baseDetails: AppDetails = {
       bundleId: currentApp.bundleId,
       isReactNative: currentApp.isReactNative,
       pid: currentApp.pid,
-      loading: true,
-    });
+      loading: platform === "ios",
+    };
+    setDetails(baseDetails);
+    if (platform === "android") return () => { cancelled = true; };
     fetchAppDetails(execOnHost, udid, currentApp.bundleId).then((extra) => {
       if (cancelled) return;
       setDetails({
@@ -33,7 +38,7 @@ export function AppDetectionTool({
       });
     });
     return () => { cancelled = true; };
-  }, [udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
+  }, [udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative, platform]);
 
   if (!details) {
     return (
@@ -57,13 +62,18 @@ export function AppDetectionTool({
             className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
             alt=""
           />
+        ) : platform === "android" ? (
+          <div className="w-10 h-10 rounded-[8px] shrink-0 border border-white/8 bg-[#052e24] text-[#bbf7d0] flex items-center justify-center text-[10px] font-mono">
+            APK
+          </div>
         ) : (
           <div className="w-10 h-10 rounded-[8px] shrink-0 border border-white/8 bg-white/[0.04]" />
         )}
         <div className="min-w-0 flex-1 leading-tight">
-          <div className="text-[13px] font-semibold text-white/90 truncate">
-            {details.displayName ?? details.bundleId}
-            {details.loading && <span className="text-white/45 font-normal"> …</span>}
+          <div className="text-[13px] font-semibold text-white/90 truncate flex items-center gap-1.5">
+            <span className="truncate">{details.displayName ?? appTitle(details.bundleId, platform)}</span>
+            <PlatformBadge platform={platform} compact />
+            {details.loading && <span className="text-white/45 font-normal">...</span>}
           </div>
           <div className="text-[11px] text-white/55 font-mono truncate" title={details.bundleId}>
             {details.bundleId}
@@ -81,35 +91,52 @@ export function AppDetectionTool({
           )}
 
           <dl className="m-0 flex flex-col gap-1.5">
-            <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "…" : "—"} />
-            <Row label="Min iOS" value={details.minOS ?? (details.loading ? "…" : "—")} />
-            <Row label="Executable" value={details.executable ?? (details.loading ? "…" : "—")} />
-            <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
-            {details.isReactNative && <Row label="React Native" value="Yes" />}
-            <Row
-              label="App path"
-              value={details.appPath ?? (details.loading ? "…" : "—")}
-              mono
-              action={
-                details.appPath
-                  ? {
-                      title: "Reveal in Finder",
-                      onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
-                      icon: (
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                          <line x1="7" y1="17" x2="17" y2="7" />
-                          <polyline points="10 7 17 7 17 14" />
-                        </svg>
-                      ),
-                    }
-                  : undefined
-              }
-            />
+            <Row label="Platform" value={platformLabel(platform)} />
+            {platform === "android" ? (
+              <>
+                <Row label="Package" value={details.bundleId} mono />
+                <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
+                {details.isReactNative && <Row label="React Native" value="Yes" />}
+              </>
+            ) : (
+              <>
+                <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "..." : "—"} />
+                <Row label="Min iOS" value={details.minOS ?? (details.loading ? "..." : "—")} />
+                <Row label="Executable" value={details.executable ?? (details.loading ? "..." : "—")} />
+                <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
+                {details.isReactNative && <Row label="React Native" value="Yes" />}
+                <Row
+                  label="App path"
+                  value={details.appPath ?? (details.loading ? "..." : "—")}
+                  mono
+                  action={
+                    details.appPath
+                      ? {
+                          title: "Reveal in Finder",
+                          onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
+                          icon: (
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                              <line x1="7" y1="17" x2="17" y2="7" />
+                              <polyline points="10 7 17 7 17 14" />
+                            </svg>
+                          ),
+                        }
+                      : undefined
+                  }
+                />
+              </>
+            )}
           </dl>
         </>
       )}
     </div>
   );
+}
+
+function appTitle(bundleId: string, platform: DevicePlatform): string {
+  if (platform === "ios") return bundleId;
+  const last = bundleId.split(".").filter(Boolean).at(-1);
+  return last || bundleId;
 }
 
 function Row({

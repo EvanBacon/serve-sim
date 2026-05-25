@@ -23,6 +23,9 @@ const WS_MSG_TOUCH = 0x03;
 const WS_MSG_BUTTON = 0x04;
 const WS_MSG_MULTI_TOUCH = 0x05;
 const WS_MSG_DIGITAL_CROWN = 0x0a;
+const RELAY_STARTUP_ERROR_MS = 6000;
+const VIDEO_RELAY_STARTUP_ERROR_MS = 30000;
+const VIDEO_RELAY_STARTUP_SLOW_MS = 8000;
 
 export interface SimulatorViewProps {
   /** Base URL of the serve-sim server, e.g. "http://localhost:3100" */
@@ -125,6 +128,7 @@ export function SimulatorView({
   const lastFrameAtRef = useRef(0);
   const hasReceivedFrameRef = useRef(false);
   const [hasReceivedFrame, setHasReceivedFrame] = useState(false);
+  const [startupSlow, setStartupSlow] = useState(false);
   const [showSlowOverlay, setShowSlowOverlay] = useState(false);
   const slowOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -158,6 +162,8 @@ export function SimulatorView({
     setScreenSize(null);
     setConnected(false);
     setHasReceivedFrame(false);
+    setStartupSlow(false);
+    setError(null);
   }, [url]);
 
   const updateScreenConfig = useCallback((config: StreamConfig | null | undefined) => {
@@ -204,12 +210,11 @@ export function SimulatorView({
     // the window. Catches the silent-failure mode where the helper accepts
     // the MJPEG connection but its underlying simulator was shut down —
     // /stream.mjpeg keeps the socket open forever without emitting bytes.
-    const STARTUP_MS = 6000;
     const watchdog = setTimeout(() => {
       if (!connectedRef.current) {
         setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
       }
-    }, STARTUP_MS);
+    }, RELAY_STARTUP_ERROR_MS);
     const unsubscribe = subscribeFrame((blobUrl) => {
       frameCountRef.current++;
       lastFrameAtRef.current = Date.now();
@@ -244,12 +249,18 @@ export function SimulatorView({
 
   useEffect(() => {
     if (!videoRelayMode || !subscribeVideoFrame) return;
-    const STARTUP_MS = 6000;
-    const watchdog = setTimeout(() => {
-      if (!connectedRef.current) {
-        setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
+    setError(null);
+    setStartupSlow(false);
+    const slowWatchdog = setTimeout(() => {
+      if (!connectedRef.current && !hasReceivedFrameRef.current) {
+        setStartupSlow(true);
       }
-    }, STARTUP_MS);
+    }, VIDEO_RELAY_STARTUP_SLOW_MS);
+    const errorWatchdog = setTimeout(() => {
+      if (!connectedRef.current && !hasReceivedFrameRef.current) {
+        setError("Android stream is still starting. Try reconnecting if it does not appear.");
+      }
+    }, VIDEO_RELAY_STARTUP_ERROR_MS);
 
     const unsubscribe = subscribeVideoFrame((frame) => {
       const width = Number(frame.displayWidth || frame.codedWidth || 0);
@@ -269,15 +280,18 @@ export function SimulatorView({
         hasReceivedFrameRef.current = true;
         setHasReceivedFrame(true);
       }
+      setStartupSlow(false);
       if (!connectedRef.current) {
-        clearTimeout(watchdog);
+        clearTimeout(slowWatchdog);
+        clearTimeout(errorWatchdog);
         setConnected(true);
         setError(null);
       }
     });
 
     return () => {
-      clearTimeout(watchdog);
+      clearTimeout(slowWatchdog);
+      clearTimeout(errorWatchdog);
       unsubscribe?.();
     };
   }, [videoRelayMode, subscribeVideoFrame, updateScreenConfig]);
@@ -1072,7 +1086,9 @@ export function SimulatorView({
         )}
         {!connected && !error && !hasReceivedFrame && (
           <div style={{...overlayStyle, ...(imageStyle || {})}}>
-            <span style={{ color: "#888", fontSize: 14 }}>Connecting...</span>
+            <span style={{ color: "#888", fontSize: 14 }}>
+              {startupSlow ? "Starting video..." : "Connecting..."}
+            </span>
           </div>
         )}
         {error && (
