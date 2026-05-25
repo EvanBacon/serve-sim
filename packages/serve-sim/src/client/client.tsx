@@ -514,11 +514,15 @@ function AppWithConfig({
   }, [simFocused, sendWs]);
 
   useEffect(() => {
-    // tvOS: keyboard navigation is owned by SimulatorView's remote-button
-    // handler (it sends remote_* button events). Letting this generic
-    // keystroke pass-through fire in parallel was duplicating each press —
-    // tolerable for arrows but Enter no longer registered as a select.
-    if (deviceType === "tv") return;
+    // For tvOS, navigation keys (arrows / Enter / Escape) are owned by
+    // SimulatorView's remote-button handler. Forwarding them here too
+    // dual-fires the press and the focus engine drops it. All OTHER keys
+    // (letters, digits, Space, Backspace, ...) still pass through as USB
+    // HID keystrokes so they can reach tvOS text-input modals.
+    const tvReservedCodes = new Set([
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+      "Enter", "NumpadEnter", "Escape",
+    ]);
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
@@ -543,6 +547,7 @@ function AppWithConfig({
         }
         return;
       }
+      if (deviceType === "tv" && tvReservedCodes.has(e.code)) return;
       const usage = hidUsageForCode(e.code);
       if (usage == null) return;
       e.preventDefault();
