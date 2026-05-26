@@ -259,6 +259,11 @@ export function DeviceFrameChrome({ type = "iphone", streaming = false }: { type
       return <WatchFrameChrome streaming={streaming} />;
     case "vision":
       return <VisionProFrameChrome streaming={streaming} />;
+    case "tv":
+      // Apple TV outputs to a television — no device chrome. Returning null
+      // keeps the borderless DEVICE_FRAMES.tv geometry from being overlaid
+      // with iPhone bezels / Dynamic Island.
+      return null;
     default:
       return <PhoneFrameChrome streaming={streaming} />;
   }
