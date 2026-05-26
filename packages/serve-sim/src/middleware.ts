@@ -130,6 +130,13 @@ export function normalizeRequestPlatform(value: unknown): DevicePlatform | null 
   return value === "ios" || value === "android" ? value : null;
 }
 
+export function isValidDeviceId(value: string, platform: DevicePlatform): boolean {
+  if (!value) return false;
+  return platform === "android"
+    ? /^[A-Za-z0-9_.:-]+$/.test(value)
+    : /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(value);
+}
+
 export function parseForegroundAppLogMessage(message: string): { bundleId: string; pid: number } | null {
   // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
   const match = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/.exec(message);
@@ -890,7 +897,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           }
           platform = parsedPlatform;
         } catch {}
-        if (!udid || !/^[A-Za-z0-9_.:-]+$/.test(udid)) {
+        if (!isValidDeviceId(udid, platform)) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing device id" }));
           return;
@@ -955,7 +962,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           }
           platform = parsedPlatform;
         } catch {}
-        if (!udid || !/^[A-Za-z0-9_.:-]+$/.test(udid)) {
+        if (!isValidDeviceId(udid, platform)) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing device id" }));
           return;
