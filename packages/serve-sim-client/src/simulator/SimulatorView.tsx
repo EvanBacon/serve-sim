@@ -547,9 +547,10 @@ export function SimulatorView({
     };
   }, []);
 
-  // Apple TV: forward arrow / Enter / Escape / Space as Siri-remote buttons.
-  // tvOS apps focus-navigate via these keys, so giving the page focus and
-  // sending keystrokes is enough to drive the UI.
+  // Apple TV: forward arrow keys / Enter / Escape (plus the PlayPause and
+  // AppleTV media keys) as Siri-remote button presses — tvOS focus-navigates
+  // via these. Space and all other keys are intentionally left out so they
+  // pass through as text input to focused fields.
   useEffect(() => {
     if (!isTv) return;
     const map: Record<string, string> = {
