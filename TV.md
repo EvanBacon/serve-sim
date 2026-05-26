@@ -149,7 +149,7 @@ serve-sim --kill
 
 ## How it works
 
-```
+```text
 ┌──────────────┐   simctl io   ┌─────────────────┐  MJPEG / WS  ┌─────────┐
 │ tvOS Simulator│ ──────────►  │ serve-sim-bin   │ ───────────► │ Browser │
 │  (1080p)      │   (Swift)    │ (per-device)    │              └─────────┘

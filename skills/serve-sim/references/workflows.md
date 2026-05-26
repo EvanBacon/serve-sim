@@ -256,9 +256,10 @@ npx serve-sim button remote_menu --hold 1000    # jumps to home instead of stepp
 #    remote buttons first, then send characters via the CLI:
 npx serve-sim type "hello world"
 
-# 8. Verify by reading the accessibility tree (works on tvOS).
-curl -s "$URL%/.sim/api" | jq -r '.streamUrl'  # discover the helper port
-curl -s http://localhost:3100/ax | jq '.children[0].AXLabel'
+# 8. Verify by reading the accessibility tree (works on tvOS). Discover the
+#    helper port the same way as workflows 1-4, rather than hardcoding it.
+PORT=$(npx serve-sim --list -q | jq -r '.[0].streamUrl' | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+curl -s "http://localhost:${PORT}/ax" | jq '.children[0].AXLabel'
 
 # 9. Cleanup
 npx serve-sim --kill
@@ -269,6 +270,6 @@ npx serve-sim --kill
 - iOS hardware buttons (`home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`) — they don't reach a tvOS sim. Use `remote_tv` for home and `remote_siri` for Siri.
 - `serve-sim rotate` — Apple TV is always landscape.
 - `serve-sim camera <bundle-id>` — camera injection isn't supported on tvOS.
-- Treat `serve-sim permissions` results as authoritative on tvOS — the TCC layout differs and the subcommand was validated only against iOS.
+- `serve-sim permissions` — the TCC database schema differs on tvOS and the subcommand was validated only against iOS, so don't treat its results as authoritative there (see [permissions.md](permissions.md)).
 
 See [buttons-rotation.md](buttons-rotation.md) for the full Siri-remote button vocabulary and long-press behaviors.

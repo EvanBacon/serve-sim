@@ -61,9 +61,11 @@ export interface SimulatorViewProps {
   /** Connection quality indicator: green (good), yellow (degraded), red (poor). */
   connectionQuality?: "good" | "degraded" | "poor" | null;
   /**
-   * Device kind hint used to drive input behavior. For "tv", arrow keys / Enter /
-   * Escape / Space are forwarded as Siri-remote button presses, and pointer-based
-   * touch input is suppressed (an Apple TV doesn't accept finger taps).
+   * Device kind hint used to drive input behavior. For "tv", the arrow keys,
+   * Enter, and Escape are forwarded as Siri-remote button presses, and
+   * pointer-based touch input is suppressed (an Apple TV doesn't accept finger
+   * taps). Other keys (letters, digits, Space, …) still pass through as text
+   * input.
    */
   deviceType?: "iphone" | "ipad" | "watch" | "vision" | "tv";
 }
