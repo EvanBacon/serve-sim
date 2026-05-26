@@ -1045,6 +1045,12 @@ async function rotate(orientation: string, deviceArg?: string) {
   });
 }
 
+/**
+ * Send a single button press to the helper over the WebSocket. `holdMs`, when
+ * set, asks the helper to hold the press that long before releasing (honored
+ * only by tvOS long-press buttons) and defers closing the socket until the
+ * hold completes so the release event isn't dropped.
+ */
 async function button(buttonName = "home", deviceArg?: string, holdMs?: number) {
   const state = readState(deviceArg);
   if (!state) {
@@ -1814,6 +1820,12 @@ Examples:
 
 // ─── Serve preview ───
 
+/**
+ * Preview-server mode (the default). Ensures a streaming helper is running for
+ * the target device (starting one if needed, preferring a tvOS sim when `tv`
+ * is set), then binds the preview UI on `servePort`, scanning forward for a
+ * free port unless the port was pinned explicitly.
+ */
 async function serve(servePort: number, devices: string[], portExplicit: boolean, host: string, tv = false) {
   let targetDevice: string | undefined;
 

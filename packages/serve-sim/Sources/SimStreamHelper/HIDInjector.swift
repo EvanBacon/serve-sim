@@ -297,6 +297,19 @@ final class HIDInjector {
         sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
     }
 
+    /// Dispatch a hardware-button or Siri-remote button press by name.
+    /// - Parameters:
+    ///   - button: The button identifier — iOS values like `home`, `lock`,
+    ///     `siri`, `side_button`, or tvOS Siri-remote values like
+    ///     `remote_up` / `remote_select` / `remote_play_pause` / `remote_tv`
+    ///     etc. Unknown names are logged and ignored.
+    ///   - deviceUDID: The simulator UDID — only used for the `home` SpringBoard
+    ///     fallback when the HID symbol isn't resolvable.
+    ///   - holdMs: Optional press duration in milliseconds. Honored only for
+    ///     buttons with a discrete long-press gesture on tvOS
+    ///     (`remote_select`, `remote_play_pause`, `remote_menu`); every other
+    ///     button silently ignores this. When set, the press is held on
+    ///     `buttonQueue` so the caller's thread isn't blocked.
     func sendButton(button: String, deviceUDID: String, holdMs: UInt32? = nil) {
         if let holdMs {
             print("[hid] Sending button: \(button) (hold \(holdMs)ms)")
@@ -411,10 +424,14 @@ final class HIDInjector {
         sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
     }
 
-    /// Press-and-release a USB HID Consumer-page key (media keys, AC controls).
-    /// Used for the Siri-remote buttons (target 0x15 routes them to tvOS's
-    /// remote subsystem).
+    /// HID target that routes Consumer-page events to the tvOS Siri-remote
+    /// subsystem (distinct from the iOS hardware-button target 0x33).
     private static let consumerTarget: Int32 = 0x15
+
+    /// Press-and-release a USB HID Consumer-page key (media keys, AC controls)
+    /// — the transport for the discrete Siri-remote buttons. When `holdMs` is
+    /// provided the press is held on `buttonQueue` for that long before
+    /// releasing, so the caller's thread isn't blocked.
     private func pressConsumer(usage: UInt32, holdMs: UInt32? = nil) {
         if let holdMs {
             buttonQueue.async { [self] in

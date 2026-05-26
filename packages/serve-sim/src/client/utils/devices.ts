@@ -5,6 +5,7 @@ export interface SimDevice {
   runtime: string;
 }
 
+/** Parse `xcrun simctl list devices -j` JSON into a flat list of available devices. */
 export function parseSimctlList(stdout: string): SimDevice[] {
   try {
     const parsed = JSON.parse(stdout);
@@ -25,6 +26,10 @@ export function parseSimctlList(stdout: string): SimDevice[] {
   }
 }
 
+/**
+ * Sort key for a device by family, derived from its name. Lower sorts first:
+ * iPhone (0), iPad (1), Watch (2), Vision (3), Apple TV (4), everything else (5).
+ */
 export function deviceKind(name: string): number {
   const n = name.toLowerCase();
   if (n.includes("iphone")) return 0;
@@ -35,6 +40,10 @@ export function deviceKind(name: string): number {
   return 5;
 }
 
+/**
+ * Sort key for a runtime string by platform. Lower sorts first: iOS (0),
+ * iPadOS (1), watchOS (2), visionOS/xrOS (3), tvOS (4), everything else (5).
+ */
 export function runtimeOrder(runtime: string): number {
   const r = runtime.toLowerCase();
   if (r.startsWith("ios")) return 0;

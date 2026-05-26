@@ -11,6 +11,7 @@ import {
 
 export type DeviceType = "iphone" | "ipad" | "watch" | "vision" | "tv";
 
+/** Classify a simulator device name into a {@link DeviceType}; defaults to "iphone". */
 export function getDeviceType(name?: string | null): DeviceType {
   if (!name) return "iphone";
   const lower = name.toLowerCase();
@@ -88,6 +89,7 @@ export const SIMULATOR_SCREENS: Record<string, { width: number; height: number }
   "Apple TV 4K (at 1080p) (2nd generation)": { width: 1920, height: 1080 },
 };
 
+/** CSS `aspect-ratio` string for the live stream, falling back to iPhone proportions. */
 export function simulatorAspectRatio(
   config?: Pick<StreamConfig, "width" | "height" | "orientation"> | null,
   fallback?: Pick<StreamConfig, "width" | "height" | "orientation"> | null,
@@ -100,6 +102,7 @@ export function simulatorAspectRatio(
   return `${DEVICE_FRAMES.iphone.width - 2 * DEVICE_FRAMES.iphone.bezelX} / ${DEVICE_FRAMES.iphone.height - 2 * DEVICE_FRAMES.iphone.bezelY}`;
 }
 
+/** Screen pixel size for a device, from the known-screens table or the frame's inner area. */
 export function fallbackScreenSize(
   type: DeviceType = "iphone",
   deviceName?: string | null,
@@ -113,6 +116,7 @@ export function fallbackScreenSize(
   };
 }
 
+/** Max rendered width (px) for a device type, accounting for portrait vs landscape. */
 export function simulatorMaxWidth(
   type: DeviceType = "iphone",
   config?: Pick<StreamConfig, "width" | "height" | "orientation"> | null,
