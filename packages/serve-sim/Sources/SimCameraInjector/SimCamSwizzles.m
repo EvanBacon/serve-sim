@@ -219,20 +219,20 @@ static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
     return arr;
 }
 
+static AVCaptureInput *SimCamFirstFakeInputForSession(AVCaptureSession *s) {
+    for (AVCaptureInput *candidate in SimCamSessionTrackedInputs(s)) {
+        if (SimCamIsFakeInput(candidate)) return candidate;
+    }
+    return nil;
+}
+
 // Real AVFoundation only exposes output connections after an output has been
 // attached to a session. Keep this per-output so newly created outputs still
 // look disconnected during client-side session configuration checks.
 static void SimCamMarkOutputAttachedToFakeSession(AVCaptureSession *s, AVCaptureOutput *output) {
     if (!output) return;
     objc_setAssociatedObject(output, &kSimCamOutputAttachedToFakeSessionKey, @YES, OBJC_ASSOCIATION_RETAIN);
-    AVCaptureInput *input = nil;
-    for (AVCaptureInput *candidate in SimCamSessionTrackedInputs(s)) {
-        if (SimCamIsFakeInput(candidate)) {
-            input = candidate;
-            break;
-        }
-    }
-    SimCamSetOutputInput(output, input);
+    SimCamSetOutputInput(output, SimCamFirstFakeInputForSession(s));
 }
 static void SimCamUnmarkOutputAttachedToFakeSession(AVCaptureOutput *output) {
     if (!output) return;
@@ -242,6 +242,14 @@ static void SimCamUnmarkOutputAttachedToFakeSession(AVCaptureOutput *output) {
 static BOOL SimCamOutputAttachedToFakeSession(AVCaptureOutput *output) {
     if (!output) return NO;
     return [objc_getAssociatedObject(output, &kSimCamOutputAttachedToFakeSessionKey) boolValue];
+}
+static void SimCamRefreshAttachedOutputInputsForSession(AVCaptureSession *s) {
+    AVCaptureInput *input = SimCamFirstFakeInputForSession(s);
+    for (AVCaptureOutput *output in SimCamSessionTrackedOutputs(s)) {
+        if (SimCamOutputAttachedToFakeSession(output)) {
+            SimCamSetOutputInput(output, input);
+        }
+    }
 }
 
 @interface AVCaptureSession (SimCam)
@@ -255,6 +263,7 @@ static BOOL SimCamOutputAttachedToFakeSession(AVCaptureOutput *output) {
         SimCamMarkSessionUsingFakeCamera(self, YES);
         NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
         if (![tracked containsObject:input]) [tracked addObject:input];
+        SimCamRefreshAttachedOutputInputsForSession(self);
         simcam_log(@"addInput: fake input (%@) — tracked (count=%lu), skipping native add",
             p == AVCaptureDevicePositionBack ? @"back" : @"front",
             (unsigned long)tracked.count);
@@ -274,6 +283,7 @@ static BOOL SimCamOutputAttachedToFakeSession(AVCaptureOutput *output) {
         SimCamMarkSessionUsingFakeCamera(self, YES);
         NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
         if (![tracked containsObject:input]) [tracked addObject:input];
+        SimCamRefreshAttachedOutputInputsForSession(self);
         simcam_log(@"addInputWithNoConnections: fake input (%@) — tracked (count=%lu), skipping native add",
             p == AVCaptureDevicePositionBack ? @"back" : @"front",
             (unsigned long)tracked.count);
@@ -285,6 +295,7 @@ static BOOL SimCamOutputAttachedToFakeSession(AVCaptureOutput *output) {
     if (SimCamIsFakeInput(input)) {
         NSMutableArray *tracked = SimCamSessionTrackedInputs(self);
         [tracked removeObject:input];
+        SimCamRefreshAttachedOutputInputsForSession(self);
         if (tracked.count == 0) SimCamMarkSessionUsingFakeCamera(self, NO);
         simcam_log(@"removeInput: fake input — untracked (count=%lu)",
             (unsigned long)tracked.count);
