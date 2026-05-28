@@ -149,6 +149,8 @@ void SimCamLogSwallowedRuntimeError(NSString *via, id object, NSDictionary *user
 - (NSArray *)supportedColorSpaces { return @[]; }
 - (NSArray *)supportedDepthDataFormats { return @[]; }
 - (BOOL)isPortraitEffectSupported { return NO; }
+- (NSArray<Class> *)unsupportedCaptureOutputClasses { return @[]; }
+- (BOOL)isStreamingDisparitySupported { return NO; }
 - (float)minISO { return 25.0f; }
 - (float)maxISO { return 6400.0f; }
 - (CMTime)minExposureDuration { return CMTimeMake(1, 8000); }
@@ -286,6 +288,8 @@ AVCaptureDevice *SimCamFakeDeviceForPosition(AVCaptureDevicePosition p) {
 - (AVCaptureVideoOrientation)_videoOrientation;
 @end
 
+static AVCaptureInputPort *SimCamFakeInputPortForInput(AVCaptureInput *input, AVCaptureDevicePosition position);
+
 @implementation SimCamFakeConnection {
     __weak AVCaptureOutput *_outputRef;
     AVCaptureDevicePosition _position;
@@ -311,8 +315,12 @@ AVCaptureDevice *SimCamFakeDeviceForPosition(AVCaptureDevicePosition p) {
     return c;
 }
 - (AVCaptureOutput *)output { return _outputRef; }
-- (NSArray *)inputPorts { return @[]; }
-- (AVCaptureInput *)input { return nil; }
+- (NSArray *)inputPorts {
+    AVCaptureInput *input = SimCamOutputInput(_outputRef) ?: SimCamFakeInputForPosition(_position);
+    AVCaptureInputPort *port = SimCamFakeInputPortForInput(input, _position);
+    return port ? @[port] : @[];
+}
+- (AVCaptureInput *)input { return SimCamOutputInput(_outputRef) ?: SimCamFakeInputForPosition(_position); }
 - (AVCaptureVideoPreviewLayer *)videoPreviewLayer { return nil; }
 - (BOOL)isEnabled { return _enabled; }
 - (void)setEnabled:(BOOL)e { _enabled = e; }
@@ -409,6 +417,67 @@ AVCaptureConnection *SimCamFakeConnectionForOutput(AVCaptureOutput *out) {
         }
     }
     return conn;
+}
+
+#pragma mark - SimCamFakeInputPort
+
+@interface SimCamFakeInputPort : AVCaptureInputPort
+@end
+
+@implementation SimCamFakeInputPort {
+    __weak AVCaptureInput *_inputRef;
+    AVCaptureDevicePosition _position;
+}
++ (instancetype)allocWithZone:(NSZone *)zone {
+    return class_createInstance([SimCamFakeInputPort class], 0);
+}
++ (instancetype)portForInput:(AVCaptureInput *)input position:(AVCaptureDevicePosition)position {
+    SimCamFakeInputPort *p = [self alloc];
+    if (p) {
+        p->_inputRef = input;
+        p->_position = position;
+    }
+    return p;
+}
+- (AVCaptureInput *)input { return _inputRef; }
+- (AVMediaType)mediaType { return AVMediaTypeVideo; }
+- (AVCaptureDeviceType)sourceDeviceType { return AVCaptureDeviceTypeBuiltInWideAngleCamera; }
+- (AVCaptureDevicePosition)sourceDevicePosition { return _position; }
+- (CMFormatDescriptionRef)formatDescription { return SimCamSharedFakeFormat().formatDescription; }
+- (BOOL)isEnabled { return YES; }
+- (void)setEnabled:(BOOL)enabled { (void)enabled; }
+@end
+
+static char kSimCamOutputInputRefKey;
+static char kSimCamFakeInputPortKey;
+
+void SimCamSetOutputInput(AVCaptureOutput *out, AVCaptureInput *input) {
+    if (!out) return;
+    if (!input) {
+        objc_setAssociatedObject(out, &kSimCamOutputInputRefKey, nil, OBJC_ASSOCIATION_RETAIN);
+        return;
+    }
+    SimCamWeakRef *ref = [SimCamWeakRef new];
+    ref.target = input;
+    objc_setAssociatedObject(out, &kSimCamOutputInputRefKey, ref, OBJC_ASSOCIATION_RETAIN);
+}
+
+AVCaptureInput *SimCamOutputInput(AVCaptureOutput *out) {
+    if (!out) return nil;
+    SimCamWeakRef *ref = objc_getAssociatedObject(out, &kSimCamOutputInputRefKey);
+    return ref.target;
+}
+
+static AVCaptureInputPort *SimCamFakeInputPortForInput(AVCaptureInput *input, AVCaptureDevicePosition position) {
+    if (!input) return nil;
+    AVCaptureInputPort *port = objc_getAssociatedObject(input, &kSimCamFakeInputPortKey);
+    if (!port) {
+        port = (AVCaptureInputPort *)[SimCamFakeInputPort portForInput:input position:position];
+        if (port) {
+            objc_setAssociatedObject(input, &kSimCamFakeInputPortKey, port, OBJC_ASSOCIATION_RETAIN);
+        }
+    }
+    return port;
 }
 
 #pragma mark - SimCamFakeInput marking
