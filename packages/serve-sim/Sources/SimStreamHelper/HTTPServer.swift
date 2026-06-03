@@ -64,6 +64,35 @@ final class HTTPServer {
             }
         }
 
+        // AVCC (H.264) stream endpoint. Emits length-prefixed envelope chunks
+        // (see AVCCEnvelope) as a plain byte stream the client reads via
+        // fetch()'s ReadableStream and decodes with WebCodecs VideoDecoder.
+        server["/stream.avcc"] = { [weak self] _ in
+            guard let self else { return .notFound }
+            let client = self.clientManager.addAvccClient()
+            return .raw(200, "OK", [
+                "Content-Type": "application/octet-stream",
+                "Cache-Control": "no-cache, no-store",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+            ]) { writer in
+                let semaphore = DispatchSemaphore(value: 0)
+                client.setWriter { data in
+                    do {
+                        try writer.write(data)
+                        return true
+                    } catch {
+                        semaphore.signal()
+                        return false
+                    }
+                }
+                // Writer attached: seed + cached description, then force an IDR.
+                self.clientManager.sendInitialAvcc(to: client)
+                semaphore.wait()
+                self.clientManager.removeAvccClient(client)
+            }
+        }
+
         // WebSocket endpoint (input only)
         server["/ws"] = websocket(
             binary: { [weak self] session, data in

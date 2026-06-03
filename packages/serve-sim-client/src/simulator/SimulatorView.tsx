@@ -15,6 +15,8 @@ import {
   streamDisplayGeometry,
 } from "./orientation.js";
 import { digitalCrownDeltaFromWheel } from "./digitalCrown.js";
+import { useAvccStream } from "./useAvccStream.js";
+import { isAvccSupported } from "../avcc-codec.js";
 
 // Custom round cursor matching the finger dot indicator
 const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='rgba(255,255,255,0.45)' stroke='rgba(0,0,0,0.55)' stroke-width='1.25' filter='drop-shadow(0 1px 2px rgba(0,0,0,0.45))'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -60,6 +62,14 @@ export interface SimulatorViewProps {
   onStreamingChange?: (streaming: boolean) => void;
   /** Connection quality indicator: green (good), yellow (degraded), red (poor). */
   connectionQuality?: "good" | "degraded" | "poor" | null;
+  /**
+   * Video codec for the direct (non-relay) stream:
+   * - "mjpeg" (default): JPEG-per-frame painted into an `<img>`.
+   * - "avcc": H.264 over `/stream.avcc` decoded with WebCodecs into a
+   *   `<canvas>`. Automatically falls back to MJPEG when the browser lacks
+   *   `VideoDecoder`. Ignored in relay mode (the relay forwards JPEG).
+   */
+  codec?: "mjpeg" | "avcc";
 }
 
 /**
@@ -90,9 +100,14 @@ export function SimulatorView({
   hideControls,
   onStreamingChange,
   connectionQuality,
+  codec = "mjpeg",
 }: SimulatorViewProps) {
   const relayMode = !!onStreamTouch;
+  // AVCC decode only applies to the direct stream and needs WebCodecs; any
+  // other case (relay, unsupported browser, codec="mjpeg") uses the <img>.
+  const useAvcc = !relayMode && codec === "avcc" && isAvccSupported();
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const relayImgRef = useRef<HTMLImageElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const inputLayerRef = useRef<HTMLDivElement | null>(null);
@@ -225,6 +240,25 @@ export function SimulatorView({
       }
     };
   }, [relayMode, subscribeFrame]);
+
+  // Direct-mode AVCC (H.264) decode → canvas. Inert unless `useAvcc`.
+  const onAvccFirstFrame = useCallback(() => {
+    lastFrameAtRef.current = Date.now();
+    setConnected(true);
+    setError(null);
+  }, []);
+  const onAvccFrame = useCallback(() => {
+    frameCountRef.current++;
+    lastFrameAtRef.current = Date.now();
+  }, []);
+  useAvccStream({
+    url,
+    enabled: useAvcc,
+    canvasRef,
+    onFirstFrame: onAvccFirstFrame,
+    onFrame: onAvccFrame,
+    onError: setError,
+  });
 
   const sendTouch = useCallback(
     (touch: {
@@ -367,14 +401,18 @@ export function SimulatorView({
     // boundary, surface a real error instead of leaving the user staring at
     // a blank <img>. This catches the "helper bound to shutdown sim" case
     // where bytes never arrive.
+    // In AVCC mode the decode hook owns the /stream.avcc connection and frame
+    // accounting, so skip the MJPEG reader + its watchdog entirely.
     let sawAnyFrame = false;
-    const startupWatchdog = setTimeout(() => {
-      if (!sawAnyFrame) {
-        setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
-      }
-    }, 6000);
+    const startupWatchdog = useAvcc
+      ? null
+      : setTimeout(() => {
+          if (!sawAnyFrame) {
+            setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
+          }
+        }, 6000);
 
-    (async () => {
+    if (!useAvcc) (async () => {
       try {
         const res = await fetch(streamUrl, { signal: fpsAbort.signal });
         const reader = res.body?.getReader();
@@ -396,7 +434,7 @@ export function SimulatorView({
                 frameCountRef.current++;
                 if (!sawAnyFrame) {
                   sawAnyFrame = true;
-                  clearTimeout(startupWatchdog);
+                  if (startupWatchdog) clearTimeout(startupWatchdog);
                 }
               }
             }
@@ -412,11 +450,11 @@ export function SimulatorView({
       configAbort.abort();
       clearInterval(configInterval);
       clearInterval(fpsInterval);
-      clearTimeout(startupWatchdog);
+      if (startupWatchdog) clearTimeout(startupWatchdog);
       ws.close();
       wsRef.current = null;
     };
-  }, [url, streamUrl, relayMode, updateScreenConfig, wsUrlProp]);
+  }, [url, streamUrl, relayMode, updateScreenConfig, wsUrlProp, useAvcc]);
 
   // FPS counter + stale-frame detection for relay mode.
   // Unlike non-relay mode (where WS close flips connected=false), relay mode
@@ -448,8 +486,9 @@ export function SimulatorView({
   }, [relayMode]);
 
   const getViewElement = useCallback(() => {
+    if (useAvcc) return canvasRef.current;
     return relayMode ? relayImgRef.current : imgRef.current;
-  }, [relayMode]);
+  }, [relayMode, useAvcc]);
 
   const getInputRect = useCallback(() => {
     return surfaceRef.current?.getBoundingClientRect()
@@ -692,18 +731,22 @@ export function SimulatorView({
             cornerShape: clipStyle?.cornerShape,
           } as CSSProperties}
         >
-        <img
-          ref={imgRef}
-          src={relayMode ? undefined : streamUrl}
-          draggable={false}
-          onLoad={(e) => {
-            const el = e.currentTarget;
-            if (el.naturalWidth > 0 && el.naturalHeight > 0) {
-              updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
-            }
-          }}
-          style={relayMode ? { display: "none" } : streamImageStyle}
-        />
+        {useAvcc ? (
+          <canvas ref={canvasRef} style={streamImageStyle} />
+        ) : (
+          <img
+            ref={imgRef}
+            src={relayMode ? undefined : streamUrl}
+            draggable={false}
+            onLoad={(e) => {
+              const el = e.currentTarget;
+              if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
+              }
+            }}
+            style={relayMode ? { display: "none" } : streamImageStyle}
+          />
+        )}
         {relayMode && (
           <img
             ref={relayImgRef}

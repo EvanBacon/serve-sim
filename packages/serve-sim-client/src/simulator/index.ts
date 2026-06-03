@@ -31,6 +31,18 @@ export {
 export type { StreamDisplayGeometry } from "./orientation.js";
 export type { DeviceType } from "./deviceFrames.js";
 export type { SimulatorOrientation, StreamConfig } from "../types.js";
+export { useAvccStream } from "./useAvccStream.js";
+export type { UseAvccStreamOptions } from "./useAvccStream.js";
+export {
+  AvccDemuxer,
+  avcCodecString,
+  isAvccSupported,
+  AVCC_TAG_DESCRIPTION,
+  AVCC_TAG_KEYFRAME,
+  AVCC_TAG_DELTA,
+  AVCC_TAG_SEED,
+} from "../avcc-codec.js";
+export type { AvccChunk, AvccChunkType } from "../avcc-codec.js";
 export { useSimStream } from "./useSimStream.js";
 export type {
   SimStreamInfo,

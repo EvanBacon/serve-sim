@@ -23,6 +23,8 @@ export interface SimulatorStreamProps {
   onScreenConfigChange?: (config: StreamConfig) => void;
   /** Enables mouse-wheel/trackpad forwarding as Apple Watch Digital Crown rotation. */
   enableDigitalCrown?: boolean;
+  /** Direct-mode video codec: "mjpeg" (default) or "avcc" (H.264 via WebCodecs). */
+  codec?: "mjpeg" | "avcc";
   /** Called when an error occurs. When provided in headerless mode, the error is not rendered inline. */
   onError?: (error: string | null) => void;
   /** Called with the active serve-sim device UDID (or null when not streaming). */
@@ -34,7 +36,7 @@ export interface SimulatorStreamProps {
  * Uses the gateway exec to invoke the `serve-sim` CLI on the host,
  * then connects directly to the serve-sim server for video + touch.
  */
-export function SimulatorStream({ exec, device, style, imageStyle, className, stream, headerless, onStreamingChange, onScreenConfigChange, onError, onActiveDeviceChange, enableDigitalCrown }: SimulatorStreamProps) {
+export function SimulatorStream({ exec, device, style, imageStyle, className, stream, headerless, onStreamingChange, onScreenConfigChange, onError, onActiveDeviceChange, enableDigitalCrown, codec }: SimulatorStreamProps) {
   const { info, loading, error, connect, disconnect, sendButton } = useSimStream({ exec, device });
   const [fullscreen, setFullscreen] = useState(false);
   const relayMode = !!stream;
@@ -136,6 +138,7 @@ export function SimulatorStream({ exec, device, style, imageStyle, className, st
           hideControls={headerless}
           onStreamingChange={onStreamingChange}
           onScreenConfigChange={onScreenConfigChange}
+          codec={codec}
           connectionQuality={relayMode ? stream.connectionQuality ?? undefined : undefined}
           {...(relayMode ? {
             onStreamTouch: stream.sendTouch,
