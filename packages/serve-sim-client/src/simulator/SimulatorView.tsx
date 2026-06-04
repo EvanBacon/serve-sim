@@ -64,10 +64,10 @@ export interface SimulatorViewProps {
   connectionQuality?: "good" | "degraded" | "poor" | null;
   /**
    * Video codec for the direct (non-relay) stream:
-   * - "mjpeg" (default): JPEG-per-frame painted into an `<img>`.
-   * - "avcc": H.264 over `/stream.avcc` decoded with WebCodecs into a
-   *   `<canvas>`. Automatically falls back to MJPEG when the browser lacks
+   * - "avcc" (default): H.264 over `/stream.avcc` decoded with WebCodecs into
+   *   a `<canvas>`. Automatically falls back to MJPEG when the browser lacks
    *   `VideoDecoder`. Ignored in relay mode (the relay forwards JPEG).
+   * - "mjpeg": force JPEG-per-frame painted into an `<img>`.
    */
   codec?: "mjpeg" | "avcc";
 }
@@ -100,12 +100,14 @@ export function SimulatorView({
   hideControls,
   onStreamingChange,
   connectionQuality,
-  codec = "mjpeg",
+  codec = "avcc",
 }: SimulatorViewProps) {
   const relayMode = !!onStreamTouch;
-  // AVCC decode only applies to the direct stream and needs WebCodecs; any
-  // other case (relay, unsupported browser, codec="mjpeg") uses the <img>.
-  const useAvcc = !relayMode && codec === "avcc" && isAvccSupported();
+  // AVCC decode is independent of input relay: the H.264 pipeline only needs
+  // `url`, so it runs in both direct and relay mode (input still forwards
+  // through `onStreamTouch`). Falls back to the <img> when WebCodecs is
+  // unavailable or `codec="mjpeg"`.
+  const useAvcc = codec === "avcc" && isAvccSupported();
   const imgRef = useRef<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const relayImgRef = useRef<HTMLImageElement | null>(null);
@@ -202,7 +204,8 @@ export function SimulatorView({
   connectedRef.current = connected;
   const prevBlobUrlRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!relayMode || !subscribeFrame) return;
+    // AVCC paints the canvas via useAvccStream; skip the MJPEG relay <img>.
+    if (!relayMode || !subscribeFrame || useAvcc) return;
     // Startup watchdog: flag the stream as broken if no frame arrives within
     // the window. Catches the silent-failure mode where the helper accepts
     // the MJPEG connection but its underlying simulator was shut down —
@@ -239,9 +242,10 @@ export function SimulatorView({
         prevBlobUrlRef.current = null;
       }
     };
-  }, [relayMode, subscribeFrame]);
+  }, [relayMode, subscribeFrame, useAvcc]);
 
-  // Direct-mode AVCC (H.264) decode → canvas. Inert unless `useAvcc`.
+  // AVCC (H.264) decode → canvas. Inert unless `useAvcc`. Works in both
+  // direct and relay mode (it only needs `url`).
   const onAvccFirstFrame = useCallback(() => {
     lastFrameAtRef.current = Date.now();
     setConnected(true);
@@ -250,6 +254,14 @@ export function SimulatorView({
   const onAvccFrame = useCallback(() => {
     frameCountRef.current++;
     lastFrameAtRef.current = Date.now();
+    // Re-establish "connected" if the relay staleness watchdog tripped during
+    // the decoder's startup buffering gap (keyframe + several deltas can land
+    // before the first frame is emitted). Mirrors the MJPEG relay path; guarded
+    // so it only fires on the false→true transition, not every frame.
+    if (!connectedRef.current) {
+      setConnected(true);
+      setError(null);
+    }
   }, []);
   useAvccStream({
     url,

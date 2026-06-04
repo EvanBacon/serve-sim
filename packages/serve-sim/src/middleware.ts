@@ -15,6 +15,9 @@ type SimNext = (err?: unknown) => void;
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
 const STATE_DIR = join(tmpdir(), "serve-sim");
+// Last logged result of a GET /api selection, used to suppress the
+// once-every-poll duplicate debugMw lines (the UI polls /api every ~2s).
+let lastApiLogKey: string | undefined;
 const DEVTOOLS_FRONTEND_REV = "854a02be78c7ffea104cb523636efa991bef5c5b";
 const INSPECT_WEBKIT_START_PORT = 9222;
 
@@ -1032,12 +1035,21 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
     if (url === base + "/api") {
       const states = readServeSimStates();
       const state = selectServeSimState(states, selectedDevice);
-      debugMw(
-        "GET /api selectedDevice=%s states=%d chose=%s",
-        selectedDevice ?? "(any)",
-        states.length,
-        state ? `${state.device}@${state.port}` : "none",
-      );
+      // The web UI polls /api every ~2s, so logging every hit floods the
+      // debug stream with identical lines. Only log when the selection
+      // result changes.
+      const apiLogKey = `${selectedDevice ?? "(any)"}|${states.length}|${
+        state ? `${state.device}@${state.port}` : "none"
+      }`;
+      if (apiLogKey !== lastApiLogKey) {
+        lastApiLogKey = apiLogKey;
+        debugMw(
+          "GET /api selectedDevice=%s states=%d chose=%s",
+          selectedDevice ?? "(any)",
+          states.length,
+          state ? `${state.device}@${state.port}` : "none",
+        );
+      }
       res.writeHead(200, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",

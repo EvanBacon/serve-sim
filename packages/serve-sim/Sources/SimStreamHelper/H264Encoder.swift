@@ -118,18 +118,34 @@ final class H264Encoder {
             self.session = nil
         }
 
+        // Low-latency rate control puts VideoToolbox in its real-time/low-delay
+        // pipeline and, crucially, emits a bitstream the *decoder* treats as
+        // low-latency (small max_dec_frame_buffering). Without it the decoder
+        // fills a large DPB before emitting, adding ~300ms of latency on the
+        // client even though the stream carries no B-frames. Falls back to the
+        // default spec on the rare hardware that rejects it.
+        let lowLatencySpec: NSDictionary = [
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue!,
+        ]
         var sess: VTCompressionSession?
-        let status = VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: width, height: height,
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: kCFAllocatorDefault,
-            outputCallback: nil,
-            refcon: nil,
-            compressionSessionOut: &sess
-        )
+        func create(spec: CFDictionary?) -> OSStatus {
+            VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: width, height: height,
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: spec,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: kCFAllocatorDefault,
+                outputCallback: nil,
+                refcon: nil,
+                compressionSessionOut: &sess
+            )
+        }
+        var status = create(spec: lowLatencySpec)
+        if status != noErr || sess == nil {
+            sess = nil
+            status = create(spec: nil)
+        }
         guard status == noErr, let sess else { return }
 
         let props: [(CFString, Any)] = [

@@ -23,7 +23,7 @@ export interface SimulatorStreamProps {
   onScreenConfigChange?: (config: StreamConfig) => void;
   /** Enables mouse-wheel/trackpad forwarding as Apple Watch Digital Crown rotation. */
   enableDigitalCrown?: boolean;
-  /** Direct-mode video codec: "mjpeg" (default) or "avcc" (H.264 via WebCodecs). */
+  /** Direct-mode video codec: "avcc" (default, H.264 via WebCodecs with MJPEG fallback) or "mjpeg" to force JPEG. */
   codec?: "mjpeg" | "avcc";
   /** Called when an error occurs. When provided in headerless mode, the error is not rendered inline. */
   onError?: (error: string | null) => void;

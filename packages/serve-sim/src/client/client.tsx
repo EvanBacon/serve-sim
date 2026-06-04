@@ -34,6 +34,7 @@ import { ToolsPanel } from "./components/tools-panel";
 import { WebKitDevtoolsPanel } from "./components/webkit-devtools-panel";
 import { useMediaDrop } from "./hooks/use-media-drop";
 import { useMjpegStream } from "./hooks/use-mjpeg-stream";
+import { useAvccStream } from "./hooks/use-avcc-stream";
 import { useResizableWidth } from "./hooks/use-resizable-width";
 import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
@@ -305,9 +306,16 @@ function AppWithConfig({
     setSelectedDevtoolsTargetId(null);
   }, [config.device, setSelectedDevtoolsTargetId]);
 
-  const mjpeg = useMjpegStream(config.streamUrl);
+  // Prefer H.264 (AVCC via WebCodecs) when the browser supports it; otherwise
+  // fall back to MJPEG. The MJPEG reader stays dormant (null url) under AVCC so
+  // we never pull both streams at once. The AVCC frames are decoded view-side
+  // by SimulatorView's `useAvccStream`; this hook just supplies screen config.
+  const avcc = useAvccStream(config.streamUrl);
+  const useAvccVideo = avcc.supported;
+  const mjpeg = useMjpegStream(useAvccVideo ? null : config.streamUrl);
   const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
-  const activeStreamConfig = liveStreamConfig ?? mjpeg.config ?? fallbackScreenSize(deviceType, selectedDevice?.name);
+  const streamConfig = useAvccVideo ? avcc.config : mjpeg.config;
+  const activeStreamConfig = liveStreamConfig ?? streamConfig ?? fallbackScreenSize(deviceType, selectedDevice?.name);
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
   const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
   const frameAspectRatio = simulatorAspectRatio(activeStreamConfig);
@@ -399,7 +407,7 @@ function AppWithConfig({
   }, [config.streamUrl]);
 
   useEffect(() => {
-    const confirmedConfig = mjpeg.config;
+    const confirmedConfig = streamConfig;
     if (!confirmedConfig) return;
     setLiveStreamConfig((prev) =>
       prev &&
@@ -409,7 +417,7 @@ function AppWithConfig({
         ? prev
         : null,
     );
-  }, [mjpeg.config, mjpeg.config?.width, mjpeg.config?.height, mjpeg.config?.orientation]);
+  }, [streamConfig, streamConfig?.width, streamConfig?.height, streamConfig?.orientation]);
 
   const sendKey = useCallback((type: "down" | "up", usage: number) => {
     sendWs(0x06, { type, usage });
@@ -725,9 +733,12 @@ function AppWithConfig({
             imageStyle={{
               borderRadius: imgBorderRadius,
               cornerShape: "superellipse(1.3)",
-              borderWidth: "1px",
-              borderStyle: "solid",
-              borderColor: "rgba(255, 255, 255, 0.2)",
+              // Subtle screen bezel as an INSET shadow rather than a border: a
+              // 1px border sits outside the content and, on the <canvas> path,
+              // composites its semi-transparent white against the black page as
+              // a visible outline. An inset shadow paints over the (opaque)
+              // video edge instead, so no white rim shows.
+              boxShadow: "inset 0 0 0 1px rgba(255, 255, 255, 0.2)",
             } as CSSProperties}
             hideControls
             onStreamingChange={setStreaming}
@@ -735,8 +746,9 @@ function AppWithConfig({
             onStreamMultiTouch={onStreamMultiTouch}
             onStreamButton={onStreamButton}
             onStreamDigitalCrown={onStreamDigitalCrown}
-            subscribeFrame={mjpeg.subscribeFrame}
-            streamFrame={mjpeg.frame}
+            codec={useAvccVideo ? "avcc" : "mjpeg"}
+            subscribeFrame={useAvccVideo ? undefined : mjpeg.subscribeFrame}
+            streamFrame={useAvccVideo ? undefined : mjpeg.frame}
             streamConfig={activeStreamConfig}
             enableDigitalCrown={deviceType === "watch"}
             onScreenConfigChange={onScreenConfigChange}
