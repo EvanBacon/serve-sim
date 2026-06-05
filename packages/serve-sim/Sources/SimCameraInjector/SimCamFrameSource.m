@@ -247,7 +247,7 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
 - (CVPixelBufferRef)newPixelBufferFromSurfaceForceFresh:(BOOL)force CF_RETURNS_RETAINED {
     if (!gShmHeader || !gSurfaceTable) return NULL;
     if (gShmHeader->magic != SIMCAM_SHM_MAGIC) return NULL;
-    uint64_t seqA = gShmHeader->frameSeq;
+    uint64_t seqA = atomic_load_explicit(&gShmHeader->frameSeq, memory_order_acquire);
     if (seqA == 0) return NULL;
     if (!force && seqA == gLastSeenSeq) return NULL;
 
@@ -256,7 +256,10 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
     uint32_t idx = gSurfaceTable->latestIndex;
     if (idx >= count) return NULL;
     IOSurfaceRef surface = gSurfaces[idx];
-    if (!surface) return NULL;
+    if (!surface) {
+        simcam_log(@"missing IOSurface at latest index %u/%u", idx, count);
+        return NULL;
+    }
 
     CVPixelBufferRef pb = NULL;
     NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey: @{} };
@@ -264,8 +267,7 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
         (__bridge CFDictionaryRef)attrs, &pb);
     if (r != kCVReturnSuccess || !pb) return NULL;
 
-    atomic_thread_fence(memory_order_acquire);
-    uint64_t seqB = gShmHeader->frameSeq;
+    uint64_t seqB = atomic_load_explicit(&gShmHeader->frameSeq, memory_order_acquire);
     if (!force && seqA != seqB) {
         CVPixelBufferRelease(pb);
         return NULL;
@@ -360,7 +362,7 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
         dispatch_once(&logOnce, ^{
             simcam_log(@"no-signal fallback: shm=%@ frameSeq=%llu cache=empty",
                 gShmHeader ? @"attached" : @"unattached",
-                (unsigned long long)(gShmHeader ? gShmHeader->frameSeq : 0));
+                (unsigned long long)(gShmHeader ? atomic_load_explicit(&gShmHeader->frameSeq, memory_order_acquire) : 0));
         });
         pb = [self newPixelBufferNoSignal];
     }
@@ -554,8 +556,14 @@ void SimCamFrameSourceOpenShmIfRequested(void) {
         if (s) resolved++;
     }
 #pragma clang diagnostic pop
-    if (resolved == 0) {
-        simcam_log(@"no IOSurfaces resolved from shm \"%s\"", shmName);
+    if (resolved != count) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (gSurfaces[i]) {
+                CFRelease(gSurfaces[i]);
+                gSurfaces[i] = NULL;
+            }
+        }
+        simcam_log(@"only %u/%u IOSurfaces resolved from shm \"%s\"", resolved, count, shmName);
         munmap(map, size);
         return;
     }

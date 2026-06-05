@@ -79,11 +79,16 @@ static void PublishFrame(const uint8_t *bgra) {
     // published, so an in-flight frame is never overwritten mid-read.
     uint32_t latest = gSurfaceTable->latestIndex;
     uint32_t idx = gWriteIndex;
+    BOOL found = NO;
     for (uint32_t tries = 0; tries < count; tries++) {
         idx = (idx + 1) % count;
         if (idx == latest) continue;
-        if (!IOSurfaceIsInUse(gSurfaces[idx])) break;
+        if (!IOSurfaceIsInUse(gSurfaces[idx])) {
+            found = YES;
+            break;
+        }
     }
+    if (!found) return;
     gWriteIndex = idx;
 
     IOSurfaceRef surface = gSurfaces[idx];
@@ -104,7 +109,7 @@ static void PublishFrame(const uint8_t *bgra) {
     gHeader->timestampNs = MachAbsToNs(mach_absolute_time());
     atomic_thread_fence(memory_order_release);
     uint64_t next = atomic_fetch_add(&gFrameSeq, 1) + 1;
-    gHeader->frameSeq = next;
+    atomic_store_explicit(&gHeader->frameSeq, next, memory_order_release);
 }
 
 #pragma mark - Source pipeline (start / stop / switch)
@@ -928,6 +933,7 @@ int main(int argc, const char *argv[]) {
         if (gControlListenFd >= 0) { close(gControlListenFd); if (socketPath) unlink(socketPath); }
         StopPlaceholderSource();
         StopWebcamSource();
+        StopVideoSource();
         ReleaseSurfaces();
         if (gShmName) shm_unlink(gShmName);
         fprintf(stderr, "[serve-sim-camera] stopped\n");

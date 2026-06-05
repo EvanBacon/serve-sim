@@ -174,8 +174,8 @@ async function loadIOSurface(): Promise<NonNullable<typeof iosurface>> {
   );
   iosurface = {
     lookup: (id) => io.symbols.IOSurfaceLookup(id) as unknown,
-    width: (s) => Number(io.symbols.IOSurfaceGetWidth(s as never) as number | bigint),
-    height: (s) => Number(io.symbols.IOSurfaceGetHeight(s as never) as number | bigint),
+    width: (s) => Number(io.symbols.IOSurfaceGetWidth(s as never) as bigint),
+    height: (s) => Number(io.symbols.IOSurfaceGetHeight(s as never) as bigint),
     release: (s) => {
       cf.symbols.CFRelease(s as never);
     },
@@ -281,7 +281,7 @@ describeIf("SimCameraHelper shm probe", () => {
       expect(header.width).toBe(DEFAULT_WIDTH);
       expect(header.height).toBe(DEFAULT_HEIGHT);
       expect(header.pixelFormat).toBe(SIMCAM_PIXEL_BGRA);
-      expect(header.bytesPerRow).toBe(DEFAULT_WIDTH * 4);
+      expect(header.bytesPerRow).toBeGreaterThanOrEqual(DEFAULT_WIDTH * 4);
       expect(header.pixelByteSize).toBe(BigInt(DEFAULT_WIDTH * DEFAULT_HEIGHT * 4));
     } finally {
       await closeShm(handle);
@@ -340,9 +340,11 @@ describeIf("SimCameraHelper shm probe", () => {
     expect(handle).not.toBeNull();
     if (!handle) return;
     try {
+      const initialFrameSeq = readHeader(handle.buffer).frameSeq;
       const moved = await waitFor(() => {
+        const header = readHeader(handle.buffer);
         const t = readSurfaceTable(handle.buffer);
-        return t.latestIndex < t.surfaceCount;
+        return header.frameSeq !== initialFrameSeq && t.latestIndex < t.surfaceCount;
       }, 1000);
       expect(moved).toBe(true);
     } finally {
@@ -379,7 +381,7 @@ describeIf("SimCameraHelper shm probe", () => {
       const header = readHeader(handle.buffer);
       expect(header.width).toBe(DEFAULT_WIDTH);
       expect(header.height).toBe(DEFAULT_HEIGHT);
-      expect(header.bytesPerRow).toBe(header.width * 4);
+      expect(header.bytesPerRow).toBeGreaterThanOrEqual(header.width * 4);
     } finally {
       await closeShm(handle);
     }
@@ -393,10 +395,11 @@ describeIf("SimCameraHelper shm probe", () => {
     try {
       await sendHelperCommand(SOCKET_PATH, { action: "shutdown" });
     } catch {}
-    await Promise.race([
+    const exitCode = await Promise.race([
       exited,
-      new Promise((r) => setTimeout(r, 3000)),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 3000)),
     ]);
+    expect(exitCode).not.toBe("timeout");
     helper = null;
 
     const sys = await loadFfi();

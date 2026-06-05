@@ -22,7 +22,9 @@
 #ifndef SIM_CAM_SHARED_H
 #define SIM_CAM_SHARED_H
 
+#include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 #define SIMCAM_SHM_MAGIC      0x53434D31u  // 'SCM1'
 #define SIMCAM_PIXEL_BGRA     0u
@@ -43,7 +45,7 @@
 #define SIMCAM_MIRROR_OFF     2
 
 // Control header is 64 bytes. The surface-ID table follows immediately after.
-typedef struct __attribute__((packed)) {
+typedef struct {
     uint32_t magic;        // SIMCAM_SHM_MAGIC
     uint32_t version;      // bumps on layout change
     uint32_t width;
@@ -51,13 +53,15 @@ typedef struct __attribute__((packed)) {
     uint32_t pixelFormat;  // SIMCAM_PIXEL_BGRA
     uint32_t bytesPerRow;  // actual IOSurface row stride (may exceed width*4)
     uint64_t pixelByteSize;// logical frame size: width*height*4
-    uint64_t frameSeq;     // written LAST; readers check tearing via re-read
+    _Atomic uint64_t frameSeq; // written LAST with release; readers acquire-load
     uint64_t timestampNs;  // mach_absolute_time-based, host monotonic
     uint8_t  mirrorMode;   // SIMCAM_MIRROR_*; UNSET = ignore (use env)
     uint8_t  reserved[15];
 } SimCamShmHeader;
 
 _Static_assert(sizeof(SimCamShmHeader) == 64, "SimCamShmHeader must be 64 bytes");
+_Static_assert(offsetof(SimCamShmHeader, frameSeq) == 32, "frameSeq offset must stay stable");
+_Static_assert(offsetof(SimCamShmHeader, mirrorMode) == 48, "mirrorMode offset must stay stable");
 
 // Ring of global IOSurface IDs, written once at startup. `latestIndex` is
 // updated each frame (before frameSeq) to point at the freshest surface.
