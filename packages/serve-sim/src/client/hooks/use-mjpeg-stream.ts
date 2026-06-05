@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { StreamConfig } from "serve-sim-client/simulator";
+import { useCallback, useEffect, useRef } from "react";
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
  * Chrome doesn't support multipart/x-mixed-replace in <img> tags,
  * so we manually read the stream and extract JPEG boundaries.
+ *
+ * Screen config (dimensions / orientation) is no longer polled here — it
+ * arrives over the input WebSocket — so this hook only deals with frame bytes.
  */
 export function useMjpegStream(streamUrl: string | null) {
-  const [config, setConfig] = useState<StreamConfig | null>(null);
   const subscribersRef = useRef<Set<(blobUrl: string) => void>>(new Set());
 
   const subscribeFrame = useCallback(
@@ -23,28 +24,6 @@ export function useMjpegStream(streamUrl: string | null) {
     const controller = new AbortController();
     let stopped = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // Poll config for screen dimensions + requested orientation.
-    const baseUrl = streamUrl.replace(/\/stream\.mjpeg$/, "");
-    const applyConfig = (c: StreamConfig) => {
-      if (c.width <= 0 || c.height <= 0) return;
-      setConfig((prev) =>
-        prev &&
-        prev.width === c.width &&
-        prev.height === c.height &&
-        prev.orientation === c.orientation
-          ? prev
-          : c,
-      );
-    };
-    const fetchConfig = () => {
-      fetch(`${baseUrl}/config`, { signal: controller.signal })
-        .then((r) => r.json())
-        .then(applyConfig)
-        .catch(() => {});
-    };
-    fetchConfig();
-    const configInterval = setInterval(fetchConfig, 1000);
 
     // Read the MJPEG stream and extract JPEG frames.
     // ?raw=1 tells the server to use Content-Type application/octet-stream
@@ -131,9 +110,8 @@ export function useMjpegStream(streamUrl: string | null) {
       stopped = true;
       if (retryTimer) clearTimeout(retryTimer);
       controller.abort();
-      clearInterval(configInterval);
     };
   }, [streamUrl]);
 
-  return { subscribeFrame, frame: null, config };
+  return { subscribeFrame, frame: null };
 }

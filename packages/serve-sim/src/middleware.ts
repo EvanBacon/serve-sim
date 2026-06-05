@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, existsSync, unlinkSync } from "fs";
+import { readdirSync, readFileSync, existsSync, unlinkSync, watch, type FSWatcher } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1056,6 +1056,84 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       });
       const remoteState = state ? rewriteStateForRequestHost(state, req.headers?.host) : null;
       res.end(JSON.stringify(remoteState ? previewConfigForState(remoteState, base, serveSimBinPath(), execToken) : null));
+      return;
+    }
+
+    // SSE: serve-sim state stream. Push replacement for the web UI's old ~1.5s
+    // /api poll — the PreviewConfig only changes when a helper boots/shuts down
+    // or the device selection changes, so we watch the state dir and emit only
+    // on change instead of re-sending identical JSON on a fixed interval.
+    if (url === base + "/api/events") {
+      const computeConfig = (): string => {
+        const states = readServeSimStates();
+        const state = selectServeSimState(states, selectedDevice);
+        const remoteState = state ? rewriteStateForRequestHost(state, req.headers?.host) : null;
+        return JSON.stringify(
+          remoteState ? previewConfigForState(remoteState, base, serveSimBinPath(), execToken) : null,
+        );
+      };
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      res.write(":\n\n");
+
+      let lastSent = computeConfig();
+      res.write("data: " + lastSent + "\n\n");
+
+      let closed = false;
+      const sendIfChanged = () => {
+        if (closed || res.writableEnded) return;
+        const next = computeConfig();
+        if (next === lastSent) return;
+        lastSent = next;
+        res.write("data: " + next + "\n\n");
+      };
+
+      // Debounce filesystem events: a helper boot rewrites the state file a few
+      // times in quick succession, and selectServeSimState also shells out to
+      // refresh booted devices, so coalesce bursts into one recompute.
+      let debounce: ReturnType<typeof setTimeout> | null = null;
+      const onFsEvent = () => {
+        if (debounce) return;
+        debounce = setTimeout(() => {
+          debounce = null;
+          sendIfChanged();
+        }, 150);
+      };
+
+      let watcher: FSWatcher | null = null;
+      try {
+        watcher = watch(STATE_DIR, onFsEvent);
+        watcher.on("error", () => {});
+      } catch {
+        // State dir may not exist yet; the heartbeat keeps the stream alive and
+        // a later reconnect will pick it up once a helper writes its state file.
+      }
+
+      // Keep the connection alive through buffering proxies + catch any change
+      // an fs event missed (e.g. dir created after we failed to watch it).
+      const heartbeat = setInterval(() => {
+        if (closed || res.writableEnded) return;
+        res.write(":\n\n");
+        if (!watcher) {
+          try {
+            watcher = watch(STATE_DIR, onFsEvent);
+            watcher.on("error", () => {});
+            sendIfChanged();
+          } catch {}
+        }
+      }, 15000);
+
+      req.on("close", () => {
+        closed = true;
+        if (debounce) clearTimeout(debounce);
+        clearInterval(heartbeat);
+        watcher?.close();
+      });
       return;
     }
 

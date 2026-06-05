@@ -38,15 +38,19 @@ final class ClientManager {
 
     func setScreenSize(width: Int, height: Int) {
         configLock.lock()
+        let changed = width != screenWidth || height != screenHeight
         screenWidth = width
         screenHeight = height
         configLock.unlock()
+        if changed { broadcastConfig() }
     }
 
     private func setScreenOrientation(_ orientation: String) {
         configLock.lock()
+        let changed = orientation != screenOrientation
         screenOrientation = orientation
         configLock.unlock()
+        if changed { broadcastConfig() }
     }
 
     func screenConfig() -> [String: Any] {
@@ -57,6 +61,28 @@ final class ClientManager {
             "height": screenHeight,
             "orientation": screenOrientation,
         ]
+    }
+
+    /// Tag for a server->client screen-config push. Distinct from the
+    /// client->server input tags (0x03–0x0A); the frame layout mirrors input:
+    /// `[tag][JSON payload]`.
+    private static let wsMsgConfig: UInt8 = 0x82
+
+    private func configFrame() -> [UInt8]? {
+        guard let json = try? JSONSerialization.data(withJSONObject: screenConfig()) else { return nil }
+        return [ClientManager.wsMsgConfig] + [UInt8](json)
+    }
+
+    /// Push the current screen config to every connected input WebSocket. This
+    /// replaces the browser's old 1s `/config` poll — clients now receive
+    /// dimensions/orientation over the socket they already hold open for input.
+    func broadcastConfig() {
+        guard let frame = configFrame() else { return }
+        queue.async {
+            for (_, session) in self.wsSessions {
+                session.writeBinary(frame)
+            }
+        }
     }
 
     // MARK: - MJPEG Client Management
@@ -152,8 +178,12 @@ final class ClientManager {
 
     func addWSClient(_ session: WebSocketSession) {
         let id = ObjectIdentifier(session)
+        let frame = configFrame()
         queue.async {
             self.wsSessions[id] = session
+            // Seed the new client with the current screen config so it gets
+            // dimensions/orientation immediately, replacing the old 1s poll.
+            if let frame = frame { session.writeBinary(frame) }
             print("[clients] WS input client connected (\(self.wsSessions.count) total)")
         }
     }

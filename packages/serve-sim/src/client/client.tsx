@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import {
   useCallback,
   useEffect,
+  useReducer,
   useRef,
   useState,
   type CSSProperties,
@@ -39,6 +40,11 @@ import { useResizableWidth } from "./hooks/use-resizable-width";
 import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
+import {
+  avccFallbackReducer,
+  initialAvccFallback,
+  AVCC_FRAME_TIMEOUT_MS,
+} from "./avcc-fallback";
 import { parseSimctlList, type SimDevice } from "./utils/devices";
 import { fileExtension } from "./utils/drop";
 import { execOnHost } from "./utils/exec";
@@ -110,30 +116,26 @@ function App() {
 
   useEffect(() => {
     const requestedDevice = new URLSearchParams(window.location.search).get("device");
-    const apiUrl = `${simEndpoint("api")}${requestedDevice ? `?device=${encodeURIComponent(requestedDevice)}` : ""}`;
-    let cancelled = false;
+    const eventsUrl = `${simEndpoint("api/events")}${requestedDevice ? `?device=${encodeURIComponent(requestedDevice)}` : ""}`;
 
-    const syncConfig = async () => {
+    const applyConfig = (next: PreviewConfig | null) => {
+      setConfig((prev) => {
+        if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
+        if (next) window.__SIM_PREVIEW__ = next;
+        else delete window.__SIM_PREVIEW__;
+        return next;
+      });
+    };
+
+    // Server pushes the serve-sim state only when it actually changes (helper
+    // boot/shutdown or device selection), so there's no polling loop here.
+    const es = new EventSource(eventsUrl);
+    es.onmessage = (event) => {
       try {
-        const res = await fetch(apiUrl, { cache: "no-store" });
-        if (!res.ok) return;
-        const next = (await res.json()) as PreviewConfig | null;
-        if (cancelled) return;
-        setConfig((prev) => {
-          if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
-          if (next) window.__SIM_PREVIEW__ = next;
-          else delete window.__SIM_PREVIEW__;
-          return next;
-        });
+        applyConfig(JSON.parse(event.data) as PreviewConfig | null);
       } catch {}
     };
-
-    void syncConfig();
-    const interval = setInterval(syncConfig, 1500);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    return () => es.close();
   }, []);
 
   // Stream simctl logs into the browser console with colors + grouping
@@ -309,12 +311,46 @@ function AppWithConfig({
   // Prefer H.264 (AVCC via WebCodecs) when the browser supports it; otherwise
   // fall back to MJPEG. The MJPEG reader stays dormant (null url) under AVCC so
   // we never pull both streams at once. The AVCC frames are decoded view-side
-  // by SimulatorView's `useAvccStream`; this hook just supplies screen config.
-  const avcc = useAvccStream(config.streamUrl);
-  const useAvccVideo = avcc.supported;
+  // by SimulatorView's `useAvccStream`; this hook just reports browser support.
+  //
+  // Browser support is necessary but not sufficient: the helper may not serve
+  // `/stream.avcc` at all. A device started from the UI is spawned via
+  // `bunx serve-sim --detach`, which runs the published `serve-sim` — older
+  // versions predate H.264 and 404 the endpoint (cross-origin that 404 is
+  // opaque to fetch, so "no frame arrived" is the only reliable signal).
+  // `avccFallback` drives a startup timeout: if AVCC paints nothing in time,
+  // drop to MJPEG, which every helper serves. See avcc-fallback.ts.
+  const avcc = useAvccStream();
+  const [avccFallback, dispatchAvccFallback] = useReducer(
+    avccFallbackReducer,
+    initialAvccFallback,
+  );
+  const useAvccVideo = avcc.supported && !avccFallback.fellBack;
   const mjpeg = useMjpegStream(useAvccVideo ? null : config.streamUrl);
+
+  // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
+  useEffect(() => {
+    dispatchAvccFallback("reset");
+  }, [config.streamUrl]);
+  // `streaming` flips true on the first painted AVCC frame (JPEG seed decodes
+  // sub-second on a healthy helper), which cancels the fallback.
+  useEffect(() => {
+    if (useAvccVideo && streaming) dispatchAvccFallback("frame");
+  }, [useAvccVideo, streaming]);
+  // One-shot startup window; on expiry fall back unless a frame already landed.
+  useEffect(() => {
+    if (!useAvccVideo) return;
+    const timer = setTimeout(
+      () => dispatchAvccFallback("timeout"),
+      AVCC_FRAME_TIMEOUT_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [useAvccVideo, config.streamUrl]);
   const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
-  const streamConfig = useAvccVideo ? avcc.config : mjpeg.config;
+  // Screen config now arrives over the input WebSocket (pushed by the helper on
+  // connect + on every dimension/orientation change) instead of a 1s /config poll.
+  const [wsStreamConfig, setWsStreamConfig] = useState<StreamConfig | null>(null);
+  const streamConfig = wsStreamConfig;
   const activeStreamConfig = liveStreamConfig ?? streamConfig ?? fallbackScreenSize(deviceType, selectedDevice?.name);
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
   const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
@@ -344,6 +380,24 @@ function AppWithConfig({
       ws.binaryType = "arraybuffer";
       currentWs = ws;
       wsRef.current = ws;
+      ws.onmessage = (ev) => {
+        // Server -> client screen-config push (tag 0x82): [tag][JSON].
+        if (!(ev.data instanceof ArrayBuffer)) return;
+        const bytes = new Uint8Array(ev.data);
+        if (bytes.length < 1 || bytes[0] !== 0x82) return;
+        try {
+          const cfg = JSON.parse(new TextDecoder().decode(bytes.subarray(1))) as StreamConfig;
+          if (cfg.width <= 0 || cfg.height <= 0) return;
+          setWsStreamConfig((prev) =>
+            prev &&
+            prev.width === cfg.width &&
+            prev.height === cfg.height &&
+            prev.orientation === cfg.orientation
+              ? prev
+              : cfg,
+          );
+        } catch {}
+      };
       ws.onclose = () => {
         if (wsRef.current === ws) wsRef.current = null;
         scheduleReconnect();
@@ -404,6 +458,7 @@ function AppWithConfig({
 
   useEffect(() => {
     setLiveStreamConfig(null);
+    setWsStreamConfig(null);
   }, [config.streamUrl]);
 
   useEffect(() => {
