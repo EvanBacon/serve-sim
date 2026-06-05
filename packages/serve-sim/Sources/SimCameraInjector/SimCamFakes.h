@@ -72,6 +72,8 @@ AVCaptureDevice *SimCamFakeDeviceForPosition(AVCaptureDevicePosition p);
 AVCaptureDeviceInput *SimCamFakeInputForPosition(AVCaptureDevicePosition p);
 
 AVCaptureConnection *SimCamFakeConnectionForOutput(AVCaptureOutput *out);
+void SimCamSetOutputInput(AVCaptureOutput *out, AVCaptureInput *input);
+AVCaptureInput *SimCamOutputInput(AVCaptureOutput *out);
 
 CMAttitude *SimCamSharedAttitude(void);
 CMAccelerometerData *SimCamSharedAccelerometerData(void);
