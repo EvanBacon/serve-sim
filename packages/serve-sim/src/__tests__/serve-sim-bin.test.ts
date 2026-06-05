@@ -1,3 +1,4 @@
+import { describe, test, expect } from "bun:test";
 import { execSync } from "child_process";
 import { resolve } from "path";
 import { existsSync, statSync } from "fs";
