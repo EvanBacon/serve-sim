@@ -174,8 +174,8 @@ async function loadIOSurface(): Promise<NonNullable<typeof iosurface>> {
   );
   iosurface = {
     lookup: (id) => io.symbols.IOSurfaceLookup(id) as unknown,
-    width: (s) => Number(io.symbols.IOSurfaceGetWidth(s as never) as number),
-    height: (s) => Number(io.symbols.IOSurfaceGetHeight(s as never) as number),
+    width: (s) => Number(io.symbols.IOSurfaceGetWidth(s as never) as number | bigint),
+    height: (s) => Number(io.symbols.IOSurfaceGetHeight(s as never) as number | bigint),
     release: (s) => {
       cf.symbols.CFRelease(s as never);
     },
@@ -312,6 +312,10 @@ describeIf("SimCameraHelper shm probe", () => {
       const table = readSurfaceTable(handle.buffer);
       expect(table.surfaceCount).toBe(SURFACE_RING);
       expect(table.latestIndex).toBeLessThan(table.surfaceCount);
+      const latestSurfaceId = table.ids[table.latestIndex];
+      if (latestSurfaceId === undefined) {
+        throw new Error(`missing IOSurface ID at index ${table.latestIndex}`);
+      }
       // All ring slots carry a distinct, non-zero global surface id.
       const unique = new Set(table.ids);
       expect(unique.size).toBe(SURFACE_RING);
@@ -319,7 +323,7 @@ describeIf("SimCameraHelper shm probe", () => {
 
       // The latest surface resolves cross-process and matches the header dims.
       const io = await loadIOSurface();
-      const surface = io.lookup(table.ids[table.latestIndex]);
+      const surface = io.lookup(latestSurfaceId);
       expect(surface).toBeTruthy();
       if (surface) {
         expect(io.width(surface)).toBe(DEFAULT_WIDTH);
