@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execSync, spawnSync } from "child_process";
+import { execFileSync, execSync, spawnSync } from "child_process";
 import { join } from "path";
 
 /**
@@ -37,15 +37,16 @@ function firstBootedIosSim(): string | null {
   return null;
 }
 
-/** Parse a length-prefixed AVCC byte stream into {tag} chunks. */
-function* parseEnvelope(buffer: Uint8Array): Generator<number> {
+/** Parse a length-prefixed AVCC byte stream into tags plus consumed bytes. */
+function* parseEnvelope(buffer: Uint8Array): Generator<{ tag: number; consumed: number }> {
   let offset = 0;
   while (buffer.length - offset >= 4) {
     const view = new DataView(buffer.buffer, buffer.byteOffset + offset, 4);
     const length = view.getUint32(0, false);
     if (buffer.length - offset - 4 < length || length < 1) break;
-    yield buffer[offset + 4]!;
-    offset += 4 + length;
+    const consumed = 4 + length;
+    yield { tag: buffer[offset + 4]!, consumed };
+    offset += consumed;
   }
 }
 
@@ -56,7 +57,7 @@ describeWithSim(`serve-sim AVCC endpoint (booted sim ${bootedUdid ?? "<skipped>"
   let avccUrl: string;
 
   beforeAll(() => {
-    try { execSync(`bun run ${CLI_PATH} --kill ${bootedUdid}`, { stdio: "pipe" }); } catch {}
+    try { execFileSync("bun", ["run", CLI_PATH, "--kill", bootedUdid!], { stdio: "pipe" }); } catch {}
 
     const startPort = 40_000 + Math.floor(Math.random() * 20_000);
     const detach = spawnSync("bun", ["run", CLI_PATH, "--detach", "-p", String(startPort), bootedUdid!], {
@@ -75,7 +76,7 @@ describeWithSim(`serve-sim AVCC endpoint (booted sim ${bootedUdid ?? "<skipped>"
   }, 60_000);
 
   afterAll(() => {
-    try { execSync(`bun run ${CLI_PATH} --kill ${bootedUdid}`, { stdio: "pipe" }); } catch {}
+    try { execFileSync("bun", ["run", CLI_PATH, "--kill", bootedUdid!], { stdio: "pipe" }); } catch {}
   });
 
   test("emits a decoder description and a keyframe", async () => {
@@ -101,7 +102,12 @@ describeWithSim(`serve-sim AVCC endpoint (booted sim ${bootedUdid ?? "<skipped>"
           merged.set(buffer);
           merged.set(value, buffer.length);
           buffer = merged;
-          for (const tag of parseEnvelope(buffer)) seenTags.add(tag);
+          let consumedBytes = 0;
+          for (const envelope of parseEnvelope(buffer)) {
+            seenTags.add(envelope.tag);
+            consumedBytes += envelope.consumed;
+          }
+          if (consumedBytes > 0) buffer = buffer.subarray(consumedBytes);
           // Stop as soon as we've proven a decodable stream: config + an IDR.
           if (seenTags.has(TAG_DESCRIPTION) && seenTags.has(TAG_KEYFRAME)) break;
         }

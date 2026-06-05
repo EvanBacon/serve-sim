@@ -52,6 +52,7 @@ export function useAvccStream({
       .EncodedVideoChunk as typeof EncodedVideoChunk;
 
     const paint = (source: CanvasImageSource, w: number, h: number) => {
+      if (stopped || controller.signal.aborted) return;
       const canvas = canvasRef.current;
       if (!canvas) return;
       if (canvas.width !== w || canvas.height !== h) {
@@ -73,6 +74,7 @@ export function useAvccStream({
       new VideoDecoderCtor({
         output: (frame) => {
           try {
+            if (stopped || controller.signal.aborted) return;
             paint(frame, frame.displayWidth, frame.displayHeight);
           } finally {
             frame.close();
@@ -89,8 +91,11 @@ export function useAvccStream({
         // JPEG seed — paint immediately for instant first frame.
         createImageBitmap(new Blob([payload as BlobPart], { type: "image/jpeg" }))
           .then((bmp) => {
-            paint(bmp, bmp.width, bmp.height);
-            bmp.close();
+            try {
+              if (!stopped && !controller.signal.aborted) paint(bmp, bmp.width, bmp.height);
+            } finally {
+              bmp.close();
+            }
           })
           .catch(() => {});
         return;

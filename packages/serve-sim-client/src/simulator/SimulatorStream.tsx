@@ -23,7 +23,12 @@ export interface SimulatorStreamProps {
   onScreenConfigChange?: (config: StreamConfig) => void;
   /** Enables mouse-wheel/trackpad forwarding as Apple Watch Digital Crown rotation. */
   enableDigitalCrown?: boolean;
-  /** Direct-mode video codec: "avcc" (default, H.264 via WebCodecs with MJPEG fallback) or "mjpeg" to force JPEG. */
+  /**
+   * Video codec preference: "avcc" (default, H.264 via WebCodecs with MJPEG
+   * fallback) or "mjpeg" to force JPEG. Relay mode still may use AVCC because
+   * SimulatorView's `useAvcc` and `useAvccStream` can read `/stream.avcc`
+   * directly while input is relayed.
+   */
   codec?: "mjpeg" | "avcc";
   /** Called when an error occurs. When provided in headerless mode, the error is not rendered inline. */
   onError?: (error: string | null) => void;

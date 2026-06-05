@@ -1106,31 +1106,39 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       };
 
       let watcher: FSWatcher | null = null;
-      try {
-        watcher = watch(STATE_DIR, onFsEvent);
-        watcher.on("error", () => {});
-      } catch {
-        // State dir may not exist yet; the heartbeat keeps the stream alive and
-        // a later reconnect will pick it up once a helper writes its state file.
-      }
+      let watcherRetry: ReturnType<typeof setTimeout> | null = null;
+      const ensureWatcher = () => {
+        if (closed || res.writableEnded || watcher || watcherRetry) return;
+        watcherRetry = setTimeout(() => {
+          watcherRetry = null;
+          if (closed || res.writableEnded || watcher) return;
+          try {
+            watcher = watch(STATE_DIR, onFsEvent);
+            watcher.on("error", () => {
+              watcher?.close();
+              watcher = null;
+              ensureWatcher();
+            });
+            sendIfChanged();
+          } catch {
+            ensureWatcher();
+          }
+        }, 250);
+      };
+      ensureWatcher();
 
       // Keep the connection alive through buffering proxies + catch any change
       // an fs event missed (e.g. dir created after we failed to watch it).
       const heartbeat = setInterval(() => {
         if (closed || res.writableEnded) return;
         res.write(":\n\n");
-        if (!watcher) {
-          try {
-            watcher = watch(STATE_DIR, onFsEvent);
-            watcher.on("error", () => {});
-            sendIfChanged();
-          } catch {}
-        }
+        ensureWatcher();
       }, 15000);
 
       req.on("close", () => {
         closed = true;
         if (debounce) clearTimeout(debounce);
+        if (watcherRetry) clearTimeout(watcherRetry);
         clearInterval(heartbeat);
         watcher?.close();
       });

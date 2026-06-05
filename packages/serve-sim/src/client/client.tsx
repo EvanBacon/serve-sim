@@ -330,8 +330,9 @@ function AppWithConfig({
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
   useEffect(() => {
+    setStreaming(false);
     dispatchAvccFallback("reset");
-  }, [config.streamUrl]);
+  }, [config.streamUrl, setStreaming]);
   // `streaming` flips true on the first painted AVCC frame (JPEG seed decodes
   // sub-second on a healthy helper), which cancels the fallback.
   useEffect(() => {

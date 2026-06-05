@@ -47,7 +47,6 @@ var h264Encoding = false // backpressure flag (H.264)
 // Set when an AVCC client connects; the next H.264 frame is forced to an IDR
 // so the freshly-configured decoder has a keyframe to start from.
 var forceKeyframe = false
-let forceKeyframeLock = NSLock()
 
 // H.264 output → AVCC envelope → broadcast to /stream.avcc clients.
 h264Encoder.onEncoded = { encoded in
@@ -60,7 +59,9 @@ h264Encoder.onEncoded = { encoded in
     }
 }
 httpServer.clientManager.onAvccClientConnect = {
-    forceKeyframeLock.lock(); forceKeyframe = true; forceKeyframeLock.unlock()
+    h264Queue.async {
+        forceKeyframe = true
+    }
 }
 
 // Setup HID injector
@@ -149,15 +150,17 @@ let frameHandler: (CVPixelBuffer, CMTime) -> Void = { pixelBuffer, timestamp in
     // H.264 path runs only while at least one AVCC viewer is connected, so an
     // all-MJPEG session pays no VideoToolbox cost. Its own backpressure flag
     // lets it skip independently of the JPEG encoder.
-    if httpServer.clientManager.hasAvccClients(), !h264Encoding {
-        h264Encoding = true
+    if httpServer.clientManager.hasAvccClients() {
         h264Queue.async {
-            forceKeyframeLock.lock()
+            if h264Encoding { return }
+            h264Encoding = true
             let force = forceKeyframe
             forceKeyframe = false
-            forceKeyframeLock.unlock()
-            h264Encoder.encode(pixelBuffer, forceKeyframe: force)
-            h264Encoding = false
+            h264Encoder.encode(pixelBuffer, forceKeyframe: force) {
+                h264Queue.async {
+                    h264Encoding = false
+                }
+            }
         }
     }
 }

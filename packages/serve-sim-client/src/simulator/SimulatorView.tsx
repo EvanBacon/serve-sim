@@ -15,7 +15,7 @@ import {
   streamDisplayGeometry,
 } from "./orientation.js";
 import { digitalCrownDeltaFromWheel } from "./digitalCrown.js";
-import { useAvccStream } from "./useAvccStream.js";
+import { useAvccStream } from "./use-avcc-stream.js";
 import { isAvccSupported } from "../avcc-codec.js";
 
 // Custom round cursor matching the finger dot indicator
@@ -68,11 +68,14 @@ export interface SimulatorViewProps {
   /** Connection quality indicator: green (good), yellow (degraded), red (poor). */
   connectionQuality?: "good" | "degraded" | "poor" | null;
   /**
-   * Video codec for the direct (non-relay) stream:
+   * Video codec preference for the stream:
    * - "avcc" (default): H.264 over `/stream.avcc` decoded with WebCodecs into
    *   a `<canvas>`. Automatically falls back to MJPEG when the browser lacks
-   *   `VideoDecoder`. Ignored in relay mode (the relay forwards JPEG).
+   *   `VideoDecoder`.
    * - "mjpeg": force JPEG-per-frame painted into an `<img>`.
+   *
+   * In relay mode, input is relayed but video can still use AVCC because
+   * `useAvcc` and `useAvccStream` only need `url` to read `/stream.avcc`.
    */
   codec?: "mjpeg" | "avcc";
 }
@@ -393,7 +396,7 @@ export function SimulatorView({
     };
 
     ws.onopen = () => {
-      setConnected(true);
+      if (!useAvcc) setConnected(true);
       setError(null);
     };
     ws.onclose = () => {
