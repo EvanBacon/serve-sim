@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "serve-sim",
+  "description": "Stream and control Apple Simulators from Claude Code",
+  "owner": {
+    "name": "Evan Bacon"
+  },
+  "plugins": [
+    {
+      "name": "serve-sim",
+      "source": "./",
+      "description": "Control and stream a running iOS, iPad, or Apple Watch Simulator with serve-sim — taps, gestures, hardware buttons, rotation, camera injection, and the live preview.",
+      "category": "development"
+    }
+  ]
+}

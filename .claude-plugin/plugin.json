@@ -1,0 +1,11 @@
+{
+  "name": "serve-sim",
+  "version": "1.0.0",
+  "description": "Control and stream a running iOS, iPad, or Apple Watch Simulator with serve-sim.",
+  "author": {
+    "name": "Evan Bacon"
+  },
+  "homepage": "https://github.com/EvanBacon/serve-sim",
+  "repository": "https://github.com/EvanBacon/serve-sim",
+  "license": "Apache-2.0"
+}
