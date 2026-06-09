@@ -5,6 +5,7 @@ import { AppDetectionTool } from "./app-detection-tool";
 import { AppPermissionsTool } from "./app-permissions-tool";
 import { AxTreeTool } from "./ax-tree-tool";
 import { CameraTool } from "./camera-tool";
+import { PushNotificationTool } from "./push-notification-tool";
 
 export function ToolsPanel({
   open,
@@ -40,6 +41,7 @@ export function ToolsPanel({
           <CameraTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <LocationEmulationTool udid={udid} exec={execOnHost} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
+          <PushNotificationTool udid={udid} currentApp={currentApp} />
         </div>
       )}
     </Panel>
