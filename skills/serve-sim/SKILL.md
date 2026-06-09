@@ -17,13 +17,13 @@ Drive an Apple Simulator (iOS, iPad, Apple Watch) from an agent using the [serve
 - The user wants to **simulate a memory warning** or **rotate the device** programmatically.
 - The user wants to **read the simulator's accessibility tree** to find UI elements without pixel hunting.
 - The user wants to **grant, revoke, or reset an app's privacy permissions** — camera, photos, location, contacts, or **push notifications**.
+- The user wants to **stream a physical iPhone/iPad** to a browser with tap/swipe input — use `serve-sim device` (drives WebDriverAgent). Handy on Intel Macs that can't boot Apple-silicon simulators.
 
 ## When NOT to use
 
 - Android emulators → use `adb shell` tooling.
 - Building or installing an iOS app → use `xcodebuild` or `xcrun simctl install`.
 - React Native in-app runtime debugging (Redux state, network inspection, component tree) → use rn-debugger tooling.
-- Real iOS hardware devices → use `xcrun devicectl` or Xcode.
 
 ## Prerequisites
 
@@ -78,6 +78,7 @@ Key invariants the agent must respect:
 | Rotate device | `npx serve-sim rotate <orientation>` | `portrait`, `portrait_upside_down`, `landscape_left`, `landscape_right`. |
 | Simulate memory warning | `npx serve-sim memory-warning` | Equivalent to Debug → Simulate Memory Warning. |
 | CoreAnimation debug | `npx serve-sim ca-debug <option> <on\|off>` | Options: `blended`, `copies`, `misaligned`, `offscreen`, `slow-animations`. See [references/ca-debug.md](references/ca-debug.md). |
+| Stream a physical device | `npx serve-sim device [device]` | Drives WebDriverAgent for a real iPhone/iPad. Viewer at `http://localhost:3300`. Needs one-time setup (`pipx install pymobiledevice3` + WebDriverAgent checkout + Xcode signing). |
 | Inject camera feed | `npx serve-sim camera <bundle-id> [--file <path>\|--webcam [name]]` | (Re)launches the app with the camera dylib attached. macOS 14+ only. See [references/camera.md](references/camera.md). |
 | Hot-swap camera source | `npx serve-sim camera switch <placeholder\|webcam\|file> [arg]` | No app relaunch. |
 | Manage app permissions | `npx serve-sim permissions <grant\|revoke\|reset\|list> <permission> <bundle-id>` | Camera, photos, location, **push notifications**, contacts, etc. See [references/permissions.md](references/permissions.md). |

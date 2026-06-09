@@ -1864,6 +1864,88 @@ function bindPreviewServer(port: number, middleware: ReturnType<typeof import(".
   return servePreview({ port, middleware, host });
 }
 
+/**
+ * Real-device mode: stream a *physical* iPhone/iPad to the browser via
+ * WebDriverAgent. Unlike simulator mode (private CoreSimulator framebuffer +
+ * synthetic-touch socket), a real device has no such APIs, so this drives an
+ * XCUITest runner (WDA) for both the live MJPEG screen and tap/swipe input.
+ *
+ * Primarily useful on Intel Macs that can't boot arm64-only simulators but can
+ * still talk to a plugged-in device over USB.
+ */
+async function device(
+  deviceArg: string | undefined,
+  opts: { port?: number; host?: string },
+) {
+  const { detectRealDevice, listRealDevices, WdaSession, defaultWdaConfig, WdaSetupError } =
+    await import("./wda");
+  const { startDeviceServer } = await import("./device-server");
+
+  debugCli("device mode arg=%s", deviceArg);
+
+  const devices = listRealDevices();
+  if (devices.length === 0) {
+    console.error(
+      "No physical iOS device found over USB.\n" +
+        "  • Plug in your iPhone/iPad and tap \u201cTrust\u201d when prompted.\n" +
+        "  • Ensure pymobiledevice3 is installed (pipx install pymobiledevice3).",
+    );
+    process.exit(1);
+  }
+
+  const target = deviceArg
+    ? devices.find((d) => d.udid === deviceArg || d.name === deviceArg)
+    : detectRealDevice();
+  if (!target) {
+    console.error(`Device not found: ${deviceArg}`);
+    console.error("Connected devices:");
+    for (const d of devices) console.error(`  ${d.name} (${d.udid}) — iOS ${d.productVersion}`);
+    process.exit(1);
+  }
+
+  const config = defaultWdaConfig();
+  const session = new WdaSession(target, config);
+
+  console.log(`Starting device stream for ${target.name} (iOS ${target.productVersion})…`);
+  console.log("This launches WebDriverAgent on the device — first run builds + signs it.");
+
+  try {
+    await session.start();
+  } catch (err) {
+    if (err instanceof WdaSetupError) {
+      console.error(`\n${err.message}`);
+      if (err.instructions) console.error(`\n${err.instructions}`);
+    } else {
+      console.error(`Failed to start WebDriverAgent: ${(err as Error).message}`);
+    }
+    await session.stop();
+    process.exit(1);
+  }
+
+  const host = opts.host ?? "127.0.0.1";
+  const server = await startDeviceServer({ session, port: opts.port ?? 3300, host });
+
+  const networkIP = getLocalNetworkIP();
+  const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
+  console.log("");
+  console.log(`  - Local:   ${server.url}`);
+  if (exposedToLan && networkIP) {
+    console.log(`  - Network: http://${networkIP}:${opts.port ?? 3300}`);
+  } else if (networkIP) {
+    console.log(`  - Network: \x1b[2muse --host 0.0.0.0 to expose on http://${networkIP}:${opts.port ?? 3300}\x1b[0m`);
+  }
+  console.log("");
+
+  const shutdown = async () => {
+    await server.stop();
+    await session.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  await new Promise(() => {});
+}
+
 // ─── Main ───
 
 const program = new Command();
@@ -2000,5 +2082,37 @@ program
   .helpOption(false)
   .argument("[args...]")
   .action((args: string[]) => permissions(args));
+
+program
+  .command("device")
+  .description("Stream a physical iPhone/iPad to the browser via WebDriverAgent")
+  .argument("[device]", "Device to target (udid or name; default: first connected)")
+  .option("-p, --port <port>", "Port for the device viewer (default: 3300)", (v) => parseInt(v, 10))
+  .option(
+    "--host <addr>",
+    "Interface to bind the viewer to. Use 0.0.0.0 to expose on the LAN " +
+      "(the viewer is unauthenticated — only on trusted networks).",
+    "127.0.0.1",
+  )
+  .addHelpText(
+    "after",
+    `
+Real devices have no simulator framebuffer or synthetic-touch APIs, so this
+drives WebDriverAgent (an XCUITest runner) for the live screen + tap/swipe.
+
+One-time setup:
+  pipx install pymobiledevice3
+  git clone --depth 1 https://github.com/appium/WebDriverAgent.git ~/.serve-sim-device/WebDriverAgent
+
+Then:
+  serve-sim device                       Stream the first connected device
+  serve-sim device "iPhone"              Stream a device by name
+  serve-sim device --host 0.0.0.0        Expose the viewer on your LAN
+
+Env overrides: SERVE_SIM_WDA_DIR, SERVE_SIM_WDA_TEAM, SERVE_SIM_WDA_BUNDLE_ID`,
+  )
+  .action((deviceArg: string | undefined, opts: { port?: number; host?: string }) =>
+    device(deviceArg, opts),
+  );
 
 await program.parseAsync(process.argv);

@@ -10,3 +10,6 @@ export const debugCli = createDebug("serve-sim:cli");
 export const debugHelper = createDebug("serve-sim:helper");
 export const debugState = createDebug("serve-sim:state");
 export const debugMw = createDebug("serve-sim:mw");
+// Real-device (WebDriverAgent) mode: device detection, WDA runner lifecycle,
+// usbmux port forwarding, and the MJPEG/input relay server.
+export const debugDevice = createDebug("serve-sim:device");

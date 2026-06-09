@@ -40,6 +40,7 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and Node.js 18+. `
 ```
 serve-sim [device...]                 Start preview server (default: localhost:3200)
 serve-sim --no-preview [device...]    Stream in foreground without a preview server
+serve-sim device [device]             Stream a physical iPhone/iPad (default: localhost:3300)
 serve-sim gesture '<json>' [-d udid]  Send a touch gesture
 serve-sim button [name] [-d udid]     Send a button press (default: home)
 serve-sim type <text> [-d udid]       Type text via the simulator keyboard
@@ -92,6 +93,11 @@ serve-sim --detach                     # start a background helper, return JSON
 serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
 
+# Stream a physical device (see “Physical devices” below for one-time setup)
+serve-sim device                       # first connected iPhone/iPad
+serve-sim device "iPhone"              # target a device by name
+serve-sim device --host 0.0.0.0        # expose the viewer on your LAN
+
 # Type text into the focused field
 serve-sim type "Hello, world!"
 echo "from stdin" | serve-sim type --stdin
@@ -129,6 +135,47 @@ Sources:
 - **placeholder** — animated programmatic frames (default).
 - **file** — image (PNG/JPEG/HEIC/…) or video (mp4/mov/m4v/webm/…). The CLI sniffs the kind from the extension and falls back to magic bytes for files without an extension.
 - **webcam** — live `AVCaptureDevice` (built-in, Continuity, external).
+
+## Physical devices
+
+`serve-sim device` streams a real iPhone or iPad to the browser — useful on Intel
+Macs that can't boot Apple-silicon simulators, or any time you want to drive a
+physical device. Real devices have no simulator framebuffer or synthetic-touch
+APIs, so device mode drives [WebDriverAgent](https://github.com/appium/WebDriverAgent)
+(an XCUITest runner) for the live screen plus tap/swipe/button input.
+
+```sh
+serve-sim device                       # first connected device → http://localhost:3300
+serve-sim device "iPhone"              # target a device by name or udid
+serve-sim device --port 4000           # custom viewer port
+serve-sim device --host 0.0.0.0        # expose on the LAN (viewer is unauthenticated)
+```
+
+The viewer at `http://localhost:3300` shows the live screen (MJPEG) and forwards
+pointer events: a press is a tap, a press-and-drag is a swipe, and the **Home**
+button presses the hardware home. The first run builds and code-signs
+WebDriverAgent onto the device with your Apple ID — subsequent runs reuse it.
+
+### One-time setup
+
+Requires Xcode (not just the command line tools) and a free or paid Apple
+Developer account for signing:
+
+```sh
+pipx install pymobiledevice3
+git clone --depth 1 https://github.com/appium/WebDriverAgent.git \
+  ~/.serve-sim-device/WebDriverAgent
+```
+
+Plug in the device and tap **Trust** when prompted, then run `serve-sim device`.
+
+### Environment overrides
+
+| Variable | Purpose |
+| --- | --- |
+| `SERVE_SIM_WDA_DIR` | Path to the WebDriverAgent checkout (default `~/.serve-sim-device/WebDriverAgent`). |
+| `SERVE_SIM_WDA_TEAM` | Apple Developer Team ID for signing (auto-detected from your signing identity when omitted). |
+| `SERVE_SIM_WDA_BUNDLE_ID` | Bundle id for the WDA runner (default `com.serve-sim.wda.runner`). |
 
 ## Connectors
 
