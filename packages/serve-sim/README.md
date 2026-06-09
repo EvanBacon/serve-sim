@@ -33,6 +33,8 @@ I develop the Expo framework, but this tool is completely agnostic to React Nati
 
 Requires macOS with Xcode command line tools (`xcrun simctl`) and Node.js 18+. `bun` is **not** required to run the CLI. Camera injection uses a host-side helper built for macOS 14+.
 
+> **Note:** Apple Silicon (arm64) only. The bundled `serve-sim-bin` helper ships as an arm64 binary and does not run on Intel (x86_64) Macs.
+
 ## CLI
 
 ```
