@@ -38,6 +38,16 @@ import {
   StopGlyph,
   WalkGlyph,
 } from "./icons";
+import {
+  buildRedirectResolveCommand,
+  parseLocationInput,
+  type ParseResult,
+} from "./location-input-parser";
+import {
+  buildEndSessionCommand,
+  pickSessionOrigin,
+  type SimLocation,
+} from "./location-session";
 
 const TRAIL_MORPH_MS = 650;
 
@@ -111,7 +121,11 @@ export function LocationEmulationTool({
   // Captured at the start of a session — the lat/lng the simulator was at
   // when the user first hit play. Restored on stop so the device returns to
   // where they were before the simulation started.
-  const sessionOriginRef = useRef<{ lat: number; lng: number } | null>(null);
+  const sessionOriginRef = useRef<SimLocation | null>(null);
+  // The user's most recent manual pin (via CustomLocationPin). This is the
+  // only way the simulator's location changes outside of trail playback, so
+  // it's what we restore to on stop. Null until the user pins something.
+  const lastPinnedRef = useRef<SimLocation | null>(null);
 
   useEffect(() => { speedRef.current = defaultSpeed(mode) * multiplier; }, [mode, multiplier]);
   // Morph state — when the trail changes we keep the previous prepared trail
@@ -264,8 +278,7 @@ export function LocationEmulationTool({
       elapsedRef.current = 0;
     }
     if (sessionOriginRef.current == null) {
-      const start = pointAtDistance(trailRef.current, arcRef.current);
-      sessionOriginRef.current = { lat: start.lat, lng: start.lng };
+      sessionOriginRef.current = pickSessionOrigin(lastPinnedRef.current);
     }
     statusRef.current = "playing";
     setPlayback((p: PlaybackState) => ({
@@ -283,9 +296,7 @@ export function LocationEmulationTool({
     setPlayback(INITIAL_PLAYBACK);
     const origin = sessionOriginRef.current;
     sessionOriginRef.current = null;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
+    const cmd = buildEndSessionCommand(udid, origin);
     void exec(cmd).then((res) => {
       if (res.exitCode !== 0) setError(parseSimctlError(res.stderr) || null);
       else setError(null);
@@ -303,10 +314,7 @@ export function LocationEmulationTool({
   // first so the device lands back where the user started.
   useEffect(() => () => {
     if (statusRef.current === "idle") return;
-    const origin = sessionOriginRef.current;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
+    const cmd = buildEndSessionCommand(udid, sessionOriginRef.current);
     void exec(cmd).catch(() => {});
   }, [exec, udid]);
 
@@ -424,9 +432,198 @@ export function LocationEmulationTool({
             </button>
           </div>
 
+          <CustomLocationPin
+            udid={udid}
+            exec={exec}
+            onBeforePin={() => {
+              // Pinning a fixed point while a trail is running would race
+              // with the trail's 1Hz simctl pushes — stop playback first so
+              // the pin sticks.
+              if (statusRef.current === "playing") {
+                statusRef.current = "paused";
+                setPlayback((p: PlaybackState) => ({ ...p, status: "paused" }));
+              }
+            }}
+            onPinned={(lat: number, lng: number) => {
+              // The pin is the new "where the user was before any trail."
+              // Record it as both the last-pinned location AND the active
+              // session origin, so a subsequent Stop restores to this pin
+              // — including the case where the trail was already playing
+              // when the pin happened (the prior origin would be stale).
+              const pin = { lat, lng };
+              lastPinnedRef.current = pin;
+              sessionOriginRef.current = pin;
+            }}
+          />
+
           {error && (
             <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
               {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Custom-location pin ───────────────────────────────────────────────────
+// Companion to the trail player: a paste-and-go input that teleports the
+// simulator to any lat/lng — typed coords, or a full Google/Apple Maps URL.
+// Short links (maps.app.goo.gl, goo.gl/maps) can't be followed by the browser
+// cross-origin, so we resolve the redirect server-side through `curl` over the
+// already-authenticated /exec channel, then re-parse the resolved URL.
+
+const PIN_INPUT_CSS = `
+.lem-pin-input { transition: background 0.12s, border-color 0.12s; }
+.lem-pin-input:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.16); }
+.lem-pin-input:focus { outline: none; border-color: rgba(255,255,255,0.24); background: rgba(255,255,255,0.08); }
+`;
+
+function CustomLocationPin({
+  udid,
+  exec,
+  onBeforePin,
+  onPinned,
+}: {
+  udid: string;
+  exec: ExecFn;
+  onBeforePin: () => void;
+  onPinned?: (lat: number, lng: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState("");
+  const [pinning, setPinning] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [lastPinned, setLastPinned] = useState<SimLocation | null>(null);
+
+  // Pure preview parse — never triggers a network call, so it's safe to run
+  // on every keystroke. Short-link inputs surface as "Resolves on Set" rather
+  // than an error so the user knows the field is valid.
+  const preview = useMemo<ParseResult | null>(() => {
+    if (!input.trim()) return null;
+    return parseLocationInput(input);
+  }, [input]);
+
+  const setLocation = useCallback(async (lat: number, lng: number) => {
+    onBeforePin();
+    const cmd = `xcrun simctl location ${udid} set ${lat.toFixed(7)},${lng.toFixed(7)}`;
+    const res = await exec(cmd);
+    if (res.exitCode !== 0) {
+      throw new Error(parseSimctlError(res.stderr) || "simctl location set failed");
+    }
+    setLastPinned({ lat, lng });
+    onPinned?.(lat, lng);
+  }, [exec, onBeforePin, onPinned, udid]);
+
+  const resolveAndPin = useCallback(async (parsed: ParseResult): Promise<void> => {
+    if (parsed.kind === "error") throw new Error(parsed.message);
+    if (parsed.kind === "coords") {
+      await setLocation(parsed.lat, parsed.lng);
+      return;
+    }
+    // Redirect — follow it server-side, then re-parse. We cap the indirection
+    // chain at one extra hop: curl already follows the full redirect chain
+    // with `-L`, so the `url_effective` payload is the final URL.
+    const cmd = buildRedirectResolveCommand(parsed.url);
+    const res = await exec(cmd);
+    const resolved = (res.stdout || "").trim();
+    if (res.exitCode !== 0 || !resolved) {
+      throw new Error(`Could not follow redirect (${res.stderr.trim() || "no response"})`);
+    }
+    const next = parseLocationInput(resolved);
+    if (next.kind === "redirect") {
+      throw new Error("Short link redirected to another short link — try the full URL");
+    }
+    if (next.kind === "error") {
+      throw new Error(`Resolved URL had no coordinates: ${resolved}`);
+    }
+    await setLocation(next.lat, next.lng);
+  }, [exec, setLocation]);
+
+  const onSet = useCallback(async () => {
+    if (!input.trim() || pinning) return;
+    setPinning(true);
+    setPinError(null);
+    try {
+      const parsed = parseLocationInput(input);
+      await resolveAndPin(parsed);
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPinning(false);
+    }
+  }, [input, pinning, resolveAndPin]);
+
+  const previewLine = (() => {
+    if (!preview) return null;
+    if (preview.kind === "coords") {
+      return `${preview.lat.toFixed(5)}, ${preview.lng.toFixed(5)}`;
+    }
+    if (preview.kind === "redirect") return "Short link — resolves on Set";
+    return preview.message;
+  })();
+  const previewIsError = preview?.kind === "error";
+
+  return (
+    <div className="bg-white/[0.02] border border-white/[0.06] rounded-md flex flex-col gap-2 px-2.5 py-2">
+      <style>{PIN_INPUT_CSS}</style>
+      <button
+        type="button"
+        onClick={() => setOpen((v: boolean) => !v)}
+        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-1 px-0 cursor-pointer w-full text-left min-h-[24px] leading-none"
+        aria-expanded={open}
+      >
+        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Pin Location</span>
+        <span className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none">
+          {lastPinned ? `${lastPinned.lat.toFixed(4)}, ${lastPinned.lng.toFixed(4)}` : "Any place in the world"}
+        </span>
+        <Chevron open={open} />
+      </button>
+
+      {open && (
+        <>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput((e.target as HTMLInputElement).value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void onSet();
+                  }
+                }}
+                placeholder="lat,lng or Google/Apple Maps URL"
+                className="lem-pin-input flex-1 min-w-0 bg-white/[0.04] border border-white/8 rounded-md text-white/90 text-[12px] py-1.5 px-2 font-[inherit]"
+                spellCheck={false}
+                autoComplete="off"
+                aria-label="Custom location"
+              />
+              <button
+                type="button"
+                onClick={() => void onSet()}
+                disabled={pinning || !preview || preview.kind === "error"}
+                className="lem-ghost py-1.5 px-3 border border-white/12 rounded-md text-[12px] font-medium bg-white/[0.06] text-white/85 cursor-pointer font-[inherit] disabled:opacity-40 disabled:cursor-not-allowed"
+                title={preview?.kind === "redirect" ? "Resolve and set location" : "Set simulator location"}
+              >
+                {pinning ? "Setting…" : "Set"}
+              </button>
+            </div>
+            {previewLine && (
+              <div
+                className={`text-[10px] font-mono ${previewIsError ? "text-danger-soft" : "text-white/55"}`}
+                aria-live="polite"
+              >
+                {previewLine}
+              </div>
+            )}
+          </div>
+
+          {pinError && (
+            <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
+              {pinError}
             </div>
           )}
         </>
