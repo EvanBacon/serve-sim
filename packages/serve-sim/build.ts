@@ -173,6 +173,10 @@ const compile = spawnSync(
     resolve(root, "src/index.ts"),
     "--outfile", resolve(distDir, "serve-sim"),
     "--define", `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
+    // `ws` must stay a runtime-resolved specifier so Bun substitutes its
+    // native implementation — bundling the Node implementation breaks
+    // upgrades (raw handshake writes never flush under Bun's node:http).
+    "--external", "ws",
   ],
   { stdio: "inherit" },
 );
