@@ -113,12 +113,16 @@ function SettingSwitch({
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-[18px] w-8 shrink-0 cursor-pointer rounded-full border-none p-0 [transition:background_0.15s] ${
-        checked ? "bg-[#0a84ff]" : "bg-white/20"
-      } ${disabled ? "opacity-60" : ""}`}
+      className={`relative h-[18px] w-8 shrink-0 rounded-full border-none p-0 [transition:background_0.15s] ${
+        disabled
+          ? "cursor-default bg-white/20"
+          : checked
+            ? "cursor-pointer bg-[#0a84ff]"
+            : "cursor-pointer bg-white/20"
+      }`}
     >
       <span
-        className="absolute top-[2px] size-[14px] rounded-full bg-white [transition:left_0.15s]"
+        className={`absolute top-[2px] size-[14px] rounded-full [transition:left_0.15s] ${disabled ? "bg-white/50" : "bg-white"}`}
         style={{ left: checked ? 16 : 2 }}
       />
     </button>
@@ -173,16 +177,21 @@ function TextSizeSlider({
   const max = TEXT_SIZE_CATEGORIES.length - 1;
   const shown = drag ?? value;
   const fill = `${(shown / max) * 100}%`;
+  // Filled portion goes gray while disabled so the control doesn't read as
+  // live during hydration.
+  const fillColor = disabled ? "rgba(255,255,255,0.3)" : "#0a84ff";
 
   const trackClasses =
     "[&::-webkit-slider-runnable-track]:h-[4px] [&::-webkit-slider-runnable-track]:rounded-full " +
-    "[&::-webkit-slider-runnable-track]:[background:linear-gradient(to_right,#0a84ff_var(--slider-fill),rgba(255,255,255,0.22)_var(--slider-fill))] " +
+    "[&::-webkit-slider-runnable-track]:[background:linear-gradient(to_right,var(--slider-fill-color)_var(--slider-fill),rgba(255,255,255,0.22)_var(--slider-fill))] " +
     "[&::-moz-range-track]:h-[4px] [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-white/20 " +
-    "[&::-moz-range-progress]:h-[4px] [&::-moz-range-progress]:rounded-full [&::-moz-range-progress]:bg-[#0a84ff]";
+    "[&::-moz-range-progress]:h-[4px] [&::-moz-range-progress]:rounded-full [&::-moz-range-progress]:bg-[var(--slider-fill-color)]";
   const thumbClasses =
     "[&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:size-[13px] [&::-webkit-slider-thumb]:rounded-full " +
-    "[&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.45)] [&::-webkit-slider-thumb]:-mt-[4.5px] " +
-    "[&::-moz-range-thumb]:size-[13px] [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-none [&::-moz-range-thumb]:bg-white";
+    "[&::-webkit-slider-thumb]:bg-white [&:disabled::-webkit-slider-thumb]:bg-white/50 " +
+    "[&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.45)] [&::-webkit-slider-thumb]:-mt-[4.5px] " +
+    "[&::-moz-range-thumb]:size-[13px] [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-none " +
+    "[&::-moz-range-thumb]:bg-white [&:disabled::-moz-range-thumb]:bg-white/50";
 
   return (
     <span className="flex w-[120px] min-w-0 flex-col">
@@ -198,8 +207,8 @@ function TextSizeSlider({
         onPointerUp={flush}
         onKeyUp={flush}
         onBlur={flush}
-        style={{ "--slider-fill": fill } as CSSProperties}
-        className={`h-[13px] w-full cursor-pointer appearance-none rounded-full bg-transparent outline-none focus-visible:[outline:1.5px_solid_rgba(10,132,255,0.55)] focus-visible:outline-offset-4 ${trackClasses} ${thumbClasses}`}
+        style={{ "--slider-fill": fill, "--slider-fill-color": fillColor } as CSSProperties}
+        className={`h-[13px] w-full appearance-none rounded-full bg-transparent outline-none focus-visible:[outline:1.5px_solid_rgba(10,132,255,0.55)] focus-visible:outline-offset-4 ${disabled ? "cursor-default" : "cursor-pointer"} ${trackClasses} ${thumbClasses}`}
       />
       <span aria-hidden className="pointer-events-none mt-[3px] flex justify-between px-[5.5px]">
         {TEXT_SIZE_CATEGORIES.map((category) => (
@@ -229,7 +238,7 @@ function SettingSelect({
       value={value}
       disabled={disabled}
       onChange={(e) => onChange((e.target as HTMLSelectElement).value)}
-      className="appearance-none [-webkit-appearance:none] bg-white/[0.06] border border-white/10 rounded-md text-white/90 text-[12px] py-0.5 px-2 font-[inherit] cursor-pointer min-w-0 max-w-[150px] truncate"
+      className="appearance-none [-webkit-appearance:none] bg-white/[0.06] border border-white/10 rounded-md text-white/90 text-[12px] py-0.5 px-2 font-[inherit] cursor-pointer min-w-0 max-w-[150px] truncate disabled:cursor-default disabled:text-white/40"
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>

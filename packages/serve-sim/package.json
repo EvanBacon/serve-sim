@@ -66,9 +66,10 @@
     "@types/debug": "^4.1.13",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "debug": "^4.4.3",
+    "@types/ws": "^8.18.1",
     "bun-plugin-tailwind": "^0.1.2",
     "commander": "^14.0.1",
+    "debug": "^4.4.3",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -77,6 +78,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
-    "inspect-webkit": "^0.0.5"
+    "inspect-webkit": "^0.0.5",
+    "ws": "^8.21.0"
   }
 }

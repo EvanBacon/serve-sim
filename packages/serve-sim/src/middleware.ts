@@ -1188,56 +1188,6 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       return;
     }
 
-    // POST /ui-settings — HTTP fallback for the control-socket `ui` requests
-    // (used when the host server doesn't forward upgrade events). Same
-    // auth/origin gating as /exec.
-    if (url === base + "/ui-settings" && req.method === "POST") {
-      if (!isJsonContentType(req.headers["content-type"])) {
-        res.writeHead(415, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Unsupported Media Type" }));
-        return;
-      }
-      const uiOrigin = req.headers.origin;
-      if (uiOrigin) {
-        let originOk = false;
-        try {
-          originOk = new URL(uiOrigin).host === req.headers.host;
-        } catch {}
-        if (!originOk) {
-          res.writeHead(403, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Cross-origin request blocked" }));
-          return;
-        }
-      }
-      const uiAuth = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
-      if (!uiAuth || !safeEqualString(uiAuth[1]!.trim(), execToken)) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Unauthorized" }));
-        return;
-      }
-      let uiBody = "";
-      req.on("data", (chunk: Buffer | string) => {
-        uiBody += typeof chunk === "string" ? chunk : chunk.toString();
-        if (uiBody.length > 64 * 1024) req.destroy();
-      });
-      req.on("end", () => {
-        let payload: unknown = null;
-        try {
-          payload = JSON.parse(uiBody);
-        } catch {}
-        handleUiRequest(payload)
-          .then((reply) => {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(reply));
-          })
-          .catch((e: unknown) => {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
-          });
-      });
-      return;
-    }
-
     // POST /exec — run a shell command on the host. Gated by a per-process
     // bearer token injected only into the same-origin preview HTML, with
     // Content-Type + Origin checks to block CORS-simple CSRF (a malicious

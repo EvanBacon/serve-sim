@@ -6,13 +6,16 @@ export interface ExecResult {
   exitCode: number;
 }
 
-// Host execs ride a dedicated WebSocket (`/exec-ws`) rather than pooled
-// fetches: every preview tab holds several long-lived HTTP streams (MJPEG +
-// SSE), and with two or more tabs open a pooled `fetch("/exec")` queues
-// behind them against the browser's six-connections-per-origin cap. The
-// socket is shared per tab, authenticated with the same exec token, and any
-// socket failure falls back to the POST /exec route (which also covers
-// middleware mounts that don't forward upgrade events).
+// Everything the preview page asks of the host — shell execs, simulator
+// settings, and the SSE side-channels — rides one WebSocket (`/exec-ws`).
+// Pooled fetches are not used: every tab holds long-lived HTTP streams
+// (MJPEG), and the browser's six-connections-per-origin cap let pooled
+// requests starve with multiple tabs open. The channel is intentionally
+// WS-only with no HTTP fallback — a broken socket surfaces as an error
+// instead of silently degrading back into the starvation it exists to fix.
+
+const CONNECT_TIMEOUT_MS = 5_000;
+const STREAM_RETRY_MS = 2_000;
 
 type SocketReply = {
   id?: number;
@@ -53,7 +56,7 @@ function rejectAllPending(reason: Error): void {
 
 function openExecSocket(): Promise<WebSocket> {
   socketPromise ??= new Promise<WebSocket>((resolve, reject) => {
-    let ready = false;
+    let settled = false;
     let ws: WebSocket;
     try {
       ws = new WebSocket(execSocketUrl());
@@ -62,6 +65,16 @@ function openExecSocket(): Promise<WebSocket> {
       reject(e);
       return;
     }
+    // Fail fast if the server never completes the handshake or auth — a
+    // hung connection must not stall every request behind it.
+    const connectTimer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        socketPromise = null;
+        reject(new Error("control socket connect timeout"));
+        ws.close();
+      }
+    }, CONNECT_TIMEOUT_MS);
     ws.onopen = () => {
       ws.send(JSON.stringify({ token: window.__SIM_PREVIEW__?.execToken ?? "" }));
     };
@@ -73,9 +86,12 @@ function openExecSocket(): Promise<WebSocket> {
         return;
       }
       if (msg.ready) {
-        ready = true;
-        openSocket = ws;
-        resolve(ws);
+        if (!settled) {
+          settled = true;
+          clearTimeout(connectTimer);
+          openSocket = ws;
+          resolve(ws);
+        }
         return;
       }
       if (typeof msg.sub === "number") {
@@ -98,12 +114,16 @@ function openExecSocket(): Promise<WebSocket> {
     const fail = () => {
       socketPromise = null;
       openSocket = null;
-      const err = new Error("exec socket closed");
+      const err = new Error("control socket closed — reload the page if this persists");
       rejectAllPending(err);
       const subscriptions = [...activeSubscriptions.values()];
       activeSubscriptions.clear();
       for (const subscription of subscriptions) subscription.onEnd();
-      if (!ready) reject(err);
+      if (!settled) {
+        settled = true;
+        clearTimeout(connectTimer);
+        reject(err);
+      }
     };
     ws.onerror = fail;
     ws.onclose = fail;
@@ -111,80 +131,12 @@ function openExecSocket(): Promise<WebSocket> {
   return socketPromise;
 }
 
-export interface HostEventStream {
-  onmessage: ((event: { data: string }) => void) | null;
-  onerror: (() => void) | null;
-  close(): void;
-}
-
-/**
- * EventSource-shaped subscription to one of the middleware's SSE routes,
- * carried over the shared control socket so it doesn't occupy one of the
- * browser's six pooled connections. Falls back to a real EventSource (which
- * also brings its native auto-reconnect) when the socket isn't available.
- */
-export function openHostEventStream(path: string): HostEventStream {
-  const stream: HostEventStream = { onmessage: null, onerror: null, close: () => {} };
-  let closed = false;
-  let native: EventSource | null = null;
-  let subId: number | null = null;
-  let sseBuffer = "";
-
-  const fallbackToNative = () => {
-    if (closed || native) return;
-    subId = null;
-    stream.onerror?.();
-    native = new EventSource(path);
-    native.onmessage = (event) => stream.onmessage?.({ data: String(event.data) });
-    native.onerror = () => stream.onerror?.();
-  };
-
-  const handleChunk = (chunk: string) => {
-    sseBuffer += chunk.replace(/\r\n/g, "\n");
-    let boundary: number;
-    while ((boundary = sseBuffer.indexOf("\n\n")) !== -1) {
-      const block = sseBuffer.slice(0, boundary);
-      sseBuffer = sseBuffer.slice(boundary + 2);
-      const data = block
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).replace(/^ /, ""))
-        .join("\n");
-      if (data) stream.onmessage?.({ data });
-    }
-  };
-
-  void (async () => {
-    try {
-      const ws = await openExecSocket();
-      if (closed) return;
-      if (ws.readyState !== WebSocket.OPEN) throw new Error("socket not open");
-      subId = nextSubId++;
-      activeSubscriptions.set(subId, { onData: handleChunk, onEnd: fallbackToNative });
-      ws.send(JSON.stringify({ sub: subId, path }));
-    } catch {
-      fallbackToNative();
-    }
-  })();
-
-  stream.close = () => {
-    closed = true;
-    native?.close();
-    native = null;
-    if (subId !== null) {
-      activeSubscriptions.delete(subId);
-      try {
-        openSocket?.send(JSON.stringify({ unsub: subId }));
-      } catch {}
-      subId = null;
-    }
-  };
-  return stream;
-}
-
-async function socketRequest(body: Record<string, unknown>, signal?: AbortSignal): Promise<SocketReply> {
+async function socketRequest(
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<SocketReply> {
   const ws = await openExecSocket();
-  if (ws.readyState !== WebSocket.OPEN) throw new Error("exec socket not open");
+  if (ws.readyState !== WebSocket.OPEN) throw new Error("control socket not open");
   return new Promise<SocketReply>((resolve, reject) => {
     const id = nextRequestId++;
     const onAbort = () => {
@@ -212,42 +164,16 @@ async function socketRequest(body: Record<string, unknown>, signal?: AbortSignal
   });
 }
 
-async function execViaSocket(command: string, signal?: AbortSignal): Promise<ExecResult> {
-  const reply = await socketRequest({ command }, signal);
+export async function execOnHost(
+  command: string,
+  opts?: { signal?: AbortSignal },
+): Promise<ExecResult> {
+  const reply = await socketRequest({ command }, opts?.signal);
   return {
     stdout: reply.stdout ?? "",
     stderr: reply.stderr ?? "",
     exitCode: reply.exitCode ?? 1,
   };
-}
-
-async function execViaFetch(
-  command: string,
-  opts?: { signal?: AbortSignal },
-): Promise<ExecResult> {
-  const token = window.__SIM_PREVIEW__?.execToken;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(simEndpoint("exec"), {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ command }),
-    signal: opts?.signal,
-  });
-  return res.json();
-}
-
-export async function execOnHost(
-  command: string,
-  opts?: { signal?: AbortSignal },
-): Promise<ExecResult> {
-  try {
-    return await execViaSocket(command, opts?.signal);
-  } catch (e) {
-    // Aborts (caller timeouts) propagate; transport failures retry over HTTP.
-    if (opts?.signal?.aborted) throw e;
-    return execViaFetch(command, opts);
-  }
 }
 
 export interface UiRequestPayload {
@@ -266,25 +192,82 @@ export async function hostUiRequest(
   payload: UiRequestPayload,
   opts?: { signal?: AbortSignal },
 ): Promise<Record<string, string> | null> {
-  let reply: SocketReply;
-  try {
-    reply = await socketRequest({ ui: payload }, opts?.signal);
-  } catch (e) {
-    if (opts?.signal?.aborted) throw e;
-    // Transport failure — fall back to the pooled HTTP route.
-    const token = window.__SIM_PREVIEW__?.execToken;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const res = await fetch(simEndpoint("ui-settings"), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: opts?.signal,
-    });
-    reply = await res.json();
-  }
+  const reply = await socketRequest({ ui: payload }, opts?.signal);
   if (reply.error) throw new Error(reply.error);
   return reply.status ?? null;
+}
+
+export interface HostEventStream {
+  onmessage: ((event: { data: string }) => void) | null;
+  onerror: (() => void) | null;
+  close(): void;
+}
+
+/**
+ * EventSource-shaped subscription to one of the middleware's SSE routes,
+ * carried over the shared control socket. Resubscribes (with backoff) when
+ * the socket drops or the upstream ends, mirroring EventSource's native
+ * auto-reconnect; `onerror` fires on each interruption.
+ */
+export function openHostEventStream(path: string): HostEventStream {
+  const stream: HostEventStream = { onmessage: null, onerror: null, close: () => {} };
+  let closed = false;
+  let subId: number | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let sseBuffer = "";
+
+  const handleChunk = (chunk: string) => {
+    sseBuffer += chunk.replace(/\r\n/g, "\n");
+    let boundary: number;
+    while ((boundary = sseBuffer.indexOf("\n\n")) !== -1) {
+      const block = sseBuffer.slice(0, boundary);
+      sseBuffer = sseBuffer.slice(boundary + 2);
+      const data = block
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).replace(/^ /, ""))
+        .join("\n");
+      if (data) stream.onmessage?.({ data });
+    }
+  };
+
+  const scheduleRetry = () => {
+    if (closed || retryTimer) return;
+    stream.onerror?.();
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void subscribe();
+    }, STREAM_RETRY_MS);
+  };
+
+  const subscribe = async () => {
+    if (closed) return;
+    try {
+      const ws = await openExecSocket();
+      if (closed) return;
+      sseBuffer = "";
+      subId = nextSubId++;
+      activeSubscriptions.set(subId, { onData: handleChunk, onEnd: scheduleRetry });
+      ws.send(JSON.stringify({ sub: subId, path }));
+    } catch {
+      scheduleRetry();
+    }
+  };
+
+  void subscribe();
+
+  stream.close = () => {
+    closed = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    if (subId !== null) {
+      activeSubscriptions.delete(subId);
+      try {
+        openSocket?.send(JSON.stringify({ unsub: subId }));
+      } catch {}
+      subId = null;
+    }
+  };
+  return stream;
 }
 
 export function shellEscape(s: string): string {

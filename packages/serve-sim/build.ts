@@ -112,13 +112,17 @@ const PREVIEW_DEFINE = {
 
 // ─── 3. Middleware ESM (serve-sim/middleware) ─────────────────────────────
 
+// `ws` stays external in the node-target bundles: under Node it resolves to
+// the installed package (a real dependency), and under Bun the module
+// specifier is substituted with Bun's native implementation — inlining the
+// Node implementation would break WebSocket upgrades on Bun.
 const mwResult = await Bun.build({
   entrypoints: [resolve(root, "src/middleware.ts")],
   target: "node",
   format: "esm",
   minify: true,
   outdir: distDir,
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"],
   define: PREVIEW_DEFINE,
 });
 if (!mwResult.success) {
@@ -144,7 +148,7 @@ const binJsResult = await Bun.build({
   minify: true,
   outdir: distDir,
   naming: "serve-sim.js",
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"],
   define: PREVIEW_DEFINE,
 });
 if (!binJsResult.success) {
