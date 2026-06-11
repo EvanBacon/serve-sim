@@ -1,5 +1,6 @@
 import type { DragEvent } from "react";
 import type { ScreenshotToast as ScreenshotToastState } from "../hooks/use-screenshot-toast";
+import { DROP_HOST_PATH_TYPE } from "../utils/drop";
 
 interface ScreenshotToastProps {
   toast: ScreenshotToastState;
@@ -44,6 +45,8 @@ export function ScreenshotToast({
     // blocks `file://` hrefs — the drop then lands as "[…](about:blank#blocked)".
     // Plain text inserts the literal URL into any text field.
     e.dataTransfer.setData("text/plain", fileUrlFor(toast.path));
+    // Dropping onto the simulator adds the screenshot to Photos in place.
+    e.dataTransfer.setData(DROP_HOST_PATH_TYPE, toast.path);
     e.dataTransfer.effectAllowed = "copy";
   };
 

@@ -1,4 +1,4 @@
-import type { ExecResult } from "./exec";
+import { shellEscape, type ExecResult } from "./exec";
 
 // ─── File drop (drag media/ipa onto the simulator) ───
 //
@@ -24,6 +24,24 @@ export const DROP_MEDIA_MIME_TYPES = new Set([
 // uploads (100MB → ~400 calls instead of ~3200 at 32KB).
 export const DROP_CHUNK_SIZE = 262144;
 export const DROP_MAX_FILE_SIZE = 500 * 1024 * 1024;
+
+// Custom drag flavor carrying a path that already exists on the host (e.g. the
+// screenshot pill). Dropping it on the simulator skips the upload and adds the
+// file to Photos in place. A non-text MIME type so text editors ignore it.
+export const DROP_HOST_PATH_TYPE = "application/x-serve-sim-host-path";
+
+// Add a host-resident image/video straight to Photos — no upload round-trip,
+// since the file is already on disk.
+export async function addHostMediaToPhotos(
+  path: string,
+  exec: (command: string) => Promise<ExecResult>,
+  udid: string,
+) {
+  const result = await exec(`xcrun simctl addmedia ${udid} ${shellEscape(path)}`);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr || `addmedia failed (exit ${result.exitCode})`);
+  }
+}
 
 export type DropKind = "media" | "ipa";
 

@@ -1,5 +1,11 @@
 import { useCallback, useRef, useState, type DragEvent } from "react";
-import { type DropKind, dropKindFor, uploadDroppedFile } from "../utils/drop";
+import {
+  type DropKind,
+  addHostMediaToPhotos,
+  dropKindFor,
+  DROP_HOST_PATH_TYPE,
+  uploadDroppedFile,
+} from "../utils/drop";
 import type { ExecResult } from "../utils/exec";
 
 export function useMediaDrop({
@@ -30,6 +36,19 @@ export function useMediaDrop({
       setIsDragOver(false);
 
       if (!enabled || !udid) return;
+
+      // In-app drag (the screenshot pill) hands us a host path — the file is
+      // already on disk, so addmedia it directly instead of uploading.
+      const hostPath = e.dataTransfer.getData(DROP_HOST_PATH_TYPE);
+      if (hostPath) {
+        const name = hostPath.split("/").pop() ?? "image";
+        const id = onUploadStart(name, "media");
+        onUploadProgress(id, null);
+        addHostMediaToPhotos(hostPath, exec, udid)
+          .then(() => onUploadEnd(id, true))
+          .catch((err) => onUploadEnd(id, false, err instanceof Error ? err.message : "Add failed"));
+        return;
+      }
 
       const files = Array.from(e.dataTransfer.files);
       if (files.length === 0) return;
