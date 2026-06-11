@@ -76,9 +76,16 @@ function AxTreeStatus({
   spinner?: boolean;
 }) {
   return (
-    <div className="mt-2 flex items-center justify-center gap-2 py-4 text-[12px] text-white/45">
+    <div
+      role="status"
+      aria-live="polite"
+      className="mt-2 flex items-center justify-center gap-2 py-4 text-[12px] text-white/45"
+    >
       {spinner ? (
-        <span className="size-3.5 shrink-0 rounded-full border-2 border-white/20 border-t-white/60 animate-[grid-spin_0.8s_linear_infinite]" />
+        <span
+          aria-hidden="true"
+          className="size-3.5 shrink-0 rounded-full border-2 border-white/20 border-t-white/60 animate-[grid-spin_0.8s_linear_infinite]"
+        />
       ) : null}
       <span>{children}</span>
     </div>

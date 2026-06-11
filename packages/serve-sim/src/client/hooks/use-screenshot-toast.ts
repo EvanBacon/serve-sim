@@ -21,8 +21,9 @@ const SAVED_DISMISS_MS = 6000;
 const ERROR_DISMISS_MS = 4000;
 
 function timestampSlug(): string {
-  // 2026-06-11T14-12-44 — filesystem-safe, sorts chronologically.
-  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  // 2026-06-11T14-12-44-123 — filesystem-safe, sorts chronologically. Keep the
+  // milliseconds so two captures in the same second don't clobber one file.
+  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
 }
 
 export function useScreenshotToast(deviceUdid?: string | null) {
@@ -82,7 +83,7 @@ export function useScreenshotToast(deviceUdid?: string | null) {
     // `open -R`. The command echoes the path it wrote on success.
     const file = `$HOME/Desktop/serve-sim-screenshot-${timestampSlug()}.png`;
     const capCmd =
-      `F="${file}"; xcrun simctl io ${deviceUdid} screenshot "$F" && printf '%s' "$F"`;
+      `F="${file}"; xcrun simctl io ${shellEscape(deviceUdid)} screenshot "$F" && printf '%s' "$F"`;
 
     let path: string;
     try {
