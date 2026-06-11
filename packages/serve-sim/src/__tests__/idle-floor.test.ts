@@ -190,7 +190,7 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
     }
 
     clearTimeout(timer);
-    try { reader.cancel(); } catch {}
+    try { await reader.cancel(); } catch {}
 
     expect(firstFrameAt).not.toBeNull();
     expect(firstFrameAt).toBeLessThanOrEqual(FIRST_FRAME_BUDGET_MS);
@@ -229,7 +229,7 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
     }
 
     clearTimeout(timer);
-    try { reader.cancel(); } catch {}
+    try { await reader.cancel(); } catch {}
 
     expect(frameCount).toBeGreaterThanOrEqual(MIN_FRAMES_IN_IDLE_WINDOW);
     // Every frame should have a reasonable size — serve-sim emits a real
