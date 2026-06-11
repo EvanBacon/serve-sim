@@ -1,10 +1,14 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { execOnHost, shellEscape } from "../utils/exec";
 
 export type ScreenshotToast = {
   id: string;
   status: "saving" | "saved" | "error";
-  // Absolute path on the host once the capture lands; used by "Open in Finder".
+  // "in" while the pill is showing, "out" once the dismiss timer fires — the
+  // component plays the exit animation, then calls dismiss() to unmount.
+  phase: "in" | "out";
+  // Absolute path on the host once the capture lands; used by "Open in Finder"
+  // and the drag-and-drop file URL.
   path?: string;
   // data: URL of a downscaled preview, filled in best-effort after the save.
   thumb?: string;
@@ -24,36 +28,54 @@ function timestampSlug(): string {
 export function useScreenshotToast(deviceUdid?: string | null) {
   const [toast, setToast] = useState<ScreenshotToast | null>(null);
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Duration of the active toast's timer, so a hover-pause can restart it with
+  // the same budget when the cursor leaves.
+  const dismissMs = useRef(SAVED_DISMISS_MS);
+  // Mirror of `toast` for pause/resume, which run from event handlers and need
+  // the current value without re-creating the callbacks on every render.
+  const toastRef = useRef<ScreenshotToast | null>(null);
+  useEffect(() => {
+    toastRef.current = toast;
+  }, [toast]);
 
   const clearTimer = () => {
     if (dismissTimer.current) clearTimeout(dismissTimer.current);
     dismissTimer.current = null;
   };
 
+  const startTimer = useCallback((id: string, ms: number) => {
+    clearTimer();
+    dismissMs.current = ms;
+    dismissTimer.current = setTimeout(() => {
+      // Hand off to the exit animation rather than yanking the node.
+      setToast((t) => (t?.id === id ? { ...t, phase: "out" } : t));
+    }, ms);
+  }, []);
+
   const dismiss = useCallback(() => {
     clearTimer();
     setToast(null);
   }, []);
 
-  const scheduleDismiss = useCallback((id: string, ms: number) => {
+  // Pause while hovered; restart with a fresh budget when the cursor leaves.
+  const pause = useCallback(() => {
     clearTimer();
-    dismissTimer.current = setTimeout(() => {
-      setToast((t) => (t?.id === id ? null : t));
-    }, ms);
   }, []);
+  const resume = useCallback(() => {
+    const t = toastRef.current;
+    if (t && t.phase === "in" && t.status !== "saving") startTimer(t.id, dismissMs.current);
+  }, [startTimer]);
 
   const reveal = useCallback(() => {
-    setToast((t) => {
-      if (t?.path) void execOnHost(`open -R ${shellEscape(t.path)}`);
-      return t;
-    });
+    const t = toastRef.current;
+    if (t?.path) void execOnHost(`open -R ${shellEscape(t.path)}`);
   }, []);
 
   const capture = useCallback(async () => {
     if (!deviceUdid) return;
     clearTimer();
     const id = crypto.randomUUID();
-    setToast({ id, status: "saving" });
+    setToast({ id, status: "saving", phase: "in" });
 
     // Resolve $HOME shell-side so the saved path comes back absolute — a "~"
     // path would survive shellEscape() as a literal tilde and break the later
@@ -67,22 +89,23 @@ export function useScreenshotToast(deviceUdid?: string | null) {
       const res = await execOnHost(capCmd);
       path = res.stdout.trim();
       if (res.exitCode !== 0 || !path) {
-        setToast({ id, status: "error", message: res.stderr.trim() || "Screenshot failed" });
-        scheduleDismiss(id, ERROR_DISMISS_MS);
+        setToast({ id, status: "error", phase: "in", message: res.stderr.trim() || "Screenshot failed" });
+        startTimer(id, ERROR_DISMISS_MS);
         return;
       }
     } catch (e) {
       setToast({
         id,
         status: "error",
+        phase: "in",
         message: e instanceof Error ? e.message : "Screenshot failed",
       });
-      scheduleDismiss(id, ERROR_DISMISS_MS);
+      startTimer(id, ERROR_DISMISS_MS);
       return;
     }
 
-    setToast({ id, status: "saved", path });
-    scheduleDismiss(id, SAVED_DISMISS_MS);
+    setToast({ id, status: "saved", phase: "in", path });
+    startTimer(id, SAVED_DISMISS_MS);
 
     // Best-effort thumbnail: downscale to a temp PNG, base64 it back, then
     // delete it. Failures (sips missing, etc.) just leave the placeholder.
@@ -100,7 +123,7 @@ export function useScreenshotToast(deviceUdid?: string | null) {
     } catch {
       // ignore — the pill is fully functional without a preview.
     }
-  }, [deviceUdid, scheduleDismiss]);
+  }, [deviceUdid, startTimer]);
 
-  return { toast, capture, reveal, dismiss };
+  return { toast, capture, reveal, dismiss, pause, resume };
 }

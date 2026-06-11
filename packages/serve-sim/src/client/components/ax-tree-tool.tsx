@@ -10,6 +10,7 @@ import {
   axNodeForElement,
   isAxeUnavailable,
 } from "../utils/ax";
+import { SettingSwitch } from "./setting-switch";
 
 const SECTION = "bg-panel border border-white/8 rounded-[10px]";
 const SECTION_TITLE = "text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] m-0";
@@ -31,14 +32,11 @@ export function AxTreeTool({
     <div className={`${SECTION} px-3 py-2`}>
       <div className="flex items-center justify-between gap-2">
         <span className={SECTION_TITLE}>AX Tree</span>
-        <button
-          type="button"
-          onClick={onToggleOverlay}
-          aria-pressed={overlayEnabled}
-          className="border border-white/12 rounded-[5px] bg-transparent text-white/70 cursor-pointer text-[10px] px-[7px] py-[3px]"
-        >
-          {overlayEnabled ? "Overlay on" : "Enable overlay"}
-        </button>
+        <SettingSwitch
+          label="Enable overlay"
+          checked={overlayEnabled}
+          onChange={onToggleOverlay}
+        />
       </div>
       {!overlayEnabled ? (
         null

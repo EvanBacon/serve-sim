@@ -8,6 +8,7 @@ import {
 } from "react";
 import { hostUiRequest } from "../utils/exec";
 import { CollapsibleSection } from "./collapsible-section";
+import { SettingSwitch } from "./setting-switch";
 
 // Simulator-wide UI options, mirroring the Xcode Devices app sidebar. Every
 // control drives `serve-sim ui <option> <value>`, which handles the simctl-
@@ -91,41 +92,6 @@ function SettingRow({
           when it's resized to its narrow end. */}
       <span className="flex min-w-0 justify-end">{children}</span>
     </div>
-  );
-}
-
-function SettingSwitch({
-  label,
-  checked,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  disabled: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={`relative h-[18px] w-8 shrink-0 rounded-full border-none p-0 [transition:background_0.15s] ${
-        disabled
-          ? "cursor-default bg-white/20"
-          : checked
-            ? "cursor-pointer bg-[#0a84ff]"
-            : "cursor-pointer bg-white/20"
-      }`}
-    >
-      <span
-        className={`absolute top-[2px] size-[14px] rounded-full [transition:left_0.15s] ${disabled ? "bg-white/50" : "bg-white"}`}
-        style={{ left: checked ? 16 : 2 }}
-      />
-    </button>
   );
 }
 

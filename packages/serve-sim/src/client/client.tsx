@@ -30,6 +30,7 @@ import { DevicePicker } from "./components/device-picker";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
+import { ScreenshotToast } from "./components/screenshot-toast";
 import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
 import { ToolsPanel } from "./components/tools-panel";
 import { WebKitDevtoolsPanel } from "./components/webkit-devtools-panel";
@@ -907,55 +908,16 @@ function AppWithConfig({
         </div>
       )}
 
-      {/* Screenshot pill — macOS-style "saved" popup with an Open in Finder action. */}
+      {/* Screenshot pill — macOS-style "saved" popup: click reveals in Finder,
+          drag copies the file, and it animates out (timer pauses on hover). */}
       {screenshot.toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40">
-          {screenshot.toast.status === "error" ? (
-            <div className="flex items-center gap-2 px-3.5 py-2.5 bg-panel border border-white/12 rounded-xl text-white/90 text-[12px] shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
-              <span className="size-1.5 rounded-full shrink-0 bg-[#f87171]" />
-              <span className="select-text">{screenshot.toast.message ?? "Screenshot failed"}</span>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={screenshot.reveal}
-              disabled={screenshot.toast.status !== "saved"}
-              aria-label="Open screenshot in Finder"
-              className="group flex items-center gap-3 pl-2 pr-3.5 py-2 bg-panel border border-white/12 rounded-xl shadow-[0_8px_24px_rgba(0,0,0,0.45)] text-left cursor-pointer enabled:hover:bg-[#2a2a2c] disabled:cursor-default [transition:background_0.15s_ease]"
-            >
-              <div className="size-9 rounded-md overflow-hidden bg-white/10 shrink-0 flex items-center justify-center ring-1 ring-white/10">
-                {screenshot.toast.thumb ? (
-                  <img src={screenshot.toast.thumb} alt="" className="size-full object-cover" />
-                ) : (
-                  <span className="block size-4 rounded-full border-2 border-white/30 border-t-white animate-[grid-spin_0.8s_linear_infinite]" />
-                )}
-              </div>
-              <div className="flex flex-col leading-tight">
-                <span className="text-[13px] font-semibold text-white">
-                  {screenshot.toast.status === "saving" ? "Saving Screenshot…" : "Screenshot Saved"}
-                </span>
-                {screenshot.toast.status === "saved" && (
-                  <span className="text-[11px] text-white/60">Open in Finder</span>
-                )}
-              </div>
-              {screenshot.toast.status === "saved" && (
-                <svg
-                  className="ml-1 text-white/80"
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.25"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="9 6 15 12 9 18" />
-                </svg>
-              )}
-            </button>
-          )}
-        </div>
+        <ScreenshotToast
+          toast={screenshot.toast}
+          onReveal={screenshot.reveal}
+          onDismiss={screenshot.dismiss}
+          onPause={screenshot.pause}
+          onResume={screenshot.resume}
+        />
       )}
 
       {/* Right-edge sidebar rail. */}
