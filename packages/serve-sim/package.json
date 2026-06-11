@@ -29,6 +29,7 @@
     "dist/middleware.cjs",
     "dist/simcam/libSimCameraInjector.dylib",
     "dist/simcam/serve-sim-camera-helper",
+    "dist/simax/serve-sim-ax-settings",
     "src/ax-shared.ts",
     "src/ax.ts",
     "src/middleware.ts",
@@ -40,7 +41,9 @@
     "Sources/SimCameraInjector/include/SimCamShared.h",
     "Sources/SimCameraInjector/build.sh",
     "Sources/SimCameraHelper/main.m",
-    "Sources/SimCameraHelper/build.sh"
+    "Sources/SimCameraHelper/build.sh",
+    "Sources/SimAXSettings/sim-ax-settings.m",
+    "Sources/SimAXSettings/build.sh"
   ],
   "exports": {
     "./middleware": {

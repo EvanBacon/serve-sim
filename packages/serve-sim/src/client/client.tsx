@@ -47,7 +47,7 @@ import {
 } from "./avcc-fallback";
 import { parseSimctlList, type SimDevice } from "./utils/devices";
 import { fileExtension } from "./utils/drop";
-import { execOnHost } from "./utils/exec";
+import { execOnHost, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
 import {
   DEVTOOLS_PANEL_WIDTH,
@@ -129,7 +129,7 @@ function App() {
 
     // Server pushes the serve-sim state only when it actually changes (helper
     // boot/shutdown or device selection), so there's no polling loop here.
-    const es = new EventSource(eventsUrl);
+    const es = openHostEventStream(eventsUrl);
     es.onmessage = (event) => {
       try {
         applyConfig(JSON.parse(event.data) as PreviewConfig | null);
@@ -141,7 +141,7 @@ function App() {
   // Stream simctl logs into the browser console with colors + grouping
   useEffect(() => {
     if (!config?.logsEndpoint) return;
-    const es = new EventSource(config.logsEndpoint);
+    const es = openHostEventStream(config.logsEndpoint);
 
     const procColors = new Map<string, string>();
     const palette = [
@@ -481,7 +481,15 @@ function AppWithConfig({
 
   // Subscribe to app-state SSE.
   const [currentApp, setCurrentApp] = useState<{ bundleId: string; isReactNative: boolean; pid?: number } | null>(null);
-  const [panelOpen, setPanelOpen] = useState(false);
+  // Start with the tools panel open when the viewport has room for it beside
+  // the simulator (typical device frame ≈ 420px plus page/panel gutters);
+  // smaller windows keep it closed so the device isn't squeezed on load.
+  const [panelOpen, setPanelOpen] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const stored = Number(window.localStorage.getItem("serve-sim:tools-panel-width"));
+    const panelWidth = Number.isFinite(stored) && stored > 0 ? stored : PANEL_WIDTH;
+    return window.innerWidth >= panelWidth + 480;
+  });
   const { width: toolsPanelWidth, onPointerDown: onToolsResize } = useResizableWidth(
     "serve-sim:tools-panel-width",
     PANEL_WIDTH,
@@ -515,7 +523,7 @@ function AppWithConfig({
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
-    const es = new EventSource(config.appStateEndpoint ?? simEndpoint("appstate"));
+    const es = openHostEventStream(config.appStateEndpoint ?? simEndpoint("appstate"));
     let timer: ReturnType<typeof setTimeout> | null = null;
     es.onmessage = (e) => {
       try {

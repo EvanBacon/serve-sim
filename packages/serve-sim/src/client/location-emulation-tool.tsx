@@ -38,6 +38,7 @@ import {
   StopGlyph,
   WalkGlyph,
 } from "./icons";
+import { CollapsibleSection } from "./components/collapsible-section";
 
 const TRAIL_MORPH_MS = 650;
 
@@ -317,30 +318,27 @@ export function LocationEmulationTool({
     : `${formatDistance(prepared.totalDistance)} total`;
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
-      <style>{HOVER_CSS}</style>
-      <button
-        type="button"
-        onClick={() => setOpen((v: boolean) => !v)}
-        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
-        aria-expanded={open}
-      >
-        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
-        <span className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none">
-          <span
-            className="size-1.5 rounded-full [transition:background_0.2s,box-shadow_0.2s]"
-            style={{
-              background: playing ? "#4ade80" : prepared.totalDistance > 0 ? "rgba(255,255,255,0.3)" : "transparent",
-              boxShadow: playing ? "0 0 6px rgba(74,222,128,0.7)" : "none",
-            }}
-          />
-          {headerStatus}
-        </span>
-        <Chevron open={open} />
-      </button>
-
-      {open && (
+    <CollapsibleSection
+      open={open}
+      onOpenChange={setOpen}
+      summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
+      summary={
         <>
+          <style>{HOVER_CSS}</style>
+          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
+          <span className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none">
+            <span
+              className="size-1.5 rounded-full [transition:background_0.2s,box-shadow_0.2s]"
+              style={{
+                background: playing ? "#4ade80" : prepared.totalDistance > 0 ? "rgba(255,255,255,0.3)" : "transparent",
+                boxShadow: playing ? "0 0 6px rgba(74,222,128,0.7)" : "none",
+              }}
+            />
+            {headerStatus}
+          </span>
+        </>
+      }
+    >
           <div className="flex flex-col gap-1">
             <div className="relative block">
               <select
@@ -429,9 +427,7 @@ export function LocationEmulationTool({
               {error}
             </div>
           )}
-        </>
-      )}
-    </div>
+    </CollapsibleSection>
   );
 }
 

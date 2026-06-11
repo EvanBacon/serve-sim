@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { Chevron, PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
+import { PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
+import { CollapsibleSection } from "./collapsible-section";
 
 export type CamSource = "placeholder" | "image" | "video" | "webcam";
 type CamMirror = "on" | "off";
@@ -693,26 +694,25 @@ export function CameraTool({
         : "placeholder";
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
-        aria-expanded={open}
+    <CollapsibleSection
+      open={open}
+      onOpenChange={setOpen}
+      bodyClassName="pt-2.5"
+      summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
+      summary={
+        <>
+          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Camera</span>
+          <CameraStatusPill state={pillState} />
+        </>
+      }
+    >
+      <div
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+        className="flex flex-col gap-2.5"
       >
-        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Camera</span>
-        <CameraStatusPill state={pillState} />
-        <Chevron open={open} />
-      </button>
-
-      {open && (
-        <div
-          onDragEnter={onDragEnter}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          className="flex flex-col gap-2.5"
-        >
           <p className="m-0 text-[10px] leading-[1.5] text-white/45">
             Replaces the simulator's camera feed by injecting a dylib at app launch
             and streaming frames into shared memory. Pick media or a webcam,
@@ -898,7 +898,6 @@ export function CameraTool({
           {warning && <CameraInlineBanner kind="warning" message={warning} />}
           {error && <CameraInlineBanner kind="error" message={error} />}
         </div>
-      )}
-    </div>
+    </CollapsibleSection>
   );
 }

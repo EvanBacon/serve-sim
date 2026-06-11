@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Chevron, ReloadIcon } from "../icons";
+import { ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
+import { CollapsibleSection } from "./collapsible-section";
 import {
   PERMISSION_SERVICES,
   type PermAction,
@@ -82,26 +83,24 @@ export function AppPermissionsTool({
   }
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
-        aria-expanded={open}
-      >
-        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Permissions</span>
-        <span />
-        <Chevron open={open} />
-      </button>
-
-      {open && error && (
-        <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md mt-2">
+    <CollapsibleSection
+      open={open}
+      onOpenChange={setOpen}
+      summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
+      summary={
+        <>
+          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Permissions</span>
+          <span />
+        </>
+      }
+    >
+      {error && (
+        <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
           {error}
         </div>
       )}
 
-      {open && (
-        <div className="relative mt-2">
+      <div className="relative">
           <div className="max-h-[260px] overflow-y-auto flex flex-col gap-1 py-2 [scrollbar-width:thin]">
             {PERMISSION_SERVICES.map(({ key, label }) => {
               const current = state[key];
@@ -153,21 +152,18 @@ export function AppPermissionsTool({
           <div className="absolute top-0 left-0 right-0 h-[14px] pointer-events-none rounded-t-[10px] bg-[linear-gradient(to_bottom,#1c1c1e_0%,rgba(28,28,30,0)_100%)]" />
           <div className="absolute bottom-0 left-0 right-0 h-[14px] pointer-events-none bg-[linear-gradient(to_top,#1c1c1e_0%,rgba(28,28,30,0)_100%)]" />
         </div>
-      )}
 
-      {open && (
-        <div className="flex justify-end pt-2">
-          <button
-            onClick={resetAll}
-            disabled={pending === "__all__"}
-            className="bg-transparent border border-white/12 text-white/70 text-[10px] px-2 py-[3px] rounded-[5px] cursor-pointer uppercase tracking-[0.04em]"
-            title="serve-sim permissions reset all"
-          >
-            {pending === "__all__" ? "…" : "Reset all"}
-          </button>
-        </div>
-      )}
-    </div>
+      <div className="flex justify-end">
+        <button
+          onClick={resetAll}
+          disabled={pending === "__all__"}
+          className="bg-transparent border border-white/12 text-white/70 text-[10px] px-2 py-[3px] rounded-[5px] cursor-pointer uppercase tracking-[0.04em]"
+          title="serve-sim permissions reset all"
+        >
+          {pending === "__all__" ? "…" : "Reset all"}
+        </button>
+      </div>
+    </CollapsibleSection>
   );
 }
 

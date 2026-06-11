@@ -28,6 +28,12 @@ through `serve-sim` subcommands against a running server:
   that need explicit `begin`/`move`/`end` events.
 - `serve-sim button [home|lock|…] [-d udid]` — hardware button.
 - `serve-sim camera …` — inject the dylib, hot-swap source, toggle mirror.
+- `serve-sim ui <option> [value] [-d udid]` — simulator-wide UI options
+  (appearance, liquid-glass, color-filter, text-size, reduce-motion,
+  increase-contrast, show-borders, reduce-transparency, voiceover); `ui status
+  --json` dumps all. Verify sets via `simctl ui <udid> <option>` readback or
+  `simctl spawn <udid> defaults read` on com.apple.Accessibility /
+  com.apple.mediaaccessibility / com.apple.UIKit.
 - `xcrun simctl openurl booted <url>` — deep-link into apps (faster than
   tapping through Expo Go's recent-projects list).
 

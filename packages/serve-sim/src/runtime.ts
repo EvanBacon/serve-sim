@@ -3,6 +3,7 @@ import { fileURLToPath } from "url";
 import { dirname } from "path";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "http";
 import { createServer as createNetServer } from "net";
+import type { Duplex } from "stream";
 
 export function dirnameOf(metaUrl: string): string {
   return dirname(fileURLToPath(metaUrl));
@@ -28,11 +29,14 @@ export interface PreviewServer {
 }
 
 /** Connect-style middleware signature, matching what `simMiddleware` returns. */
-type ConnectMiddleware = (
+type ConnectMiddleware = ((
   req: IncomingMessage,
   res: ServerResponse,
   next: () => void,
-) => void;
+) => void) & {
+  /** WebSocket upgrade hook (exec channel); returns true when handled. */
+  handleUpgrade?: (req: IncomingMessage, socket: Duplex, head: Buffer) => boolean;
+};
 
 /** Run a Connect-style middleware as an HTTP server. */
 export async function servePreview(opts: {
@@ -51,6 +55,11 @@ export async function servePreview(opts: {
       if (!res.headersSent) res.statusCode = 404;
       res.end("Not found");
     });
+  });
+  // The exec WebSocket channel keeps actions off the browser's per-origin
+  // HTTP connection pool (which the streams below saturate with 2+ tabs).
+  server.on("upgrade", (req, socket, head) => {
+    if (!opts.middleware.handleUpgrade?.(req, socket, head)) socket.destroy();
   });
   // MJPEG streams + SSE log channel are long-lived; clear the default 2-min
   // socket timeout so they don't get torn down mid-stream.

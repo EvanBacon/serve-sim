@@ -207,4 +207,20 @@ if (helperBuild.status !== 0) {
 }
 console.log("dist/simcam/serve-sim-camera-helper");
 
+// ─── 7. sim-ax-settings in-sim CLI (simulator-wide UI settings) ──────────
+
+const axSettingsBuild = spawnSync(
+  "bash",
+  [
+    resolve(root, "Sources/SimAXSettings/build.sh"),
+    resolve(distDir, "simax"),
+  ],
+  { stdio: "inherit" },
+);
+if (axSettingsBuild.status !== 0) {
+  console.error("SimAXSettings build failed.");
+  process.exit(axSettingsBuild.status ?? 1);
+}
+console.log("dist/simax/serve-sim-ax-settings");
+
 console.log("Done.");

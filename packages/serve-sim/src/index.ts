@@ -10,6 +10,7 @@ import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from ".
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { findBootedDevice, resolveDevice } from "./device";
 import { permissions } from "./permissions";
+import { uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
@@ -2000,5 +2001,13 @@ program
   .helpOption(false)
   .argument("[args...]")
   .action((args: string[]) => permissions(args));
+
+program
+  .command("ui")
+  .description("Get or set simulator-wide UI options (see `ui --help`)")
+  .allowUnknownOption(true)
+  .helpOption(false)
+  .argument("[args...]")
+  .action((args: string[]) => uiSettings(args));
 
 await program.parseAsync(process.argv);

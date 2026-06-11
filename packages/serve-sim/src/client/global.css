@@ -24,6 +24,36 @@
   --font-system: -apple-system, system-ui, sans-serif;
 }
 
+/* Collapsible tool sections (<details>) animate open/close height with a
+   CSS-only ::details-content transition. interpolate-size lets `height: auto`
+   participate in the transition; allow-discrete swaps content-visibility at the
+   keyframe boundaries so collapsed content stays out of the a11y tree. */
+@supports (interpolate-size: allow-keywords) {
+  :root {
+    interpolate-size: allow-keywords;
+  }
+}
+
+details.lem-section::details-content {
+  height: 0;
+  overflow: clip;
+  transition:
+    height 0.22s ease,
+    content-visibility 0.22s allow-discrete;
+}
+
+details.lem-section[open]::details-content {
+  height: auto;
+}
+
+/* The Chevron is the disclosure affordance; drop the native marker. */
+details.lem-section > summary {
+  list-style: none;
+}
+details.lem-section > summary::-webkit-details-marker {
+  display: none;
+}
+
 @keyframes grid-spin {
   to { transform: rotate(360deg); }
 }

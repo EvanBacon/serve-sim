@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import type { AxSnapshot } from "../../ax-shared";
 import { isAxeUnavailable } from "../utils/ax";
+import { openHostEventStream } from "../utils/exec";
 
 export function useAxSnapshot(endpoint?: string) {
   const [snapshot, setSnapshot] = useState<AxSnapshot | null>(null);
@@ -15,7 +16,7 @@ export function useAxSnapshot(endpoint?: string) {
 
     setSnapshot(null);
     setStatus("AX waiting");
-    const source = new EventSource(endpoint);
+    const source = openHostEventStream(endpoint);
     source.onmessage = (event) => {
       try {
         const next = JSON.parse(event.data) as AxSnapshot;
@@ -29,9 +30,9 @@ export function useAxSnapshot(endpoint?: string) {
         setStatus("AX parse error");
       }
     };
-    source.addEventListener("error", () => {
+    source.onerror = () => {
       setStatus("AX reconnecting");
-    });
+    };
     return () => source.close();
   }, [endpoint]);
 

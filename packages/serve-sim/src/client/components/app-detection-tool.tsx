@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { type AppDetails, fetchAppDetails } from "../utils/app-icon";
 import { execOnHost, shellEscape } from "../utils/exec";
-import { Chevron } from "../icons";
+import { CollapsibleSection } from "./collapsible-section";
 
 export function AppDetectionTool({
   udid,
@@ -44,43 +44,40 @@ export function AppDetectionTool({
   }
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="lem-toggle flex items-center gap-3 bg-transparent border-none text-white/90 py-2 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px]"
-        aria-expanded={open}
-      >
-        {details.iconDataUrl ? (
-          <img
-            src={details.iconDataUrl}
-            className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
-            alt=""
-          />
-        ) : (
-          <div className="w-10 h-10 rounded-[8px] shrink-0 border border-white/8 bg-white/[0.04]" />
-        )}
-        <div className="min-w-0 flex-1 leading-tight">
-          <div className="text-[13px] font-semibold text-white/90 truncate">
-            {details.displayName ?? details.bundleId}
-            {details.loading && <span className="text-white/45 font-normal"> …</span>}
-          </div>
-          <div className="text-[11px] text-white/55 font-mono truncate" title={details.bundleId}>
-            {details.bundleId}
-          </div>
-        </div>
-        <Chevron open={open} />
-      </button>
-
-      {open && (
+    <CollapsibleSection
+      open={open}
+      onOpenChange={setOpen}
+      summaryClassName="flex items-center gap-3 text-left"
+      summary={
         <>
-          {details.error && (
-            <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
-              {details.error}
-            </div>
+          {details.iconDataUrl ? (
+            <img
+              src={details.iconDataUrl}
+              className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
+              alt=""
+            />
+          ) : (
+            <div className="w-10 h-10 rounded-[8px] shrink-0 border border-white/8 bg-white/[0.04]" />
           )}
+          <div className="min-w-0 flex-1 leading-tight">
+            <div className="text-[13px] font-semibold text-white/90 truncate">
+              {details.displayName ?? details.bundleId}
+              {details.loading && <span className="text-white/45 font-normal"> …</span>}
+            </div>
+            <div className="text-[11px] text-white/55 font-mono truncate" title={details.bundleId}>
+              {details.bundleId}
+            </div>
+          </div>
+        </>
+      }
+    >
+      {details.error && (
+        <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
+          {details.error}
+        </div>
+      )}
 
-          <dl className="m-0 flex flex-col gap-1.5">
+      <dl className="m-0 flex flex-col gap-1.5">
             <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "…" : "—"} />
             <Row label="Min iOS" value={details.minOS ?? (details.loading ? "…" : "—")} />
             <Row label="Executable" value={details.executable ?? (details.loading ? "…" : "—")} />
@@ -106,9 +103,7 @@ export function AppDetectionTool({
               }
             />
           </dl>
-        </>
-      )}
-    </div>
+    </CollapsibleSection>
   );
 }
 
