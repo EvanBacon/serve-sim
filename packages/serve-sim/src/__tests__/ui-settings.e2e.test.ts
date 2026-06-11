@@ -29,13 +29,21 @@ function bootedUdid(): string | null {
 
 const udid = bootedUdid();
 
-// Every `simctl ui` call (reads included) hangs indefinitely on GitHub's
-// headless macOS runners — the booted sim's UI services never come up, the
-// same breakage that keeps the /ax accessibility endpoint stuck there. Probe
-// once with a hard timeout and skip the suite when the host can't do it;
-// locally the full suite runs. The timeout also bounds the probe itself.
+// `simctl ui` hangs *intermittently per-call* on GitHub's shared macOS
+// runners — a probe can succeed and the very next call hang for minutes
+// (the same unwarmed-UI-plane breakage the avcc and ax suites skip around),
+// so no point-in-time health check can gate this reliably. Skip on CI by
+// default; SERVE_SIM_UI_E2E=1 forces the suite on for runners where the
+// simulator UI plane actually works. Off-CI, a bounded probe still guards
+// against a wedged local sim.
+const skipOnCi = !!process.env.CI && process.env.SERVE_SIM_UI_E2E !== "1";
+
 function simctlUiUsable(): boolean {
   if (!udid) return false;
+  if (skipOnCi) {
+    console.warn("[ui-settings.e2e] skipping on CI: `simctl ui` hangs intermittently on shared runners (set SERVE_SIM_UI_E2E=1 to force)");
+    return false;
+  }
   try {
     execFileSync("xcrun", ["simctl", "ui", udid, "appearance"], {
       encoding: "utf-8",
