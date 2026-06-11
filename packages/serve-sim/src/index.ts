@@ -17,6 +17,20 @@ import { debugCli, debugHelper, debugState } from "./debug";
 // CLI works under plain `node` too.
 const __dirname = dirnameOf(import.meta.url);
 
+// Stamped in at build time (see build.ts), mirroring __PREVIEW_HTML_B64__. In
+// the un-bundled dev run the define is absent, so fall back to reading the
+// package.json that sits next to the source / dist bin.
+declare const __SERVE_SIM_VERSION__: string | undefined;
+function resolveVersion(): string {
+  if (typeof __SERVE_SIM_VERSION__ === "string") return __SERVE_SIM_VERSION__;
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 // Embed the Swift helper so `bun build --compile` produces a self-contained
 // `serve-sim` binary. In dev / the un-compiled ESM bin the returned path is a
 // real file on disk; inside a compiled binary it points at bun's virtual FS
@@ -1872,6 +1886,7 @@ const program = new Command();
 program
   .name("serve-sim")
   .description("Stream iOS Simulator to the browser")
+  .version(resolveVersion(), "-v, --version", "Output the serve-sim version")
   .helpOption("-h, --help", "Show this help")
   // The default command: start the preview server (or stream / list / kill).
   .argument("[devices...]", "Simulator(s) to target (udid or name; default: booted)")

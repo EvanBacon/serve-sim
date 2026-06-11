@@ -106,8 +106,13 @@ ${faviconTag}
 const htmlB64 = Buffer.from(html).toString("base64");
 console.log(`preview html      ${kb(html.length)}  (base64 ${kb(htmlB64.length)})`);
 
+const pkgVersion = JSON.parse(
+  readFileSync(resolve(root, "package.json"), "utf-8"),
+).version as string;
+
 const PREVIEW_DEFINE = {
   __PREVIEW_HTML_B64__: JSON.stringify(htmlB64),
+  __SERVE_SIM_VERSION__: JSON.stringify(pkgVersion),
 };
 
 // ─── 3. Middleware ESM (serve-sim/middleware) ─────────────────────────────
@@ -173,6 +178,7 @@ const compile = spawnSync(
     resolve(root, "src/index.ts"),
     "--outfile", resolve(distDir, "serve-sim"),
     "--define", `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
+    "--define", `__SERVE_SIM_VERSION__=${JSON.stringify(pkgVersion)}`,
     // `ws` must stay a runtime-resolved specifier so Bun substitutes its
     // native implementation — bundling the Node implementation breaks
     // upgrades (raw handshake writes never flush under Bun's node:http).
