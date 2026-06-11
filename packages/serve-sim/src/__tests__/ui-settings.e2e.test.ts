@@ -28,11 +28,37 @@ function bootedUdid(): string | null {
 }
 
 const udid = bootedUdid();
-const describeIfSim = udid && existsSync(CLI) ? describe : describe.skip;
+
+// Every `simctl ui` call (reads included) hangs indefinitely on GitHub's
+// headless macOS runners — the booted sim's UI services never come up, the
+// same breakage that keeps the /ax accessibility endpoint stuck there. Probe
+// once with a hard timeout and skip the suite when the host can't do it;
+// locally the full suite runs. The timeout also bounds the probe itself.
+function simctlUiUsable(): boolean {
+  if (!udid) return false;
+  try {
+    execFileSync("xcrun", ["simctl", "ui", udid, "appearance"], {
+      encoding: "utf-8",
+      timeout: 15_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    console.warn("[ui-settings.e2e] skipping: `simctl ui` is not functional on this host");
+    return false;
+  }
+}
+
+const describeIfSim = udid && existsSync(CLI) && simctlUiUsable() ? describe : describe.skip;
+
+// Timeouts on every child call so a wedged simulator fails the test instead
+// of hanging the CI job.
+const EXEC_TIMEOUT_MS = 15_000;
 
 function cli(...args: string[]): string {
   return execFileSync("node", [CLI, "ui", ...args, "-d", udid!], {
     encoding: "utf-8",
+    timeout: EXEC_TIMEOUT_MS,
   }).trim();
 }
 
@@ -41,7 +67,7 @@ function simDefault(domain: string, key: string): string {
     return execFileSync(
       "xcrun",
       ["simctl", "spawn", udid!, "defaults", "read", domain, key],
-      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: EXEC_TIMEOUT_MS },
     ).trim();
   } catch {
     return "<missing>";
@@ -51,6 +77,7 @@ function simDefault(domain: string, key: string): string {
 function simctlUi(subcommand: string): string {
   return execFileSync("xcrun", ["simctl", "ui", udid!, subcommand], {
     encoding: "utf-8",
+    timeout: EXEC_TIMEOUT_MS,
   }).trim();
 }
 
