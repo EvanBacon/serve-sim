@@ -39,13 +39,11 @@ export function ScreenshotToast({
       return;
     }
     onPause();
-    const url = fileUrlFor(toast.path);
-    const name = toast.path.split("/").pop() ?? "screenshot.png";
-    // text/* for dropping the URL into editors and text areas; DownloadURL so
-    // Finder and the desktop accept the screenshot as a file drop.
-    e.dataTransfer.setData("text/uri-list", url);
-    e.dataTransfer.setData("text/plain", url);
-    e.dataTransfer.setData("DownloadURL", `image/png:${name}:${url}`);
+    // Hand over the file URL as plain text only. Offering `text/uri-list` (or
+    // `DownloadURL`) makes rich-text targets build a hyperlink, and Chrome
+    // blocks `file://` hrefs — the drop then lands as "[…](about:blank#blocked)".
+    // Plain text inserts the literal URL into any text field.
+    e.dataTransfer.setData("text/plain", fileUrlFor(toast.path));
     e.dataTransfer.effectAllowed = "copy";
   };
 
