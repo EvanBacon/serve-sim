@@ -106,8 +106,12 @@ export function parseUiArgs(args: string[]): UiArgs {
   let json = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "-d" || a === "--device") device = args[++i];
-    else if (a === "--json") json = true;
+    if (a === "-d" || a === "--device") {
+      if (i + 1 >= args.length) {
+        return { command: "get", json, error: `${a} requires a value` };
+      }
+      device = args[++i];
+    } else if (a === "--json") json = true;
     else rest.push(a);
   }
 

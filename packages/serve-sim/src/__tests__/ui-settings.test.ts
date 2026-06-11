@@ -41,6 +41,11 @@ describe("parseUiArgs", () => {
     expect(parseUiArgs(["sound", "50"]).error).toMatch(/unknown option/i);
   });
 
+  test("dangling -d/--device flag is an error", () => {
+    expect(parseUiArgs(["appearance", "-d"]).error).toMatch(/requires a value/i);
+    expect(parseUiArgs(["status", "--device"]).error).toMatch(/requires a value/i);
+  });
+
   test("invalid value is an error", () => {
     expect(parseUiArgs(["appearance", "blue"]).error).toMatch(/invalid value/i);
   });
