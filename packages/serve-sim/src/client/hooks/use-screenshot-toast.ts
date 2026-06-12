@@ -15,9 +15,10 @@ export type ScreenshotToast = {
   message?: string;
 };
 
-// How long the success pill lingers before auto-dismissing. Long enough to
-// give the user a chance to click "Open in Finder" without it nagging forever.
-const SAVED_DISMISS_MS = 6000;
+// How long the success pill lingers before auto-dismissing. Hovering pauses
+// the timer, so this only needs to be long enough to notice the pill — not to
+// read and act on it.
+const SAVED_DISMISS_MS = 3500;
 const ERROR_DISMISS_MS = 4000;
 
 function timestampSlug(): string {

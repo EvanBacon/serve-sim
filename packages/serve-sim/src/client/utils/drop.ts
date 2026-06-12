@@ -19,10 +19,11 @@ export const DROP_MEDIA_MIME_TYPES = new Set([
   "video/quicktime",
 ]);
 
-// 256KB per chunk. macOS ARG_MAX is 1MB, so this leaves generous headroom
-// for the bash/echo wrapper while sharply cutting round-trips on large .ipa
-// uploads (100MB → ~400 calls instead of ~3200 at 32KB).
-export const DROP_CHUNK_SIZE = 262144;
+// 192KB of raw bytes per chunk → ~256KB of base64 per exec. macOS ARG_MAX is
+// 1MB, so this leaves generous headroom for the bash/echo wrapper while
+// sharply cutting round-trips on large .ipa uploads. Each chunk is decoded by
+// its own `base64 -d`, so chunks are independent of each other.
+export const DROP_CHUNK_BYTES = 196608;
 export const DROP_MAX_FILE_SIZE = 500 * 1024 * 1024;
 
 // Custom drag flavor carrying a path that already exists on the host (e.g. the
@@ -62,8 +63,41 @@ export function dropKindFor(file: File): DropKind | null {
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
+  // 32KB blocks keep fromCharCode's argument count under engine limits while
+  // avoiding a per-byte concat loop that stalls the main thread on big files.
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
   return btoa(binary);
+}
+
+// Stream `file` into `tmpPath` one slice at a time. Reading and encoding per
+// slice (instead of base64ing the whole file up front) keeps peak memory at
+// one chunk regardless of file size and never blocks the main thread long
+// enough to stall the simulator stream.
+async function streamFileToHostPath(
+  file: File,
+  tmpPath: string,
+  exec: (command: string) => Promise<ExecResult>,
+  onProgress?: (fraction: number) => void,
+): Promise<void> {
+  let lastReportedPct = 0;
+  for (let offset = 0; offset < file.size; offset += DROP_CHUNK_BYTES) {
+    const slice = await file.slice(offset, offset + DROP_CHUNK_BYTES).arrayBuffer();
+    const chunk = arrayBufferToBase64(slice);
+    const op = offset === 0 ? ">" : ">>";
+    const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
+    }
+    if (!onProgress) continue;
+    const written = Math.min(offset + DROP_CHUNK_BYTES, file.size);
+    const pct = Math.floor((written / file.size) * 100);
+    if (pct !== lastReportedPct) {
+      lastReportedPct = pct;
+      onProgress(written / file.size);
+    }
+  }
 }
 
 // Stream a file to /tmp via the /exec base64 chunk loop. Used by the camera
@@ -79,16 +113,7 @@ export async function uploadFileToTmp(
     throw new Error("File too large (max 500MB)");
   }
   const tmpPath = `/tmp/${prefix}-${crypto.randomUUID()}.${ext}`;
-  const buffer = await file.arrayBuffer();
-  const b64 = arrayBufferToBase64(buffer);
-  for (let offset = 0; offset < b64.length; offset += DROP_CHUNK_SIZE) {
-    const chunk = b64.slice(offset, offset + DROP_CHUNK_SIZE);
-    const op = offset === 0 ? ">" : ">>";
-    const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
-    }
-  }
+  await streamFileToHostPath(file, tmpPath, exec);
   return tmpPath;
 }
 
@@ -109,24 +134,7 @@ export async function uploadDroppedFile(
 
   try {
     onProgress(0);
-    const buffer = await file.arrayBuffer();
-    const b64 = arrayBufferToBase64(buffer);
-
-    let lastReportedPct = 0;
-    for (let offset = 0; offset < b64.length; offset += DROP_CHUNK_SIZE) {
-      const chunk = b64.slice(offset, offset + DROP_CHUNK_SIZE);
-      const op = offset === 0 ? ">" : ">>";
-      const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
-      if (result.exitCode !== 0) {
-        throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
-      }
-      const written = Math.min(offset + DROP_CHUNK_SIZE, b64.length);
-      const pct = Math.floor((written / b64.length) * 100);
-      if (pct !== lastReportedPct) {
-        lastReportedPct = pct;
-        onProgress(written / b64.length);
-      }
-    }
+    await streamFileToHostPath(file, tmpPath, exec, onProgress);
 
     // install/addmedia gives no progress signal — flip to indeterminate.
     onProgress(null);

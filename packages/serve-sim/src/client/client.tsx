@@ -833,7 +833,10 @@ function AppWithConfig({
           {axOverlayEnabled && <AxDomOverlay />}
           {mediaDrop.isDragOver && (
             <div
-              className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-accent bg-[rgba(99,102,241,0.12)] backdrop-blur-[2px] text-accent pointer-events-none z-20"
+              // No backdrop-blur here: the canvas underneath repaints every
+              // stream frame, and backdrop-filter forces a full re-blur per
+              // frame for the whole drag — the tint alone stays cheap.
+              className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-accent bg-[rgba(99,102,241,0.18)] text-accent pointer-events-none z-20"
               style={{ borderRadius: imgBorderRadius }}
             >
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
