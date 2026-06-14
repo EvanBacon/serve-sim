@@ -1870,6 +1870,7 @@ function getTailscaleName(): string | null {
     const output = execFileSync("tailscale", ["status", "--json"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5_000,
     });
     const status = JSON.parse(output) as {
       BackendState?: string;
@@ -1882,14 +1883,17 @@ function getTailscaleName(): string | null {
   }
 }
 
-function installTailscaleShareCleanup(target: string): void {
+function installTailscaleShareCleanup(command: "serve" | "funnel", target: string): void {
   let cleaned = false;
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
     try {
-      if (tailscaleServeTargets(target)) {
-        execFileSync("tailscale", ["serve", "clear", "https:443"], { stdio: "ignore" });
+      if (tailscaleTargets(command, target)) {
+        execFileSync("tailscale", [command, "--bg", target, "off"], {
+          stdio: "ignore",
+          timeout: 5_000,
+        });
       }
     } catch {}
   };
@@ -1905,10 +1909,11 @@ function installTailscaleShareCleanup(target: string): void {
   process.once("exit", cleanup);
 }
 
-function tailscaleServeTargets(target: string): boolean {
-  const output = execFileSync("tailscale", ["serve", "status", "--json"], {
+function tailscaleTargets(command: "serve" | "funnel", target: string): boolean {
+  const output = execFileSync("tailscale", [command, "status", "--json"], {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "ignore"],
+    timeout: 5_000,
   });
   return collectStrings(JSON.parse(output)).some((value) => matchesServeTarget(value, target));
 }
@@ -1932,6 +1937,10 @@ function matchesServeTarget(value: string, target: string): boolean {
   }
 }
 
+function formatHostForUrl(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
 async function share(
   servePort: number,
   devices: string[],
@@ -1941,10 +1950,13 @@ async function share(
 ) {
   const shareHost = host === "0.0.0.0" ? "127.0.0.1" : host;
   await serve(servePort, devices, portExplicit, host, ({ port }) => {
-    const target = `http://${shareHost}:${port}`;
+    const target = `http://${formatHostForUrl(shareHost)}:${port}`;
     const command = publicFunnel ? "funnel" : "serve";
-    execFileSync("tailscale", [command, "--bg", target], { stdio: "ignore" });
-    installTailscaleShareCleanup(target);
+    execFileSync("tailscale", [command, "--bg", target], {
+      stdio: "ignore",
+      timeout: 10_000,
+    });
+    installTailscaleShareCleanup(command, target);
 
     const name = getTailscaleName();
     const url = name ? `https://${name}` : "(run `tailscale serve status` for URL)";

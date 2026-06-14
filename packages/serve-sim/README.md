@@ -124,7 +124,7 @@ Multiple booted simulators are supported — pass several device names, or leave
 
 ### Remote access with Tailscale
 
-`serve-sim share [device]` starts the normal preview server and publishes it with [Tailscale Serve](https://tailscale.com/kb/1247/funnel-serve-use-cases) so other devices in your private tailnet can open it. Private tailnet Serve is the default. Use `--public` only when you explicitly want Tailscale Funnel.
+`serve-sim share [devices...]` starts the normal preview server and publishes it with [Tailscale Serve](https://tailscale.com/kb/1247/funnel-serve-use-cases) so other devices in your private tailnet can open it. Private tailnet Serve is the default. Use `--public` only when you explicitly want Tailscale Funnel.
 
 > **Security:** the shared URL exposes live simulator video and browser controls. Anyone who can open it can interact with the simulator. Share only with trusted users and stop the server when done.
 
