@@ -41,9 +41,7 @@ final class FrameCapture {
     func start(deviceUDID: String, onFrame: @escaping (CVPixelBuffer, CMTime) -> Void) throws {
         self.onFrame = onFrame
 
-        _ = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW)
-        _ = dlopen("/Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit", RTLD_NOW)
-
+        SimFrameworks.load()
         guard let device = Self.findSimDevice(udid: deviceUDID) else {
             throw makeError(1, "Device \(deviceUDID) not found")
         }
@@ -297,7 +295,7 @@ final class FrameCapture {
 
     static func findSimDevice(udid: String) -> NSObject? {
         guard let contextClass = NSClassFromString("SimServiceContext") as? NSObject.Type else { return nil }
-        let developerDir = getDeveloperDir()
+        let developerDir = Xcode.developerDir()
         let sharedSel = NSSelectorFromString("sharedServiceContextForDeveloperDir:error:")
         guard let context = contextClass.perform(sharedSel, with: developerDir, with: nil)?
                 .takeUnretainedValue() as? NSObject else { return nil }
@@ -308,17 +306,5 @@ final class FrameCapture {
         return devices.first(where: {
             ($0.value(forKey: "UDID") as? NSUUID)?.uuidString == udid
         })
-    }
-
-    static func getDeveloperDir() -> String {
-        let pipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
-        process.arguments = ["-p"]
-        process.standardOutput = pipe
-        try? process.run()
-        process.waitUntilExit()
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "/Applications/Xcode.app/Contents/Developer"
     }
 }

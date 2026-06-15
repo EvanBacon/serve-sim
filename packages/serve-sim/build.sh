@@ -6,15 +6,13 @@ cd "$SCRIPT_DIR"
 
 echo "Building serve-sim-bin (arm64)..."
 
-export DEVELOPER_DIR=$(xcode-select -p)
+SWIFT_BUILD_ARGS=(-c release --arch arm64 --build-path .build)
 
-swift build \
-    -c release \
-    --arch arm64 \
-    --build-path .build
+swift build "${SWIFT_BUILD_ARGS[@]}"
+BIN_DIR="$(swift build "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)"
 
 mkdir -p bin
-cp .build/arm64-apple-macosx/release/serve-sim-bin bin/serve-sim-bin
+cp "$BIN_DIR/serve-sim-bin" bin/serve-sim-bin
 
 # Re-sign after copy (required for framework linking)
 codesign -s - -f bin/serve-sim-bin 2>/dev/null

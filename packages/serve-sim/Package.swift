@@ -1,10 +1,5 @@
 // swift-tools-version: 5.9
 import PackageDescription
-import Foundation
-
-let developerDir = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
-    ?? "/Applications/Xcode.app/Contents/Developer"
-let privateFrameworks = "\(developerDir)/Library/PrivateFrameworks"
 
 let package = Package(
     name: "SimStreamHelper",
@@ -19,21 +14,7 @@ let package = Package(
                 .product(name: "Swifter", package: "swifter"),
             ],
             path: "Sources/SimStreamHelper",
-            swiftSettings: [
-                .unsafeFlags([
-                    "-F/Library/Developer/PrivateFrameworks",
-                    "-F\(privateFrameworks)",
-                ]),
-            ],
             linkerSettings: [
-                .unsafeFlags([
-                    "-F/Library/Developer/PrivateFrameworks",
-                    "-F\(privateFrameworks)",
-                    "-Xlinker", "-rpath", "-Xlinker", "/Library/Developer/PrivateFrameworks",
-                    "-Xlinker", "-rpath", "-Xlinker", "\(privateFrameworks)",
-                ]),
-                .linkedFramework("CoreSimulator"),
-                .linkedFramework("SimulatorKit"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),

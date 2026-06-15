@@ -42,9 +42,7 @@ final class HIDInjector {
     private var digitalCrownFunc: IndigoDigitalCrownFunc?
 
     func setup(deviceUDID: String) throws {
-        _ = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW)
-        _ = dlopen("/Applications/Xcode.app/Contents/Developer/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit", RTLD_NOW)
-
+        SimFrameworks.load()
         guard let device = FrameCapture.findSimDevice(udid: deviceUDID) else {
             throw NSError(domain: "HIDInjector", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Device \(deviceUDID) not found"])
