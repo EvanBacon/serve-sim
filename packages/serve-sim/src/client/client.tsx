@@ -913,6 +913,7 @@ function AppWithConfig({
             aria-pressed={gridOpen}
             title="Simulators"
             hideSubtitle
+            hideChevron
             style={{
               maxWidth: "min(230px, calc(100vw - 170px))",
             }}
@@ -998,50 +999,71 @@ function AppWithConfig({
             visible={simulatorResize.isResizing || simulatorResize.isInertia}
           />
         </div>
-        <SimulatorToolbar
-          exec={execOnHost}
-          onRotate={rotateDevice}
-          orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
-          deviceUdid={config.device}
-          deviceName={deviceName}
-          deviceRuntime={deviceRuntime}
-          streaming={streaming}
-          aria-label="Simulator actions"
-          style={{
-            alignSelf: "center",
-            width: "auto",
-            minWidth: 0,
-            maxWidth: "100%",
-            justifyContent: "center",
-            padding: "6px 8px",
-            borderRadius: 18,
-          }}
-        >
-          <SimulatorToolbar.Actions>
-            {currentApp?.isReactNative && (
-              <SimulatorToolbar.Button
-                aria-label="Reload React Native bundle"
-                title="Reload (Cmd+R)"
-                onClick={() => void sendReactNativeReload()}
-              >
-                <ReloadIcon />
-              </SimulatorToolbar.Button>
-            )}
-            <SimulatorToolbar.HomeButton
-              onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-            />
-            <SimulatorToolbar.ScreenshotButton
-              title="Screenshot"
-              onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
-            />
+        <div className="relative inline-flex items-center justify-center">
+          <SimulatorToolbar
+            exec={execOnHost}
+            onRotate={rotateDevice}
+            orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+            deviceUdid={config.device}
+            deviceName={deviceName}
+            deviceRuntime={deviceRuntime}
+            streaming={streaming}
+            aria-label="Simulator actions"
+            style={{
+              alignSelf: "center",
+              width: "auto",
+              minWidth: 0,
+              maxWidth: "100%",
+              justifyContent: "center",
+              padding: "6px 8px",
+              borderRadius: 18,
+            }}
+          >
+            <SimulatorToolbar.Actions>
+              {currentApp?.isReactNative && (
+                <SimulatorToolbar.Button
+                  aria-label="Reload React Native bundle"
+                  title="Reload (Cmd+R)"
+                  onClick={() => void sendReactNativeReload()}
+                >
+                  <ReloadIcon />
+                </SimulatorToolbar.Button>
+              )}
+              <SimulatorToolbar.HomeButton
+                onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
+              />
+              <SimulatorToolbar.ScreenshotButton
+                title="Screenshot"
+                onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
+              />
+              <SimulatorToolbar.RotateButton title="Rotate device" />
+            </SimulatorToolbar.Actions>
+          </SimulatorToolbar>
+          <SimulatorToolbar
+            exec={execOnHost}
+            onRotate={rotateDevice}
+            orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+            deviceUdid={config.device}
+            deviceName={deviceName}
+            deviceRuntime={deviceRuntime}
+            streaming={streaming}
+            aria-label="Accessibility overlay"
+            className="absolute left-full ml-2"
+            style={{
+              width: "auto",
+              minWidth: 0,
+              justifyContent: "center",
+              padding: 6,
+              borderRadius: 18,
+            }}
+          >
             <AxToolbarButton
               overlayEnabled={axOverlayEnabled}
               streaming={streaming}
               onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
             />
-            <SimulatorToolbar.RotateButton title="Rotate device" />
-          </SimulatorToolbar.Actions>
-        </SimulatorToolbar>
+          </SimulatorToolbar>
+        </div>
       </div>
 
       {/* Upload toasts */}

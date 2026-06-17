@@ -63,6 +63,11 @@ details.lem-section > summary::-webkit-details-marker {
   display: none;
 }
 
+.lem-chevron {
+  transform-origin: center;
+  transition: transform 160ms ease, color 120ms ease;
+}
+
 @keyframes grid-spin {
   to { transform: rotate(360deg); }
 }

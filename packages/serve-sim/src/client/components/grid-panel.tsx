@@ -34,8 +34,10 @@ export function GridPanel({
   shuttingDown: Record<string, boolean>;
   onShutdown: (udid: string) => void;
 }) {
-  const config = window.__SIM_PREVIEW__;
-  const memoryEndpoint = config?.gridMemoryEndpoint ?? simEndpoint("grid/api/memory");
+  const config = typeof window === "undefined" ? undefined : window.__SIM_PREVIEW__;
+  const memoryEndpoint =
+    config?.gridMemoryEndpoint ??
+    (typeof window === "undefined" ? undefined : simEndpoint("grid/api/memory"));
   const memory = useGridMemory(memoryEndpoint, open);
 
   const [query, setQuery] = useState("");
@@ -87,31 +89,41 @@ export function GridPanel({
         </label>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-2">
-        {filtered === null ? null : filtered.length === 0 ? (
-          <div className="px-2 py-6 text-white/40 text-[12px] text-center">
-            {query ? "No matching simulators." : "No iOS simulators available."}
-          </div>
-        ) : (
-          <>
-            <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
-              Available
+      <div className="relative flex-1 min-h-0">
+        <div className="h-full min-h-0 overflow-y-auto px-2 py-2 [scrollbar-width:thin]">
+          {filtered === null ? null : filtered.length === 0 ? (
+            <div className="px-2 py-6 text-white/40 text-[12px] text-center">
+              {query ? "No matching simulators." : "No iOS simulators available."}
             </div>
-            <div className="flex flex-col gap-0.5">
-              {filtered.map((d) => (
-                <DeviceRow
-                  key={d.device}
-                  device={d}
-                  active={d.device === selectedUdid}
-                  starting={!!starting[d.device]}
-                  shuttingDown={!!shuttingDown[d.device]}
-                  onSelect={() => onSelect(d.device)}
-                  onShutdown={() => onShutdown(d.device)}
-                />
-              ))}
-            </div>
-          </>
-        )}
+          ) : (
+            <>
+              <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+                Available
+              </div>
+              <div className="flex flex-col gap-0.5 pb-1">
+                {filtered.map((d) => (
+                  <DeviceRow
+                    key={d.device}
+                    device={d}
+                    active={d.device === selectedUdid}
+                    starting={!!starting[d.device]}
+                    shuttingDown={!!shuttingDown[d.device]}
+                    onSelect={() => onSelect(d.device)}
+                    onShutdown={() => onShutdown(d.device)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+        <div
+          data-testid="device-list-top-fade"
+          className="absolute top-0 left-0 right-0 h-[16px] pointer-events-none bg-[linear-gradient(to_bottom,rgba(20,20,22,0.96)_0%,rgba(20,20,22,0)_100%)]"
+        />
+        <div
+          data-testid="device-list-bottom-fade"
+          className="absolute bottom-0 left-0 right-0 h-[16px] pointer-events-none bg-[linear-gradient(to_top,rgba(20,20,22,0.96)_0%,rgba(20,20,22,0)_100%)]"
+        />
       </div>
 
       {memory && memory.totalBytes > 0 && (

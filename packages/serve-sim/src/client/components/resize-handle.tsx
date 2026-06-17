@@ -21,10 +21,11 @@ export function ResizeHandle({
   const [active, setActive] = useState(false);
   const hot = hover || active;
   // A right-edge panel sits at right:12 — its draggable (left) border is at
-  // right:(12 + panelWidth - 1). A left-edge sidebar sits at left:12 — its
-  // draggable (right) border is at left:(12 + panelWidth - 1). Center the
-  // 16px hit target on whichever border is interior.
-  const handleOffset = 12 + panelWidth - 9;
+  // right:(12 + panelWidth - 1). The flush left sidebar sits at left:0, so its
+  // draggable right border is at left:(panelWidth - 1). Center the 16px hit
+  // target on whichever border is interior.
+  const handleOffset = (side === "left" ? 0 : 12) + panelWidth - 9;
+  const edgeClass = side === "left" ? "top-0 bottom-0" : "top-3 bottom-3";
   return (
     <div
       role="separator"
@@ -39,7 +40,7 @@ export function ResizeHandle({
       onPointerCancel={() => setActive(false)}
       onPointerEnter={() => setHover(true)}
       onPointerLeave={() => setHover(false)}
-      className={`fixed top-3 bottom-3 w-4 z-36 cursor-col-resize touch-none transition-opacity duration-200 ${visible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
+      className={`fixed ${edgeClass} w-4 z-36 cursor-col-resize touch-none transition-opacity duration-200 ${visible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
       style={side === "left" ? { left: handleOffset } : { right: handleOffset }}
     >
       {/* Subtle hairline accent that brightens the panel's existing border

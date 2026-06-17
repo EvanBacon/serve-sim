@@ -35,7 +35,7 @@ export function DeviceRow({
     ? "Shutting down…"
     : isBooted
     ? "Booted"
-    : "Simulator";
+    : null;
   const dotColor = helper ? "#34d399" : isBooted ? "#e9a13b" : null;
 
   return (
@@ -51,7 +51,9 @@ export function DeviceRow({
         }
       }}
       className={`group relative flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer select-none [transition:background_0.12s] ${
-        active ? "bg-[#0a84ff] text-white" : "text-white/90 hover:bg-white/8"
+        active
+          ? "bg-white/10 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)]"
+          : "text-white/90 hover:bg-white/8"
       }`}
     >
       <div
@@ -81,13 +83,15 @@ export function DeviceRow({
 
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13px] font-semibold leading-tight">{device.name}</div>
-        <div
-          className={`truncate text-[11px] leading-tight ${
-            active ? "text-white/75" : helper ? "text-[#34d399]" : "text-white/45"
-          }`}
-        >
-          {status}
-        </div>
+        {status && (
+          <div
+            className={`truncate text-[11px] leading-tight ${
+              active ? "text-white/75" : helper ? "text-[#34d399]" : "text-white/45"
+            }`}
+          >
+            {status}
+          </div>
+        )}
       </div>
 
       {(helper || isBooted) && (

@@ -1,4 +1,5 @@
 export const SIMULATOR_RESIZE_MIN_WIDTH = 280;
+export const SIMULATOR_RESIZE_ABSOLUTE_MIN_WIDTH = 180;
 export const SIMULATOR_RESIZE_MAX_SCALE = 3;
 export const SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME = 136;
 export const SIMULATOR_RESIZE_DRAG_TRANSITION = "width 70ms linear";
@@ -77,16 +78,19 @@ export function getSimulatorFrameMaxWidth(
   const scaledMaxWidth = defaultWidth * SIMULATOR_RESIZE_MAX_SCALE;
   const viewportMaxWidth =
     viewportWidth > 0
-      ? Math.max(SIMULATOR_RESIZE_MIN_WIDTH, viewportWidth - 48)
+      ? Math.max(SIMULATOR_RESIZE_ABSOLUTE_MIN_WIDTH, viewportWidth - 48)
       : scaledMaxWidth;
   const viewportMaxHeight =
     viewportHeight > 0 && Number.isFinite(aspectRatio) && aspectRatio > 0
       ? Math.max(
-          SIMULATOR_RESIZE_MIN_WIDTH,
+          SIMULATOR_RESIZE_ABSOLUTE_MIN_WIDTH,
           (viewportHeight - SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME) * aspectRatio,
         )
       : scaledMaxWidth;
-  return Math.min(scaledMaxWidth, viewportMaxWidth, viewportMaxHeight);
+  return Math.max(
+    SIMULATOR_RESIZE_ABSOLUTE_MIN_WIDTH,
+    Math.min(scaledMaxWidth, viewportMaxWidth, viewportMaxHeight),
+  );
 }
 
 export function clampSimulatorFrameWidth(
