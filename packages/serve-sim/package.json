@@ -70,6 +70,7 @@
     "bun-plugin-tailwind": "^0.1.2",
     "commander": "^14.0.1",
     "debug": "^4.4.3",
+    "lucide-react": "^1.20.0",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

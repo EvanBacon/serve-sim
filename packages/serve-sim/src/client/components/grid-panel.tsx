@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { PanelRight, Search, X } from "lucide-react";
 import { Panel, PanelHeader, PanelTitle } from "../Panel";
 import { useGridMemory } from "../hooks/use-grid-memory";
 import { type GridDevice, runtimeLabel } from "../utils/grid";
@@ -59,23 +60,14 @@ export function GridPanel({
           aria-pressed
           title="Devices"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <path d="M9 3v2" />
-            <path d="M9 9v1" />
-            <path d="M9 14v1" />
-            <path d="M9 19v2" />
-          </svg>
+          <PanelRight size={18} strokeWidth={1.75} />
         </button>
         <PanelTitle>Devices</PanelTitle>
       </PanelHeader>
 
       <div className="px-3 pb-2 pt-0.5 shrink-0">
         <label className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-white/6 focus-within:bg-white/10 [transition:background_0.12s]">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/40 shrink-0">
-            <circle cx="11" cy="11" r="7" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
+          <Search size={14} strokeWidth={2} className="text-white/40 shrink-0" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -89,10 +81,7 @@ export function GridPanel({
               onClick={() => setQuery("")}
               className="shrink-0 grid place-items-center size-4 rounded-full bg-white/15 text-white/70 hover:bg-white/25"
             >
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
+              <X size={9} strokeWidth={3} />
             </button>
           )}
         </label>
