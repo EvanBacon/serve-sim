@@ -1,154 +1,120 @@
-import { useCallback, useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "../Panel";
-import { useGridDevices } from "../hooks/use-grid-devices";
 import { useGridMemory } from "../hooks/use-grid-memory";
-import { type GridDevice, gridPreviewHref } from "../utils/grid";
+import { type GridDevice, runtimeLabel } from "../utils/grid";
+import { simEndpoint } from "../utils/sim-endpoint";
 import { GridCapacityBanner } from "./grid-capacity-banner";
-import { GridTile } from "./grid-tile";
+import { DeviceRow } from "./device-row";
 
+// The device sidebar: the merged picker + grid. A search field, a scrollable
+// list of horizontal device rows (Xcode-style), and a capacity footer. Device
+// data and start/shutdown actions are owned by App so selecting a row can swap
+// the main stream instantly — this component is presentational.
 export function GridPanel({
   open,
   onClose,
-  currentUdid,
   width,
+  side = "right",
+  devices,
+  selectedUdid,
+  onSelect,
+  starting,
+  shuttingDown,
+  onShutdown,
 }: {
   open: boolean;
   onClose: () => void;
-  currentUdid: string;
   width: number;
+  side?: "left" | "right";
+  devices: GridDevice[] | null;
+  selectedUdid: string | null;
+  onSelect: (udid: string) => void;
+  starting: Record<string, boolean>;
+  shuttingDown: Record<string, boolean>;
+  onShutdown: (udid: string) => void;
 }) {
   const config = window.__SIM_PREVIEW__;
-  const apiEndpoint = config?.gridApiEndpoint;
-  const startEndpoint = config?.gridStartEndpoint;
-  const shutdownEndpoint = config?.gridShutdownEndpoint;
-  const memoryEndpoint = config?.gridMemoryEndpoint;
-  const previewEndpoint = config?.previewEndpoint ?? "/";
-
-  const [pending, setPending] = useState<Record<string, boolean>>({});
-  const [shuttingDown, setShuttingDown] = useState<Record<string, boolean>>({});
-  const [errors, setErrors] = useState<Record<string, string | null>>({});
-  const hasPending =
-    Object.values(pending).some(Boolean) || Object.values(shuttingDown).some(Boolean);
-  const { devices, refresh } = useGridDevices(apiEndpoint, open, hasPending);
+  const memoryEndpoint = config?.gridMemoryEndpoint ?? simEndpoint("grid/api/memory");
   const memory = useGridMemory(memoryEndpoint, open);
 
-  const waitForHelper = useCallback(
-    async (udid: string, timeoutMs = 20_000): Promise<GridDevice | null> => {
-      if (!apiEndpoint) return null;
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        try {
-          const res = await fetch(apiEndpoint, { cache: "no-store" });
-          const json = await res.json();
-          const found = (json.devices ?? []).find(
-            (d: GridDevice) => d.device === udid && d.helper,
-          );
-          if (found) return found;
-        } catch {}
-        await new Promise((r) => setTimeout(r, 400));
-      }
-      return null;
-    },
-    [apiEndpoint],
-  );
-
-  const start = useCallback(
-    async (udid: string) => {
-      if (!startEndpoint) return;
-      setPending((p) => ({ ...p, [udid]: true }));
-      setErrors((e) => ({ ...e, [udid]: null }));
-      try {
-        const res = await fetch(startEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok || !json.ok) {
-          setErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
-          return;
-        }
-        const ready = await waitForHelper(udid);
-        if (ready) {
-          window.location.assign(gridPreviewHref(previewEndpoint, udid));
-          return;
-        }
-        setErrors((e) => ({ ...e, [udid]: "Helper did not register in time" }));
-      } catch (err: any) {
-        setErrors((e) => ({ ...e, [udid]: err?.message ?? "Request failed" }));
-      } finally {
-        setPending((p) => ({ ...p, [udid]: false }));
-        refresh();
-      }
-    },
-    [startEndpoint, refresh, waitForHelper, previewEndpoint],
-  );
-
-  // If the currently-focused simulator's helper disappears from the API,
-  // hop to another live helper.
-  useEffect(() => {
-    if (!devices || !currentUdid) return;
-    const current = devices.find((d) => d.device === currentUdid);
-    if (current?.helper) return;
-    const next = devices.find((d) => d.helper && d.device !== currentUdid);
-    window.location.assign(
-      next ? gridPreviewHref(previewEndpoint, next.device) : previewEndpoint,
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q || !devices) return devices;
+    return devices.filter(
+      (d) =>
+        d.name.toLowerCase().includes(q) ||
+        runtimeLabel(d.runtime).toLowerCase().includes(q),
     );
-  }, [devices, currentUdid, previewEndpoint]);
-
-  const shutdown = useCallback(
-    async (udid: string) => {
-      if (!shutdownEndpoint) return;
-      setShuttingDown((s) => ({ ...s, [udid]: true }));
-      setErrors((e) => ({ ...e, [udid]: null }));
-      try {
-        const res = await fetch(shutdownEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok || !json.ok) {
-          setErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
-        }
-      } catch (err: any) {
-        setErrors((e) => ({ ...e, [udid]: err?.message ?? "Request failed" }));
-      } finally {
-        setShuttingDown((s) => ({ ...s, [udid]: false }));
-        refresh();
-      }
-    },
-    [shutdownEndpoint, refresh],
-  );
+  }, [devices, query]);
 
   return (
-    <Panel open={open} width={width}>
+    <Panel open={open} width={width} side={side}>
       <PanelHeader>
         <PanelTitle>Simulators</PanelTitle>
-        <div className="flex items-center gap-2">
-          <GridCapacityBanner report={memory} />
-          <PanelCloseButton onClick={onClose} />
-        </div>
+        <PanelCloseButton onClick={onClose} />
       </PanelHeader>
-      <div className="flex-1 min-h-0 overflow-y-auto p-3.5 grid auto-rows-[minmax(300px,auto)] gap-3 content-start grid-cols-[repeat(auto-fill,minmax(200px,1fr))]">
-        {devices === null ? null : devices.length === 0 ? (
-          <div className="col-span-full bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">No iOS simulators available.</div>
+
+      <div className="px-3 pb-2 pt-0.5 shrink-0">
+        <label className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-white/6 focus-within:bg-white/10 [transition:background_0.12s]">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/40 shrink-0">
+            <circle cx="11" cy="11" r="7" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search"
+            className="min-w-0 flex-1 bg-transparent border-none outline-none text-[13px] text-white/90 placeholder:text-white/40"
+          />
+          {query && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => setQuery("")}
+              className="shrink-0 grid place-items-center size-4 rounded-full bg-white/15 text-white/70 hover:bg-white/25"
+            >
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          )}
+        </label>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-2">
+        {filtered === null ? null : filtered.length === 0 ? (
+          <div className="px-2 py-6 text-white/40 text-[12px] text-center">
+            {query ? "No matching simulators." : "No iOS simulators available."}
+          </div>
         ) : (
-          devices.map((d) => (
-            <GridTile
-              key={d.device}
-              device={d}
-              active={d.device === currentUdid}
-              previewEndpoint={previewEndpoint}
-              starting={!!pending[d.device]}
-              shuttingDown={!!shuttingDown[d.device]}
-              error={errors[d.device] ?? null}
-              onStart={() => start(d.device)}
-              onShutdown={() => shutdown(d.device)}
-            />
-          ))
+          <>
+            <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+              Available
+            </div>
+            <div className="flex flex-col gap-0.5">
+              {filtered.map((d) => (
+                <DeviceRow
+                  key={d.device}
+                  device={d}
+                  active={d.device === selectedUdid}
+                  starting={!!starting[d.device]}
+                  shuttingDown={!!shuttingDown[d.device]}
+                  onSelect={() => onSelect(d.device)}
+                  onShutdown={() => onShutdown(d.device)}
+                />
+              ))}
+            </div>
+          </>
         )}
       </div>
+
+      {memory && memory.totalBytes > 0 && (
+        <div className="shrink-0 px-3 py-2 border-t border-white/8 flex justify-center">
+          <GridCapacityBanner report={memory} />
+        </div>
+      )}
     </Panel>
   );
 }

@@ -5,18 +5,22 @@ export function Panel({
   width,
   children,
   style,
+  side = "right",
 }: {
   open: boolean;
   width: number;
   children: ReactNode;
   style?: CSSProperties;
+  side?: "left" | "right";
 }) {
+  const closedTransform =
+    side === "left" ? "translateX(calc(-100% - 24px))" : "translateX(calc(100% + 24px))";
   return (
     <aside
-      className="fixed top-3 right-3 bottom-3 z-35 min-w-0 overflow-hidden rounded-[14px] border border-white/10 bg-panel-bg text-white/90 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-[18px] [font-family:-apple-system,system-ui,sans-serif] [transition:transform_0.25s_ease,opacity_0.2s_ease] flex flex-col"
+      className={`fixed top-3 bottom-3 z-35 min-w-0 overflow-hidden rounded-[14px] border border-white/10 bg-panel-bg text-white/90 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-[18px] [font-family:-apple-system,system-ui,sans-serif] [transition:transform_0.25s_ease,opacity_0.2s_ease] flex flex-col ${side === "left" ? "left-3" : "right-3"}`}
       style={{
         width,
-        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
+        transform: open ? "translateX(0)" : closedTransform,
         opacity: open ? 1 : 0,
         pointerEvents: open ? "auto" : "none",
         ...style,
