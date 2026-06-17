@@ -52,7 +52,7 @@ export function DeviceRow({
       }}
       className={`group relative flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer select-none [transition:background_0.12s] ${
         active
-          ? "bg-white/10 text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)]"
+          ? "bg-white/10 text-white"
           : "text-white/90 hover:bg-white/8"
       }`}
     >

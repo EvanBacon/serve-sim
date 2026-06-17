@@ -8,6 +8,11 @@ export function isSystemBundleId(bundleId: string): boolean {
   return bundleId.startsWith("com.apple.");
 }
 
+export function fallbackAppDisplayName(bundleId: string): string {
+  if (bundleId === "com.apple.springboard") return "SpringBoard";
+  return bundleId;
+}
+
 export function AppIconFallback({ bundleId }: { bundleId: string }) {
   const system = isSystemBundleId(bundleId);
 
@@ -73,12 +78,11 @@ export function AppDetectionTool({
   }, [udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
 
   if (!details) {
-    return (
-      <div className="bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">
-        Waiting for an app to come to the foreground…
-      </div>
-    );
+    return <AppDetectionSkeleton />;
   }
+
+  const appIconDataUrl =
+    details.iconDataUrl && !isSystemBundleId(details.bundleId) ? details.iconDataUrl : undefined;
 
   return (
     <CollapsibleSection
@@ -87,24 +91,20 @@ export function AppDetectionTool({
       summaryClassName="flex items-center gap-3 text-left"
       summary={
         <>
-          {details.iconDataUrl ? (
+          {appIconDataUrl ? (
             <img
-              src={details.iconDataUrl}
+              src={appIconDataUrl}
               className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
               alt=""
             />
           ) : (
             <AppIconFallback bundleId={details.bundleId} />
           )}
-          <div className="min-w-0 flex-1 leading-tight">
-            <div className="text-[13px] font-semibold text-white/90 truncate">
-              {details.displayName ?? details.bundleId}
-              {details.loading && <span className="text-white/45 font-normal"> …</span>}
-            </div>
-            <div className="text-[11px] text-white/55 font-mono truncate" title={details.bundleId}>
-              {details.bundleId}
-            </div>
-          </div>
+          <AppSummaryLabel
+            bundleId={details.bundleId}
+            displayName={details.displayName}
+            loading={details.loading}
+          />
         </>
       }
     >
@@ -138,6 +138,57 @@ export function AppDetectionTool({
             />
           </dl>
     </CollapsibleSection>
+  );
+}
+
+export function AppDetectionSkeleton() {
+  return (
+    <div
+      data-testid="app-detection-skeleton"
+      className="bg-panel rounded-[10px] px-3 py-2"
+      aria-label="Waiting for foreground app"
+    >
+      <div className="flex items-center gap-3 text-left min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)]">
+        <span className="w-10 h-10 rounded-[8px] shrink-0 bg-white/[0.08]" />
+        <span className="min-w-0 flex-1 flex flex-col gap-2">
+          <span className="h-3.5 w-[46%] rounded-full bg-white/[0.12]" />
+          <span className="h-2.5 w-[68%] rounded-full bg-white/[0.08]" />
+        </span>
+        <span className="w-2.5 h-2.5 rounded-full bg-white/[0.08]" />
+      </div>
+    </div>
+  );
+}
+
+export function AppSummaryLabel({
+  bundleId,
+  displayName,
+  loading,
+}: {
+  bundleId: string;
+  displayName?: string;
+  loading: boolean;
+}) {
+  return (
+    <div className="min-w-0 flex-1 leading-tight text-left">
+      <div className="grid grid-cols-[minmax(0,1fr)_14px] items-center gap-1">
+        <span className="text-[13px] font-semibold text-white/90 truncate">
+          {displayName ?? fallbackAppDisplayName(bundleId)}
+        </span>
+        <span
+          data-testid="app-summary-loading"
+          role={loading ? "status" : undefined}
+          aria-label={loading ? "Loading app details" : undefined}
+          aria-hidden={loading ? undefined : true}
+          className={`size-2.5 rounded-full border border-white/35 border-t-white/85 ${
+            loading ? "animate-[grid-spin_0.7s_linear_infinite]" : "invisible"
+          }`}
+        />
+      </div>
+      <div className="text-[11px] text-white/55 font-mono truncate" title={bundleId}>
+        {bundleId}
+      </div>
+    </div>
   );
 }
 

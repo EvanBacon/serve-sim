@@ -999,7 +999,7 @@ function AppWithConfig({
             visible={simulatorResize.isResizing || simulatorResize.isInertia}
           />
         </div>
-        <div className="relative inline-flex items-center justify-center">
+        <div className="inline-flex items-center justify-center gap-2 max-w-full">
           <SimulatorToolbar
             exec={execOnHost}
             onRotate={rotateDevice}
@@ -1048,13 +1048,12 @@ function AppWithConfig({
             deviceRuntime={deviceRuntime}
             streaming={streaming}
             aria-label="Accessibility overlay"
-            className="absolute left-full ml-2"
             style={{
               width: "auto",
               minWidth: 0,
               justifyContent: "center",
               padding: 6,
-              borderRadius: 18,
+              borderRadius: 22,
             }}
           >
             <AxToolbarButton

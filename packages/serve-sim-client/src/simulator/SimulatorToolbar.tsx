@@ -241,7 +241,7 @@ const buttonStyle: CSSProperties = {
   background: "transparent",
   border: "none",
   padding: 6,
-  borderRadius: 6,
+  borderRadius: 12,
   cursor: "pointer",
   display: "inline-flex",
   alignItems: "center",

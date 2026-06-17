@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { GridPanel } from "../client/components/grid-panel";
-import type { GridDevice } from "../client/utils/grid";
+import { GridCapacityFooter, GridPanel } from "../client/components/grid-panel";
+import type { GridDevice, MemoryReport } from "../client/utils/grid";
 
 const devices: GridDevice[] = [
   {
@@ -15,7 +15,36 @@ const devices: GridDevice[] = [
 
 const noop = () => {};
 
+const memoryReport: MemoryReport = {
+  totalBytes: 100,
+  availableBytes: 20,
+  runningSimulators: 3,
+  perSimAvgBytes: 10,
+  perSimSource: "estimated",
+  estimatedAdditional: 5,
+};
+
 describe("GridPanel", () => {
+  test("aligns the close control to the closed sidebar opener", () => {
+    const html = renderToStaticMarkup(
+      <GridPanel
+        open
+        onClose={noop}
+        width={320}
+        side="left"
+        devices={devices}
+        selectedUdid="one"
+        onSelect={noop}
+        starting={{}}
+        shuttingDown={{}}
+        onShutdown={noop}
+      />,
+    );
+
+    expect(html).toContain("padding-left:16px");
+    expect(html).toContain("padding-top:16px");
+  });
+
   test("renders gradient fades around the device list scroll area", () => {
     const html = renderToStaticMarkup(
       <GridPanel
@@ -36,5 +65,12 @@ describe("GridPanel", () => {
     expect(html).toContain('data-testid="device-list-bottom-fade"');
     expect(html).toContain("linear-gradient(to_bottom");
     expect(html).toContain("linear-gradient(to_top");
+  });
+
+  test("renders the capacity footer without a top border", () => {
+    const html = renderToStaticMarkup(<GridCapacityFooter report={memoryReport} />);
+
+    expect(html).toContain("3/8 sims");
+    expect(html).not.toContain("border-t");
   });
 });

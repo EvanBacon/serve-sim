@@ -12,7 +12,7 @@ import {
 } from "../utils/ax";
 import { SettingSwitch } from "./setting-switch";
 
-const SECTION = "bg-panel border border-white/8 rounded-[10px]";
+const SECTION = "bg-panel rounded-[10px]";
 const SECTION_TITLE = "text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] m-0";
 
 export function AxTreeTool({

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { PanelLeft, Search, X } from "lucide-react";
 import { Panel, PanelHeader, PanelTitle } from "../Panel";
 import { useGridMemory } from "../hooks/use-grid-memory";
-import { type GridDevice, runtimeLabel } from "../utils/grid";
+import { type GridDevice, type MemoryReport, runtimeLabel } from "../utils/grid";
 import { simEndpoint } from "../utils/sim-endpoint";
 import { GridCapacityBanner } from "./grid-capacity-banner";
 import { DeviceRow } from "./device-row";
@@ -53,7 +53,9 @@ export function GridPanel({
 
   return (
     <Panel open={open} width={width} side={side}>
-      <PanelHeader style={{ justifyContent: "flex-start", paddingLeft: 8, gap: 4 }}>
+      <PanelHeader
+        style={{ justifyContent: "flex-start", paddingLeft: 16, paddingTop: 16, gap: 4 }}
+      >
         <button
           type="button"
           onClick={onClose}
@@ -126,11 +128,16 @@ export function GridPanel({
         />
       </div>
 
-      {memory && memory.totalBytes > 0 && (
-        <div className="shrink-0 px-3 py-2 border-t border-white/8 flex justify-center">
-          <GridCapacityBanner report={memory} />
-        </div>
-      )}
+      <GridCapacityFooter report={memory} />
     </Panel>
+  );
+}
+
+export function GridCapacityFooter({ report }: { report: MemoryReport | null }) {
+  if (!report || report.totalBytes <= 0) return null;
+  return (
+    <div className="shrink-0 px-3 py-2 flex justify-center">
+      <GridCapacityBanner report={report} />
+    </div>
   );
 }

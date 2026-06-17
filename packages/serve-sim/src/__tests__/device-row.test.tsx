@@ -68,5 +68,6 @@ describe("DeviceRow", () => {
 
     expect(html).toContain("bg-white/10");
     expect(html).not.toContain("bg-[#0a84ff]");
+    expect(html).not.toContain("shadow-[inset");
   });
 });
