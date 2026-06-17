@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "../Panel";
+import { Panel, PanelHeader, PanelTitle } from "../Panel";
 import { useGridMemory } from "../hooks/use-grid-memory";
 import { type GridDevice, runtimeLabel } from "../utils/grid";
 import { simEndpoint } from "../utils/sim-endpoint";
@@ -50,9 +50,24 @@ export function GridPanel({
 
   return (
     <Panel open={open} width={width} side={side}>
-      <PanelHeader>
-        <PanelTitle>Simulators</PanelTitle>
-        <PanelCloseButton onClick={onClose} />
+      <PanelHeader style={{ justifyContent: "flex-start", paddingLeft: 8, gap: 4 }}>
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-md border-none bg-transparent text-[#8e8e93] [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          aria-label="Close devices sidebar"
+          aria-pressed
+          title="Devices"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M9 3v2" />
+            <path d="M9 9v1" />
+            <path d="M9 14v1" />
+            <path d="M9 19v2" />
+          </svg>
+        </button>
+        <PanelTitle>Devices</PanelTitle>
       </PanelHeader>
 
       <div className="px-3 pb-2 pt-0.5 shrink-0">

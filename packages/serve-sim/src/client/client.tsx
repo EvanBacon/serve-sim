@@ -92,20 +92,18 @@ function previewConfigKey(config: PreviewConfig | null): string {
 function DeviceSidebarToggle({ open, onClick }: { open: boolean; onClick: () => void }) {
   return (
     <div
-      className={`fixed top-3 left-3 flex flex-col gap-1 p-1 bg-panel-bg border border-white/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${open ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
+      className={`fixed top-3 left-3 flex flex-col gap-1 p-1 [transition:opacity_0.18s_ease] z-40 ${open ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
     >
       <button
         onClick={onClick}
         className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
-        aria-label="Open simulators sidebar"
+        aria-label="Open devices sidebar"
         aria-pressed={open}
-        title="Simulators"
+        title="Devices"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="3" width="7" height="7" rx="1.5" />
-          <rect x="14" y="3" width="7" height="7" rx="1.5" />
-          <rect x="3" y="14" width="7" height="7" rx="1.5" />
-          <rect x="14" y="14" width="7" height="7" rx="1.5" />
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <path d="M9 3v18" />
         </svg>
       </button>
     </div>
@@ -150,12 +148,23 @@ function App() {
   const [starting, setStarting] = useState<Record<string, boolean>>({});
   const [shuttingDown, setShuttingDown] = useState<Record<string, boolean>>({});
   const [actionErrors, setActionErrors] = useState<Record<string, string | null>>({});
+  // Devices we booted from the UI run the npm-published serve-sim helper, which
+  // (unlike the local build serving this page) may not serve `/stream.avcc`.
+  // Skip the H.264 path for them so the stream paints over MJPEG immediately
+  // instead of stalling on the 4s AVCC-fallback window.
+  const [uiStarted, setUiStarted] = useState<Set<string>>(() => new Set());
   const hasPending =
     Object.values(starting).some(Boolean) || Object.values(shuttingDown).some(Boolean);
   const { devices: gridDevices, refresh: refreshGrid } = useGridDevices(
     gridApiEndpoint,
     true,
     hasPending,
+  );
+  // Re-subscribe the stream SSE the instant the selected device gains (or loses)
+  // a helper, so its config lands as soon as it boots rather than waiting on the
+  // next filesystem-watch tick — the stream appears sooner after boot.
+  const selectedHasHelper = !!(
+    selectedUdid && gridDevices?.find((d) => d.device === selectedUdid)?.helper
   );
 
   const selectDevice = useCallback((udid: string) => {
@@ -198,6 +207,7 @@ function App() {
           setActionErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
           return;
         }
+        setUiStarted((s) => (s.has(udid) ? s : new Set(s).add(udid)));
         // The helper registers asynchronously; once it does, the SSE (subscribed
         // to this udid) delivers its config and the main view starts streaming.
         await waitForHelper(udid);
@@ -280,7 +290,7 @@ function App() {
       } catch {}
     };
     return () => es.close();
-  }, [selectedUdid]);
+  }, [selectedUdid, selectedHasHelper]);
 
   // Stream simctl logs into the browser console with colors + grouping
   useEffect(() => {
@@ -365,6 +375,7 @@ function App() {
         config={config}
         deviceName={selectedDevice?.name ?? null}
         deviceRuntime={selectedDevice?.runtime ?? null}
+        preferMjpeg={uiStarted.has(config.device)}
         axOverlayEnabled={axOverlayEnabled}
         setAxOverlayEnabled={setAxOverlayEnabled}
         devtoolsOpen={devtoolsOpen}
@@ -440,6 +451,7 @@ interface AppWithConfigProps {
   config: PreviewConfig;
   deviceName: string | null;
   deviceRuntime: string | null;
+  preferMjpeg: boolean;
   axOverlayEnabled: boolean;
   setAxOverlayEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   devtoolsOpen: boolean;
@@ -457,6 +469,7 @@ function AppWithConfig({
   config,
   deviceName,
   deviceRuntime,
+  preferMjpeg,
   axOverlayEnabled,
   setAxOverlayEnabled,
   devtoolsOpen,
@@ -503,7 +516,7 @@ function AppWithConfig({
     avccFallbackReducer,
     initialAvccFallback,
   );
-  const useAvccVideo = avcc.supported && !avccFallback.fellBack;
+  const useAvccVideo = avcc.supported && !avccFallback.fellBack && !preferMjpeg;
   const mjpeg = useMjpegStream(useAvccVideo ? null : config.streamUrl);
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).

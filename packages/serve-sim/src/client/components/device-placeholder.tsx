@@ -1,10 +1,8 @@
-import { type CSSProperties } from "react";
 import {
+  DEVICE_FRAMES,
   DeviceFrameChrome,
   fallbackScreenSize,
   getDeviceType,
-  screenBorderRadius,
-  simulatorAspectRatio,
   simulatorMaxWidth,
 } from "serve-sim-client/simulator";
 import { runtimeLabel } from "../utils/grid";
@@ -28,27 +26,40 @@ export function DevicePlaceholder({
   onStart: () => void;
 }) {
   const type = getDeviceType(name);
-  const screen = fallbackScreenSize(type, name);
-  const aspectRatio = simulatorAspectRatio(screen);
-  const maxWidth = simulatorMaxWidth(type, screen);
-  const imgBorderRadius = screenBorderRadius(type, screen);
+  const f = DEVICE_FRAMES[type];
+  // Draw the blank screen in the SAME coordinate space as the chrome SVG (the
+  // device frame's own viewBox), so the bezel and the screen always line up —
+  // unlike a CSS box, which letterboxes against the chrome's fixed aspect.
+  const screenMax = simulatorMaxWidth(type, fallbackScreenSize(type, name));
+  const frameMaxWidth = (screenMax * f.width) / (f.width - 2 * f.bezelX);
 
   return (
     <div className="flex flex-col items-center gap-5 min-w-0">
       <div
         className="relative w-full"
-        style={{ maxWidth, aspectRatio }}
+        style={{ maxWidth: frameMaxWidth, aspectRatio: `${f.width} / ${f.height}` }}
       >
-        {/* Blank screen — a soft blue gradient like an unloaded simulator. */}
-        <div
-          className="absolute inset-0"
-          style={{
-            borderRadius: imgBorderRadius,
-            cornerShape: "superellipse(1.3)",
-            background: "linear-gradient(160deg, #6fa8e6 0%, #5b93d6 55%, #5188cf 100%)",
-            boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.18)",
-          } as CSSProperties}
-        />
+        <svg
+          viewBox={`0 0 ${f.width} ${f.height}`}
+          className="absolute inset-0 size-full"
+          preserveAspectRatio="xMidYMid meet"
+        >
+          <defs>
+            <linearGradient id="placeholder-screen" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stopColor="#6fa8e6" />
+              <stop offset="55%" stopColor="#5b93d6" />
+              <stop offset="100%" stopColor="#5188cf" />
+            </linearGradient>
+          </defs>
+          <rect
+            x={f.bezelX}
+            y={f.bezelY}
+            width={f.width - 2 * f.bezelX}
+            height={f.height - 2 * f.bezelY}
+            rx={f.innerRadius}
+            fill="url(#placeholder-screen)"
+          />
+        </svg>
         <div className="absolute inset-0 pointer-events-none">
           <DeviceFrameChrome type={type} />
         </div>
