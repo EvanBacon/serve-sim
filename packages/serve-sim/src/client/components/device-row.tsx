@@ -3,10 +3,10 @@ import { X } from "lucide-react";
 import { type GridDevice, runtimeVersion } from "../utils/grid";
 import { DeviceGlyph } from "./device-glyph";
 
-// A single horizontal device row in the sidebar (Xcode-style): family glyph (or
-// a live stream thumbnail when streaming), name + status, and the runtime
-// version on the trailing edge. Clicking the row selects the device — the main
-// view swaps to its stream, or to a placeholder when it isn't running yet.
+// A single horizontal device row in the sidebar (Xcode-style): family glyph,
+// name + status, and the runtime version on the trailing edge. Clicking the row
+// selects the device — the main view swaps to its stream, or to a placeholder
+// when it isn't running yet.
 export function DeviceRow({
   device,
   active,
@@ -38,6 +38,14 @@ export function DeviceRow({
     : null;
   const dotColor = helper ? "#34d399" : isBooted ? "#e9a13b" : null;
   const canShutdown = helper || isBooted;
+  const iconBackingClass = helper
+    ? active
+      ? "bg-[#26364c]"
+      : "bg-[#202b3a]"
+    : active
+    ? "bg-white/15"
+    : "bg-white/6";
+  const iconColorClass = helper ? "text-[#d2e7ff]" : active ? "text-white/90" : "text-white/55";
 
   return (
     <div
@@ -58,22 +66,11 @@ export function DeviceRow({
       }`}
     >
       <div
-        className={`relative shrink-0 grid place-items-center size-9 rounded-[9px] overflow-hidden ${
-          active ? "bg-white/15" : "bg-white/6"
-        }`}
+        className={`relative shrink-0 grid place-items-center size-9 rounded-[9px] overflow-hidden ${iconBackingClass}`}
       >
-        {helper ? (
-          <img
-            src={helper.streamUrl}
-            alt=""
-            draggable={false}
-            className="size-full object-cover"
-          />
-        ) : (
-          <span className={active ? "text-white/90" : "text-white/55"}>
-            <DeviceGlyph type={type} />
-          </span>
-        )}
+        <span className={iconColorClass}>
+          <DeviceGlyph type={type} screenOn={Boolean(helper)} />
+        </span>
         {dotColor && !helper && (
           <span
             className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-2 ring-[#1c1c1e]"

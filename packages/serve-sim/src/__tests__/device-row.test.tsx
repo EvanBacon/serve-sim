@@ -49,6 +49,24 @@ describe("DeviceRow", () => {
     expect(html).toContain("Streaming");
   });
 
+  test("does not render a live stream thumbnail in the device list", () => {
+    const html = render({
+      device: "streaming",
+      name: "iPhone 16",
+      runtime: "iOS-26-5",
+      state: "Booted",
+      helper: {
+        port: 3100,
+        url: "http://localhost:3100",
+        streamUrl: "http://localhost:3100/stream.mjpeg",
+        wsUrl: "ws://localhost:3100/ws",
+      },
+    });
+
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("stream.mjpeg");
+  });
+
   test("keeps streaming status green when selected", () => {
     const html = render(
       {

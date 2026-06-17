@@ -1,13 +1,17 @@
 import type { DeviceType } from "serve-sim-client/simulator";
 
+const SCREEN_ON_FILL = "#47b7ff";
+
 // Compact device-family glyphs for the sidebar rows. Stroked outlines keyed off
 // `getDeviceType(name)` — a stand-in when a device has no live stream thumbnail.
 export function DeviceGlyph({
   type,
   size = 20,
+  screenOn = false,
 }: {
   type: DeviceType;
   size?: number;
+  screenOn?: boolean;
 }) {
   const common = {
     width: size,
@@ -23,6 +27,18 @@ export function DeviceGlyph({
     case "ipad":
       return (
         <svg {...common}>
+          {screenOn && (
+            <rect
+              x="5.05"
+              y="3.55"
+              width="13.9"
+              height="16.45"
+              rx="1.65"
+              fill={SCREEN_ON_FILL}
+              stroke="none"
+              data-testid="device-glyph-screen-on"
+            />
+          )}
           <rect x="4" y="2.5" width="16" height="19" rx="2.5" />
           <line x1="12" y1="18.5" x2="12" y2="18.5" />
         </svg>
@@ -44,6 +60,18 @@ export function DeviceGlyph({
     default:
       return (
         <svg {...common}>
+          {screenOn && (
+            <rect
+              x="7.45"
+              y="3.65"
+              width="9.1"
+              height="16.35"
+              rx="2"
+              fill={SCREEN_ON_FILL}
+              stroke="none"
+              data-testid="device-glyph-screen-on"
+            />
+          )}
           <rect x="6.5" y="2.5" width="11" height="19" rx="2.8" />
           <line x1="10.5" y1="5" x2="13.5" y2="5" />
         </svg>
