@@ -86,7 +86,7 @@ export function DeviceRow({
         {status && (
           <div
             className={`truncate text-[11px] leading-tight ${
-              active ? "text-white/75" : helper ? "text-[#34d399]" : "text-white/45"
+              helper ? "text-[#34d399]" : active ? "text-white/75" : "text-white/45"
             }`}
           >
             {status}

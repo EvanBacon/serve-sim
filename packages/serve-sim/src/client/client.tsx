@@ -828,6 +828,7 @@ function AppWithConfig({
         message: `Unsupported: ${file.type || fileExtension(file)}`,
       });
     },
+    onHostPathDrop: screenshot.dismiss,
   });
 
   const simulatorResize = useSimulatorResize({

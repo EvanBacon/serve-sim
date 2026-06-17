@@ -25,6 +25,28 @@ const memoryReport: MemoryReport = {
 };
 
 describe("GridPanel", () => {
+  test("renders row-shaped skeletons while devices are loading", () => {
+    const html = renderToStaticMarkup(
+      <GridPanel
+        open
+        onClose={noop}
+        width={320}
+        side="left"
+        devices={null}
+        selectedUdid={null}
+        onSelect={noop}
+        starting={{}}
+        shuttingDown={{}}
+        onShutdown={noop}
+      />,
+    );
+
+    expect(html).toContain('data-testid="device-list-skeleton"');
+    expect(html).toContain('data-testid="device-row-skeleton"');
+    expect(html).toContain("Available");
+    expect(html).not.toContain("No iOS simulators available.");
+  });
+
   test("aligns the close control to the closed sidebar opener", () => {
     const html = renderToStaticMarkup(
       <GridPanel

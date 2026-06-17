@@ -7,6 +7,8 @@ import { simEndpoint } from "../utils/sim-endpoint";
 import { GridCapacityBanner } from "./grid-capacity-banner";
 import { DeviceRow } from "./device-row";
 
+const DEVICE_SKELETON_ROWS = 12;
+
 // The device sidebar: the merged picker + grid. A search field, a scrollable
 // list of horizontal device rows (Xcode-style), and a capacity footer. Device
 // data and start/shutdown actions are owned by App so selecting a row can swap
@@ -93,7 +95,9 @@ export function GridPanel({
 
       <div className="relative flex-1 min-h-0">
         <div className="h-full min-h-0 overflow-y-auto px-2 py-2 [scrollbar-width:thin]">
-          {filtered === null ? null : filtered.length === 0 ? (
+          {filtered === null ? (
+            <DeviceListSkeleton />
+          ) : filtered.length === 0 ? (
             <div className="px-2 py-6 text-white/40 text-[12px] text-center">
               {query ? "No matching simulators." : "No iOS simulators available."}
             </div>
@@ -130,6 +134,49 @@ export function GridPanel({
 
       <GridCapacityFooter report={memory} />
     </Panel>
+  );
+}
+
+export function DeviceListSkeleton() {
+  return (
+    <>
+      <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+        Available
+      </div>
+      <div
+        data-testid="device-list-skeleton"
+        className="flex flex-col gap-0.5 pb-1"
+        aria-label="Loading simulators"
+        aria-busy="true"
+      >
+        {Array.from({ length: DEVICE_SKELETON_ROWS }, (_, index) => (
+          <DeviceRowSkeleton key={index} index={index} />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function DeviceRowSkeleton({ index }: { index: number }) {
+  const nameWidth = ["w-[62%]", "w-[74%]", "w-[58%]", "w-[70%]"][index % 4]!;
+  const statusWidth = ["w-[42%]", "w-[36%]", "w-[48%]", "w-[32%]"][index % 4]!;
+  const versionWidth = ["w-7", "w-6", "w-8"][index % 3]!;
+
+  return (
+    <div
+      data-testid="device-row-skeleton"
+      className="flex items-center gap-2.5 px-2 py-1.5 rounded-lg select-none"
+      aria-hidden="true"
+    >
+      <div className="relative shrink-0 grid place-items-center size-9 rounded-[9px] overflow-hidden bg-white/6">
+        <span className="size-4 rounded-[4px] bg-white/[0.12]" />
+      </div>
+      <div className="min-w-0 flex-1 flex flex-col gap-1.5">
+        <span className={`h-3 rounded-full bg-white/[0.12] ${nameWidth}`} />
+        <span className={`h-2.5 rounded-full bg-white/[0.08] ${statusWidth}`} />
+      </div>
+      <span className={`shrink-0 h-2.5 rounded-full bg-white/[0.08] ${versionWidth}`} />
+    </div>
   );
 }
 

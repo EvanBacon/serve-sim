@@ -49,6 +49,27 @@ describe("DeviceRow", () => {
     expect(html).toContain("Streaming");
   });
 
+  test("keeps streaming status green when selected", () => {
+    const html = render(
+      {
+        device: "streaming",
+        name: "iPhone 16",
+        runtime: "iOS-26-5",
+        state: "Booted",
+        helper: {
+          port: 3100,
+          url: "http://localhost:3100",
+          streamUrl: "http://localhost:3100/stream.mjpeg",
+          wsUrl: "ws://localhost:3100/ws",
+        },
+      },
+      true,
+    );
+
+    expect(html).toContain("Streaming");
+    expect(html).toContain("text-[#34d399]");
+  });
+
   test("uses a light overlay instead of a bright blue selected state", () => {
     const html = render(
       {
