@@ -45,6 +45,25 @@ export function AppIconFallback({ bundleId }: { bundleId: string }) {
   );
 }
 
+export function AppIcon({
+  bundleId,
+  iconDataUrl,
+}: {
+  bundleId: string;
+  iconDataUrl?: string | null;
+}) {
+  if (iconDataUrl) {
+    return (
+      <img
+        src={iconDataUrl}
+        className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
+        alt=""
+      />
+    );
+  }
+  return <AppIconFallback bundleId={bundleId} />;
+}
+
 export function AppDetectionTool({
   udid,
   currentApp,
@@ -81,9 +100,6 @@ export function AppDetectionTool({
     return <AppDetectionSkeleton />;
   }
 
-  const appIconDataUrl =
-    details.iconDataUrl && !isSystemBundleId(details.bundleId) ? details.iconDataUrl : undefined;
-
   return (
     <CollapsibleSection
       open={open}
@@ -91,15 +107,7 @@ export function AppDetectionTool({
       summaryClassName="flex items-center gap-3 text-left"
       summary={
         <>
-          {appIconDataUrl ? (
-            <img
-              src={appIconDataUrl}
-              className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
-              alt=""
-            />
-          ) : (
-            <AppIconFallback bundleId={details.bundleId} />
-          )}
+          <AppIcon bundleId={details.bundleId} iconDataUrl={details.iconDataUrl} />
           <AppSummaryLabel
             bundleId={details.bundleId}
             displayName={details.displayName}
