@@ -37,6 +37,7 @@ export function DeviceRow({
     ? "Booted"
     : null;
   const dotColor = helper ? "#34d399" : isBooted ? "#e9a13b" : null;
+  const canShutdown = helper || isBooted;
 
   return (
     <div
@@ -94,32 +95,37 @@ export function DeviceRow({
         )}
       </div>
 
-      {(helper || isBooted) && (
-        <button
-          type="button"
-          title={shuttingDown ? "Shutting down…" : "Shut down simulator"}
-          aria-label="Shut down simulator"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onShutdown();
-          }}
-          disabled={shuttingDown}
-          className={`shrink-0 grid place-items-center size-5 rounded-md opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [transition:opacity_0.12s,background_0.12s] ${
-            active ? "text-white/80 hover:bg-white/20" : "text-white/60 hover:bg-white/12 hover:text-white"
-          }`}
-        >
-          <X size={13} strokeWidth={2.2} />
-        </button>
-      )}
-
-      <span
-        className={`shrink-0 text-[11px] font-mono tabular-nums ${
-          active ? "text-white/85" : "text-white/40"
-        } ${(helper || isBooted) ? "group-hover:hidden" : ""}`}
+      <div
+        data-testid="device-row-trailing-slot"
+        className="relative shrink-0 w-8 h-6 flex items-center justify-end"
       >
-        {version}
-      </span>
+        <span
+          className={`absolute right-0 text-[11px] font-mono tabular-nums [transition:opacity_0.12s] ${
+            active ? "text-white/85" : "text-white/40"
+          } ${canShutdown ? "group-hover:opacity-0 group-focus-within:opacity-0" : ""}`}
+        >
+          {version}
+        </span>
+
+        {canShutdown && (
+          <button
+            type="button"
+            title={shuttingDown ? "Shutting down…" : "Shut down simulator"}
+            aria-label="Shut down simulator"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onShutdown();
+            }}
+            disabled={shuttingDown}
+            className={`absolute right-0 top-1/2 -translate-y-1/2 grid place-items-center size-5 rounded-md opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [transition:opacity_0.12s,background_0.12s,color_0.12s] ${
+              active ? "text-white/80 hover:bg-white/20" : "text-white/70 hover:bg-white/12 hover:text-white"
+            }`}
+          >
+            <X size={13} strokeWidth={2.2} />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

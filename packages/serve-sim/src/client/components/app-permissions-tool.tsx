@@ -25,7 +25,7 @@ export function AppPermissionsTool({
   // can't (push notifications via BulletinBoard, location's `i<bundleId>:`
   // clients.plist keys), so the UI drives it instead of calling simctl directly.
   const cliPrefix = useMemo(() => {
-    const bin = window.__SIM_PREVIEW__?.serveSimBin;
+    const bin = typeof window === "undefined" ? undefined : window.__SIM_PREVIEW__?.serveSimBin;
     if (!bin) return "serve-sim";
     if (/\.ts$/.test(bin)) return `bun ${shellEscape(bin)}`;
     if (/\.js$/.test(bin)) return `node ${shellEscape(bin)}`;
@@ -76,11 +76,7 @@ export function AppPermissionsTool({
   }, [cliPrefix, udid, bundleId]);
 
   if (!bundleId) {
-    return (
-      <div className="bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">
-        Permissions appear once an app is in the foreground.
-      </div>
-    );
+    return <AppPermissionsLoading />;
   }
 
   return (
@@ -160,6 +156,30 @@ export function AppPermissionsTool({
         </button>
       </div>
     </CollapsibleSection>
+  );
+}
+
+export function AppPermissionsLoading() {
+  return (
+    <div
+      data-testid="app-permissions-loading"
+      className="bg-panel rounded-[10px] px-3 py-2"
+      aria-disabled="true"
+      aria-busy="true"
+    >
+      <div className="select-none text-white/55 min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)] grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left cursor-default">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.08em] leading-none inline-flex items-center">
+          Permissions
+        </span>
+        <span />
+        <span
+          data-testid="permissions-loading-indicator"
+          role="status"
+          aria-label="Loading permissions"
+          className="size-2.5 rounded-full border border-[#5f6268] border-t-[#f4f4f5] animate-[grid-spin_0.7s_linear_infinite]"
+        />
+      </div>
+    </div>
   );
 }
 

@@ -103,7 +103,6 @@ export function AppDetectionTool({
           <AppSummaryLabel
             bundleId={details.bundleId}
             displayName={details.displayName}
-            loading={details.loading}
           />
         </>
       }
@@ -163,27 +162,14 @@ export function AppDetectionSkeleton() {
 export function AppSummaryLabel({
   bundleId,
   displayName,
-  loading,
 }: {
   bundleId: string;
   displayName?: string;
-  loading: boolean;
 }) {
   return (
     <div className="min-w-0 flex-1 leading-tight text-left">
-      <div className="grid grid-cols-[minmax(0,1fr)_14px] items-center gap-1">
-        <span className="text-[13px] font-semibold text-white/90 truncate">
-          {displayName ?? fallbackAppDisplayName(bundleId)}
-        </span>
-        <span
-          data-testid="app-summary-loading"
-          role={loading ? "status" : undefined}
-          aria-label={loading ? "Loading app details" : undefined}
-          aria-hidden={loading ? undefined : true}
-          className={`size-2.5 rounded-full border border-white/35 border-t-white/85 ${
-            loading ? "animate-[grid-spin_0.7s_linear_infinite]" : "invisible"
-          }`}
-        />
+      <div className="text-[13px] font-semibold text-white/90 truncate">
+        {displayName ?? fallbackAppDisplayName(bundleId)}
       </div>
       <div className="text-[11px] text-white/55 font-mono truncate" title={bundleId}>
         {bundleId}

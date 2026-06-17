@@ -25,18 +25,19 @@ describe("AppDetectionTool app icon fallback", () => {
 });
 
 describe("AppSummaryLabel", () => {
-  test("keeps pending text left-aligned and reserves the loading slot", () => {
+  test("renders app identity without a summary-level loading spinner", () => {
     const html = renderToStaticMarkup(
       <AppSummaryLabel
         bundleId="com.apple.springboard"
         displayName="SpringBoard"
-        loading
       />,
     );
 
     expect(html).toContain("text-left");
-    expect(html).toContain('data-testid="app-summary-loading"');
     expect(html).toContain("SpringBoard");
+    expect(html).toContain("com.apple.springboard");
+    expect(html).not.toContain('data-testid="app-summary-loading"');
+    expect(html).not.toContain("animate-[grid-spin");
     expect(html).not.toContain("SpringBoard …");
   });
 });

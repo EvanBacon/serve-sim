@@ -183,7 +183,7 @@ function DeviceRowSkeleton({ index }: { index: number }) {
 export function GridCapacityFooter({ report }: { report: MemoryReport | null }) {
   if (!report || report.totalBytes <= 0) return null;
   return (
-    <div className="shrink-0 px-3 py-2 flex justify-center">
+    <div className="shrink-0 min-w-0 overflow-hidden px-3 py-2 flex justify-center">
       <GridCapacityBanner report={report} />
     </div>
   );

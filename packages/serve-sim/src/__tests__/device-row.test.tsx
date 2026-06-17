@@ -70,6 +70,27 @@ describe("DeviceRow", () => {
     expect(html).toContain("text-[#34d399]");
   });
 
+  test("keeps the runtime and shutdown button in a stable trailing slot", () => {
+    const html = render({
+      device: "streaming",
+      name: "iPhone 16",
+      runtime: "iOS-26-5",
+      state: "Booted",
+      helper: {
+        port: 3100,
+        url: "http://localhost:3100",
+        streamUrl: "http://localhost:3100/stream.mjpeg",
+        wsUrl: "ws://localhost:3100/ws",
+      },
+    });
+
+    expect(html).toContain('data-testid="device-row-trailing-slot"');
+    expect(html).toContain("w-8 h-6");
+    expect(html).toContain("group-hover:opacity-0");
+    expect(html).toContain("group-hover:opacity-100");
+    expect(html).not.toContain("group-hover:hidden");
+  });
+
   test("uses a light overlay instead of a bright blue selected state", () => {
     const html = render(
       {

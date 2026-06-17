@@ -95,4 +95,14 @@ describe("GridPanel", () => {
     expect(html).toContain("3/8 sims");
     expect(html).not.toContain("border-t");
   });
+
+  test("line-clamps capacity footer content to one row", () => {
+    const html = renderToStaticMarkup(<GridCapacityFooter report={memoryReport} />);
+
+    expect(html).toContain("min-w-0 overflow-hidden");
+    expect(html).toContain("max-w-full min-w-0 flex-nowrap");
+    expect(html).toContain("whitespace-nowrap");
+    expect(html).toContain("truncate");
+    expect(html).toContain("w-7 h-[3px] shrink-0");
+  });
 });
