@@ -776,7 +776,7 @@ export function CameraTool({
             <div className="relative" data-camera-source-menu>
               <button
                 onClick={() => setSourceMenuOpen((o) => !o)}
-                className="lem-ghost h-full min-h-[36px] w-10 flex items-center justify-center bg-transparent border border-white/12 text-white/85 rounded-[7px] cursor-pointer p-0"
+                className="h-full min-h-[36px] w-10 flex items-center justify-center bg-transparent border border-white/12 text-white/85 rounded-[7px] cursor-pointer p-0 hover:bg-white/[0.06] hover:border-white/20 hover:text-white"
                 aria-haspopup="menu"
                 aria-expanded={sourceMenuOpen}
                 title={
@@ -844,8 +844,8 @@ export function CameraTool({
               className={[
                 "flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer disabled:opacity-50 min-h-[36px]",
                 primary.kind === "stop"
-                  ? "lem-primary lem-primary-on bg-white/[0.16] text-white"
-                  : "lem-primary bg-success-emerald text-[#062018]",
+                  ? "bg-white/[0.16] text-white enabled:hover:bg-white/[0.22]"
+                  : "bg-success-emerald text-[#062018] enabled:hover:brightness-[1.08]",
               ].join(" ")}
               title={
                 primary.kind === "stop" ? "Stop the camera helper and terminate injected apps" :
@@ -864,10 +864,10 @@ export function CameraTool({
               type="button"
               onClick={toggleMirror}
               disabled={mirrorDisabled}
-              className={`flex items-center justify-center w-10 min-h-[36px] border rounded-[7px] font-[inherit] disabled:opacity-50 disabled:cursor-not-allowed ${
+              className={`flex items-center justify-center w-10 min-h-[36px] border rounded-[7px] font-[inherit] disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.97] ${
                 mirror === "on"
-                  ? "lem-speed lem-speed-on bg-white border-white text-[#0a0a0c] cursor-pointer"
-                  : "lem-speed bg-white/[0.04] border-white/8 text-white/85 cursor-pointer"
+                  ? "bg-white border-white text-[#0a0a0c] cursor-pointer enabled:hover:bg-white/[0.88] enabled:hover:border-white/[0.88] enabled:hover:text-[#0a0a0c]"
+                  : "bg-white/[0.04] border-white/8 text-white/85 cursor-pointer enabled:hover:bg-white/[0.09] enabled:hover:border-[rgba(255,255,255,0.18)] enabled:hover:text-white"
               }`}
               aria-label={`Mirror: ${mirror} — tap to toggle`}
               title={
