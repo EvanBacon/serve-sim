@@ -11,8 +11,11 @@ export function useResizableWidth(
   max: number,
   grow: "left" | "right" = "left",
 ) {
-  const deltaFor = (startX: number, clientX: number) =>
-    grow === "left" ? startX - clientX : clientX - startX;
+  const deltaFor = useCallback(
+    (startX: number, clientX: number) =>
+      grow === "left" ? startX - clientX : clientX - startX,
+    [grow],
+  );
   const clamp = useCallback(
     (w: number) => Math.max(min, Math.min(max, w)),
     [min, max],
@@ -53,7 +56,7 @@ export function useResizableWidth(
       target.addEventListener("pointerup", up);
       target.addEventListener("pointercancel", up);
     },
-    [clamp, effectiveWidth, storageKey],
+    [clamp, deltaFor, effectiveWidth, storageKey],
   );
 
   return { width: effectiveWidth, onPointerDown };
