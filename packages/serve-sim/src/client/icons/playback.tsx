@@ -1,3 +1,5 @@
+import { FastForward } from "lucide-react";
+
 export function PlayGlyph() {
   return (
     <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
@@ -24,11 +26,5 @@ export function StopGlyph() {
 }
 
 export function FastForwardGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M12 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 12 18z" />
-      <path d="M2 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 2 18z" />
-    </svg>
-  );
+  return <FastForward size={12} strokeWidth={2} aria-hidden="true" />;
 }

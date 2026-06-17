@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { FlipHorizontal2, Images, X } from "lucide-react";
 import { PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
@@ -764,10 +765,7 @@ export function CameraTool({
                 aria-label="Clear source"
                 title="Clear → placeholder"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
+                <X size={14} strokeWidth={2} />
               </button>
             )}
           </div>
@@ -788,12 +786,7 @@ export function CameraTool({
                 }
                 aria-label="Choose camera source"
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16" />
-                  <path d="M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2" />
-                  <circle cx="13" cy="7" r="1" fill="currentColor" />
-                  <rect x="8" y="2" width="14" height="14" rx="2" />
-                </svg>
+                <Images size={20} strokeWidth={2} />
               </button>
 
               {sourceMenuOpen && (
@@ -884,14 +877,7 @@ export function CameraTool({
               }
               aria-pressed={mirror === "on"}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill={mirror === "on" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m3 7 5 5-5 5V7" />
-                <path d="m21 7-5 5 5 5V7" />
-                <path d="M12 20v2" />
-                <path d="M12 14v2" />
-                <path d="M12 8v2" />
-                <path d="M12 2v2" />
-              </svg>
+              <FlipHorizontal2 size={20} strokeWidth={2} fill={mirror === "on" ? "currentColor" : "none"} />
             </button>
           </div>
 

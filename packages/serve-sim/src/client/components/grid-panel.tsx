@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { PanelRight, Search, X } from "lucide-react";
+import { PanelLeft, Search, X } from "lucide-react";
 import { Panel, PanelHeader, PanelTitle } from "../Panel";
 import { useGridMemory } from "../hooks/use-grid-memory";
 import { type GridDevice, runtimeLabel } from "../utils/grid";
@@ -60,7 +60,7 @@ export function GridPanel({
           aria-pressed
           title="Devices"
         >
-          <PanelRight size={18} strokeWidth={1.75} />
+          <PanelLeft size={18} strokeWidth={1.75} />
         </button>
         <PanelTitle>Devices</PanelTitle>
       </PanelHeader>

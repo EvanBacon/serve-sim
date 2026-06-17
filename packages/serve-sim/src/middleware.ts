@@ -204,7 +204,30 @@ function getBootedUdids(): Set<string> | null {
   }
 }
 
-function readServeSimStates(): ServeSimState[] {
+// The device the user most recently opened in Simulator.app, regardless of
+// which tool launched it. Simulator.app persists this as CurrentDeviceUDID, so
+// it's the best signal for "the device this user actually cares about" — we
+// surface it near the top of the grid the way Xcode's Devices window does.
+let preferredSnapshot: { at: number; udid: string | null } = { at: 0, udid: null };
+function getPreferredDeviceUdid(): string | null {
+  const now = Date.now();
+  if (now - preferredSnapshot.at < 1500) return preferredSnapshot.udid;
+  let udid: string | null = null;
+  try {
+    udid =
+      execSync("defaults read com.apple.iphonesimulator CurrentDeviceUDID", {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1500,
+      }).trim() || null;
+  } catch {
+    udid = null;
+  }
+  preferredSnapshot = { at: now, udid };
+  return udid;
+}
+
+export function readServeSimStates(): ServeSimState[] {
   let files: string[];
   try {
     files = readdirSync(STATE_DIR).filter(
@@ -832,9 +855,13 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
             : null,
         };
       });
-      // Stable order: family (iPhone, iPad, Watch, TV, Vision, other) →
-      // state (helper > booted > shutdown) → alpha. Keeps the most
-      // commonly used devices visible without scrolling.
+      // Order mirrors Xcode's Devices window: the devices the user is actually
+      // using float to the top — streaming first, then booted, then the
+      // simulator they last opened in Simulator.app — and everything else falls
+      // back to a stable family / newest-OS / name grouping. This surfaces the
+      // handful of relevant devices instead of burying them in an alphabetical
+      // wall of near-identical names.
+      const preferredUdid = getPreferredDeviceUdid();
       const familyRank = (name: string): number => {
         if (/iphone/i.test(name)) return 0;
         if (/ipad/i.test(name)) return 1;
@@ -843,12 +870,21 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         if (/vision|reality/i.test(name)) return 4;
         return 5;
       };
+      // Lower is higher in the list: streaming > booted > last-opened > rest.
       const stateRank = (x: typeof devices[number]) =>
-        x.helper ? 0 : x.state === "Booted" ? 1 : 2;
+        x.helper ? 0 : x.state === "Booted" ? 1 : x.device === preferredUdid ? 2 : 3;
+      // Newest runtime first, so "iPhone 17 Pro (27.0)" sorts above its 26.x twins.
+      const runtimeRank = (runtime: string): number => {
+        const m = runtime.match(/-(\d+)-(\d+)/);
+        const major = m ? Number(m[1]) : 0;
+        const minor = m ? Number(m[2]) : 0;
+        return -(major * 1000 + minor);
+      };
       devices.sort((a, b) =>
-        familyRank(a.name) - familyRank(b.name) ||
         stateRank(a) - stateRank(b) ||
-        a.name.localeCompare(b.name),
+        familyRank(a.name) - familyRank(b.name) ||
+        a.name.localeCompare(b.name) ||
+        runtimeRank(a.runtime) - runtimeRank(b.runtime),
       );
       res.writeHead(200, {
         "Content-Type": "application/json",

@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { ArrowUpRight } from "lucide-react";
 import { type AppDetails, fetchAppDetails } from "../utils/app-icon";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { CollapsibleSection } from "./collapsible-section";
@@ -93,10 +94,7 @@ export function AppDetectionTool({
                       title: "Reveal in Finder",
                       onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
                       icon: (
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                          <line x1="7" y1="17" x2="17" y2="7" />
-                          <polyline points="10 7 17 7 17 14" />
-                        </svg>
+                        <ArrowUpRight size={11} strokeWidth={2.2} />
                       ),
                     }
                   : undefined

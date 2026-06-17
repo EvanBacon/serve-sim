@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Check, X } from "lucide-react";
 import { ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { CollapsibleSection } from "./collapsible-section";
@@ -119,9 +120,7 @@ export function AppPermissionsTool({
                       variant="grant"
                       title="Allow"
                     >
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="5 12 10 17 19 7" />
-                      </svg>
+                      <Check size={11} strokeWidth={3} />
                     </PermBtn>
                     <PermBtn
                       active={current === "revoke"}
@@ -130,10 +129,7 @@ export function AppPermissionsTool({
                       variant="revoke"
                       title="Deny"
                     >
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="6" y1="6" x2="18" y2="18" />
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                      </svg>
+                      <X size={11} strokeWidth={3} />
                     </PermBtn>
                     <PermBtn
                       active={false}

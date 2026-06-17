@@ -113,6 +113,8 @@ export interface TitleProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>
   subtitle?: ReactNode;
   /** Hide the chevron hint (e.g. when not interactive). */
   hideChevron?: boolean;
+  /** Hide the subtitle row entirely. */
+  hideSubtitle?: boolean;
 }
 
 const titleButtonStyle: CSSProperties = {
@@ -134,7 +136,7 @@ const titleButtonStyle: CSSProperties = {
 };
 
 const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
-  { name, subtitle, hideChevron, style, onMouseEnter, onMouseLeave, ...rest },
+  { name, subtitle, hideChevron, hideSubtitle, style, onMouseEnter, onMouseLeave, ...rest },
   ref,
 ) {
   const ctx = useToolbar("Title");
@@ -194,18 +196,20 @@ const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
           </svg>
         )}
       </span>
-      <span
-        style={{
-          fontSize: 10,
-          color: "rgba(255,255,255,0.5)",
-          maxWidth: "100%",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {displaySubtitle}
-      </span>
+      {!hideSubtitle && (
+        <span
+          style={{
+            fontSize: 10,
+            color: "rgba(255,255,255,0.5)",
+            maxWidth: "100%",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {displaySubtitle}
+        </span>
+      )}
     </button>
   );
 });

@@ -1,4 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
+import { X } from "lucide-react";
 
 export function Panel({
   open,
@@ -65,19 +66,7 @@ export function PanelCloseButton({
       aria-label={ariaLabel}
       title={title}
     >
-      <svg
-        width={iconSize}
-        height={iconSize}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <line x1="18" y1="6" x2="6" y2="18" />
-        <line x1="6" y1="6" x2="18" y2="18" />
-      </svg>
+      <X size={iconSize} strokeWidth={2} />
     </button>
   );
 }

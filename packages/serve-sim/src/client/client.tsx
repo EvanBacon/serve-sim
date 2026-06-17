@@ -22,6 +22,7 @@ import {
   type StreamConfig,
 } from "serve-sim-client/simulator";
 
+import { Globe, PanelLeft, PanelRight, Upload } from "lucide-react";
 import { ReloadIcon } from "./icons";
 import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
@@ -32,6 +33,7 @@ import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
 import { ScreenshotToast } from "./components/screenshot-toast";
 import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
+import { StreamStatusPill } from "./components/stream-status-pill";
 import { ToolsPanel } from "./components/tools-panel";
 import { WebKitDevtoolsPanel } from "./components/webkit-devtools-panel";
 import { useMediaDrop } from "./hooks/use-media-drop";
@@ -101,10 +103,7 @@ function DeviceSidebarToggle({ open, onClick }: { open: boolean; onClick: () => 
         aria-pressed={open}
         title="Devices"
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="3" width="18" height="18" rx="2" />
-          <path d="M9 3v18" />
-        </svg>
+        <PanelLeft size={18} strokeWidth={1.75} />
       </button>
     </div>
   );
@@ -895,37 +894,30 @@ function AppWithConfig({
           deviceName={deviceName}
           deviceRuntime={deviceRuntime}
           streaming={streaming}
+          aria-label="Simulator status"
+          style={{
+            alignSelf: "center",
+            width: "auto",
+            minWidth: 0,
+            maxWidth: "100%",
+            flexWrap: "nowrap",
+            justifyContent: "center",
+            gap: 10,
+            padding: "6px 10px",
+            borderRadius: 18,
+          }}
         >
           <SimulatorToolbar.Title
             onClick={() => setGridOpen((o) => !o)}
             aria-label="Toggle simulators sidebar"
             aria-pressed={gridOpen}
             title="Simulators"
+            hideSubtitle
+            style={{
+              maxWidth: "min(230px, calc(100vw - 170px))",
+            }}
           />
-          <SimulatorToolbar.Actions>
-            {currentApp?.isReactNative && (
-              <SimulatorToolbar.Button
-                aria-label="Reload React Native bundle"
-                title="Reload (Cmd+R)"
-                onClick={() => void sendReactNativeReload()}
-              >
-                <ReloadIcon />
-              </SimulatorToolbar.Button>
-            )}
-            <SimulatorToolbar.HomeButton
-              onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-            />
-            <SimulatorToolbar.ScreenshotButton
-              title="Screenshot"
-              onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
-            />
-            <AxToolbarButton
-              overlayEnabled={axOverlayEnabled}
-              streaming={streaming}
-              onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
-            />
-            <SimulatorToolbar.RotateButton title="Rotate device" />
-          </SimulatorToolbar.Actions>
+          <StreamStatusPill streaming={streaming} />
         </SimulatorToolbar>
         <div
           ref={simContainerRef}
@@ -983,11 +975,7 @@ function AppWithConfig({
               className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-accent bg-[rgba(99,102,241,0.18)] text-accent pointer-events-none z-20"
               style={{ borderRadius: imgBorderRadius }}
             >
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="17 8 12 3 7 8" />
-                <line x1="12" y1="3" x2="12" y2="15" />
-              </svg>
+              <Upload size={32} strokeWidth={1.5} />
               <span className="text-[13px] font-medium">Drop media or .ipa</span>
             </div>
           )}
@@ -1010,6 +998,50 @@ function AppWithConfig({
             visible={simulatorResize.isResizing || simulatorResize.isInertia}
           />
         </div>
+        <SimulatorToolbar
+          exec={execOnHost}
+          onRotate={rotateDevice}
+          orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+          deviceUdid={config.device}
+          deviceName={deviceName}
+          deviceRuntime={deviceRuntime}
+          streaming={streaming}
+          aria-label="Simulator actions"
+          style={{
+            alignSelf: "center",
+            width: "auto",
+            minWidth: 0,
+            maxWidth: "100%",
+            justifyContent: "center",
+            padding: "6px 8px",
+            borderRadius: 18,
+          }}
+        >
+          <SimulatorToolbar.Actions>
+            {currentApp?.isReactNative && (
+              <SimulatorToolbar.Button
+                aria-label="Reload React Native bundle"
+                title="Reload (Cmd+R)"
+                onClick={() => void sendReactNativeReload()}
+              >
+                <ReloadIcon />
+              </SimulatorToolbar.Button>
+            )}
+            <SimulatorToolbar.HomeButton
+              onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
+            />
+            <SimulatorToolbar.ScreenshotButton
+              title="Screenshot"
+              onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
+            />
+            <AxToolbarButton
+              overlayEnabled={axOverlayEnabled}
+              streaming={streaming}
+              onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+            />
+            <SimulatorToolbar.RotateButton title="Rotate device" />
+          </SimulatorToolbar.Actions>
+        </SimulatorToolbar>
       </div>
 
       {/* Upload toasts */}
@@ -1090,10 +1122,7 @@ function AppWithConfig({
           aria-pressed={panelOpen}
           title="Tools"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="4" width="18" height="16" rx="2.5" />
-            <line x1="15" y1="4" x2="15" y2="20" />
-          </svg>
+          <PanelRight size={18} strokeWidth={1.75} />
         </button>
         <button
           onClick={() => {
@@ -1105,11 +1134,7 @@ function AppWithConfig({
           aria-pressed={devtoolsOpen}
           title="WebKit DevTools"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
-            <path d="M2 12h20" />
-          </svg>
+          <Globe size={18} strokeWidth={1.75} />
         </button>
       </div>
 
@@ -1147,20 +1172,6 @@ function AppWithConfig({
         onPointerDown={onDevtoolsResize}
         ariaLabel="Resize WebKit DevTools panel"
       />
-
-      {/* Status bar */}
-      <div className="flex items-center gap-2.5 text-[12px] font-mono text-white/40">
-        <span
-          className="flex items-center gap-[5px] [transition:color_0.3s]"
-          style={{ color: streaming ? "#4ade80" : "#666" }}
-        >
-          <span
-            className="size-1.5 rounded-full [transition:background_0.3s]"
-            style={{ background: streaming ? "#4ade80" : "#666" }}
-          />
-          {streaming ? "live" : "connecting"}
-        </span>
-      </div>
     </div>
     </AxStateProvider>
   );

@@ -11,8 +11,8 @@ export const SIMULATOR_RESIZE_EASE_OUT = "cubic-bezier(0.4, 0, 0.2, 1)";
 /** Subtle spring overshoot for the handle scale when becoming hot. Falls back to `EASE` if `linear()` isn't supported. */
 export const SIMULATOR_RESIZE_SPRING =
   "linear(0, 0.32 9%, 0.62 18%, 0.85 27%, 1.01 36%, 1.07 45%, 1.05 56%, 1.02 70%, 1)";
-export const SIMULATOR_RESIZE_HANDLE_DUR_HOT = "0.5s";
-export const SIMULATOR_RESIZE_HANDLE_DUR_IDLE = "0.42s";
+export const SIMULATOR_RESIZE_HANDLE_DUR_HOT = "0.16s";
+export const SIMULATOR_RESIZE_HANDLE_DUR_IDLE = "0.2s";
 /** Extra invisible stroke padding around the visible arc so the pointer target stays generous. */
 export const SIMULATOR_RESIZE_HIT_SLOP = 5;
 
@@ -26,15 +26,21 @@ export const RESIZE_SCALE: Record<ResizeVisualPhase, number> = {
 };
 
 export const RESIZE_MAIN_STROKE: Record<ResizeVisualPhase, string> = {
-  idle: "#8f939a",
+  idle: "#686e78",
   hover: "#b7bbc2",
   drag: "#f4f6fa",
 };
 
 export const RESIZE_MAIN_STROKE_W: Record<ResizeVisualPhase, number> = {
-  idle: 3.95,
+  idle: 2.65,
   hover: 4.15,
   drag: 4.65,
+};
+
+export const RESIZE_HANDLE_OPACITY: Record<ResizeVisualPhase, number> = {
+  idle: 0.38,
+  hover: 0.86,
+  drag: 1,
 };
 
 /** `linear()` easing landed in Chrome 113 / Safari 17.4 / Firefox 112. Cubic-bezier is the fallback. */
