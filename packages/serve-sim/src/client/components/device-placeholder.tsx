@@ -5,14 +5,14 @@ import {
   getDeviceType,
   simulatorMaxWidth,
 } from "serve-sim-client/simulator";
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import type { DeviceKitChromeDescriptor, GridRect } from "../utils/grid";
 import { runtimeLabel } from "../utils/grid";
 import { simEndpoint } from "../utils/sim-endpoint";
 
 // Shown in the main view when the selected device isn't streaming yet: a static
-// device frame with a blank blue screen, the device name + runtime, and a Start
-// button that boots/streams it. Mirrors Xcode's "device not running" state.
+// device frame, the device name + runtime, and a Start button that boots/streams
+// it. Mirrors Xcode's "device not running" state.
 export function DevicePlaceholder({
   name,
   runtime,
@@ -32,24 +32,42 @@ export function DevicePlaceholder({
 }) {
   const type = getDeviceType(name);
   const f = DEVICE_FRAMES[type];
-  const screenSize = chrome
-    ? { width: chrome.screen.width, height: chrome.screen.height }
+  const previewAssetName = placeholderAssetNameForDevice(type, name);
+  const previewAssetLayout = previewAssetName
+    ? PLACEHOLDER_ASSET_LAYOUTS[previewAssetName] ?? null
+    : null;
+  const activeChrome = previewAssetName ? null : chrome ?? null;
+  const screenSize = activeChrome
+    ? { width: activeChrome.screen.width, height: activeChrome.screen.height }
     : fallbackScreenSize(type, name);
   const screenMax = simulatorMaxWidth(type, screenSize);
-  const frameMaxWidth = chrome
-    ? (screenMax * chrome.frame.width) / chrome.screen.width
+  const frameMaxWidth = previewAssetLayout
+    ? previewAssetLayout.maxWidth
+    : activeChrome
+    ? (screenMax * activeChrome.frame.width) / activeChrome.screen.width
     : (screenMax * f.width) / (f.width - 2 * f.bezelX);
-  const aspectRatio = chrome
-    ? `${chrome.frame.width} / ${chrome.frame.height}`
+  const aspectRatio = previewAssetLayout
+    ? previewAssetLayout.aspectRatio
+    : activeChrome
+    ? `${activeChrome.frame.width} / ${activeChrome.frame.height}`
     : `${f.width} / ${f.height}`;
+  const fallbackChrome = type === "vision"
+    ? <VisionPlaceholderFallback />
+    : <SvgPlaceholderChrome type={type} />;
 
   return (
-    <div className="flex flex-col items-center gap-5 min-w-0">
+    <div className="flex flex-col items-center gap-5 min-w-0 w-full">
       <div
         className="relative w-full"
         style={{ maxWidth: frameMaxWidth, aspectRatio }}
       >
-        {chrome ? <DeviceKitPlaceholderChrome chrome={chrome} /> : <SvgPlaceholderChrome type={type} />}
+        {previewAssetName ? (
+          <AssetPlaceholderChrome name={previewAssetName} fallback={fallbackChrome} />
+        ) : activeChrome ? (
+          <DeviceKitPlaceholderChrome chrome={activeChrome} />
+        ) : (
+          fallbackChrome
+        )}
       </div>
 
       <div className="flex flex-col items-center gap-1 text-center">
@@ -80,6 +98,36 @@ export function DevicePlaceholder({
       </button>
     </div>
   );
+}
+
+type PlaceholderAssetName =
+  | "vision-pro"
+  | "apple-watch-series-11"
+  | "apple-watch-ultra-3"
+  | "apple-watch-se-3";
+
+type PlaceholderAssetLayout = {
+  maxWidth: number;
+  aspectRatio: string;
+};
+
+const PLACEHOLDER_ASSET_LAYOUTS: Partial<Record<PlaceholderAssetName, PlaceholderAssetLayout>> = {
+  "apple-watch-series-11": { maxWidth: 250, aspectRatio: "492 / 792" },
+  "apple-watch-ultra-3": { maxWidth: 255, aspectRatio: "499 / 795" },
+  "apple-watch-se-3": { maxWidth: 238, aspectRatio: "468 / 792" },
+};
+
+function placeholderAssetNameForDevice(
+  type: ReturnType<typeof getDeviceType>,
+  name: string,
+): PlaceholderAssetName | null {
+  const lower = name.toLowerCase();
+  if (type === "vision") return "vision-pro";
+  if (type !== "watch") return null;
+  if (lower.includes("ultra 3")) return "apple-watch-ultra-3";
+  if (lower.includes("series 11")) return "apple-watch-series-11";
+  if (/\bse 3\b/.test(lower)) return "apple-watch-se-3";
+  return null;
 }
 
 function SvgPlaceholderChrome({ type }: { type: ReturnType<typeof getDeviceType> }) {
@@ -116,14 +164,107 @@ function SvgPlaceholderChrome({ type }: { type: ReturnType<typeof getDeviceType>
   );
 }
 
+function AssetPlaceholderChrome({
+  name,
+  fallback,
+}: {
+  name: PlaceholderAssetName;
+  fallback: ReactNode;
+}) {
+  const [assetState, setAssetState] = useState<"loading" | "loaded" | "error">("loading");
+
+  return (
+    <div className="absolute inset-0 size-full pointer-events-none">
+      {assetState !== "loaded" && fallback}
+      {assetState !== "error" && (
+        <img
+          alt=""
+          aria-hidden
+          draggable={false}
+          src={placeholderAssetUrl(name)}
+          className="absolute inset-0 size-full select-none object-contain"
+          style={{ WebkitUserDrag: "none" } as CSSProperties}
+          onLoad={() => setAssetState("loaded")}
+          onError={() => setAssetState("error")}
+        />
+      )}
+    </div>
+  );
+}
+
+function VisionPlaceholderFallback() {
+  const { width: w, height: h } = DEVICE_FRAMES.vision;
+
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      className="absolute inset-0 size-full"
+      preserveAspectRatio="xMidYMid meet"
+      fill="none"
+      aria-hidden
+    >
+      <defs>
+        <linearGradient id="vision-placeholder-shell" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#28282b" />
+          <stop offset="54%" stopColor="#121214" />
+          <stop offset="100%" stopColor="#070708" />
+        </linearGradient>
+        <linearGradient id="vision-placeholder-glass" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#31353a" />
+          <stop offset="48%" stopColor="#0a0b0d" />
+          <stop offset="100%" stopColor="#010102" />
+        </linearGradient>
+        <radialGradient id="vision-placeholder-lens" cx="50%" cy="46%" r="60%">
+          <stop offset="0%" stopColor="#202832" />
+          <stop offset="72%" stopColor="#090a0d" />
+          <stop offset="100%" stopColor="#010102" />
+        </radialGradient>
+      </defs>
+      <path
+        d="M95 177C95 119 147 86 218 91C257 94 286 111 320 111C354 111 383 94 422 91C493 86 545 119 545 177V222C545 278 501 311 443 310C398 309 371 286 345 268C329 257 311 257 295 268C269 286 242 309 197 310C139 311 95 278 95 222V177Z"
+        fill="url(#vision-placeholder-shell)"
+        stroke="#3d3d42"
+        strokeWidth="7"
+      />
+      <path
+        d="M117 181C117 134 157 112 220 116C260 119 287 136 320 136C353 136 380 119 420 116C483 112 523 134 523 181V217C523 263 488 287 439 287C399 287 369 264 345 250C329 240 311 240 295 250C271 264 241 287 201 287C152 287 117 263 117 217V181Z"
+        fill="url(#vision-placeholder-glass)"
+        stroke="#17181b"
+        strokeWidth="5"
+      />
+      <path
+        d="M143 186C145 148 176 135 226 138C264 141 289 156 320 156C351 156 376 141 414 138C464 135 495 148 497 186V213C497 250 469 266 432 266C394 266 369 246 343 235C328 229 312 229 297 235C271 246 246 266 208 266C171 266 143 250 143 213V186Z"
+        fill="url(#vision-placeholder-lens)"
+        stroke="#262a2f"
+        strokeWidth="2"
+      />
+      <path
+        d="M151 171C179 150 217 147 251 154M389 154C423 147 461 150 489 171"
+        stroke="#4e535a"
+        strokeWidth="3"
+        strokeLinecap="round"
+      />
+      <path
+        d="M277 233C289 224 304 219 320 219C336 219 351 224 363 233"
+        stroke="#3b4046"
+        strokeWidth="4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function DeviceKitPlaceholderChrome({ chrome }: { chrome: DeviceKitChromeDescriptor }) {
   const screenRadius = `${(chrome.innerCornerRadius / chrome.screen.width) * 100}% / ${
     (chrome.innerCornerRadius / chrome.screen.height) * 100
   }%`;
+  const buttons = chrome.compositeImage
+    ? chrome.buttons.filter((button) => button.onTop)
+    : chrome.buttons;
 
   return (
     <div className="absolute inset-0 pointer-events-none">
-      {chrome.buttons.map((button) => (
+      {buttons.map((button) => (
         <ChromeImage
           key={`button-${button.name}`}
           chrome={chrome}
@@ -284,6 +425,11 @@ function ChromeImage({
 
 function chromeAssetUrl(identifier: string, image: string): string {
   const path = `grid/api/devicekit-chrome?chrome=${encodeURIComponent(identifier)}&image=${encodeURIComponent(image)}`;
+  return typeof window === "undefined" ? `/${path}` : simEndpoint(path);
+}
+
+function placeholderAssetUrl(name: string): string {
+  const path = `grid/api/device-placeholder-asset?name=${encodeURIComponent(name)}`;
   return typeof window === "undefined" ? `/${path}` : simEndpoint(path);
 }
 

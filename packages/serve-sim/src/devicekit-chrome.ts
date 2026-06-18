@@ -16,8 +16,52 @@ const DEVICE_TYPES_ROOT = "/Library/Developer/CoreSimulator/Profiles/DeviceTypes
 const CHROME_ROOT = "/Library/Developer/DeviceKit/Chrome";
 const CHROME_PREFIX = "com.apple.dt.devicekit.chrome.";
 const PNG_CACHE_ROOT = join(tmpdir(), "serve-sim-devicekit-chrome");
+const PLACEHOLDER_ASSET_CACHE_ROOT = join(tmpdir(), "serve-sim-device-placeholder-assets");
+const MOBILE_DEVICE_RESOURCES_ROOT =
+  "/System/Library/CoreServices/CoreTypes.bundle/Contents/Library/MobileDevices.bundle/Contents/Resources";
+const LEGACY_CORE_TYPES_RESOURCES_ROOT =
+  "/System/Library/CoreServices/CoreTypes.bundle/Contents/Library/CoreTypes-0006.bundle/Contents/Resources";
 
 type JsonRecord = Record<string, unknown>;
+type PlaceholderCrop = { width: number; height: number; offsetX: number; offsetY: number };
+type PlaceholderAssetDefinition = {
+  paths: readonly string[];
+  crop: PlaceholderCrop;
+};
+
+const PLACEHOLDER_ASSETS = {
+  "vision-pro": {
+    paths: [
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.vision-pro.icns"),
+      join(LEGACY_CORE_TYPES_RESOURCES_ROOT, "com.apple.visionpro.icns"),
+    ],
+    crop: { width: 1024, height: 620, offsetX: 0, offsetY: 210 },
+  },
+  "apple-watch-series-11": {
+    paths: [
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-series-11-4.icns"),
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-series-11-41.icns"),
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-series-11-36.icns"),
+    ],
+    crop: { width: 492, height: 792, offsetX: 276, offsetY: 116 },
+  },
+  "apple-watch-ultra-3": {
+    paths: [
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-ultra-3-8.icns"),
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-ultra-3-14.icns"),
+    ],
+    crop: { width: 499, height: 795, offsetX: 276, offsetY: 115 },
+  },
+  "apple-watch-se-3": {
+    paths: [
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-se-3-1.icns"),
+      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-se-3-2.icns"),
+    ],
+    crop: { width: 468, height: 792, offsetX: 288, offsetY: 116 },
+  },
+} as const satisfies Record<string, PlaceholderAssetDefinition>;
+
+type PlaceholderAssetName = keyof typeof PLACEHOLDER_ASSETS;
 
 export type DeviceKitChromeDescriptor = {
   identifier: string;
@@ -174,6 +218,40 @@ export function serveDeviceKitChromeAsset(url: URL, res: ServerResponse): void {
   } catch (err) {
     jsonError(res, 500, err instanceof Error ? err.message : "Failed to render chrome asset");
   }
+}
+
+export function serveDevicePlaceholderAsset(url: URL, res: ServerResponse): void {
+  const name = url.searchParams.get("name") ?? "";
+  const asset = placeholderAsset(name);
+  if (!asset) {
+    jsonError(res, 404, "Placeholder asset not found");
+    return;
+  }
+
+  const sourcePath = asset.paths.find((path) => existsSync(path));
+  if (!sourcePath) {
+    jsonError(res, 404, "Placeholder asset not found");
+    return;
+  }
+
+  try {
+    const pngPath = cachedPlaceholderAssetPngPath(name, sourcePath, asset.crop);
+    const bytes = readFileSync(pngPath);
+    res.writeHead(200, {
+      "Content-Type": "image/png",
+      "Cache-Control": "public, max-age=604800, immutable",
+      "Content-Length": String(bytes.byteLength),
+    });
+    res.end(bytes);
+  } catch (err) {
+    jsonError(res, 500, err instanceof Error ? err.message : "Failed to render placeholder asset");
+  }
+}
+
+function placeholderAsset(name: string): PlaceholderAssetDefinition | null {
+  return Object.prototype.hasOwnProperty.call(PLACEHOLDER_ASSETS, name)
+    ? PLACEHOLDER_ASSETS[name as PlaceholderAssetName]
+    : null;
 }
 
 function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDescriptor | null {
@@ -503,6 +581,53 @@ function cachedPngPath(identifier: string, imageName: string, pdfPath: string): 
     stdio: ["ignore", "ignore", "ignore"],
     timeout: 10_000,
   });
+  renameSync(tmpPath, outPath);
+  return outPath;
+}
+
+function cachedPlaceholderAssetPngPath(
+  name: string,
+  sourcePath: string,
+  crop: PlaceholderCrop,
+): string {
+  mkdirSync(PLACEHOLDER_ASSET_CACHE_ROOT, { recursive: true });
+  const stat = statSync(sourcePath);
+  const key = createHash("sha1")
+    .update(name)
+    .update("\0")
+    .update(sourcePath)
+    .update("\0")
+    .update(JSON.stringify(crop))
+    .update("\0")
+    .update(String(stat.mtimeMs))
+    .update("\0")
+    .update(String(stat.size))
+    .digest("hex");
+  const outPath = join(PLACEHOLDER_ASSET_CACHE_ROOT, `${name}-${key}.png`);
+  if (existsSync(outPath)) return outPath;
+
+  const tmpPath = `${outPath}.${process.pid}.tmp`;
+  execFileSync(
+    "sips",
+    [
+      "-c",
+      String(crop.height),
+      String(crop.width),
+      "--cropOffset",
+      String(crop.offsetY),
+      String(crop.offsetX),
+      "-s",
+      "format",
+      "png",
+      sourcePath,
+      "--out",
+      tmpPath,
+    ],
+    {
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: 10_000,
+    },
+  );
   renameSync(tmpPath, outPath);
   return outPath;
 }

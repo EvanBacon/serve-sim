@@ -7,7 +7,11 @@ import { randomBytes, timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import { createAxStreamerCache } from "./ax";
 import { debugMw } from "./debug";
-import { resolveDeviceKitChrome, serveDeviceKitChromeAsset } from "./devicekit-chrome";
+import {
+  resolveDeviceKitChrome,
+  serveDeviceKitChromeAsset,
+  serveDevicePlaceholderAsset,
+} from "./devicekit-chrome";
 import { createExecUpgradeHandler, type UiRequestHandler } from "./exec-ws";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 
@@ -833,6 +837,11 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
 
     if (url === base + "/grid/api/devicekit-chrome") {
       serveDeviceKitChromeAsset(new URL(rawUrl || "/", "http://serve-sim.local"), res);
+      return;
+    }
+
+    if (url === base + "/grid/api/device-placeholder-asset") {
+      serveDevicePlaceholderAsset(new URL(rawUrl || "/", "http://serve-sim.local"), res);
       return;
     }
 
