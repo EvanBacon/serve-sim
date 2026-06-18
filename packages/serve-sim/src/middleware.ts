@@ -7,6 +7,7 @@ import { randomBytes, timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import { createAxStreamerCache } from "./ax";
 import { debugMw } from "./debug";
+import { resolveDeviceKitChrome, serveDeviceKitChromeAsset } from "./devicekit-chrome";
 import { createExecUpgradeHandler, type UiRequestHandler } from "./exec-ws";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 
@@ -518,6 +519,7 @@ interface SimctlDevice {
   name: string;
   state: string;
   isAvailable?: boolean;
+  deviceTypeIdentifier?: string;
   runtime: string;
 }
 
@@ -832,6 +834,11 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
       return;
     }
 
+    if (url === base + "/grid/api/devicekit-chrome") {
+      serveDeviceKitChromeAsset(new URL(rawUrl || "/", "http://serve-sim.local"), res);
+      return;
+    }
+
     // Grid JSON: every supported simulator, annotated with running helper info if any.
     if (url === base + "/grid/api") {
       const states = readServeSimStates();
@@ -845,6 +852,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           name: d.name,
           runtime: d.runtime,
           state: d.state,
+          chrome: resolveDeviceKitChrome(d),
           helper: remoteHelper
             ? {
                 port: remoteHelper.port,

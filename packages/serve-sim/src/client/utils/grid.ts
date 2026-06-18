@@ -3,7 +3,57 @@ export interface GridDevice {
   name: string;
   runtime: string;
   state: string;
+  chrome?: DeviceKitChromeDescriptor | null;
   helper: { port: number; url: string; streamUrl: string; wsUrl: string } | null;
+}
+
+export interface DeviceKitChromeDescriptor {
+  identifier: string;
+  frame: GridSize;
+  body: GridRect;
+  screen: GridRect;
+  insets: GridInsets;
+  outerCornerRadius: number;
+  innerCornerRadius: number;
+  compositeImage: string | null;
+  slice: DeviceKitChromeSlice | null;
+  corner: GridSize | null;
+  buttons: DeviceKitChromeButton[];
+}
+
+export interface DeviceKitChromeButton {
+  name: string;
+  image: string;
+  onTop: boolean;
+  frame: GridRect;
+}
+
+export interface DeviceKitChromeSlice {
+  topLeft: string;
+  top: string;
+  topRight: string;
+  right: string;
+  bottomRight: string;
+  bottom: string;
+  bottomLeft: string;
+  left: string;
+}
+
+export interface GridSize {
+  width: number;
+  height: number;
+}
+
+export interface GridRect extends GridSize {
+  x: number;
+  y: number;
+}
+
+export interface GridInsets {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
 }
 
 export interface MemoryReport {
