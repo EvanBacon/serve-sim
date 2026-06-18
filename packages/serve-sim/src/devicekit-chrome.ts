@@ -7,10 +7,12 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
 } from "fs";
 import type { ServerResponse } from "http";
 import { tmpdir } from "os";
 import { basename, dirname, join } from "path";
+import { inflateSync } from "zlib";
 
 const DEVICE_TYPES_ROOT = "/Library/Developer/CoreSimulator/Profiles/DeviceTypes";
 const CHROME_ROOT = "/Library/Developer/DeviceKit/Chrome";
@@ -23,45 +25,37 @@ const LEGACY_CORE_TYPES_RESOURCES_ROOT =
   "/System/Library/CoreServices/CoreTypes.bundle/Contents/Library/CoreTypes-0006.bundle/Contents/Resources";
 
 type JsonRecord = Record<string, unknown>;
-type PlaceholderCrop = { width: number; height: number; offsetX: number; offsetY: number };
+type PlaceholderAssetInfo = { sourcePath: string; pngPath: string; width: number; height: number };
 type PlaceholderAssetDefinition = {
   paths: readonly string[];
-  crop: PlaceholderCrop;
 };
 
-const PLACEHOLDER_ASSETS = {
+const FALLBACK_PLACEHOLDER_ASSETS = {
   "vision-pro": {
     paths: [
       join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.vision-pro.icns"),
       join(LEGACY_CORE_TYPES_RESOURCES_ROOT, "com.apple.visionpro.icns"),
     ],
-    crop: { width: 1024, height: 620, offsetX: 0, offsetY: 210 },
   },
-  "apple-watch-series-11": {
-    paths: [
-      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-series-11-4.icns"),
-      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-series-11-41.icns"),
-      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-series-11-36.icns"),
-    ],
-    crop: { width: 492, height: 792, offsetX: 276, offsetY: 116 },
-  },
-  "apple-watch-ultra-3": {
-    paths: [
-      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-ultra-3-8.icns"),
-      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-ultra-3-14.icns"),
-    ],
-    crop: { width: 499, height: 795, offsetX: 276, offsetY: 115 },
-  },
-  "apple-watch-se-3": {
-    paths: [
-      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-se-3-1.icns"),
-      join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.apple-watch-se-3-2.icns"),
-    ],
-    crop: { width: 468, height: 792, offsetX: 288, offsetY: 116 },
-  },
+  "iphone-17e": { paths: [join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.iphone-16-e-1.icns")] },
+  "ipad-air-11-inch-m4": { paths: [join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.ipad-air-m3-1.icns")] },
+  "ipad-air-13-inch-m4": { paths: [join(MOBILE_DEVICE_RESOURCES_ROOT, "com.apple.ipad-air-m3-1.icns")] },
 } as const satisfies Record<string, PlaceholderAssetDefinition>;
 
-type PlaceholderAssetName = keyof typeof PLACEHOLDER_ASSETS;
+type FallbackPlaceholderAssetName = keyof typeof FALLBACK_PLACEHOLDER_ASSETS;
+
+type CoreTypesIconEntry = {
+  description: string;
+  iconFile: string;
+  iconName: string;
+  modelCodes: string[];
+};
+
+export type DevicePlaceholderAssetDescriptor = {
+  name: string;
+  width: number;
+  height: number;
+};
 
 export type DeviceKitChromeDescriptor = {
   identifier: string;
@@ -105,6 +99,13 @@ type DeviceProfile = {
   screenSize: Size | null;
 };
 
+type DeviceProfileMetadata = {
+  chromeIdentifier: string | null;
+  modelIdentifier: string | null;
+  productClass: string | null;
+  screenSize: Size | null;
+};
+
 type ParsedChrome = {
   identifier: string;
   insets: Insets;
@@ -130,6 +131,8 @@ type ParsedButton = {
 let deviceTypeNameByIdentifier: Map<string, string> | null = null;
 const chromeCache = new Map<string, ParsedChrome | null>();
 const descriptorCache = new Map<string, DeviceKitChromeDescriptor | null>();
+let coreTypesIconEntriesCache: CoreTypesIconEntry[] | null = null;
+const placeholderAssetInfoCache = new Map<string, PlaceholderAssetInfo | null>();
 
 export function bareChromeIdentifier(identifier: string): string {
   return identifier.startsWith(CHROME_PREFIX)
@@ -176,14 +179,28 @@ export function resolveDeviceKitChrome(device: {
   name: string;
   deviceTypeIdentifier?: string;
 }): DeviceKitChromeDescriptor | null {
-  const profileName =
-    deviceTypeNameForIdentifier(device.deviceTypeIdentifier) ?? device.name;
+  const profileName = profileNameForDevice(device);
   const cacheKey = profileName;
   if (descriptorCache.has(cacheKey)) return descriptorCache.get(cacheKey) ?? null;
 
   const resolved = resolveDeviceKitChromeUncached(profileName);
   descriptorCache.set(cacheKey, resolved);
   return resolved;
+}
+
+export function resolveDevicePlaceholderAsset(device: {
+  name: string;
+  deviceTypeIdentifier?: string;
+}): DevicePlaceholderAssetDescriptor | null {
+  const profilePath = profilePathForDevice(device);
+  const profile = profilePath ? readProfileMetadata(profilePath) : null;
+  const iconName =
+    iconNameForProfile(profile) ??
+    fallbackIconNameForDeviceName(device.name);
+  if (!iconName) return null;
+
+  const info = placeholderAssetInfo(iconName);
+  return info ? { name: iconName, width: info.width, height: info.height } : null;
 }
 
 export function serveDeviceKitChromeAsset(url: URL, res: ServerResponse): void {
@@ -222,21 +239,14 @@ export function serveDeviceKitChromeAsset(url: URL, res: ServerResponse): void {
 
 export function serveDevicePlaceholderAsset(url: URL, res: ServerResponse): void {
   const name = url.searchParams.get("name") ?? "";
-  const asset = placeholderAsset(name);
-  if (!asset) {
-    jsonError(res, 404, "Placeholder asset not found");
-    return;
-  }
-
-  const sourcePath = asset.paths.find((path) => existsSync(path));
-  if (!sourcePath) {
-    jsonError(res, 404, "Placeholder asset not found");
-    return;
-  }
-
   try {
-    const pngPath = cachedPlaceholderAssetPngPath(name, sourcePath, asset.crop);
-    const bytes = readFileSync(pngPath);
+    const asset = placeholderAssetInfo(name);
+    if (!asset) {
+      jsonError(res, 404, "Placeholder asset not found");
+      return;
+    }
+
+    const bytes = readFileSync(asset.pngPath);
     res.writeHead(200, {
       "Content-Type": "image/png",
       "Cache-Control": "public, max-age=604800, immutable",
@@ -248,20 +258,34 @@ export function serveDevicePlaceholderAsset(url: URL, res: ServerResponse): void
   }
 }
 
-function placeholderAsset(name: string): PlaceholderAssetDefinition | null {
-  return Object.prototype.hasOwnProperty.call(PLACEHOLDER_ASSETS, name)
-    ? PLACEHOLDER_ASSETS[name as PlaceholderAssetName]
+function placeholderAssetInfo(name: string): PlaceholderAssetInfo | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return null;
+  if (placeholderAssetInfoCache.has(name)) return placeholderAssetInfoCache.get(name) ?? null;
+
+  const sourcePath = placeholderAssetSourcePath(name);
+  const info = sourcePath ? cachedPlaceholderAssetPngPath(name, sourcePath) : null;
+  placeholderAssetInfoCache.set(name, info);
+  return info;
+}
+
+function placeholderAssetSourcePath(name: string): string | null {
+  const fallback = fallbackPlaceholderAsset(name);
+  const fallbackPath = fallback?.paths.find((path) => existsSync(path));
+  if (fallbackPath) return fallbackPath;
+
+  if (!coreTypesIconEntries().some((entry) => entry.iconName === name)) return null;
+  const path = join(MOBILE_DEVICE_RESOURCES_ROOT, `${name}.icns`);
+  return existsSync(path) ? path : null;
+}
+
+function fallbackPlaceholderAsset(name: string): PlaceholderAssetDefinition | null {
+  return Object.prototype.hasOwnProperty.call(FALLBACK_PLACEHOLDER_ASSETS, name)
+    ? FALLBACK_PLACEHOLDER_ASSETS[name as FallbackPlaceholderAssetName]
     : null;
 }
 
 function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDescriptor | null {
-  const profilePath = join(
-    DEVICE_TYPES_ROOT,
-    `${profileName}.simdevicetype`,
-    "Contents",
-    "Resources",
-    "profile.plist",
-  );
+  const profilePath = profilePathForName(profileName);
   if (!existsSync(profilePath)) return null;
 
   const profile = readProfile(profilePath);
@@ -334,18 +358,116 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
 }
 
 function readProfile(profilePath: string): DeviceProfile | null {
-  const raw = readPlist(profilePath);
-  if (!raw) return null;
-  const fullIdentifier = typeof raw.chromeIdentifier === "string" ? raw.chromeIdentifier : null;
+  const profile = readProfileMetadata(profilePath);
+  const fullIdentifier = profile?.chromeIdentifier;
   if (!fullIdentifier) return null;
   const chromeIdentifier = bareChromeIdentifier(fullIdentifier);
   return {
     chromeIdentifier,
-    screenSize: logicalScreenSizeFromProfile(
-      { ...raw, __profileDir: dirname(profilePath) },
-      chromeIdentifier,
-    ),
+    screenSize: profile.screenSize,
   };
+}
+
+function readProfileMetadata(profilePath: string): DeviceProfileMetadata | null {
+  const raw = readPlist(profilePath);
+  if (!raw) return null;
+  const fullIdentifier = typeof raw.chromeIdentifier === "string" ? raw.chromeIdentifier : null;
+  const chromeIdentifier = fullIdentifier ? bareChromeIdentifier(fullIdentifier) : null;
+  return {
+    chromeIdentifier,
+    modelIdentifier: typeof raw.modelIdentifier === "string" ? raw.modelIdentifier : null,
+    productClass: typeof raw.productClass === "string" ? raw.productClass : null,
+    screenSize: chromeIdentifier
+      ? logicalScreenSizeFromProfile(
+          { ...raw, __profileDir: dirname(profilePath) },
+          chromeIdentifier,
+        )
+      : null,
+  };
+}
+
+function profileNameForDevice(device: {
+  name: string;
+  deviceTypeIdentifier?: string;
+}): string {
+  return deviceTypeNameForIdentifier(device.deviceTypeIdentifier) ?? device.name;
+}
+
+function profilePathForDevice(device: {
+  name: string;
+  deviceTypeIdentifier?: string;
+}): string | null {
+  const path = profilePathForName(profileNameForDevice(device));
+  return existsSync(path) ? path : null;
+}
+
+function profilePathForName(profileName: string): string {
+  return join(
+    DEVICE_TYPES_ROOT,
+    `${profileName}.simdevicetype`,
+    "Contents",
+    "Resources",
+    "profile.plist",
+  );
+}
+
+function iconNameForProfile(profile: DeviceProfileMetadata | null): string | null {
+  if (!profile) return null;
+  const candidates = new Set<string>();
+  if (profile.modelIdentifier) candidates.add(profile.modelIdentifier);
+  if (profile.productClass) {
+    candidates.add(profile.productClass);
+    candidates.add(`${profile.productClass}AP`);
+  }
+  if (candidates.size === 0) return null;
+
+  for (const entry of coreTypesIconEntries()) {
+    if (entry.modelCodes.some((code) => candidates.has(code))) {
+      return entry.iconName;
+    }
+  }
+  return null;
+}
+
+function fallbackIconNameForDeviceName(name: string): string | null {
+  const normalized = name.toLowerCase();
+  if (normalized.includes("vision")) return "vision-pro";
+  if (/iphone\s+17e\b/.test(normalized)) return "iphone-17e";
+  if (/ipad\s+air\s+11-inch\s+\(m4\)/.test(normalized)) return "ipad-air-11-inch-m4";
+  if (/ipad\s+air\s+13-inch\s+\(m4\)/.test(normalized)) return "ipad-air-13-inch-m4";
+  return null;
+}
+
+function coreTypesIconEntries(): CoreTypesIconEntry[] {
+  if (coreTypesIconEntriesCache) return coreTypesIconEntriesCache;
+  const info =
+    readPlist(join(MOBILE_DEVICE_RESOURCES_ROOT, "MobileDevices-Info.plist")) ??
+    readPlist(join(dirname(MOBILE_DEVICE_RESOURCES_ROOT), "Info.plist"));
+  const declarations = Array.isArray(info?.UTExportedTypeDeclarations)
+    ? info.UTExportedTypeDeclarations
+    : [];
+  const entries: CoreTypesIconEntry[] = [];
+  for (const declaration of declarations) {
+    const recordValue = record(declaration);
+    const iconFile = stringValue(recordValue.UTTypeIconFile);
+    if (!iconFile || !iconFile.endsWith(".icns")) continue;
+    const iconPath = join(MOBILE_DEVICE_RESOURCES_ROOT, iconFile);
+    if (!existsSync(iconPath)) continue;
+    const tags = record(recordValue.UTTypeTagSpecification);
+    const rawCodes = tags["com.apple.device-model-code"];
+    const modelCodes = Array.isArray(rawCodes)
+      ? rawCodes.filter((value): value is string => typeof value === "string" && value.length > 0)
+      : [];
+    if (modelCodes.length === 0) continue;
+    entries.push({
+      description: stringValue(recordValue.UTTypeDescription) ?? "",
+      iconFile,
+      iconName: basename(iconFile, ".icns"),
+      modelCodes,
+    });
+  }
+  coreTypesIconEntriesCache = entries;
+  return entries;
 }
 
 function readChrome(identifier: string): ParsedChrome | null {
@@ -588,8 +710,7 @@ function cachedPngPath(identifier: string, imageName: string, pdfPath: string): 
 function cachedPlaceholderAssetPngPath(
   name: string,
   sourcePath: string,
-  crop: PlaceholderCrop,
-): string {
+): PlaceholderAssetInfo {
   mkdirSync(PLACEHOLDER_ASSET_CACHE_ROOT, { recursive: true });
   const stat = statSync(sourcePath);
   const key = createHash("sha1")
@@ -597,39 +718,172 @@ function cachedPlaceholderAssetPngPath(
     .update("\0")
     .update(sourcePath)
     .update("\0")
-    .update(JSON.stringify(crop))
-    .update("\0")
     .update(String(stat.mtimeMs))
     .update("\0")
     .update(String(stat.size))
     .digest("hex");
   const outPath = join(PLACEHOLDER_ASSET_CACHE_ROOT, `${name}-${key}.png`);
-  if (existsSync(outPath)) return outPath;
+  if (existsSync(outPath)) {
+    const size = pngSize(readFileSync(outPath));
+    return { sourcePath, pngPath: outPath, width: size.width, height: size.height };
+  }
 
   const tmpPath = `${outPath}.${process.pid}.tmp`;
-  execFileSync(
-    "sips",
-    [
-      "-c",
-      String(crop.height),
-      String(crop.width),
-      "--cropOffset",
-      String(crop.offsetY),
-      String(crop.offsetX),
-      "-s",
-      "format",
-      "png",
-      sourcePath,
-      "--out",
-      tmpPath,
-    ],
-    {
+  const rawPath = `${outPath}.${process.pid}.raw.png`;
+  try {
+    execFileSync("sips", ["-s", "format", "png", sourcePath, "--out", rawPath], {
       stdio: ["ignore", "ignore", "ignore"],
       timeout: 10_000,
-    },
-  );
-  renameSync(tmpPath, outPath);
-  return outPath;
+    });
+    const rawPng = readFileSync(rawPath);
+    const crop = alphaBounds(rawPng) ?? { x: 0, y: 0, ...pngSize(rawPng) };
+    execFileSync(
+      "sips",
+      [
+        "-c",
+        String(crop.height),
+        String(crop.width),
+        "--cropOffset",
+        String(crop.y),
+        String(crop.x),
+        "-s",
+        "format",
+        "png",
+        sourcePath,
+        "--out",
+        tmpPath,
+      ],
+      {
+        stdio: ["ignore", "ignore", "ignore"],
+        timeout: 10_000,
+      },
+    );
+    renameSync(tmpPath, outPath);
+    return { sourcePath, pngPath: outPath, width: crop.width, height: crop.height };
+  } finally {
+    try {
+      if (existsSync(rawPath)) unlinkSync(rawPath);
+    } catch {}
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {}
+  }
+}
+
+function pngSize(png: Buffer): Size {
+  if (
+    png.byteLength < 24 ||
+    png[0] !== 0x89 ||
+    png.toString("ascii", 1, 4) !== "PNG"
+  ) {
+    throw new Error("Invalid PNG placeholder asset");
+  }
+  return {
+    width: png.readUInt32BE(16),
+    height: png.readUInt32BE(20),
+  };
+}
+
+function alphaBounds(png: Buffer): Rect | null {
+  const { width, height } = pngSize(png);
+  let offset = 8;
+  let bitDepth = 0;
+  let colorType = 0;
+  const idats: Buffer[] = [];
+  while (offset < png.byteLength) {
+    const length = png.readUInt32BE(offset);
+    offset += 4;
+    const type = png.toString("ascii", offset, offset + 4);
+    offset += 4;
+    const data = png.subarray(offset, offset + length);
+    offset += length + 4;
+    if (type === "IHDR") {
+      bitDepth = data[8] ?? 0;
+      colorType = data[9] ?? 0;
+    } else if (type === "IDAT") {
+      idats.push(data);
+    } else if (type === "IEND") {
+      break;
+    }
+  }
+
+  const bytesPerPixel = colorType === 6 ? 4 : colorType === 4 ? 2 : 0;
+  if (bitDepth !== 8 || bytesPerPixel === 0 || idats.length === 0) {
+    return { x: 0, y: 0, width, height };
+  }
+
+  const raw = inflateSync(Buffer.concat(idats));
+  const stride = width * bytesPerPixel;
+  let previous = Buffer.alloc(stride);
+  let inputOffset = 0;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y++) {
+    const filter = raw[inputOffset++] ?? 0;
+    const row = Buffer.from(raw.subarray(inputOffset, inputOffset + stride));
+    inputOffset += stride;
+    unfilterPngRow(row, previous, bytesPerPixel, filter);
+
+    for (let x = 0; x < width; x++) {
+      const alpha = row[x * bytesPerPixel + bytesPerPixel - 1] ?? 0;
+      if (alpha <= 0) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    previous = row;
+  }
+
+  if (maxX < minX || maxY < minY) return null;
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+}
+
+function unfilterPngRow(
+  row: Buffer,
+  previous: Buffer,
+  bytesPerPixel: number,
+  filter: number,
+): void {
+  for (let i = 0; i < row.byteLength; i++) {
+    const left = i >= bytesPerPixel ? row[i - bytesPerPixel]! : 0;
+    const up = previous[i] ?? 0;
+    const upLeft = i >= bytesPerPixel ? previous[i - bytesPerPixel]! : 0;
+    switch (filter) {
+      case 0:
+        break;
+      case 1:
+        row[i] = (row[i]! + left) & 0xff;
+        break;
+      case 2:
+        row[i] = (row[i]! + up) & 0xff;
+        break;
+      case 3:
+        row[i] = (row[i]! + Math.floor((left + up) / 2)) & 0xff;
+        break;
+      case 4:
+        row[i] = (row[i]! + paeth(left, up, upLeft)) & 0xff;
+        break;
+      default:
+        throw new Error(`Unsupported PNG filter ${filter}`);
+    }
+  }
+}
+
+function paeth(left: number, up: number, upLeft: number): number {
+  const p = left + up - upLeft;
+  const pa = Math.abs(p - left);
+  const pb = Math.abs(p - up);
+  const pc = Math.abs(p - upLeft);
+  if (pa <= pb && pa <= pc) return left;
+  return pb <= pc ? up : upLeft;
 }
 
 function jsonError(res: ServerResponse, status: number, error: string): void {

@@ -6,7 +6,11 @@ import {
   simulatorMaxWidth,
 } from "serve-sim-client/simulator";
 import { useState, type CSSProperties, type ReactNode } from "react";
-import type { DeviceKitChromeDescriptor, GridRect } from "../utils/grid";
+import type {
+  DeviceKitChromeDescriptor,
+  DevicePlaceholderAssetDescriptor,
+  GridRect,
+} from "../utils/grid";
 import { runtimeLabel } from "../utils/grid";
 import { simEndpoint } from "../utils/sim-endpoint";
 
@@ -17,6 +21,7 @@ export function DevicePlaceholder({
   name,
   runtime,
   chrome,
+  placeholderAsset,
   busy,
   busyLabel = "Starting…",
   error,
@@ -25,6 +30,7 @@ export function DevicePlaceholder({
   name: string;
   runtime: string;
   chrome?: DeviceKitChromeDescriptor | null;
+  placeholderAsset?: DevicePlaceholderAssetDescriptor | null;
   busy: boolean;
   busyLabel?: string;
   error: string | null;
@@ -32,25 +38,26 @@ export function DevicePlaceholder({
 }) {
   const type = getDeviceType(name);
   const f = DEVICE_FRAMES[type];
-  const previewAssetName = placeholderAssetNameForDevice(type, name);
-  const previewAssetLayout = previewAssetName
-    ? PLACEHOLDER_ASSET_LAYOUTS[previewAssetName] ?? null
-    : null;
-  const activeChrome = previewAssetName ? null : chrome ?? null;
+  const activeAsset = placeholderAsset ?? null;
+  const activeChrome = activeAsset ? null : chrome ?? null;
   const screenSize = activeChrome
     ? { width: activeChrome.screen.width, height: activeChrome.screen.height }
     : fallbackScreenSize(type, name);
   const screenMax = simulatorMaxWidth(type, screenSize);
-  const frameMaxWidth = previewAssetLayout
-    ? previewAssetLayout.maxWidth
+  const frameMaxWidth = activeAsset
+    ? placeholderAssetMaxWidth(type, activeAsset.name)
     : activeChrome
     ? (screenMax * activeChrome.frame.width) / activeChrome.screen.width
     : (screenMax * f.width) / (f.width - 2 * f.bezelX);
-  const aspectRatio = previewAssetLayout
-    ? previewAssetLayout.aspectRatio
+  const aspectSize = activeAsset
+    ? { width: activeAsset.width, height: activeAsset.height }
     : activeChrome
-    ? `${activeChrome.frame.width} / ${activeChrome.frame.height}`
-    : `${f.width} / ${f.height}`;
+    ? { width: activeChrome.frame.width, height: activeChrome.frame.height }
+    : { width: f.width, height: f.height };
+  const aspectRatio = `${aspectSize.width} / ${aspectSize.height}`;
+  const viewportWidthLimit = (
+    (aspectSize.width / aspectSize.height) * placeholderAssetMaxViewportHeight(type)
+  ).toFixed(2);
   const fallbackChrome = type === "vision"
     ? <VisionPlaceholderFallback />
     : <SvgPlaceholderChrome type={type} />;
@@ -59,10 +66,14 @@ export function DevicePlaceholder({
     <div className="flex flex-col items-center gap-5 min-w-0 w-full">
       <div
         className="relative w-full"
-        style={{ maxWidth: frameMaxWidth, aspectRatio }}
+        style={{
+          width: `min(100%, ${frameMaxWidth}px, ${viewportWidthLimit}dvh)`,
+          maxWidth: frameMaxWidth,
+          aspectRatio,
+        }}
       >
-        {previewAssetName ? (
-          <AssetPlaceholderChrome name={previewAssetName} fallback={fallbackChrome} />
+        {activeAsset ? (
+          <AssetPlaceholderChrome name={activeAsset.name} fallback={fallbackChrome} />
         ) : activeChrome ? (
           <DeviceKitPlaceholderChrome chrome={activeChrome} />
         ) : (
@@ -100,34 +111,25 @@ export function DevicePlaceholder({
   );
 }
 
-type PlaceholderAssetName =
-  | "vision-pro"
-  | "apple-watch-series-11"
-  | "apple-watch-ultra-3"
-  | "apple-watch-se-3";
-
-type PlaceholderAssetLayout = {
-  maxWidth: number;
-  aspectRatio: string;
-};
-
-const PLACEHOLDER_ASSET_LAYOUTS: Partial<Record<PlaceholderAssetName, PlaceholderAssetLayout>> = {
-  "apple-watch-series-11": { maxWidth: 250, aspectRatio: "492 / 792" },
-  "apple-watch-ultra-3": { maxWidth: 255, aspectRatio: "499 / 795" },
-  "apple-watch-se-3": { maxWidth: 238, aspectRatio: "468 / 792" },
-};
-
-function placeholderAssetNameForDevice(
+function placeholderAssetMaxWidth(
   type: ReturnType<typeof getDeviceType>,
-  name: string,
-): PlaceholderAssetName | null {
-  const lower = name.toLowerCase();
-  if (type === "vision") return "vision-pro";
-  if (type !== "watch") return null;
-  if (lower.includes("ultra 3")) return "apple-watch-ultra-3";
-  if (lower.includes("series 11")) return "apple-watch-series-11";
-  if (/\bse 3\b/.test(lower)) return "apple-watch-se-3";
-  return null;
+  assetName: string,
+): number {
+  if (type === "watch") {
+    if (assetName.includes("ultra")) return 255;
+    if (assetName.includes("watch-se-") || assetName.includes("apple-watch-se-")) return 238;
+    return 250;
+  }
+  if (type === "vision") return 390;
+  if (type === "ipad") return 340;
+  return 280;
+}
+
+function placeholderAssetMaxViewportHeight(type: ReturnType<typeof getDeviceType>): number {
+  if (type === "vision") return 34;
+  if (type === "ipad") return 50;
+  if (type === "watch") return 56;
+  return 52;
 }
 
 function SvgPlaceholderChrome({ type }: { type: ReturnType<typeof getDeviceType> }) {
@@ -168,7 +170,7 @@ function AssetPlaceholderChrome({
   name,
   fallback,
 }: {
-  name: PlaceholderAssetName;
+  name: string;
   fallback: ReactNode;
 }) {
   const [assetState, setAssetState] = useState<"loading" | "loaded" | "error">("loading");

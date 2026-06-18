@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { createAxStreamerCache } from "./ax";
 import { debugMw } from "./debug";
 import {
+  resolveDevicePlaceholderAsset,
   resolveDeviceKitChrome,
   serveDeviceKitChromeAsset,
   serveDevicePlaceholderAsset,
@@ -859,6 +860,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           runtime: d.runtime,
           state: d.state,
           chrome: resolveDeviceKitChrome(d),
+          placeholderAsset: resolveDevicePlaceholderAsset(d),
           helper: remoteHelper
             ? {
                 port: remoteHelper.port,

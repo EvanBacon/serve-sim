@@ -1,22 +1,28 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DevicePlaceholder } from "../client/components/device-placeholder";
-import type { DeviceKitChromeDescriptor } from "../client/utils/grid";
+import type {
+  DeviceKitChromeDescriptor,
+  DevicePlaceholderAssetDescriptor,
+} from "../client/utils/grid";
 
 function renderPlaceholder({
   name = "Apple Vision Pro",
   runtime = "xrOS-26-5",
   chrome = null,
+  placeholderAsset = null,
 }: {
   name?: string;
   runtime?: string;
   chrome?: DeviceKitChromeDescriptor | null;
+  placeholderAsset?: DevicePlaceholderAssetDescriptor | null;
 } = {}) {
   return renderToStaticMarkup(
     <DevicePlaceholder
       name={name}
       runtime={runtime}
       chrome={chrome}
+      placeholderAsset={placeholderAsset}
       busy={false}
       error={null}
       onStart={() => {}}
@@ -26,14 +32,20 @@ function renderPlaceholder({
 
 describe("DevicePlaceholder", () => {
   test("uses a headset-shaped Vision fallback instead of the generic blue screen", () => {
-    const html = renderPlaceholder();
+    const html = renderPlaceholder({
+      placeholderAsset: {
+        name: "com.apple.vision-pro",
+        width: 1023,
+        height: 524,
+      },
+    });
 
-    expect(html).toContain("grid/api/device-placeholder-asset?name=vision-pro");
+    expect(html).toContain("grid/api/device-placeholder-asset?name=com.apple.vision-pro");
     expect(html).toContain("vision-placeholder-shell");
     expect(html).not.toContain("placeholder-screen");
   });
 
-  test("uses Apple preview assets for current watch placeholders", () => {
+  test("uses Apple preview assets for current device placeholders", () => {
     const chrome = {
       identifier: "watch6",
       frame: { width: 120, height: 140 },
@@ -49,14 +61,23 @@ describe("DevicePlaceholder", () => {
     } satisfies DeviceKitChromeDescriptor;
 
     const cases = [
-      ["Apple Watch Series 11 (42mm)", "apple-watch-series-11"],
-      ["Apple Watch Ultra 3 (49mm)", "apple-watch-ultra-3"],
-      ["Apple Watch SE 3 (40mm)", "apple-watch-se-3"],
+      ["Apple Watch Series 11 (42mm)", "watchOS-27-0", "com.apple.apple-watch-series-11-4", 492, 792, 250],
+      ["Apple Watch Ultra 3 (49mm)", "watchOS-27-0", "com.apple.apple-watch-ultra-3-8", 499, 795, 255],
+      ["Apple Watch SE 3 (40mm)", "watchOS-27-0", "com.apple.apple-watch-se-3-1", 468, 792, 238],
+      ["iPhone 17 Pro", "iOS-26-5", "com.apple.iphone-17-pro-2", 950, 1024, 280],
+      ["iPad Pro 11-inch (M5)", "iOS-26-5", "com.apple.ipad-pro-11-inch-m5-1", 895, 986, 340],
     ] as const;
 
-    for (const [name, assetName] of cases) {
-      const html = renderPlaceholder({ name, runtime: "watchOS-27-0", chrome });
+    for (const [name, runtime, assetName, width, height, maxWidth] of cases) {
+      const html = renderPlaceholder({
+        name,
+        runtime,
+        chrome,
+        placeholderAsset: { name: assetName, width, height },
+      });
       expect(html).toContain(`grid/api/device-placeholder-asset?name=${assetName}`);
+      expect(html).toContain(`width:min(100%, ${maxWidth}px,`);
+      expect(html).toContain(`max-width:${maxWidth}px`);
       expect(html).not.toContain("WatchComposite");
     }
   });

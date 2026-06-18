@@ -4,7 +4,14 @@ export interface GridDevice {
   runtime: string;
   state: string;
   chrome?: DeviceKitChromeDescriptor | null;
+  placeholderAsset?: DevicePlaceholderAssetDescriptor | null;
   helper: { port: number; url: string; streamUrl: string; wsUrl: string } | null;
+}
+
+export interface DevicePlaceholderAssetDescriptor {
+  name: string;
+  width: number;
+  height: number;
 }
 
 export interface DeviceKitChromeDescriptor {

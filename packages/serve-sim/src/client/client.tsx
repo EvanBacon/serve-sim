@@ -330,6 +330,7 @@ function App() {
             name={selectedDevice.name}
             runtime={selectedDevice.runtime}
             chrome={selectedDevice.chrome ?? null}
+            placeholderAsset={selectedDevice.placeholderAsset ?? null}
             busy={!!selectedDevice.helper || !!starting[selectedDevice.device]}
             busyLabel={selectedDevice.helper ? "Connecting…" : "Starting…"}
             error={actionErrors[selectedDevice.device] ?? null}
