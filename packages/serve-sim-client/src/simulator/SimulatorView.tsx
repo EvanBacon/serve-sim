@@ -207,10 +207,18 @@ export function SimulatorView({
     }
   }, [relayMode, streamConfig, updateScreenConfig]);
 
-  // In relay mode, subscribe to frames and update img.src directly (bypasses React)
+  // In relay mode, subscribe to frames and update img.src directly (bypasses React).
   const connectedRef = useRef(false);
   connectedRef.current = connected;
-  const prevBlobUrlRef = useRef<string | null>(null);
+  // Latest received-but-not-yet-painted frame, and the one currently shown.
+  // Painting is drained on requestAnimationFrame (latest wins; stale frames
+  // are dropped and their blob URLs released) so a browser that can't keep up
+  // never queues an img.src assignment + JPEG decode for every received frame.
+  // That per-frame work on the main thread is what freezes weak browsers — the
+  // ones without WebCodecs that fall back to this MJPEG path — under the high
+  // frame rate of heavy interaction. Mirrors the AVCC canvas single-frame queue.
+  const pendingBlobUrlRef = useRef<string | null>(null);
+  const paintedBlobUrlRef = useRef<string | null>(null);
   useEffect(() => {
     // AVCC paints the canvas via useAvccStream; skip the MJPEG relay <img>.
     if (!relayMode || !subscribeFrame || useAvcc) return;
@@ -224,18 +232,31 @@ export function SimulatorView({
         setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
       }
     }, STARTUP_MS);
-    const unsubscribe = subscribeFrame((blobUrl) => {
-      frameCountRef.current++;
-      lastFrameAtRef.current = Date.now();
-      const img = relayImgRef.current;
-      if (img) {
-        // Revoke the previous blob URL to avoid memory leaks
-        if (prevBlobUrlRef.current) {
-          URL.revokeObjectURL(prevBlobUrlRef.current);
+
+    let rafId = requestAnimationFrame(function paint() {
+      const next = pendingBlobUrlRef.current;
+      if (next) {
+        pendingBlobUrlRef.current = null;
+        const img = relayImgRef.current;
+        if (img) {
+          // Release the frame we're replacing; its decode is now moot.
+          if (paintedBlobUrlRef.current) URL.revokeObjectURL(paintedBlobUrlRef.current);
+          paintedBlobUrlRef.current = next;
+          img.src = next;
+          frameCountRef.current++;
+        } else {
+          URL.revokeObjectURL(next);
         }
-        prevBlobUrlRef.current = blobUrl;
-        img.src = blobUrl;
       }
+      rafId = requestAnimationFrame(paint);
+    });
+
+    const unsubscribe = subscribeFrame((blobUrl) => {
+      lastFrameAtRef.current = Date.now();
+      // Latest-wins: a frame that arrived since the last paint is now stale —
+      // release it so blob URLs don't accumulate between animation frames.
+      if (pendingBlobUrlRef.current) URL.revokeObjectURL(pendingBlobUrlRef.current);
+      pendingBlobUrlRef.current = blobUrl;
       if (!connectedRef.current) {
         clearTimeout(watchdog);
         setConnected(true);
@@ -244,10 +265,15 @@ export function SimulatorView({
     });
     return () => {
       clearTimeout(watchdog);
+      cancelAnimationFrame(rafId);
       unsubscribe?.();
-      if (prevBlobUrlRef.current) {
-        URL.revokeObjectURL(prevBlobUrlRef.current);
-        prevBlobUrlRef.current = null;
+      if (pendingBlobUrlRef.current) {
+        URL.revokeObjectURL(pendingBlobUrlRef.current);
+        pendingBlobUrlRef.current = null;
+      }
+      if (paintedBlobUrlRef.current) {
+        URL.revokeObjectURL(paintedBlobUrlRef.current);
+        paintedBlobUrlRef.current = null;
       }
     };
   }, [relayMode, subscribeFrame, useAvcc]);

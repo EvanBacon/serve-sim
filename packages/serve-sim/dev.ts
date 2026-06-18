@@ -71,7 +71,7 @@ type ServeSimState = {
 
 // Cache simctl's booted-device set briefly (1.5s). dev.ts calls
 // readServeSimStates() on every request, so uncached we'd invoke simctl
-// per page view / per /logs / per /appstate.
+// per page view / per /appstate.
 let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
 function getBootedUdids(): Set<string> | null {
   const now = Date.now();
@@ -154,7 +154,6 @@ function previewConfigForState(state: ServeSimState) {
   return {
     ...state,
     basePath: "/",
-    logsEndpoint: endpoint("logs", state.device),
     appStateEndpoint: endpoint("appstate", state.device),
     axEndpoint: endpoint("ax", state.device),
     serveSimBin: SERVE_SIM_BIN,
@@ -463,53 +462,6 @@ Bun.serve({
             }));
           });
         });
-      });
-    }
-
-    // SSE logs
-    if (url.pathname === "/logs") {
-      const states = readServeSimStates();
-      const state = selectServeSimState(states, selectedDevice);
-      if (!state) {
-        return new Response("No serve-sim device", { status: 404 });
-      }
-      const udid = state.device;
-      const stream = new ReadableStream({
-        start(controller) {
-          const child: ChildProcess = spawn("xcrun", [
-            "simctl", "spawn", udid, "log", "stream",
-            "--style", "ndjson", "--level", "info",
-          ], { stdio: ["ignore", "pipe", "ignore"] });
-
-          let buf = "";
-          child.stdout!.on("data", (chunk: Buffer) => {
-            buf += chunk.toString();
-            let nl: number;
-            while ((nl = buf.indexOf("\n")) !== -1) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (line) {
-                try {
-                  controller.enqueue(`data: ${line}\n\n`);
-                } catch {
-                  child.kill();
-                }
-              }
-            }
-          });
-          child.on("close", () => {
-            try { controller.close(); } catch {}
-          });
-          // Clean up when client disconnects
-          req.signal.addEventListener("abort", () => child.kill());
-        },
-      });
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
       });
     }
 

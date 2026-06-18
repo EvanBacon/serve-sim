@@ -146,76 +146,6 @@ function App() {
     return () => es.close();
   }, []);
 
-  // Stream simctl logs into the browser console with colors + grouping
-  useEffect(() => {
-    if (!config?.logsEndpoint) return;
-    const es = openHostEventStream(config.logsEndpoint);
-
-    const procColors = new Map<string, string>();
-    const palette = [
-      "#8be9fd", "#50fa7b", "#ffb86c", "#ff79c6", "#bd93f9",
-      "#f1fa8c", "#6272a4", "#ff5555", "#69ff94", "#d6acff",
-      "#ffffa5", "#a4ffff", "#ff6e6e", "#caa9fa", "#5af78e",
-    ];
-    function colorFor(name: string): string {
-      let c = procColors.get(name);
-      if (!c) {
-        let h = 0;
-        for (let i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
-        c = palette[Math.abs(h) % palette.length]!;
-        procColors.set(name, c);
-      }
-      return c;
-    }
-
-    let lastProc = "";
-    let groupOpen = false;
-
-    es.onmessage = (event) => {
-      try {
-        const entry = JSON.parse(event.data);
-        const proc = entry.processImagePath?.split("/").pop() ?? entry.senderImagePath?.split("/").pop() ?? "";
-        const subsystem = entry.subsystem ?? "";
-        const category = entry.category ?? "";
-        const msg = entry.eventMessage ?? "";
-        if (!msg) return;
-
-        if (proc !== lastProc) {
-          if (groupOpen) console.groupEnd();
-          const color = colorFor(proc);
-          console.groupCollapsed(
-            `%c${proc}${subsystem ? ` %c${subsystem}${category ? ":" + category : ""}` : ""}`,
-            `color:${color};font-weight:bold`,
-            ...(subsystem ? ["color:#888;font-weight:normal"] : []),
-          );
-          groupOpen = true;
-          lastProc = proc;
-        }
-
-        const level = (entry.messageType ?? "").toLowerCase();
-        const tag = subsystem && proc === lastProc
-          ? `%c${category || subsystem}%c `
-          : "";
-        const tagStyles = tag
-          ? ["color:#888;font-style:italic", "color:inherit"]
-          : [];
-
-        if (level === "fault" || level === "error") {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:#ff5555");
-        } else if (level === "debug") {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:#6272a4");
-        } else {
-          console.log(`${tag}%c${msg}`, ...tagStyles, "color:inherit");
-        }
-      } catch {}
-    };
-
-    return () => {
-      if (groupOpen) console.groupEnd();
-      es.close();
-    };
-  }, [config?.logsEndpoint]);
-
   if (!config) {
     return (
       <BootEmptyState
@@ -333,7 +263,13 @@ function AppWithConfig({
     avccFallbackReducer,
     initialAvccFallback,
   );
-  const useAvccVideo = avcc.supported && !avccFallback.fellBack;
+  // `?codec=mjpeg` forces the JPEG fallback path even where WebCodecs exists —
+  // an escape hatch for browsers whose H.264 decode misbehaves, and the way to
+  // exercise the MJPEG pipeline in a browser that would otherwise pick AVCC.
+  const [forceMjpeg] = useState(
+    () => new URLSearchParams(window.location.search).get("codec") === "mjpeg",
+  );
+  const useAvccVideo = avcc.supported && !avccFallback.fellBack && !forceMjpeg;
   const mjpeg = useMjpegStream(useAvccVideo ? null : config.streamUrl);
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).

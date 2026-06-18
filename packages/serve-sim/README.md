@@ -204,7 +204,6 @@ import { simMiddleware } from "serve-sim/middleware";
 app.use(simMiddleware({ basePath: "/.sim" }));
 // → preview HTML at /.sim
 // → state JSON  at /.sim/api
-// → SSE logs    at /.sim/logs
 ```
 
 The middleware reads the helper's state from `$TMPDIR/serve-sim/` and forwards the user's browser to the live MJPEG + WebSocket endpoints. CORS is wide-open on the helper, so the page renders without a proxy.

@@ -1092,7 +1092,7 @@ void SimCamInstallSwizzles(void) {
 // renames them in a future iOS, the picker degrades to "back to gray + no
 // shutter" rather than crashing.
 //
-// Credit: this is the approach pioneered by tddworks/baguette's SimCamInject.
+// Credit: this is the approach pioneered by baguette's SimCamInject.
 
 static NSString *const SimCamPickerUTImage = @"public.image";
 
