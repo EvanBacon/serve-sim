@@ -105,6 +105,25 @@ export function clampSimulatorFrameWidth(
   return Math.min(maxWidth, Math.max(minWidth, value));
 }
 
+export function restoredSimulatorFrameWidth(
+  defaultWidth: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  aspectRatio: number,
+  storedScale: number | null | undefined,
+) {
+  const restored = Number.isFinite(storedScale)
+    ? defaultWidth * storedScale!
+    : defaultWidth;
+  return clampSimulatorFrameWidth(
+    restored,
+    defaultWidth,
+    viewportWidth,
+    viewportHeight,
+    aspectRatio,
+  );
+}
+
 /** Round to whole device pixels so the frame / stream don't shimmer at sub-pixel widths. */
 export function roundToDevicePixel(value: number): number {
   if (!Number.isFinite(value)) return value;

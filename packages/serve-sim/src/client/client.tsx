@@ -64,6 +64,11 @@ import {
   SIMULATOR_RESIZE_LAYOUT_TRANSITION,
   SIMULATOR_RESIZE_PAGE_TRANSITION,
 } from "./utils/simulator-resize";
+import {
+  flushWsMessageQueue,
+  sendOrQueueWsMessage,
+  type QueuedWsMessage,
+} from "./utils/ws-send-queue";
 
 // Counter-clockwise cycle, matching Simulator.app's Cmd+Left ("Rotate Left").
 const ROTATE_LEFT_CYCLE: Record<SimulatorOrientation, SimulatorOrientation> = {
@@ -491,10 +496,12 @@ function AppWithConfig({
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
+  const pendingWsMessagesRef = useRef<QueuedWsMessage[]>([]);
   useEffect(() => {
     let stopped = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let currentWs: WebSocket | null = null;
+    pendingWsMessagesRef.current = [];
 
     const scheduleReconnect = () => {
       if (stopped || reconnectTimer) return;
@@ -509,6 +516,12 @@ function AppWithConfig({
       ws.binaryType = "arraybuffer";
       currentWs = ws;
       wsRef.current = ws;
+      ws.onopen = () => {
+        pendingWsMessagesRef.current = flushWsMessageQueue(
+          ws,
+          pendingWsMessagesRef.current,
+        );
+      };
       ws.onmessage = (ev) => {
         // Server -> client screen-config push (tag 0x82): [tag][JSON].
         if (!(ev.data instanceof ArrayBuffer)) return;
@@ -547,13 +560,12 @@ function AppWithConfig({
   }, [config.wsUrl]);
 
   const sendWs = useCallback((tag: number, payload: object) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const json = new TextEncoder().encode(JSON.stringify(payload));
-    const msg = new Uint8Array(1 + json.length);
-    msg[0] = tag;
-    msg.set(json, 1);
-    ws.send(msg);
+    pendingWsMessagesRef.current = sendOrQueueWsMessage(
+      wsRef.current,
+      pendingWsMessagesRef.current,
+      tag,
+      payload,
+    );
   }, []);
 
   const onStreamTouch = useCallback((data: any) => sendWs(0x03, data), [sendWs]);

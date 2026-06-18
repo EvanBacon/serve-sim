@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   getSimulatorFrameMaxWidth,
   RESIZE_MAIN_STROKE_W,
+  restoredSimulatorFrameWidth,
   SIMULATOR_RESIZE_ABSOLUTE_MIN_WIDTH,
   SIMULATOR_RESIZE_HANDLE_DUR_HOT,
   SIMULATOR_RESIZE_HANDLE_DUR_IDLE,
@@ -20,5 +21,16 @@ describe("simulator resize visual tuning", () => {
 
     expect(maxWidth).toBeLessThan(SIMULATOR_RESIZE_MIN_WIDTH);
     expect(maxWidth).toBeGreaterThanOrEqual(SIMULATOR_RESIZE_ABSOLUTE_MIN_WIDTH);
+  });
+
+  test("clamps restored scale to the current viewport on open", () => {
+    const restored = restoredSimulatorFrameWidth(320, 1280, 576, 1179 / 2556, 3);
+    const maxWidth = getSimulatorFrameMaxWidth(320, 1280, 576, 1179 / 2556);
+
+    expect(restored).toBe(maxWidth);
+  });
+
+  test("falls back to the default frame width for invalid persisted scale", () => {
+    expect(restoredSimulatorFrameWidth(320, 1280, 900, 1179 / 2556, Number.NaN)).toBe(320);
   });
 });
