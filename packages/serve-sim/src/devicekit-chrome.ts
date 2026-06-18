@@ -94,11 +94,6 @@ type Point = { x: number; y: number };
 type Rect = Point & Size;
 type Insets = { top: number; left: number; bottom: number; right: number };
 
-type DeviceProfile = {
-  chromeIdentifier: string;
-  screenSize: Size | null;
-};
-
 type DeviceProfileMetadata = {
   chromeIdentifier: string | null;
   modelIdentifier: string | null;
@@ -131,6 +126,7 @@ type ParsedButton = {
 let deviceTypeNameByIdentifier: Map<string, string> | null = null;
 const chromeCache = new Map<string, ParsedChrome | null>();
 const descriptorCache = new Map<string, DeviceKitChromeDescriptor | null>();
+const placeholderDescriptorCache = new Map<string, DevicePlaceholderAssetDescriptor | null>();
 let coreTypesIconEntriesCache: CoreTypesIconEntry[] | null = null;
 const placeholderAssetInfoCache = new Map<string, PlaceholderAssetInfo | null>();
 
@@ -189,6 +185,22 @@ export function resolveDeviceKitChrome(device: {
 }
 
 export function resolveDevicePlaceholderAsset(device: {
+  name: string;
+  deviceTypeIdentifier?: string;
+}): DevicePlaceholderAssetDescriptor | null {
+  // Keyed by the same profile name as descriptorCache so repeated /grid/api
+  // requests don't re-spawn `plutil` (and re-read the PDF mask) per device.
+  const cacheKey = profileNameForDevice(device);
+  if (placeholderDescriptorCache.has(cacheKey)) {
+    return placeholderDescriptorCache.get(cacheKey) ?? null;
+  }
+
+  const resolved = resolveDevicePlaceholderAssetUncached(device);
+  placeholderDescriptorCache.set(cacheKey, resolved);
+  return resolved;
+}
+
+function resolveDevicePlaceholderAssetUncached(device: {
   name: string;
   deviceTypeIdentifier?: string;
 }): DevicePlaceholderAssetDescriptor | null {
@@ -288,8 +300,8 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
   const profilePath = profilePathForName(profileName);
   if (!existsSync(profilePath)) return null;
 
-  const profile = readProfile(profilePath);
-  if (!profile) return null;
+  const profile = readProfileMetadata(profilePath);
+  if (!profile?.chromeIdentifier) return null;
   const chrome = readChrome(profile.chromeIdentifier);
   if (!chrome) return null;
 
@@ -354,17 +366,6 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     slice: chrome.slice,
     corner,
     buttons,
-  };
-}
-
-function readProfile(profilePath: string): DeviceProfile | null {
-  const profile = readProfileMetadata(profilePath);
-  const fullIdentifier = profile?.chromeIdentifier;
-  if (!fullIdentifier) return null;
-  const chromeIdentifier = bareChromeIdentifier(fullIdentifier);
-  return {
-    chromeIdentifier,
-    screenSize: profile.screenSize,
   };
 }
 
@@ -591,32 +592,23 @@ function buttonTopLeft(
 ): Point {
   const bodyX = margins.left;
   const bodyY = margins.top;
+  // The rest position mirrors the rollover offset back across the normal offset.
+  const restX = 2 * button.normalOffset.x - button.rolloverOffset.x;
+  const restY = 2 * button.normalOffset.y - button.rolloverOffset.y;
+  const alignedX = button.align === "trailing"
+    ? bodyX + bodySize.width + restX - imageSize.width
+    : bodyX + restX;
   switch (button.anchor) {
     case "left": {
       const centerX = bodyX + button.rolloverOffset.x;
       return { x: centerX - imageSize.width / 2, y: bodyY + button.rolloverOffset.y };
     }
-    case "right": {
-      const restX = 2 * button.normalOffset.x - button.rolloverOffset.x;
-      const restY = 2 * button.normalOffset.y - button.rolloverOffset.y;
+    case "right":
       return { x: bodyX + bodySize.width + restX, y: bodyY + restY };
-    }
-    case "top": {
-      const restX = 2 * button.normalOffset.x - button.rolloverOffset.x;
-      const restY = 2 * button.normalOffset.y - button.rolloverOffset.y;
-      const x = button.align === "trailing"
-        ? bodyX + bodySize.width + restX - imageSize.width
-        : bodyX + restX;
-      return { x, y: bodyY + restY - imageSize.height };
-    }
-    case "bottom": {
-      const restX = 2 * button.normalOffset.x - button.rolloverOffset.x;
-      const restY = 2 * button.normalOffset.y - button.rolloverOffset.y;
-      const x = button.align === "trailing"
-        ? bodyX + bodySize.width + restX - imageSize.width
-        : bodyX + restX;
-      return { x, y: bodyY + bodySize.height + restY };
-    }
+    case "top":
+      return { x: alignedX, y: bodyY + restY - imageSize.height };
+    case "bottom":
+      return { x: alignedX, y: bodyY + bodySize.height + restY };
   }
 }
 

@@ -62,25 +62,20 @@ export function useSimulatorResize({
 
   const readRestoredWidth = useCallback(() => {
     if (typeof window === "undefined") return defaultWidth;
+    // A non-finite scale (storage threw / empty / NaN) falls back to defaultWidth
+    // inside restoredSimulatorFrameWidth, so both paths share one call.
+    let scale = NaN;
     try {
       const raw = window.localStorage.getItem(SIMULATOR_RESIZE_SCALE_STORAGE_KEY);
-      const scale = raw != null ? Number(raw) : NaN;
-      return restoredSimulatorFrameWidth(
-        defaultWidth,
-        viewportWidth,
-        viewportHeight,
-        aspectRatio,
-        scale,
-      );
-    } catch {
-      return restoredSimulatorFrameWidth(
-        defaultWidth,
-        viewportWidth,
-        viewportHeight,
-        aspectRatio,
-        null,
-      );
-    }
+      scale = raw != null ? Number(raw) : NaN;
+    } catch {}
+    return restoredSimulatorFrameWidth(
+      defaultWidth,
+      viewportWidth,
+      viewportHeight,
+      aspectRatio,
+      scale,
+    );
   }, [aspectRatio, defaultWidth, viewportHeight, viewportWidth]);
   const initialWidth = useMemo(() => readRestoredWidth(), [readRestoredWidth]);
   const [frameWidth, setFrameWidth] = useState<number | null>(initialWidth);
