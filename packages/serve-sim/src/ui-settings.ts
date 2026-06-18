@@ -239,15 +239,21 @@ export async function setUiOption(udid: string, option: string, value: string): 
 
 export async function getUiStatus(udid: string): Promise<Record<string, string>> {
   // One ax-tool spawn covers all its settings; the simctl-backed reads fan
-  // out in parallel alongside it.
+  // out in parallel alongside it. The ax helper is an iOS-simulator Mach-O, so
+  // on watchOS / tvOS / visionOS the spawn aborts in dyld — degrade those
+  // options to "unsupported" instead of failing the whole panel. (The web UI
+  // also gates the panel on the device runtime, so this is the backstop for
+  // direct callers.)
   const simctlOptions = Object.entries(UI_OPTIONS).filter(([, spec]) => spec.via !== "ax");
   const [axStatus, ...simctlValues] = await Promise.all([
-    axRun(udid, "status").then((out) => JSON.parse(out) as Record<string, string>),
-    ...simctlOptions.map(([option]) => getUiOption(udid, option)),
+    axRun(udid, "status")
+      .then((out) => JSON.parse(out) as Record<string, string>)
+      .catch(() => ({}) as Record<string, string>),
+    ...simctlOptions.map(([option]) => getUiOption(udid, option).catch(() => "unsupported")),
   ]);
   const status: Record<string, string> = {};
   for (const [option, spec] of Object.entries(UI_OPTIONS)) {
-    if (spec.via === "ax") status[option] = axStatus[option] ?? "unknown";
+    if (spec.via === "ax") status[option] = axStatus[option] ?? "unsupported";
   }
   simctlOptions.forEach(([option], i) => {
     status[option] = simctlValues[i]!;

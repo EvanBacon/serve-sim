@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { hostUiRequest } from "../utils/exec";
+import { parseRuntime } from "../utils/grid";
 import { CollapsibleSection } from "./collapsible-section";
 import { Select } from "./select";
 import { SettingSwitch } from "./setting-switch";
@@ -275,11 +276,27 @@ const I = {
   ),
 };
 
-export function SimulatorSettingsTool({ udid }: { udid: string }) {
+// These options drive the iOS accessibility/appearance setters; the in-sim
+// helper is an iOS-simulator binary, so the panel only applies to iOS devices.
+// (`runtime` arrives as `iOS-26-5` / `watchOS-11-2` — simctl's SimRuntime
+// suffix.) Treat an unknown runtime as iOS so the panel still renders.
+export function isIosRuntime(runtime: string | null): boolean {
+  if (!runtime) return true;
+  return parseRuntime(runtime).os.toLowerCase() === "ios";
+}
+
+export function SimulatorSettingsTool({
+  udid,
+  runtime,
+}: {
+  udid: string;
+  runtime: string | null;
+}) {
   const [open, setOpen] = useState(true);
   const [state, setState] = useState<SettingsState | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const supported = isIosRuntime(runtime);
 
   // Hydration can fail outright (server restarted under the tab, control
   // socket unreachable) or stall — both must land in the error state with a
@@ -306,8 +323,11 @@ export function SimulatorSettingsTool({ udid }: { udid: string }) {
 
   useEffect(() => {
     setState(null);
+    // The in-sim helper can't run on non-iOS runtimes; skip the round-trip
+    // (it would spawn an iOS binary inside e.g. a watchOS sim and abort).
+    if (!supported) return;
     void refresh();
-  }, [refresh]);
+  }, [refresh, supported]);
 
   const apply = useCallback(
     async (option: string, value: string) => {
@@ -382,6 +402,12 @@ export function SimulatorSettingsTool({ udid }: { udid: string }) {
         </>
       }
     >
+      {!supported ? (
+        <div className="text-white/45 text-[11px] px-0.5 py-1">
+          Simulator settings are available on iOS simulators only.
+        </div>
+      ) : (
+        <>
       {error && (
         <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md flex items-center justify-between gap-2">
           <span className="min-w-0">{error}</span>
@@ -459,6 +485,8 @@ export function SimulatorSettingsTool({ udid }: { udid: string }) {
             </SettingRow>
           ))}
         </div>
+        </>
+      )}
     </CollapsibleSection>
   );
 }

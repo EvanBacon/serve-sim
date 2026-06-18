@@ -1164,6 +1164,7 @@ function AppWithConfig({
         open={panelOpen}
         onClose={() => setPanelOpen(false)}
         udid={config.device}
+        deviceRuntime={deviceRuntime}
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
