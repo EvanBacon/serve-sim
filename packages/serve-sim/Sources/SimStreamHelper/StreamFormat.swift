@@ -24,8 +24,6 @@ enum StreamFormat: String {
 /// - `0x04` seed — a JPEG painted immediately on connect so the viewer sees
 ///   the current screen before the first IDR decodes.
 ///
-/// A parser reads the 4-byte length, then `length` bytes that begin with the
-/// tag. Mirrors baguette's `AVCCEnvelope` so the same browser decoder works.
 enum AVCCEnvelope {
     static let descriptionTag: UInt8 = 0x01
     static let keyframeTag: UInt8 = 0x02
@@ -40,10 +38,7 @@ enum AVCCEnvelope {
     private static func wrap(tag: UInt8, payload: Data) -> Data {
         let length = UInt32(payload.count + 1)
         var out = Data(capacity: 5 + payload.count)
-        out.append(UInt8((length >> 24) & 0xFF))
-        out.append(UInt8((length >> 16) & 0xFF))
-        out.append(UInt8((length >> 8) & 0xFF))
-        out.append(UInt8(length & 0xFF))
+        withUnsafeBytes(of: length.bigEndian) { out.append(contentsOf: $0) }
         out.append(tag)
         out.append(payload)
         return out

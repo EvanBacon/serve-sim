@@ -1,8 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   AvccDemuxer,
   avcCodecString,
   isAvccSupported,
+  type AvccChunkType,
 } from "../avcc-codec.js";
 
 export interface UseAvccStreamOptions {
@@ -20,14 +21,18 @@ export interface UseAvccStreamOptions {
   onError?: (message: string) => void;
 }
 
+const RETRY_DELAY_MS = 1000;
+/** ~60fps monotonic tick. Never displayed — WebCodecs just needs increasing PTS. */
+const FRAME_DURATION_US = 16_667;
+
 /**
- * Decodes the `/stream.avcc` H.264 stream into a `<canvas>` using WebCodecs.
+ * Decode an H.264 `/stream.avcc` feed into `canvasRef` via WebCodecs.
  *
- * Mirrors baguette's AVCC decoder: a length-prefixed envelope carrying an
- * avcC `description` (decoder config), `keyframe`/`delta` NAL chunks, and a
- * one-shot JPEG `seed` painted before the first IDR decodes so the canvas
- * isn't blank on connect. No-op (and the caller should fall back to MJPEG)
- * when the browser lacks `VideoDecoder`.
+ * The decode pipeline is keyed only on `url` and `enabled`; the callbacks are
+ * read through a ref so passing fresh closures every render does not restart the
+ * stream. A no-op when AVCC is unsupported, `enabled` is false, or `url` is
+ * empty (a device-less preview config would otherwise fetch a relative
+ * `undefined/stream.avcc` from the page origin).
  */
 export function useAvccStream({
   url,
@@ -37,118 +42,130 @@ export function useAvccStream({
   onFrame,
   onError,
 }: UseAvccStreamOptions): void {
+  // Latest-callback ref: keeps the decode effect off the callback identities.
+  const callbacks = useRef({ onFirstFrame, onFrame, onError });
+  callbacks.current = { onFirstFrame, onFrame, onError };
+
   useEffect(() => {
-    // The empty `url` guard matters: a device-less preview config would
-    // otherwise fetch a relative `undefined/stream.avcc` from the page origin.
     if (!enabled || !url || !isAvccSupported()) return;
 
     const controller = new AbortController();
+    const demuxer = new AvccDemuxer();
     let stopped = false;
     let painted = false;
     let timestamp = 0;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    const demuxer = new AvccDemuxer();
+    let decoder: VideoDecoder | null = null;
 
-    const VideoDecoderCtor = (globalThis as any).VideoDecoder as typeof VideoDecoder;
-    const EncodedVideoChunkCtor = (globalThis as any)
-      .EncodedVideoChunk as typeof EncodedVideoChunk;
+    const isLive = () => !stopped && !controller.signal.aborted;
 
-    const paint = (source: CanvasImageSource, w: number, h: number) => {
-      if (stopped || controller.signal.aborted) return;
+    const paint = (source: CanvasImageSource, width: number, height: number) => {
+      if (!isLive()) return;
       const canvas = canvasRef.current;
       if (!canvas) return;
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
       }
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      ctx.drawImage(source, 0, 0, w, h);
-      onFrame?.();
+      ctx.drawImage(source, 0, 0, width, height);
+      callbacks.current.onFrame?.();
       if (!painted) {
         painted = true;
-        onFirstFrame?.();
+        callbacks.current.onFirstFrame?.();
       }
     };
 
-    let decoder: VideoDecoder | null = null;
     const makeDecoder = () =>
-      new VideoDecoderCtor({
+      new VideoDecoder({
         output: (frame) => {
           try {
-            if (stopped || controller.signal.aborted) return;
-            paint(frame, frame.displayWidth, frame.displayHeight);
+            if (isLive()) paint(frame, frame.displayWidth, frame.displayHeight);
           } finally {
             frame.close();
           }
         },
-        error: (err) => onError?.(`decoder: ${err.message}`),
+        error: (err) => callbacks.current.onError?.(`decoder: ${err.message}`),
       });
 
-    const handleChunk = (
-      type: "description" | "keyframe" | "delta" | "seed",
-      payload: Uint8Array,
-    ) => {
-      if (type === "seed") {
-        // JPEG seed — paint immediately for instant first frame.
-        createImageBitmap(new Blob([payload as BlobPart], { type: "image/jpeg" }))
-          .then((bmp) => {
-            try {
-              if (!stopped && !controller.signal.aborted) paint(bmp, bmp.width, bmp.height);
-            } finally {
-              bmp.close();
-            }
-          })
-          .catch(() => {});
-        return;
+    const paintSeed = async (jpeg: Uint8Array) => {
+      // JPEG seed — paint immediately for an instant first frame.
+      const bitmap = await createImageBitmap(
+        new Blob([jpeg as BlobPart], { type: "image/jpeg" }),
+      );
+      try {
+        if (isLive()) paint(bitmap, bitmap.width, bitmap.height);
+      } finally {
+        bitmap.close();
       }
-      if (type === "description") {
-        if (!decoder || decoder.state === "closed") decoder = makeDecoder();
-        try {
-          decoder.configure({
-            codec: avcCodecString(payload),
-            description: payload,
-            optimizeFor: "latency",
-            hardwareAcceleration: "prefer-hardware",
-          } as VideoDecoderConfig);
-        } catch (e) {
-          onError?.(`config: ${(e as Error).message}`);
-        }
-        return;
+    };
+
+    const configureDecoder = (description: Uint8Array) => {
+      if (!decoder || decoder.state === "closed") decoder = makeDecoder();
+      try {
+        decoder.configure({
+          codec: avcCodecString(description),
+          description,
+          // `optimizeFor` is a valid runtime hint not yet in lib.dom's types.
+          optimizeFor: "latency",
+          hardwareAcceleration: "prefer-hardware",
+        } as VideoDecoderConfig & { optimizeFor: "latency" });
+      } catch (err) {
+        callbacks.current.onError?.(`config: ${(err as Error).message}`);
       }
-      // keyframe | delta
-      if (!decoder || decoder.state !== "configured") return;
+    };
+
+    const decodeFrame = (type: "keyframe" | "delta", data: Uint8Array) => {
+      if (decoder?.state !== "configured") return;
       try {
         decoder.decode(
-          new EncodedVideoChunkCtor({
+          new EncodedVideoChunk({
             type: type === "keyframe" ? "key" : "delta",
             timestamp,
-            data: payload,
+            data,
           }),
         );
-        timestamp += 16667; // ~60fps tick; not displayed, just monotonic.
+        timestamp += FRAME_DURATION_US;
       } catch {
         /* drop undecodable frame */
       }
     };
 
+    const handleChunk = (type: AvccChunkType, payload: Uint8Array) => {
+      switch (type) {
+        case "seed":
+          void paintSeed(payload).catch(() => {});
+          return;
+        case "description":
+          configureDecoder(payload);
+          return;
+        case "keyframe":
+        case "delta":
+          decodeFrame(type, payload);
+          return;
+      }
+    };
+
     const scheduleRetry = () => {
-      if (stopped || controller.signal.aborted || retryTimer) return;
+      if (!isLive() || retryTimer) return;
       retryTimer = setTimeout(() => {
         retryTimer = null;
         void read();
-      }, 1000);
+      }, RETRY_DELAY_MS);
     };
 
     const read = async () => {
+      // Each HTTP response is a self-contained stream that opens with its own
+      // description — drop any partial bytes left over from a dropped connection.
+      demuxer.reset();
       try {
-        const res = await fetch(`${url}/stream.avcc`, { signal: controller.signal });
+        const res = await fetch(`${url}/stream.avcc`, {
+          signal: controller.signal,
+        });
         const reader = res.body?.getReader();
-        if (!reader) {
-          scheduleRetry();
-          return;
-        }
-        while (true) {
+        if (!reader) return;
+        for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           if (!value) continue;
@@ -157,9 +174,9 @@ export function useAvccStream({
           }
         }
       } catch {
-        /* aborted or network error */
+        /* aborted or network error — falls through to retry */
       } finally {
-        if (!stopped) scheduleRetry();
+        if (isLive()) scheduleRetry();
       }
     };
 
@@ -171,9 +188,13 @@ export function useAvccStream({
       controller.abort();
       demuxer.reset();
       if (decoder && decoder.state !== "closed") {
-        try { decoder.close(); } catch {}
+        try {
+          decoder.close();
+        } catch {
+          /* already closed */
+        }
       }
       decoder = null;
     };
-  }, [url, enabled, canvasRef, onFirstFrame, onFrame, onError]);
+  }, [url, enabled, canvasRef]);
 }
