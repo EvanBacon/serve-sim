@@ -3,6 +3,7 @@ import {
   forwardRef,
   useContext,
   useEffect,
+  useId,
   useState,
   type ButtonHTMLAttributes,
   type CSSProperties,
@@ -113,6 +114,8 @@ export interface TitleProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>
   subtitle?: ReactNode;
   /** Hide the chevron hint (e.g. when not interactive). */
   hideChevron?: boolean;
+  /** Hide the subtitle row entirely. */
+  hideSubtitle?: boolean;
 }
 
 const titleButtonStyle: CSSProperties = {
@@ -134,7 +137,7 @@ const titleButtonStyle: CSSProperties = {
 };
 
 const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
-  { name, subtitle, hideChevron, style, onMouseEnter, onMouseLeave, ...rest },
+  { name, subtitle, hideChevron, hideSubtitle, style, onMouseEnter, onMouseLeave, ...rest },
   ref,
 ) {
   const ctx = useToolbar("Title");
@@ -194,18 +197,20 @@ const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
           </svg>
         )}
       </span>
-      <span
-        style={{
-          fontSize: 10,
-          color: "rgba(255,255,255,0.5)",
-          maxWidth: "100%",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {displaySubtitle}
-      </span>
+      {!hideSubtitle && (
+        <span
+          style={{
+            fontSize: 10,
+            color: "rgba(255,255,255,0.5)",
+            maxWidth: "100%",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {displaySubtitle}
+        </span>
+      )}
     </button>
   );
 });
@@ -228,34 +233,57 @@ function Actions({ style, ...rest }: HTMLAttributes<HTMLDivElement>) {
 export interface ToolbarButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   /** Force disabled even if the toolbar is ready. */
   forceDisabled?: boolean;
+  /** Override the hover/focus tooltip label. Defaults to title or aria-label. */
+  tooltip?: ReactNode;
 }
 
 const buttonStyle: CSSProperties = {
   background: "transparent",
   border: "none",
   padding: 6,
-  borderRadius: 6,
+  borderRadius: 12,
   cursor: "pointer",
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
   color: "rgba(255,255,255,0.8)",
   transition: "background-color 0.15s, color 0.15s",
+  position: "relative",
+  overflow: "visible",
 };
 
 const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function ToolbarButton(
-  { forceDisabled, style, disabled, onMouseEnter, onMouseLeave, children, ...rest },
+  {
+    forceDisabled,
+    tooltip,
+    style,
+    disabled,
+    title,
+    onMouseEnter,
+    onMouseLeave,
+    onFocus,
+    onBlur,
+    children,
+    "aria-label": ariaLabel,
+    ...rest
+  },
   ref,
 ) {
   const ctx = useContext(ToolbarContext);
   const effectiveDisabled = disabled || forceDisabled || ctx?.disabled;
   const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const tooltipId = useId();
+  const tooltipLabel = tooltip ?? title ?? (typeof ariaLabel === "string" ? ariaLabel : null);
+  const tooltipVisible = !!tooltipLabel && !effectiveDisabled && (hover || focus);
 
   return (
     <button
       ref={ref}
       type="button"
       disabled={effectiveDisabled}
+      aria-label={ariaLabel}
+      aria-describedby={tooltipLabel ? tooltipId : undefined}
       onMouseEnter={(e) => {
         setHover(true);
         onMouseEnter?.(e);
@@ -263,6 +291,14 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
       onMouseLeave={(e) => {
         setHover(false);
         onMouseLeave?.(e);
+      }}
+      onFocus={(e) => {
+        setFocus(true);
+        onFocus?.(e);
+      }}
+      onBlur={(e) => {
+        setFocus(false);
+        onBlur?.(e);
       }}
       style={{
         ...buttonStyle,
@@ -275,6 +311,35 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
       {...rest}
     >
       {children}
+      {tooltipLabel && (
+        <span
+          id={tooltipId}
+          role="tooltip"
+          aria-hidden={!tooltipVisible}
+          style={{
+            position: "absolute",
+            left: "50%",
+            bottom: "calc(100% + 8px)",
+            transform: `translateX(-50%) translateY(${tooltipVisible ? 0 : 2}px)`,
+            opacity: tooltipVisible ? 1 : 0,
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+            padding: "4px 7px",
+            borderRadius: 6,
+            background: "rgba(30,30,32,0.96)",
+            border: "1px solid rgba(255,255,255,0.12)",
+            color: "rgba(255,255,255,0.92)",
+            fontSize: 11,
+            fontWeight: 500,
+            lineHeight: 1,
+            boxShadow: "0 4px 14px rgba(0,0,0,0.32)",
+            transition: "opacity 0.12s ease, transform 0.12s ease",
+            zIndex: 100,
+          }}
+        >
+          {tooltipLabel}
+        </span>
+      )}
     </button>
   );
 });

@@ -4,6 +4,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "build": "bun run --filter '*' build",
+    "dev": "bun run --filter 'serve-sim' dev",
     "build:swift": "cd packages/serve-sim && ./build.sh",
     "knip": "knip",
     "typecheck": "tsc --noEmit",

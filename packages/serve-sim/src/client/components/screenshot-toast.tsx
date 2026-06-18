@@ -1,4 +1,5 @@
 import { useRef, useState, type DragEvent } from "react";
+import { ChevronRight } from "lucide-react";
 import type { ScreenshotToast as ScreenshotToastState } from "../hooks/use-screenshot-toast";
 import { DROP_HOST_PATH_TYPE } from "../utils/drop";
 
@@ -131,19 +132,11 @@ export function ScreenshotToast({
               )}
             </div>
             {toast.status === "saved" && (
-              <svg
+              <ChevronRight
                 className="ml-1 text-white/80 pointer-events-none"
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.25"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polyline points="9 6 15 12 9 18" />
-              </svg>
+                size={16}
+                strokeWidth={2.25}
+              />
             )}
           </button>
         )}

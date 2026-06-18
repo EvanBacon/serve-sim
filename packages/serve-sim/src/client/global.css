@@ -62,6 +62,23 @@ details.lem-section > summary {
 details.lem-section > summary::-webkit-details-marker {
   display: none;
 }
+details.lem-section > summary:hover {
+  color: #fff;
+}
+details.lem-section > summary:hover .lem-chevron {
+  color: rgba(255,255,255,0.85) !important;
+}
+
+.lem-chevron {
+  transform-origin: center;
+  transition: transform 160ms ease, color 120ms ease;
+}
+
+@container (max-width: 210px) {
+  [data-location-status-total] {
+    display: none;
+  }
+}
 
 @keyframes grid-spin {
   to { transform: rotate(360deg); }

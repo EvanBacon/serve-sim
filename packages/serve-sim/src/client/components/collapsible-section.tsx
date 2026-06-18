@@ -30,7 +30,7 @@ export function CollapsibleSection({
     <details
       open={open}
       onToggle={(e) => onOpenChange((e.currentTarget as HTMLDetailsElement).open)}
-      className={`lem-section bg-panel border border-white/8 rounded-[10px] px-3 py-2 ${className}`}
+      className={`lem-section bg-panel rounded-[10px] px-3 py-2 ${className}`}
       {...dataProps}
     >
       <summary

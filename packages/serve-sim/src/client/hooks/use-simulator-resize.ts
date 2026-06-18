@@ -58,7 +58,7 @@ export function useSimulatorResize({
   const tweenCancelRef = useRef<(() => void) | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastWidthRef = useRef<number | null>(null);
-  const handleRef = useRef<SVGSVGElement | null>(null);
+  const handleRef = useRef<HTMLDivElement | null>(null);
 
   const initialWidth = useMemo(() => {
     if (typeof window === "undefined") return defaultWidth;
@@ -317,7 +317,7 @@ export function useSimulatorResize({
   }, [aspectRatio, endDrag, isResizing, scheduleMove]);
 
   const onPointerEnd = useCallback(
-    (event: ReactPointerEvent<SVGSVGElement>) => {
+    (event: ReactPointerEvent<HTMLElement>) => {
       const s = dragStartRef.current;
       if (!s || s.pointerId !== event.pointerId) return;
       event.preventDefault();
@@ -328,7 +328,7 @@ export function useSimulatorResize({
   );
 
   const onPointerDown = useCallback(
-    (event: ReactPointerEvent<SVGSVGElement>) => {
+    (event: ReactPointerEvent<HTMLElement>) => {
       if (event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
@@ -339,7 +339,7 @@ export function useSimulatorResize({
   );
 
   const onPointerMove = useCallback(
-    (event: ReactPointerEvent<SVGSVGElement>) => {
+    (event: ReactPointerEvent<HTMLElement>) => {
       const s = dragStartRef.current;
       if (!s || s.pointerId !== event.pointerId) return;
       event.preventDefault();

@@ -1,14 +1,21 @@
 import { useCallback, useState, type PointerEvent as ReactPointerEvent } from "react";
 
 // Persists a width to localStorage and exposes a pointer-driven resize handler.
-// The panels live at the right edge, so dragging the handle leftwards grows
-// the panel — the delta is `startX - clientX`.
+// Right-edge panels grow as the handle is dragged leftwards (`grow: "left"`,
+// delta = startX - clientX); a left-edge sidebar grows as the handle is dragged
+// rightwards (`grow: "right"`, delta = clientX - startX).
 export function useResizableWidth(
   storageKey: string,
   defaultWidth: number,
   min: number,
   max: number,
+  grow: "left" | "right" = "left",
 ) {
+  const deltaFor = useCallback(
+    (startX: number, clientX: number) =>
+      grow === "left" ? startX - clientX : clientX - startX,
+    [grow],
+  );
   const clamp = useCallback(
     (w: number) => Math.max(min, Math.min(max, w)),
     [min, max],
@@ -33,7 +40,7 @@ export function useResizableWidth(
       const target = e.currentTarget;
       target.setPointerCapture(e.pointerId);
       const move = (ev: PointerEvent) => {
-        const next = clamp(startWidth + (startX - ev.clientX));
+        const next = clamp(startWidth + deltaFor(startX, ev.clientX));
         setWidth(next);
       };
       const up = (ev: PointerEvent) => {
@@ -42,14 +49,14 @@ export function useResizableWidth(
         target.removeEventListener("pointerup", up);
         target.removeEventListener("pointercancel", up);
         try {
-          window.localStorage.setItem(storageKey, String(clamp(startWidth + (startX - ev.clientX))));
+          window.localStorage.setItem(storageKey, String(clamp(startWidth + deltaFor(startX, ev.clientX))));
         } catch {}
       };
       target.addEventListener("pointermove", move);
       target.addEventListener("pointerup", up);
       target.addEventListener("pointercancel", up);
     },
-    [clamp, effectiveWidth, storageKey],
+    [clamp, deltaFor, effectiveWidth, storageKey],
   );
 
   return { width: effectiveWidth, onPointerDown };

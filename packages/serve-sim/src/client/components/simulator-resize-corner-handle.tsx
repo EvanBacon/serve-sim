@@ -1,18 +1,9 @@
 // Curved-arc resize affordance anchored to the bottom-right of the simulator
-// frame. The SVG owns the pointer surface (with a generous transparent hit
-// stroke), and the wrapper div carries the role="separator"/aria for the
-// keyboard surface. Visuals: per-phase scale/stroke and a focus ring that
-// follows the arc path.
+// frame. The wrapper div is the generous pointer/keyboard surface; the SVG is
+// visual only. Visuals: per-phase scale/stroke and a focus ring that follows
+// the arc path.
 
-import {
-  forwardRef,
-  useMemo,
-  useState,
-  type CSSProperties,
-  type MouseEventHandler as ReactMouseEventHandler,
-  type PointerEventHandler as ReactPointerEventHandler,
-  type Ref,
-} from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import {
   simulatorResizeCornerArc,
   type DeviceType,
@@ -24,6 +15,7 @@ import { usePrefersReducedMotion } from "../hooks/use-prefers-reduced-motion";
 import {
   RESIZE_MAIN_STROKE,
   RESIZE_MAIN_STROKE_W,
+  RESIZE_HANDLE_OPACITY,
   RESIZE_SCALE,
   SIMULATOR_RESIZE_EASE,
   SIMULATOR_RESIZE_EASE_OUT,
@@ -45,38 +37,23 @@ type SimulatorResizeCornerSvgProps = {
   reducedMotion: boolean;
   highContrast: boolean;
   focusVisible: boolean;
-  onPointerDown: ReactPointerEventHandler<SVGSVGElement>;
-  onPointerMove: ReactPointerEventHandler<SVGSVGElement>;
-  onPointerUp: ReactPointerEventHandler<SVGSVGElement>;
-  onPointerCancel: ReactPointerEventHandler<SVGSVGElement>;
-  onPointerEnter: ReactPointerEventHandler<SVGSVGElement>;
-  onPointerLeave: ReactPointerEventHandler<SVGSVGElement>;
-  onMouseDown?: ReactMouseEventHandler<SVGSVGElement>;
 };
 
-const SimulatorResizeCornerSvg = forwardRef(function SimulatorResizeCornerSvg(
+function SimulatorResizeCornerSvg(
   {
     arc,
     phase,
     reducedMotion,
     highContrast,
     focusVisible,
-    onPointerDown,
-    onPointerMove,
-    onPointerUp,
-    onPointerCancel,
-    onPointerEnter,
-    onPointerLeave,
-    onMouseDown,
   }: SimulatorResizeCornerSvgProps,
-  ref: Ref<SVGSVGElement | null>,
 ) {
   const isHot = phase !== "idle";
 
   const vw = highContrast ? 1.12 : 1;
-  const hitStrokeW = (6 + SIMULATOR_RESIZE_HIT_SLOP * 2) * vw;
   const scale = reducedMotion ? 1 : RESIZE_SCALE[phase];
   const mainStrokeW = RESIZE_MAIN_STROKE_W[phase] * vw;
+  const handleOpacity = highContrast ? 1 : RESIZE_HANDLE_OPACITY[phase];
 
   const dur = isHot ? SIMULATOR_RESIZE_HANDLE_DUR_HOT : SIMULATOR_RESIZE_HANDLE_DUR_IDLE;
   const ease = isHot ? SIMULATOR_RESIZE_EASE : SIMULATOR_RESIZE_EASE_OUT;
@@ -100,7 +77,6 @@ const SimulatorResizeCornerSvg = forwardRef(function SimulatorResizeCornerSvg(
 
   return (
     <svg
-      ref={ref}
       width={vb}
       height={vb}
       viewBox={`0 0 ${vb} ${vb}`}
@@ -111,18 +87,10 @@ const SimulatorResizeCornerSvg = forwardRef(function SimulatorResizeCornerSvg(
       style={{
         display: "block",
         overflow: "visible",
-        cursor: "nwse-resize",
+        cursor: "inherit",
         touchAction: "none",
-        pointerEvents: "auto",
+        pointerEvents: "none",
       }}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerCancel}
-      onLostPointerCapture={onPointerUp}
-      onPointerEnter={onPointerEnter}
-      onPointerLeave={onPointerLeave}
-      onMouseDown={onMouseDown}
     >
       <g aria-hidden="true" style={{ pointerEvents: "none" }}>
         <path
@@ -165,7 +133,11 @@ const SimulatorResizeCornerSvg = forwardRef(function SimulatorResizeCornerSvg(
             strokeWidth={mainStrokeW + 2.2 * vw}
             strokeLinecap="round"
             vectorEffect="non-scaling-stroke"
-            style={{ transition: motionStroke, filter: RESIZE_HANDLE_LIT_SHADOW }}
+            style={{
+              opacity: Math.min(1, handleOpacity + 0.08),
+              transition: `${motionStroke}, opacity ${dur} ${ease}`,
+              filter: RESIZE_HANDLE_LIT_SHADOW,
+            }}
           />
           <path
             d={d}
@@ -173,21 +145,17 @@ const SimulatorResizeCornerSvg = forwardRef(function SimulatorResizeCornerSvg(
             strokeWidth={mainStrokeW}
             strokeLinecap="round"
             vectorEffect="non-scaling-stroke"
-            style={{ transition: motionStroke, filter: RESIZE_HANDLE_LIT_SHADOW }}
+            style={{
+              opacity: handleOpacity,
+              transition: `${motionStroke}, opacity ${dur} ${ease}`,
+              filter: RESIZE_HANDLE_LIT_SHADOW,
+            }}
           />
         </g>
-        <path
-          d={d}
-          fill="none"
-          stroke="rgba(0,0,0,0)"
-          strokeWidth={hitStrokeW}
-          strokeLinecap="round"
-          pointerEvents="stroke"
-        />
       </g>
     </svg>
   );
-});
+}
 
 type SimulatorResize = ReturnType<typeof useSimulatorResize>;
 
@@ -238,7 +206,15 @@ export function SimulatorResizeCornerHandle({
       aria-valuemax={Math.round(simulatorResize.maxWidth)}
       aria-valuenow={Math.round(simulatorResize.committedWidth)}
       tabIndex={0}
+      ref={simulatorResize.handleRef}
       onKeyDown={simulatorResize.onKeyDown}
+      onPointerDown={simulatorResize.onPointerDown}
+      onPointerMove={simulatorResize.onPointerMove}
+      onPointerUp={simulatorResize.onPointerEnd}
+      onPointerCancel={simulatorResize.onPointerEnd}
+      onLostPointerCapture={simulatorResize.onPointerEnd}
+      onPointerEnter={() => simulatorResize.setHandleHovered(true)}
+      onPointerLeave={() => simulatorResize.setHandleHovered(false)}
       onFocus={(e) => {
         setFocusVisible(e.currentTarget.matches?.(":focus-visible") ?? false);
       }}
@@ -256,25 +232,20 @@ export function SimulatorResizeCornerHandle({
         alignItems: "flex-end",
         justifyContent: "flex-end",
         background: "transparent",
-        pointerEvents: "none",
+        cursor: "nwse-resize",
+        touchAction: "none",
+        pointerEvents: "auto",
         outline: "none",
         zIndex: 25,
         WebkitTapHighlightColor: "transparent",
       }}
     >
       <SimulatorResizeCornerSvg
-        ref={simulatorResize.handleRef}
         arc={arc}
         phase={phase}
         reducedMotion={reducedMotion}
         highContrast={highContrast}
         focusVisible={focusVisible}
-        onPointerDown={simulatorResize.onPointerDown}
-        onPointerMove={simulatorResize.onPointerMove}
-        onPointerUp={simulatorResize.onPointerEnd}
-        onPointerCancel={simulatorResize.onPointerEnd}
-        onPointerEnter={() => simulatorResize.setHandleHovered(true)}
-        onPointerLeave={() => simulatorResize.setHandleHovered(false)}
       />
     </div>
   );

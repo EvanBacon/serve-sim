@@ -1,22 +1,32 @@
 import type { CSSProperties, ReactNode } from "react";
+import { X } from "lucide-react";
 
 export function Panel({
   open,
   width,
   children,
   style,
+  side = "right",
 }: {
   open: boolean;
   width: number;
   children: ReactNode;
   style?: CSSProperties;
+  side?: "left" | "right";
 }) {
+  const closedTransform =
+    side === "left" ? "translateX(-100%)" : "translateX(calc(100% + 24px))";
+  const chromeClass =
+    side === "left"
+      ? "top-0 bottom-0 left-0 rounded-none border-0 border-r border-white/10 shadow-[8px_0_32px_rgba(0,0,0,0.35)]"
+      : "top-3 bottom-3 right-3 rounded-[14px] border border-white/10 shadow-[0_12px_40px_rgba(0,0,0,0.55)]";
+
   return (
     <aside
-      className="fixed top-3 right-3 bottom-3 z-35 min-w-0 overflow-hidden rounded-[14px] border border-white/10 bg-panel-bg text-white/90 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-[18px] [font-family:-apple-system,system-ui,sans-serif] [transition:transform_0.25s_ease,opacity_0.2s_ease] flex flex-col"
+      className={`fixed z-35 min-w-0 overflow-hidden bg-panel-bg text-white/90 backdrop-blur-[18px] [font-family:-apple-system,system-ui,sans-serif] [transition:transform_0.25s_ease,opacity_0.2s_ease] flex flex-col ${chromeClass}`}
       style={{
         width,
-        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
+        transform: open ? "translateX(0)" : closedTransform,
         opacity: open ? 1 : 0,
         pointerEvents: open ? "auto" : "none",
         ...style,
@@ -57,23 +67,11 @@ export function PanelCloseButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex shrink-0 cursor-pointer items-center justify-center rounded bg-transparent p-1 text-white/65"
+      className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-md border-none bg-transparent p-0 text-[#8e8e93] [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
       aria-label={ariaLabel}
       title={title}
     >
-      <svg
-        width={iconSize}
-        height={iconSize}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <line x1="18" y1="6" x2="6" y2="18" />
-        <line x1="6" y1="6" x2="18" y2="18" />
-      </svg>
+      <X size={iconSize} strokeWidth={2} />
     </button>
   );
 }

@@ -4,6 +4,8 @@
 
 ## E2E testing with agent-browser
 
+If you are codex, run in the in-app Codex browser instead of using agent-browser. Only use agent-browser when developing from TUIs like Claude Code.
+
 The serve-sim web UI streams the iOS Simulator and forwards clicks, so end-to-end
 behavior can be driven from a browser with the `agent-browser` CLI:
 
@@ -31,7 +33,7 @@ through `serve-sim` subcommands against a running server:
 - `serve-sim ui <option> [value] [-d udid]` — simulator-wide UI options
   (appearance, liquid-glass, color-filter, text-size, reduce-motion,
   increase-contrast, show-borders, reduce-transparency, voiceover); `ui status
-  --json` dumps all. Verify sets via `simctl ui <udid> <option>` readback or
+--json` dumps all. Verify sets via `simctl ui <udid> <option>` readback or
   `simctl spawn <udid> defaults read` on com.apple.Accessibility /
   com.apple.mediaaccessibility / com.apple.UIKit.
 - `xcrun simctl openurl booted <url>` — deep-link into apps (faster than

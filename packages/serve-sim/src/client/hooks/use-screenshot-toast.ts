@@ -56,6 +56,7 @@ export function useScreenshotToast(deviceUdid?: string | null) {
 
   const dismiss = useCallback(() => {
     clearTimer();
+    toastRef.current = null;
     setToast(null);
   }, []);
 
