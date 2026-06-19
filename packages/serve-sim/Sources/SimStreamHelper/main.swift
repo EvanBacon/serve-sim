@@ -101,6 +101,11 @@ httpServer.clientManager.onMemoryWarning = {
 httpServer.clientManager.onDigitalCrown = { payload in
     hidInjector.sendDigitalCrown(delta: payload.delta)
 }
+httpServer.clientManager.onScroll = { payload in
+    // Payload deltas are a fraction of the display; scale to device pixels.
+    hidInjector.sendScroll(dx: payload.dx * Double(screenWidth),
+                           dy: payload.dy * Double(screenHeight))
+}
 
 // Start HTTP + WebSocket server
 do {

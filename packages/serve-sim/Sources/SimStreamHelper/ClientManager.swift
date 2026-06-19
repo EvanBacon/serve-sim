@@ -33,6 +33,7 @@ final class ClientManager {
     var onCADebug: ((CADebugEventPayload) -> Void)?
     var onMemoryWarning: (() -> Void)?
     var onDigitalCrown: ((DigitalCrownEventPayload) -> Void)?
+    var onScroll: ((ScrollEventPayload) -> Void)?
 
     // MARK: - Configuration
 
@@ -239,6 +240,9 @@ final class ClientManager {
         } else if type == 0x0A { // WS_MSG_DIGITAL_CROWN
             guard let json = try? JSONDecoder().decode(DigitalCrownEventPayload.self, from: data[1...]) else { return }
             onDigitalCrown?(json)
+        } else if type == 0x0B { // WS_MSG_SCROLL
+            guard let json = try? JSONDecoder().decode(ScrollEventPayload.self, from: data[1...]) else { return }
+            onScroll?(json)
         }
     }
 

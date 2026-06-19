@@ -10,18 +10,13 @@ import type { StreamConfig } from "../types.js";
 import {
   HID_EDGE_BOTTOM,
   homeIndicatorEdge,
+  rawDeltaForDisplayDelta,
   rawEdgeForDisplayEdge,
   rawPointForDisplayPoint,
   streamDisplayGeometry,
 } from "./orientation.js";
 import { digitalCrownDeltaFromWheel } from "./digitalCrown.js";
-import {
-  endScrollPan,
-  initialScrollPanState,
-  stepScrollPan,
-  wheelDeltaToPixels,
-  type ScrollPanState,
-} from "./scroll-pan.js";
+import { wheelDeltaToPixels } from "./scroll-wheel.js";
 import { useAvccStream } from "./use-avcc-stream.js";
 import { isAvccSupported } from "../avcc-codec.js";
 
@@ -37,6 +32,7 @@ const WS_MSG_TOUCH = 0x03;
 const WS_MSG_BUTTON = 0x04;
 const WS_MSG_MULTI_TOUCH = 0x05;
 const WS_MSG_DIGITAL_CROWN = 0x0a;
+const WS_MSG_SCROLL = 0x0b;
 
 export interface SimulatorViewProps {
   /** Base URL of the serve-sim server, e.g. "http://localhost:3100" */
@@ -57,6 +53,9 @@ export interface SimulatorViewProps {
   onStreamButton?: (button: string) => void;
   /** Relay mode: callback for Digital Crown rotation events */
   onStreamDigitalCrown?: (delta: number) => void;
+  /** Relay mode: callback for scroll-wheel / trackpad pan events. Deltas are a
+   * fraction of the display in raw device orientation (positive dy = content down). */
+  onStreamScroll?: (data: { dx: number; dy: number }) => void;
   /** Enables mouse-wheel/trackpad Digital Crown rotation forwarding. */
   enableDigitalCrown?: boolean;
   /** Relay mode: subscribe to frame updates (bypasses React state for performance).
@@ -107,6 +106,7 @@ export function SimulatorView({
   onStreamMultiTouch,
   onStreamButton,
   onStreamDigitalCrown,
+  onStreamScroll,
   enableDigitalCrown,
   subscribeFrame,
   streamFrame: _streamFrame,
@@ -372,6 +372,28 @@ export function SimulatorView({
     msg.set(json, 1);
     ws.send(msg);
   }, [relayMode, onStreamDigitalCrown]);
+
+  const sendScroll = useCallback(
+    (dx: number, dy: number) => {
+      if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return;
+      // Rotate the delta into the raw device orientation so scrolling tracks the
+      // visible content on landscape / upside-down devices.
+      const orientation = streamDisplayGeometry(screenSizeRef.current).inputOrientation;
+      const raw = rawDeltaForDisplayDelta(orientation, dx, dy);
+      if (relayMode) {
+        onStreamScroll?.(raw);
+        return;
+      }
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const json = new TextEncoder().encode(JSON.stringify(raw));
+      const msg = new Uint8Array(1 + json.length);
+      msg[0] = WS_MSG_SCROLL;
+      msg.set(json, 1);
+      ws.send(msg);
+    },
+    [relayMode, onStreamScroll],
+  );
 
   const sendMultiTouch = useCallback(
     (touch: {
@@ -664,28 +686,9 @@ export function SimulatorView({
   }, []);
 
   // Scroll-to-pan: mouse-wheel/trackpad scrolling over the device is forwarded
-  // as a single-finger drag (begin → move → end). The finger drags opposite the
-  // scroll direction so content follows the wheel, matching a real page scroll.
-  // The gesture stays open across consecutive wheel events and lifts after a
-  // short inactivity window; momentum/inertial scrolling keeps it alive.
-  const SCROLL_PAN_END_MS = 120;
-  const scrollPanStateRef = useRef<ScrollPanState>(initialScrollPanState());
-  const scrollPanEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const flushScrollPan = useCallback(() => {
-    if (scrollPanEndTimerRef.current) {
-      clearTimeout(scrollPanEndTimerRef.current);
-      scrollPanEndTimerRef.current = null;
-    }
-    const { state, actions } = endScrollPan(scrollPanStateRef.current);
-    scrollPanStateRef.current = state;
-    if (actions.length) {
-      hideTouchIndicator();
-      for (const a of actions) sendTouch(a);
-    }
-  }, [sendTouch, hideTouchIndicator]);
-
-  const handleScrollPanWheel = useCallback(
+  // as a native scroll event so iOS pans content exactly as it would for a
+  // physical scroll wheel — no synthesized finger drag.
+  const handleScrollWheel = useCallback(
     (event: globalThis.WheelEvent) => {
       // Don't fight an in-progress pointer/touch drag on the same surface.
       if (touchActiveRef.current || multiTouchActiveRef.current) return false;
@@ -693,34 +696,15 @@ export function SimulatorView({
       if (!rect) return false;
       const dxPx = wheelDeltaToPixels(event.deltaX, event.deltaMode, rect.width);
       const dyPx = wheelDeltaToPixels(event.deltaY, event.deltaMode, rect.height);
-      // Negate: scrolling down (positive delta) should drag the finger up so the
-      // content scrolls the same way it would on a real page.
-      const fingerDx = -dxPx / rect.width;
-      const fingerDy = -dyPx / rect.height;
-      const anchorX = (event.clientX - rect.left) / rect.width;
-      const anchorY = (event.clientY - rect.top) / rect.height;
-      const wasActive = scrollPanStateRef.current.active;
-
-      const { state, actions } = stepScrollPan(
-        scrollPanStateRef.current,
-        fingerDx,
-        fingerDy,
-        anchorX,
-        anchorY,
-      );
-      scrollPanStateRef.current = state;
-      if (!actions.length) return false;
-
-      for (const a of actions) sendTouch(a);
-      // Mirror the touch indicator so panning shows the same finger dot as a drag.
-      if (!wasActive) showTouchIndicator(state.x, state.y);
-      else moveTouchIndicator(state.x, state.y);
-
-      if (scrollPanEndTimerRef.current) clearTimeout(scrollPanEndTimerRef.current);
-      scrollPanEndTimerRef.current = setTimeout(flushScrollPan, SCROLL_PAN_END_MS);
+      if (dxPx === 0 && dyPx === 0) return false;
+      // Express the delta as a fraction of the rendered display so the server can
+      // rescale to the device's pixel dimensions. Browser wheel deltas already
+      // reflect the user's natural-scroll setting, so the sign passes straight
+      // through to match a real scroll wheel.
+      sendScroll(dxPx / rect.width, dyPx / rect.height);
       return true;
     },
-    [getInputRect, sendTouch, showTouchIndicator, moveTouchIndicator, flushScrollPan],
+    [getInputRect, sendScroll],
   );
 
   useEffect(() => {
@@ -730,19 +714,15 @@ export function SimulatorView({
     const onWheel = (event: globalThis.WheelEvent) => {
       const handled = enableDigitalCrown
         ? handleDigitalCrownWheelDelta(event.deltaY, event.deltaMode)
-        : handleScrollPanWheel(event);
+        : handleScrollWheel(event);
       if (!handled) return;
       event.preventDefault();
       event.stopPropagation();
     };
 
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => {
-      el.removeEventListener("wheel", onWheel);
-      // End any pan still open when the handler is torn down (device/codec swap).
-      if (!enableDigitalCrown) flushScrollPan();
-    };
-  }, [enableDigitalCrown, handleDigitalCrownWheelDelta, handleScrollPanWheel, flushScrollPan]);
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [enableDigitalCrown, handleDigitalCrownWheelDelta, handleScrollWheel]);
 
   const lastHomeClickRef = useRef(0);
   const homeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

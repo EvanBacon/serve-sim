@@ -41,6 +41,14 @@ final class HIDInjector {
     private typealias IndigoDigitalCrownFunc = @convention(c) (Double) -> UnsafeMutableRawPointer?
     private var digitalCrownFunc: IndigoDigitalCrownFunc?
 
+    // IndigoHIDMessageForScrollEvent(uint32_t, double dx, double dy, double dz, IndigoHIDTarget)
+    // (signature recovered from SimulatorKit's cold-path assertion string). arm64
+    // ABI: x0=arg0, d0=dx, d1=dy, d2=dz, x1=target. The leading uint32 is unused
+    // by Simulator.app's path (left zero, mirroring the Digital Crown message),
+    // and the target is the display digitizer (0x32, same as touch input).
+    private typealias IndigoScrollFunc = @convention(c) (UInt32, Double, Double, Double, UInt32) -> UnsafeMutableRawPointer?
+    private var scrollFunc: IndigoScrollFunc?
+
     func setup(deviceUDID: String) throws {
         SimFrameworks.load()
         guard let device = FrameCapture.findSimDevice(udid: deviceUDID) else {
@@ -74,6 +82,13 @@ final class HIDInjector {
             print("[hid] IndigoHIDMessageForDigitalCrownEvent loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForDigitalCrownEvent not found")
+        }
+
+        if let scrollPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForScrollEvent") {
+            self.scrollFunc = unsafeBitCast(scrollPtr, to: IndigoScrollFunc.self)
+            print("[hid] IndigoHIDMessageForScrollEvent loaded")
+        } else {
+            print("[hid] Warning: IndigoHIDMessageForScrollEvent not found")
         }
 
         guard let hidClass = NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") else {
@@ -273,6 +288,38 @@ final class HIDInjector {
         }
 
         print("[hid] Digital Crown delta=\(String(format:"%.4f", delta))")
+
+        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
+        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
+            free(msg)
+            return
+        }
+        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
+        sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
+    }
+
+    // MARK: - Scroll events
+
+    // IndigoHIDTarget for the display digitizer (same surface as touch input).
+    private static let scrollTargetDigitizer: UInt32 = 0x32
+
+    /// Inject a scroll-wheel / trackpad pan event into the display.
+    /// - Parameters:
+    ///   - dx: Horizontal scroll delta in device pixels (positive = rightward).
+    ///   - dy: Vertical scroll delta in device pixels (positive = content down).
+    func sendScroll(dx: Double, dy: Double) {
+        guard dx.isFinite, dy.isFinite, dx != 0 || dy != 0 else { return }
+        guard let client = hidClient, let sendSel = sendSel, let scrollFunc else {
+            print("[hid] Scroll injection unavailable")
+            return
+        }
+
+        guard let msg = scrollFunc(0, dx, dy, 0, HIDInjector.scrollTargetDigitizer) else {
+            print("[hid] IndigoHIDMessageForScrollEvent returned nil (dx=\(dx), dy=\(dy))")
+            return
+        }
+
+        print("[hid] Scroll dx=\(String(format:"%.2f", dx)) dy=\(String(format:"%.2f", dy))")
 
         typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
         guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {

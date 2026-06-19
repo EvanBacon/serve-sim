@@ -10,6 +10,7 @@ enum WSMessageType: UInt8 {
     case caDebug = 0x08        // client → server: JSON CoreAnimation debug toggle
     case memoryWarning = 0x09  // client → server: empty body, triggers [SimDevice simulateMemoryWarning]
     case digitalCrown = 0x0A   // client → server: JSON Digital Crown rotation event
+    case scroll = 0x0B         // client → server: JSON scroll-wheel / trackpad pan event
 }
 
 struct TouchEventPayload: Codable {
@@ -44,6 +45,14 @@ struct OrientationEventPayload: Codable {
 struct DigitalCrownEventPayload: Codable {
     /// Raw scroll delta to feed through SimulatorKit's Digital Crown HID event.
     let delta: Double
+}
+
+struct ScrollEventPayload: Codable {
+    /// Scroll deltas as a fraction of the display (normalized, raw device
+    /// orientation). Positive `dy` scrolls content down. The server scales these
+    /// by the screen dimensions before handing them to the scroll HID event.
+    let dx: Double
+    let dy: Double
 }
 
 // Simulator.app's Debug menu toggles map to `-[SimDevice setCADebugOption:enabled:]`
