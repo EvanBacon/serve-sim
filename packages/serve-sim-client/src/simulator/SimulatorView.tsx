@@ -15,6 +15,13 @@ import {
   streamDisplayGeometry,
 } from "./orientation.js";
 import { digitalCrownDeltaFromWheel } from "./digitalCrown.js";
+import {
+  endScrollPan,
+  initialScrollPanState,
+  stepScrollPan,
+  wheelDeltaToPixels,
+  type ScrollPanState,
+} from "./scroll-pan.js";
 import { useAvccStream } from "./use-avcc-stream.js";
 import { isAvccSupported } from "../avcc-codec.js";
 
@@ -560,21 +567,6 @@ export function SimulatorView({
     [getInputRect, sendDigitalCrown],
   );
 
-  useEffect(() => {
-    if (!enableDigitalCrown) return;
-    const el = inputLayerRef.current;
-    if (!el) return;
-
-    const onWheel = (event: globalThis.WheelEvent) => {
-      const handled = handleDigitalCrownWheelDelta(event.deltaY, event.deltaMode);
-      if (!handled) return;
-      event.preventDefault();
-      event.stopPropagation();
-    };
-
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, [enableDigitalCrown, handleDigitalCrownWheelDelta]);
 
   // Bottom-edge gesture: forward touches with edge=3 (bottom) so iOS
   // handles the interactive home indicator animation natively.
@@ -670,6 +662,87 @@ export function SimulatorView({
       el.style.display = "none";
     }
   }, []);
+
+  // Scroll-to-pan: mouse-wheel/trackpad scrolling over the device is forwarded
+  // as a single-finger drag (begin → move → end). The finger drags opposite the
+  // scroll direction so content follows the wheel, matching a real page scroll.
+  // The gesture stays open across consecutive wheel events and lifts after a
+  // short inactivity window; momentum/inertial scrolling keeps it alive.
+  const SCROLL_PAN_END_MS = 120;
+  const scrollPanStateRef = useRef<ScrollPanState>(initialScrollPanState());
+  const scrollPanEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushScrollPan = useCallback(() => {
+    if (scrollPanEndTimerRef.current) {
+      clearTimeout(scrollPanEndTimerRef.current);
+      scrollPanEndTimerRef.current = null;
+    }
+    const { state, actions } = endScrollPan(scrollPanStateRef.current);
+    scrollPanStateRef.current = state;
+    if (actions.length) {
+      hideTouchIndicator();
+      for (const a of actions) sendTouch(a);
+    }
+  }, [sendTouch, hideTouchIndicator]);
+
+  const handleScrollPanWheel = useCallback(
+    (event: globalThis.WheelEvent) => {
+      // Don't fight an in-progress pointer/touch drag on the same surface.
+      if (touchActiveRef.current || multiTouchActiveRef.current) return false;
+      const rect = getInputRect();
+      if (!rect) return false;
+      const dxPx = wheelDeltaToPixels(event.deltaX, event.deltaMode, rect.width);
+      const dyPx = wheelDeltaToPixels(event.deltaY, event.deltaMode, rect.height);
+      // Negate: scrolling down (positive delta) should drag the finger up so the
+      // content scrolls the same way it would on a real page.
+      const fingerDx = -dxPx / rect.width;
+      const fingerDy = -dyPx / rect.height;
+      const anchorX = (event.clientX - rect.left) / rect.width;
+      const anchorY = (event.clientY - rect.top) / rect.height;
+      const wasActive = scrollPanStateRef.current.active;
+
+      const { state, actions } = stepScrollPan(
+        scrollPanStateRef.current,
+        fingerDx,
+        fingerDy,
+        anchorX,
+        anchorY,
+      );
+      scrollPanStateRef.current = state;
+      if (!actions.length) return false;
+
+      for (const a of actions) sendTouch(a);
+      // Mirror the touch indicator so panning shows the same finger dot as a drag.
+      if (!wasActive) showTouchIndicator(state.x, state.y);
+      else moveTouchIndicator(state.x, state.y);
+
+      if (scrollPanEndTimerRef.current) clearTimeout(scrollPanEndTimerRef.current);
+      scrollPanEndTimerRef.current = setTimeout(flushScrollPan, SCROLL_PAN_END_MS);
+      return true;
+    },
+    [getInputRect, sendTouch, showTouchIndicator, moveTouchIndicator, flushScrollPan],
+  );
+
+  useEffect(() => {
+    const el = inputLayerRef.current;
+    if (!el) return;
+
+    const onWheel = (event: globalThis.WheelEvent) => {
+      const handled = enableDigitalCrown
+        ? handleDigitalCrownWheelDelta(event.deltaY, event.deltaMode)
+        : handleScrollPanWheel(event);
+      if (!handled) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      // End any pan still open when the handler is torn down (device/codec swap).
+      if (!enableDigitalCrown) flushScrollPan();
+    };
+  }, [enableDigitalCrown, handleDigitalCrownWheelDelta, handleScrollPanWheel, flushScrollPan]);
 
   const lastHomeClickRef = useRef(0);
   const homeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

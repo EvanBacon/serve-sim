@@ -288,14 +288,14 @@ final class HIDInjector {
 
         switch button {
         case "home":
-            if buttonFunc != nil {
-                // Single home press via HID
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonDown)
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonUp)
-            } else {
-                // Fallback: simctl
-                launchSpringBoard(deviceUDID: deviceUDID)
-            }
+            // Xcode 26+ silently drops the Indigo HID home-button press, so the
+            // press is delivered but never reaches SpringBoard. Relaunching
+            // SpringBoard foregrounds the home screen reliably on every Xcode
+            // version (it's what the buttonFunc-missing fallback always used),
+            // and is functionally identical to a single home press, so use it
+            // unconditionally rather than depending on whether the HID symbol
+            // resolved.
+            launchSpringBoard(deviceUDID: deviceUDID)
 
         case "swipe_home":
             buttonQueue.async { [self] in

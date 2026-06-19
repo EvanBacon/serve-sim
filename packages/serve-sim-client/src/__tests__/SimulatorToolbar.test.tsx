@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SimulatorToolbar } from "../simulator/SimulatorToolbar";
+import { SimulatorToolbar, homeButtonCommand } from "../simulator/SimulatorToolbar";
 
 const exec = async () => ({ stdout: "", stderr: "", exitCode: 0 });
 
@@ -36,6 +36,30 @@ describe("SimulatorToolbar.Title", () => {
 
     expect(html).toContain("iPhone 16 (26.5)");
     expect(html).not.toContain("<polyline");
+  });
+});
+
+describe("homeButtonCommand", () => {
+  // Xcode 26+ silently drops the HID home press, so phones/pads must relaunch
+  // SpringBoard instead of going through `serve-sim button home`.
+  test("relaunches SpringBoard for a known iphone udid", () => {
+    expect(homeButtonCommand("iphone", "BOOTED-UDID")).toBe(
+      "xcrun simctl launch BOOTED-UDID com.apple.springboard",
+    );
+  });
+
+  test("relaunches SpringBoard for ipad simulators", () => {
+    expect(homeButtonCommand("ipad", "udid")).toContain("com.apple.springboard");
+  });
+
+  test("drives Simulator.app's Device > Home menu for watch simulators", () => {
+    const cmd = homeButtonCommand("watch", "udid");
+    expect(cmd).toContain("osascript");
+    expect(cmd).not.toContain("com.apple.springboard");
+  });
+
+  test("falls back to the HID button command when no udid is known", () => {
+    expect(homeButtonCommand("iphone", null)).toBe("serve-sim button home");
   });
 });
 

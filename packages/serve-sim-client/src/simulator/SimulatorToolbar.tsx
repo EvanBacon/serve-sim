@@ -348,6 +348,23 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
 // Raises the watch window, sets Simulator as frontmost, then clicks the menu
 // item — this is the only mechanism that actually returns a watchOS simulator
 // to the watch face.
+// Pick the host command that returns a device to its home screen.
+//
+// The HID home-button press (`serve-sim button home`) is silently dropped by
+// Xcode 26+, which delivers the Indigo event but never routes it to
+// SpringBoard. Relaunching SpringBoard foregrounds the home screen reliably on
+// every Xcode version and is functionally identical to a single home press, so
+// it's the default whenever a udid is known. Watch simulators ignore both, so
+// they fall back to driving Simulator.app's Device > Home menu item.
+export function homeButtonCommand(
+  deviceType: DeviceType,
+  deviceUdid?: string | null,
+): string {
+  if (deviceType === "watch") return watchHomeAppleScript();
+  if (deviceUdid) return `xcrun simctl launch ${deviceUdid} com.apple.springboard`;
+  return "serve-sim button home";
+}
+
 function watchHomeAppleScript(): string {
   const args = [
     'tell application "System Events" to tell process "Simulator" to set frontmost to true',
@@ -418,18 +435,7 @@ const HomeButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function Ho
       onClick={(e) => {
         onClick?.(e);
         if (e.defaultPrevented) return;
-        // Apple Watch simulators ignore the HID button 0 that serve-sim sends.
-        // Simctl has no hardware-button command, and no launchable bundle id
-        // reliably returns to the watch face (Carousel/Mandrake both fail or
-        // show "Feature not available"). The working approach is to trigger
-        // Simulator.app's Device > Home menu item against the raised watchOS
-        // window via AppleScript — that dispatches through homeButtonPressed:
-        // which does reach the watch face.
-        if (ctx.deviceType === "watch") {
-          void ctx.exec(watchHomeAppleScript());
-        } else {
-          void ctx.exec("serve-sim button home");
-        }
+        void ctx.exec(homeButtonCommand(ctx.deviceType, ctx.deviceUdid));
       }}
       {...rest}
     >

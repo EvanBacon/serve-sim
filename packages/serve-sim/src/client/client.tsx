@@ -980,9 +980,7 @@ function AppWithConfig({
                   <ReloadIcon />
                 </SimulatorToolbar.Button>
               )}
-              <SimulatorToolbar.HomeButton
-                onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-              />
+              <SimulatorToolbar.HomeButton title="Home" />
               <SimulatorToolbar.ScreenshotButton
                 title="Screenshot"
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
