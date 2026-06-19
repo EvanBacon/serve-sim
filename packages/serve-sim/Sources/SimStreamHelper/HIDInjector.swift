@@ -41,13 +41,10 @@ final class HIDInjector {
     private typealias IndigoDigitalCrownFunc = @convention(c) (Double) -> UnsafeMutableRawPointer?
     private var digitalCrownFunc: IndigoDigitalCrownFunc?
 
-    // IndigoHIDMessageForScrollEvent(uint32_t, double dx, double dy, double dz, IndigoHIDTarget)
-    // (signature recovered from SimulatorKit's cold-path assertion string). arm64
-    // ABI: x0=arg0, d0=dx, d1=dy, d2=dz, x1=target. The leading uint32 is unused
-    // by Simulator.app's path (left zero, mirroring the Digital Crown message),
-    // and the target is the display digitizer (0x32, same as touch input).
-    private typealias IndigoScrollFunc = @convention(c) (UInt32, Double, Double, Double, UInt32) -> UnsafeMutableRawPointer?
-    private var scrollFunc: IndigoScrollFunc?
+    // NOTE: scroll is NOT a native HID event on the simulator — see the "Scroll
+    // events" section below. Device Hub's trackpad-capture path requires private
+    // Apple HID entitlements an unprivileged helper can't have, and synthetic
+    // scroll events are ignored by iOS, so we scroll via a touch drag instead.
 
     func setup(deviceUDID: String) throws {
         SimFrameworks.load()
@@ -84,12 +81,6 @@ final class HIDInjector {
             print("[hid] Warning: IndigoHIDMessageForDigitalCrownEvent not found")
         }
 
-        if let scrollPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForScrollEvent") {
-            self.scrollFunc = unsafeBitCast(scrollPtr, to: IndigoScrollFunc.self)
-            print("[hid] IndigoHIDMessageForScrollEvent loaded")
-        } else {
-            print("[hid] Warning: IndigoHIDMessageForScrollEvent not found")
-        }
 
         guard let hidClass = NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") else {
             throw NSError(domain: "HIDInjector", code: 2,
@@ -116,7 +107,6 @@ final class HIDInjector {
         self.sendSel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
         print("[hid] SimDeviceLegacyHIDClient created")
         print("[hid] IndigoHIDMessageForMouseNSEvent loaded (with edge gesture support)")
-
     }
 
     // IndigoHIDEdge values (x4 param to IndigoHIDMessageForMouseNSEvent).
@@ -299,35 +289,102 @@ final class HIDInjector {
     }
 
     // MARK: - Scroll events
+    //
+    // iOS treats the simulator display as a touchscreen — there is no hardware
+    // scroll wheel. Device Hub scrolls by capturing a real Mac trackpad and
+    // forwarding genuine HID scroll events through a privileged pointer service
+    // (`com.apple.private.hid.client.event-filter`); an unprivileged helper can't
+    // capture host HID or synthesize events iOS accepts (synthetic scroll to the
+    // pointer service 0x35 is silently dropped). See docs/scroll-injection-devicehub.md.
+    //
+    // So we scroll the way a finger does: translate the wheel delta into a touch
+    // drag on the digitizer (target 0x32) — the same path taps/swipes use, which
+    // is verified to scroll on iOS 27. A wheel burst becomes one continuous drag
+    // (begin → moves → end on idle), re-anchoring to center when it nears an edge
+    // so long scrolls aren't capped by the screen bounds.
 
-    // IndigoHIDTarget for the display digitizer (same surface as touch input).
-    private static let scrollTargetDigitizer: UInt32 = 0x32
+    // Fraction of the display a finger travels per pixel of wheel delta. Wheel
+    // deltas are large (~120/notch); 1.0 maps a notch to a full-screen drag, which
+    // matches the feel of a wheel "page". Tunable.
+    private static let scrollDragGain: Double = 1.0
+    private static let scrollEdgeMargin: Double = 0.08   // re-anchor inside this margin
+    private static let scrollGestureIdle: TimeInterval = 0.1
 
-    /// Inject a scroll-wheel / trackpad pan event into the display.
+    private let scrollQueue = DispatchQueue(label: "hid-scroll")
+    private var scrollDragActive = false
+    private var scrollFingerX = 0.5
+    private var scrollFingerY = 0.5
+    private var scrollAnchorX = 0.5   // where the gesture (re)starts — under the cursor
+    private var scrollAnchorY = 0.5
+    private var scrollDimW = 0
+    private var scrollDimH = 0
+    private var scrollEndWork: DispatchWorkItem?
+
+    private func clampFinger(_ v: Double) -> Double {
+        min(max(v, HIDInjector.scrollEdgeMargin), 1 - HIDInjector.scrollEdgeMargin)
+    }
+
+    /// Inject a scroll-wheel / trackpad pan as a touch drag on the digitizer.
     /// - Parameters:
-    ///   - dx: Horizontal scroll delta in device pixels (positive = rightward).
+    ///   - dx: Horizontal scroll delta in device pixels (positive = content right).
     ///   - dy: Vertical scroll delta in device pixels (positive = content down).
-    func sendScroll(dx: Double, dy: Double) {
-        guard dx.isFinite, dy.isFinite, dx != 0 || dy != 0 else { return }
-        guard let client = hidClient, let sendSel = sendSel, let scrollFunc else {
-            print("[hid] Scroll injection unavailable")
-            return
-        }
+    ///   - anchorX/anchorY: Normalized (0–1) cursor position to begin the drag
+    ///     under, so iOS pans the view beneath the pointer. Nil = screen center.
+    func sendScroll(dx: Double, dy: Double, anchorX: Double?, anchorY: Double?, screenWidth: Int, screenHeight: Int) {
+        guard dx.isFinite, dy.isFinite, (dx != 0 || dy != 0), screenWidth > 0, screenHeight > 0 else { return }
 
-        guard let msg = scrollFunc(0, dx, dy, 0, HIDInjector.scrollTargetDigitizer) else {
-            print("[hid] IndigoHIDMessageForScrollEvent returned nil (dx=\(dx), dy=\(dy))")
-            return
-        }
+        // Finger moves opposite to content: scrolling content down = swipe up.
+        let stepX = -(dx / Double(screenWidth)) * HIDInjector.scrollDragGain
+        let stepY = -(dy / Double(screenHeight)) * HIDInjector.scrollDragGain
+        let aX = clampFinger((anchorX?.isFinite == true) ? anchorX! : 0.5)
+        let aY = clampFinger((anchorY?.isFinite == true) ? anchorY! : 0.5)
 
-        print("[hid] Scroll dx=\(String(format:"%.2f", dx)) dy=\(String(format:"%.2f", dy))")
+        scrollQueue.async { [self] in
+            scrollDimW = screenWidth
+            scrollDimH = screenHeight
 
-        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
-        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
-            free(msg)
-            return
+            if !scrollDragActive {
+                // Anchor a fresh gesture under the cursor so iOS hit-tests the
+                // right scroll view (e.g. a bottom sheet vs. the map behind it).
+                scrollAnchorX = aX
+                scrollAnchorY = aY
+                scrollFingerX = aX
+                scrollFingerY = aY
+                sendTouch(type: "begin", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
+                usleep(8000)  // let iOS register the touch-down before it moves
+                scrollDragActive = true
+            }
+
+            var nextX = scrollFingerX + stepX
+            var nextY = scrollFingerY + stepY
+
+            // Near an edge: lift, re-anchor back under the cursor, and continue.
+            // Re-beginning at the anchor keeps the gesture hit-testing the same view.
+            if nextX <= HIDInjector.scrollEdgeMargin || nextX >= 1 - HIDInjector.scrollEdgeMargin ||
+               nextY <= HIDInjector.scrollEdgeMargin || nextY >= 1 - HIDInjector.scrollEdgeMargin {
+                sendTouch(type: "end", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
+                scrollFingerX = scrollAnchorX
+                scrollFingerY = scrollAnchorY
+                sendTouch(type: "begin", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
+                usleep(8000)
+                nextX = scrollFingerX + stepX
+                nextY = scrollFingerY + stepY
+            }
+
+            scrollFingerX = clampFinger(nextX)
+            scrollFingerY = clampFinger(nextY)
+            sendTouch(type: "move", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
+
+            // End the drag shortly after the wheel goes idle.
+            scrollEndWork?.cancel()
+            let work = DispatchWorkItem { [self] in
+                guard scrollDragActive else { return }
+                sendTouch(type: "end", x: scrollFingerX, y: scrollFingerY, screenWidth: scrollDimW, screenHeight: scrollDimH)
+                scrollDragActive = false
+            }
+            scrollEndWork = work
+            scrollQueue.asyncAfter(deadline: .now() + HIDInjector.scrollGestureIdle, execute: work)
         }
-        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
-        sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
     }
 
     func sendButton(button: String, deviceUDID: String) {

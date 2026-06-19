@@ -53,6 +53,12 @@ struct ScrollEventPayload: Codable {
     /// by the screen dimensions before handing them to the scroll HID event.
     let dx: Double
     let dy: Double
+    /// Normalized (0–1, raw device orientation) cursor position the scroll
+    /// happened over. The touch-drag that emulates the scroll begins here so iOS
+    /// pans the view under the pointer (e.g. a bottom modal vs. the map behind
+    /// it). Optional for backwards compatibility; defaults to the screen center.
+    let x: Double?
+    let y: Double?
 }
 
 // Simulator.app's Debug menu toggles map to `-[SimDevice setCADebugOption:enabled:]`

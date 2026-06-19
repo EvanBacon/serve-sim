@@ -53,9 +53,10 @@ export interface SimulatorViewProps {
   onStreamButton?: (button: string) => void;
   /** Relay mode: callback for Digital Crown rotation events */
   onStreamDigitalCrown?: (delta: number) => void;
-  /** Relay mode: callback for scroll-wheel / trackpad pan events. Deltas are a
-   * fraction of the display in raw device orientation (positive dy = content down). */
-  onStreamScroll?: (data: { dx: number; dy: number }) => void;
+  /** Relay mode: callback for scroll-wheel / trackpad pan events. Deltas and the
+   * `x`/`y` cursor anchor are a fraction of the display in raw device orientation
+   * (positive dy = content down). The anchor is where the pan gesture begins. */
+  onStreamScroll?: (data: { dx: number; dy: number; x: number; y: number }) => void;
   /** Enables mouse-wheel/trackpad Digital Crown rotation forwarding. */
   enableDigitalCrown?: boolean;
   /** Relay mode: subscribe to frame updates (bypasses React state for performance).
@@ -374,19 +375,21 @@ export function SimulatorView({
   }, [relayMode, onStreamDigitalCrown]);
 
   const sendScroll = useCallback(
-    (dx: number, dy: number) => {
+    (dx: number, dy: number, anchorX: number, anchorY: number) => {
       if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return;
-      // Rotate the delta into the raw device orientation so scrolling tracks the
-      // visible content on landscape / upside-down devices.
+      // Rotate both the delta and the cursor anchor into raw device orientation so
+      // scrolling tracks the visible content on landscape / upside-down devices.
       const orientation = streamDisplayGeometry(screenSizeRef.current).inputOrientation;
-      const raw = rawDeltaForDisplayDelta(orientation, dx, dy);
+      const rawDelta = rawDeltaForDisplayDelta(orientation, dx, dy);
+      const rawAnchor = rawPointForDisplayPoint(orientation, anchorX, anchorY);
+      const payload = { dx: rawDelta.dx, dy: rawDelta.dy, x: rawAnchor.x, y: rawAnchor.y };
       if (relayMode) {
-        onStreamScroll?.(raw);
+        onStreamScroll?.(payload);
         return;
       }
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const json = new TextEncoder().encode(JSON.stringify(raw));
+      const json = new TextEncoder().encode(JSON.stringify(payload));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = WS_MSG_SCROLL;
       msg.set(json, 1);
@@ -697,11 +700,15 @@ export function SimulatorView({
       const dxPx = wheelDeltaToPixels(event.deltaX, event.deltaMode, rect.width);
       const dyPx = wheelDeltaToPixels(event.deltaY, event.deltaMode, rect.height);
       if (dxPx === 0 && dyPx === 0) return false;
+      // Anchor the pan under the cursor so iOS pans the view beneath the pointer
+      // (e.g. a bottom sheet vs. the map behind it), clamped to the display.
+      const anchorX = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+      const anchorY = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 1);
       // Express the delta as a fraction of the rendered display so the server can
       // rescale to the device's pixel dimensions. Browser wheel deltas already
       // reflect the user's natural-scroll setting, so the sign passes straight
       // through to match a real scroll wheel.
-      sendScroll(dxPx / rect.width, dyPx / rect.height);
+      sendScroll(dxPx / rect.width, dyPx / rect.height, anchorX, anchorY);
       return true;
     },
     [getInputRect, sendScroll],
