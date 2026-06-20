@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -31,12 +32,15 @@ export function DeviceKitChrome({
   screen,
   interactive = false,
   onButton,
+  onCrownWheel,
 }: {
   chrome: DeviceKitChromeDescriptor;
   /** Rendered inside the screen cutout (the live stream, or a black fill). */
   screen?: ReactNode;
   interactive?: boolean;
   onButton?: (press: ChromeButtonPress) => void;
+  /** Wheel over the Digital Crown — forwards rotation to scroll the watch. */
+  onCrownWheel?: (deltaY: number, deltaMode: number) => void;
 }) {
   // Apple's composite pictures only the bezel — the hardware buttons are
   // separate sprites that poke out past the metal edge (the part overshooting
@@ -51,6 +55,9 @@ export function DeviceKitChrome({
           button={button}
           interactive={interactive}
           onButton={onButton}
+          onWheel={
+            interactive && button.name === "digital-crown" ? onCrownWheel : undefined
+          }
         />
       ))}
 
@@ -84,10 +91,10 @@ export function DeviceKitChrome({
   );
 }
 
-/** CSS border-radius for the screen cutout, matched to the chrome's inner corner. */
+/** CSS border-radius for the screen cutout, matched to its measured corner radius. */
 export function deviceKitScreenRadius(chrome: DeviceKitChromeDescriptor): string {
-  return `${(chrome.innerCornerRadius / chrome.screen.width) * 100}% / ${
-    (chrome.innerCornerRadius / chrome.screen.height) * 100
+  return `${(chrome.screenRadius / chrome.screen.width) * 100}% / ${
+    (chrome.screenRadius / chrome.screen.height) * 100
   }%`;
 }
 
@@ -96,15 +103,35 @@ function ChromeButton({
   button,
   interactive,
   onButton,
+  onWheel,
 }: {
   chrome: DeviceKitChromeDescriptor;
   button: DeviceKitChromeButton;
   interactive: boolean;
   onButton?: (press: ChromeButtonPress) => void;
+  /** Wheel over this cap (the Digital Crown) → (deltaY, deltaMode). */
+  onWheel?: (deltaY: number, deltaMode: number) => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const [pressed, setPressed] = useState(false);
   const activePointerRef = useRef<number | null>(null);
+  const elRef = useRef<HTMLDivElement | null>(null);
+
+  // Native (non-passive) wheel listener so it can preventDefault — turning the
+  // crown scrolls the watch instead of the page.
+  const onWheelRef = useRef(onWheel);
+  onWheelRef.current = onWheel;
+  useEffect(() => {
+    const el = elRef.current;
+    if (!el || !onWheel) return;
+    const handler = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onWheelRef.current?.(event.deltaY, event.deltaMode);
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [onWheel]);
   // A button is only pressable when it carries a HID code; decorative inputs
   // (rare) still render but don't intercept pointer events.
   const pressable = interactive && button.usagePage != null && button.usage != null;
@@ -131,11 +158,12 @@ function ChromeButton({
     [button, onButton],
   );
 
-  // zIndex relative to bezel (z2) and screen (z3): raised caps (watch crown /
-  // side / action, which sit in a bezel cutout) are drawn ABOVE the bezel so the
-  // whole cap shows; the rest sit behind it (z0) so only the overshoot past the
-  // solid edge shows. All buttons are on the side rails, clear of the screen.
-  const zIndex = button.raised ? 5 : 0;
+  // zIndex vs the bezel (z1) and stream (z2): onTop caps (the watch's action
+  // button) sit above both; the rest sit BEHIND the bezel (z0) so the composite
+  // hides the cap where it pictures it (the watch's baked-in crown / side button
+  // show through the bezel) and reveals it where it doesn't (every iPhone button
+  // pokes past the transparent edge). No doubling, no per-button detection.
+  const zIndex = button.onTop ? 5 : 0;
 
   // The cap slides out on hover/press by its rollover travel; the depressed
   // sprite (or a brightened cap) reads the press.
@@ -159,6 +187,7 @@ function ChromeButton({
 
   return (
     <div
+      ref={elRef}
       role={pressable ? "button" : undefined}
       aria-label={pressable ? buttonLabel(button.name) : undefined}
       aria-hidden={pressable ? undefined : true}

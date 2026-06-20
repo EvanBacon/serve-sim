@@ -65,6 +65,8 @@ export type DeviceKitChromeDescriptor = {
   insets: Insets;
   outerCornerRadius: number;
   innerCornerRadius: number;
+  /** The active screen's corner radius (composite px) for rounding the stream. */
+  screenRadius: number;
   compositeImage: string | null;
   slice: DeviceKitChromeSlice | null;
   corner: Size | null;
@@ -80,10 +82,6 @@ export type DeviceKitChromeButton = {
   frame: Rect;
   /** Hover/press travel as a fraction of the button image (rollover − normal). */
   hover: Point;
-  /** The cap sits in a bezel cutout (watch crown/side) or is flagged onTop, so
-   * it's drawn ON TOP of the composite (full sprite). Otherwise it's drawn behind
-   * a solid bezel and only the overshoot past the edge shows (iPhone buttons). */
-  raised: boolean;
   /** HID (page, usage) from chrome.json — dispatched via arbitrary HID injection
    * when the button is pressed in the live view. Null for inputs without codes. */
   usagePage: number | null;
@@ -111,6 +109,9 @@ type DeviceProfileMetadata = {
   modelIdentifier: string | null;
   productClass: string | null;
   screenSize: Size | null;
+  /** Raw framebuffer-mask PDF size — Apple's active-display shape, but in
+   * inconsistent units across families (iPhone @3x px, watch @1x pt). */
+  framebufferMaskSize: Size | null;
 };
 
 type ParsedChrome = {
@@ -325,13 +326,27 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     bodySize = pdfAssetSize(chrome.identifier, chrome.compositeImage);
   }
 
+  // The active display size, in composite points. Apple's framebuffer mask is
+  // the display shape but in inconsistent units across families (iPhone @3x px,
+  // watch @1x pt), so the per-family fallback scale is wrong for some devices.
+  // Derive the real scale from the composite's own black-screen opening
+  // (mask px ÷ opening pt → 3 for iPhone, 1 for watch) and convert. Nine-slice
+  // chrome (no composite) keeps the profile's logical screen, which is correct
+  // for it; `bodySize − insets` is the last-resort fallback.
+  const opening = chrome.compositeImage
+    ? compositeScreenBounds(chrome.identifier, chrome.compositeImage)
+    : null;
   const screenSize =
-    bodySize
+    (opening && profile.framebufferMaskSize
+      ? scaleMaskToPoints(profile.framebufferMaskSize, opening)
+      : null) ??
+    profile.screenSize ??
+    (bodySize
       ? {
           width: bodySize.width - chrome.insets.left - chrome.insets.right,
           height: bodySize.height - chrome.insets.top - chrome.insets.bottom,
         }
-      : profile.screenSize;
+      : null);
   if (!screenSize || screenSize.width <= 0 || screenSize.height <= 0) return null;
 
   const resolvedBodySize = bodySize ?? {
@@ -349,26 +364,24 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     width: resolvedBodySize.width + chrome.devicePadding.left + chrome.devicePadding.right,
     height: resolvedBodySize.height + chrome.devicePadding.top + chrome.devicePadding.bottom,
   };
-  // The active screen rect (the logical display, inset by the chrome's screen
-  // insets). The stream renders here ON TOP of the bezel; the composite's own
-  // black screen border (between the metal edge and this inset) frames it, the
-  // way a real device's black display border does.
+  // The active screen, centered in the device body (the case). The stream renders
+  // here ON TOP of the bezel; the composite's own black screen border (between
+  // the metal edge and this rect) frames it like a real device's display border.
   const screen: Rect = {
-    x: body.x + chrome.insets.left,
-    y: body.y + chrome.insets.top,
+    x: body.x + (resolvedBodySize.width - screenSize.width) / 2,
+    y: body.y + (resolvedBodySize.height - screenSize.height) / 2,
     width: screenSize.width,
     height: screenSize.height,
   };
+  // The screen's own corner radius. innerCornerRadius (outer − inset) is right
+  // for the iPhone but far too small for the watch's very rounded display, so
+  // measure the composite's screen-cutout radius and step it in by the same
+  // amount the active display is inset from that cutout.
+  const screenRadius = opening
+    ? Math.max(0, opening.radius - (opening.width - screenSize.width) / 2)
+    : chrome.innerCornerRadius;
 
   const corner = chrome.slice ? pdfAssetSize(chrome.identifier, chrome.slice.topLeft) : null;
-  // Some composites already picture certain buttons (Apple Watch's crown + side
-  // button are part of the case), while others don't (every iPhone button, the
-  // watch's action button). Sample the composite's opacity at each button's
-  // outer edge so the client can skip re-drawing a button the bezel already
-  // shows (drawing it would double/offset it) yet still draw the ones it must.
-  const opaqueMask = chrome.compositeImage
-    ? compositeOpaqueMask(chrome.identifier, chrome.compositeImage)
-    : null;
   const buttons = chrome.buttons.flatMap((button): DeviceKitChromeButton[] => {
     const imageSize = pdfAssetSize(chrome.identifier, button.image);
     if (!imageSize) return [];
@@ -386,11 +399,6 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
       onTop: button.onTop,
       frame: { ...topLeft, ...imageSize },
       hover,
-      raised:
-        button.onTop ||
-        (opaqueMask
-          ? buttonInBezelNotch(opaqueMask, { x: topLeft.x - body.x, y: topLeft.y - body.y, ...imageSize }, button.anchor)
-          : false),
       usagePage: button.usagePage,
       usage: button.usage,
     }];
@@ -404,6 +412,7 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     insets: chrome.insets,
     outerCornerRadius: chrome.outerCornerRadius,
     innerCornerRadius: chrome.innerCornerRadius,
+    screenRadius,
     compositeImage: chrome.compositeImage,
     slice: chrome.slice,
     corner,
@@ -426,7 +435,17 @@ function readProfileMetadata(profilePath: string): DeviceProfileMetadata | null 
           chromeIdentifier,
         )
       : null,
+    framebufferMaskSize: framebufferMaskSize({ ...raw, __profileDir: dirname(profilePath) }),
   };
+}
+
+function framebufferMaskSize(profile: JsonRecord): Size | null {
+  const mask = typeof profile.framebufferMask === "string" ? profile.framebufferMask : null;
+  const profileDir = typeof profile.__profileDir === "string" ? profile.__profileDir : null;
+  if (!mask || !profileDir) return null;
+  const maskPath = join(profileDir, `${mask}.pdf`);
+  if (!existsSync(maskPath)) return null;
+  return parsePdfPageSize(readFileSync(maskPath));
 }
 
 function profileNameForDevice(device: {
@@ -896,6 +915,56 @@ function alphaBounds(png: Buffer): Rect | null {
   return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
 }
 
+/**
+ * Convert Apple's framebuffer-mask size into composite points using the
+ * composite's own black-screen opening as the scale reference (mask px ÷
+ * opening pt, rounded). Handles the per-family unit inconsistency uniformly.
+ */
+function scaleMaskToPoints(mask: Size, opening: Rect): Size | null {
+  if (opening.width <= 0) return null;
+  const scale = Math.max(1, Math.round(mask.width / opening.width));
+  return { width: mask.width / scale, height: mask.height / scale };
+}
+
+/**
+ * The composite's black-screen opening (the cutout Apple fills with opaque
+ * black). Found by walking the contiguous black region out from the screen
+ * center along the center row + column, so dark metal / button slots elsewhere
+ * don't inflate the rect. In the composite's own pixel/point coordinates.
+ */
+function compositeScreenBounds(identifier: string, imageName: string): (Rect & { radius: number }) | null {
+  const png = readCompositePng(identifier, imageName);
+  if (!png) return null;
+  const decoded = decodeMask(png, (r, g, b, a) => a > 200 && r < 30 && g < 30 && b < 30);
+  if (!decoded) return null;
+  const { width, height, mask } = decoded;
+  const cx = Math.floor(width / 2);
+  const cy = Math.floor(height / 2);
+  const dark = (x: number, y: number) =>
+    x >= 0 && y >= 0 && x < width && y < height && mask[y * width + x] === 1;
+  if (!dark(cx, cy)) return null;
+  let x0 = cx;
+  while (x0 > 0 && dark(x0 - 1, cy)) x0--;
+  let x1 = cx;
+  while (x1 < width - 1 && dark(x1 + 1, cy)) x1++;
+  let y0 = cy;
+  while (y0 > 0 && dark(cx, y0 - 1)) y0--;
+  let y1 = cy;
+  while (y1 < height - 1 && dark(cx, y1 + 1)) y1++;
+  // Corner radius: down each corner column the rounded corner stays non-dark for
+  // ~r rows. Averaged over the four corners (innerCornerRadius is wrong for the
+  // watch's very rounded screen).
+  const span = y1 - y0;
+  const cornerInset = (x: number, fromTop: boolean) => {
+    let n = 0;
+    while (n < span && !dark(x, fromTop ? y0 + n : y1 - n)) n++;
+    return n;
+  };
+  const radii = [cornerInset(x0, true), cornerInset(x1, true), cornerInset(x0, false), cornerInset(x1, false)];
+  const radius = radii.reduce((a, b) => a + b, 0) / radii.length;
+  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1, radius };
+}
+
 function readCompositePng(identifier: string, imageName: string): Buffer | null {
   const pdfPath = chromeAssetPath(identifier, imageName);
   if (!existsSync(pdfPath)) return null;
@@ -904,55 +973,6 @@ function readCompositePng(identifier: string, imageName: string): Buffer | null 
   } catch {
     return null;
   }
-}
-
-/** Opaque-pixel mask of the composite, in its own pixel/point coordinate space. */
-function compositeOpaqueMask(identifier: string, imageName: string): PixelMask | null {
-  const png = readCompositePng(identifier, imageName);
-  if (!png) return null;
-  return decodeMask(png, (_r, _g, _b, a) => a > 40);
-}
-
-/**
- * Whether the button sits in a cutout in the bezel (a notch the cap fills) rather
- * than poking past a solid edge. Sample the composite's opacity at the button's
- * INNER edge (toward the screen): transparent there means the bezel is notched
- * for the button (Apple Watch crown / side button), so the full cap is drawn ON
- * TOP, filling the notch; opaque there means a solid bezel the cap pokes past
- * (every iPhone button), so it's drawn behind and only the overshoot shows.
- * `rect` is the button frame in the composite's coordinate space.
- */
-function buttonInBezelNotch(
-  mask: PixelMask,
-  rect: Rect,
-  anchor: "left" | "right" | "top" | "bottom",
-): boolean {
-  const fx = (frac: number) => rect.x + rect.width * frac;
-  const fy = (frac: number) => rect.y + rect.height * frac;
-  let sx: number;
-  let sy: number;
-  switch (anchor) {
-    case "left":
-      sx = fx(0.85);
-      sy = fy(0.5);
-      break;
-    case "top":
-      sx = fx(0.5);
-      sy = fy(0.85);
-      break;
-    case "bottom":
-      sx = fx(0.5);
-      sy = fy(0.15);
-      break;
-    default: // right
-      sx = fx(0.15);
-      sy = fy(0.5);
-      break;
-  }
-  const x = Math.round(sx);
-  const y = Math.round(sy);
-  if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) return false;
-  return mask.mask[y * mask.width + x] !== 1;
 }
 
 function unfilterPngRow(

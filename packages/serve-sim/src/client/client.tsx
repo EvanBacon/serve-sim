@@ -10,6 +10,7 @@ import {
 } from "react";
 import {
   SimulatorView,
+  digitalCrownDeltaFromWheel,
   displayStreamConfig,
   fallbackScreenSize,
   isLandscapeConfig,
@@ -988,6 +989,14 @@ function AppWithConfig({
                 chrome={chrome!}
                 interactive
                 onButton={handleChromeButton}
+                onCrownWheel={(deltaY, deltaMode) => {
+                  const delta = digitalCrownDeltaFromWheel(
+                    deltaY,
+                    deltaMode,
+                    deviceRenderedHeight || 1,
+                  );
+                  if (delta != null) onStreamDigitalCrown(delta);
+                }}
                 screen={screenContent}
               />
             );

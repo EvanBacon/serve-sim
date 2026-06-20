@@ -22,6 +22,7 @@ export interface DeviceKitChromeDescriptor {
   insets: GridInsets;
   outerCornerRadius: number;
   innerCornerRadius: number;
+  screenRadius: number;
   compositeImage: string | null;
   slice: DeviceKitChromeSlice | null;
   corner: GridSize | null;
@@ -35,7 +36,6 @@ export interface DeviceKitChromeButton {
   onTop: boolean;
   frame: GridRect;
   hover: { x: number; y: number };
-  raised: boolean;
   usagePage: number | null;
   usage: number | null;
 }
