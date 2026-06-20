@@ -131,7 +131,11 @@ function ChromeButton({
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, [onWheel]);
+    // Keyed on presence, not identity: the handler reads onWheelRef.current,
+    // so a new closure each render must not tear down and re-add the listener
+    // (the parent re-renders every frame during a resize/inertia drag).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!onWheel]);
   // A button is only pressable when it carries a HID code; decorative inputs
   // (rare) still render but don't intercept pointer events.
   const pressable = interactive && button.usagePage != null && button.usage != null;
@@ -158,12 +162,11 @@ function ChromeButton({
     [button, onButton],
   );
 
-  // zIndex vs the bezel (z1) and stream (z2). Watch caps (crown / side / action)
-  // are drawn ABOVE the bezel so the whole cap shows and is the hit target —
-  // exactly where it's clicked. iPhone / iPad buttons sit BEHIND the bezel (z0)
-  // so only the overshoot past the bezel's transparent edge shows.
-  const isWatch = chrome.identifier.startsWith("watch");
-  const zIndex = button.onTop || isWatch ? 5 : 0;
+  // zIndex vs the bezel (z1) and stream (z2). `onTop` caps (e.g. watch crown /
+  // side / action) are drawn ABOVE the bezel so the whole cap shows and is the
+  // hit target — exactly where it's clicked. iPhone / iPad buttons sit BEHIND
+  // the bezel (z0) so only the overshoot past its transparent edge shows.
+  const zIndex = button.onTop ? 5 : 0;
 
   // The cap slides out on hover/press by its rollover travel; the depressed
   // sprite (or a brightened cap) reads the press.

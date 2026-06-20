@@ -30,11 +30,7 @@ import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
 import { DevicePlaceholder } from "./components/device-placeholder";
-import {
-  DeviceKitChrome,
-  deviceKitScreenRadius,
-  type ChromeButtonPress,
-} from "./components/device-chrome-frame";
+import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
@@ -522,7 +518,6 @@ function AppWithConfig({
   const containerAspectRatio = useChrome
     ? `${chrome!.frame.width} / ${chrome!.frame.height}`
     : frameAspectRatio;
-  const screenClipRadius = useChrome ? deviceKitScreenRadius(chrome!) : imgBorderRadius;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -951,7 +946,7 @@ function AppWithConfig({
                   // content and, on the <canvas> path, composites its
                   // semi-transparent white against the black page as a visible
                   // outline. An inset shadow paints over the (opaque) video edge.
-                  borderRadius: useChrome ? 0 : screenClipRadius,
+                  borderRadius: useChrome ? 0 : imgBorderRadius,
                   cornerShape: useChrome ? undefined : "superellipse(1.3)",
                   ...(useChrome
                     ? {}

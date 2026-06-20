@@ -382,6 +382,10 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     : chrome.innerCornerRadius;
 
   const corner = chrome.slice ? pdfAssetSize(chrome.identifier, chrome.slice.topLeft) : null;
+  // Watch caps (crown / side / action) always render above the bezel so the
+  // whole cap shows and is the hit target; iPhone/iPad buttons only honor the
+  // per-button `onTop` flag and otherwise sit behind the bezel's edge.
+  const capsOnTop = chrome.identifier.startsWith("watch");
   const buttons = chrome.buttons.flatMap((button): DeviceKitChromeButton[] => {
     const imageSize = pdfAssetSize(chrome.identifier, button.image);
     if (!imageSize) return [];
@@ -396,7 +400,7 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
       name: button.name,
       image: button.image,
       imageDown: button.imageDown,
-      onTop: button.onTop,
+      onTop: button.onTop || capsOnTop,
       frame: { ...topLeft, ...imageSize },
       hover,
       usagePage: button.usagePage,
