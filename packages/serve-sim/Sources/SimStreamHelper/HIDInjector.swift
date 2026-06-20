@@ -324,6 +324,13 @@ final class HIDInjector {
         min(max(v, HIDInjector.scrollEdgeMargin), 1 - HIDInjector.scrollEdgeMargin)
     }
 
+    /// Touch down to (re)start the scroll drag, then let iOS register the
+    /// touch-down before the finger moves. Runs on `scrollQueue`.
+    private func beginDrag(x: Double, y: Double) {
+        sendTouch(type: "begin", x: x, y: y, screenWidth: scrollDimW, screenHeight: scrollDimH)
+        usleep(8000)
+    }
+
     /// Inject a scroll-wheel / trackpad pan as a touch drag on the digitizer.
     /// - Parameters:
     ///   - dx: Horizontal scroll delta in device pixels (positive = content right).
@@ -336,8 +343,8 @@ final class HIDInjector {
         // Finger moves opposite to content: scrolling content down = swipe up.
         let stepX = -(dx / Double(screenWidth)) * HIDInjector.scrollDragGain
         let stepY = -(dy / Double(screenHeight)) * HIDInjector.scrollDragGain
-        let aX = clampFinger((anchorX?.isFinite == true) ? anchorX! : 0.5)
-        let aY = clampFinger((anchorY?.isFinite == true) ? anchorY! : 0.5)
+        let aX = clampFinger(anchorX.flatMap { $0.isFinite ? $0 : nil } ?? 0.5)
+        let aY = clampFinger(anchorY.flatMap { $0.isFinite ? $0 : nil } ?? 0.5)
 
         scrollQueue.async { [self] in
             scrollDimW = screenWidth
@@ -350,8 +357,7 @@ final class HIDInjector {
                 scrollAnchorY = aY
                 scrollFingerX = aX
                 scrollFingerY = aY
-                sendTouch(type: "begin", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
-                usleep(8000)  // let iOS register the touch-down before it moves
+                beginDrag(x: scrollFingerX, y: scrollFingerY)
                 scrollDragActive = true
             }
 
@@ -362,18 +368,17 @@ final class HIDInjector {
             // Re-beginning at the anchor keeps the gesture hit-testing the same view.
             if nextX <= HIDInjector.scrollEdgeMargin || nextX >= 1 - HIDInjector.scrollEdgeMargin ||
                nextY <= HIDInjector.scrollEdgeMargin || nextY >= 1 - HIDInjector.scrollEdgeMargin {
-                sendTouch(type: "end", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
+                sendTouch(type: "end", x: scrollFingerX, y: scrollFingerY, screenWidth: scrollDimW, screenHeight: scrollDimH)
                 scrollFingerX = scrollAnchorX
                 scrollFingerY = scrollAnchorY
-                sendTouch(type: "begin", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
-                usleep(8000)
+                beginDrag(x: scrollFingerX, y: scrollFingerY)
                 nextX = scrollFingerX + stepX
                 nextY = scrollFingerY + stepY
             }
 
             scrollFingerX = clampFinger(nextX)
             scrollFingerY = clampFinger(nextY)
-            sendTouch(type: "move", x: scrollFingerX, y: scrollFingerY, screenWidth: screenWidth, screenHeight: screenHeight)
+            sendTouch(type: "move", x: scrollFingerX, y: scrollFingerY, screenWidth: scrollDimW, screenHeight: scrollDimH)
 
             // End the drag shortly after the wheel goes idle.
             scrollEndWork?.cancel()
