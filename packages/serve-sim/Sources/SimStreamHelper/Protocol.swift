@@ -21,7 +21,16 @@ struct TouchEventPayload: Codable {
 }
 
 struct ButtonEventPayload: Codable {
-    let button: String  // "home"
+    let button: String     // named button ("home", "lock", …) — used when page/usage absent
+    /// Optional HID usage page (e.g. 12 = Consumer) for an arbitrary hardware
+    /// button injected via IndigoHIDMessageForHIDArbitrary. Carried straight from
+    /// DeviceKit chrome.json's per-input `usagePage`/`usage`.
+    let page: UInt32?
+    let usage: UInt32?
+    /// "down", "up", or "press" (down + brief hold + up). Defaults to "press"
+    /// when omitted, so a CLI tap is a momentary press while the UI can hold
+    /// power / side buttons for their long-press menus via explicit down/up.
+    let phase: String?
 }
 
 struct MultiTouchEventPayload: Codable {

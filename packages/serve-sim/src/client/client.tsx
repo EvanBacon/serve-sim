@@ -12,6 +12,7 @@ import {
   SimulatorView,
   displayStreamConfig,
   fallbackScreenSize,
+  isLandscapeConfig,
   screenBorderRadius,
   SimulatorToolbar,
   getDeviceType,
@@ -28,6 +29,11 @@ import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
 import { DevicePlaceholder } from "./components/device-placeholder";
+import {
+  DeviceKitChrome,
+  deviceKitScreenRadius,
+  type ChromeButtonPress,
+} from "./components/device-chrome-frame";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
@@ -45,6 +51,7 @@ import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
 import { useGridDevices } from "./hooks/use-grid-devices";
+import type { DeviceKitChromeDescriptor } from "./utils/grid";
 import {
   avccFallbackReducer,
   initialAvccFallback,
@@ -309,6 +316,7 @@ function App() {
         config={config}
         deviceName={selectedDevice?.name ?? null}
         deviceRuntime={selectedDevice?.runtime ?? null}
+        chrome={selectedDevice?.chrome ?? null}
         preferMjpeg={uiStarted.has(config.device)}
         axOverlayEnabled={axOverlayEnabled}
         setAxOverlayEnabled={setAxOverlayEnabled}
@@ -387,6 +395,7 @@ interface AppWithConfigProps {
   config: PreviewConfig;
   deviceName: string | null;
   deviceRuntime: string | null;
+  chrome: DeviceKitChromeDescriptor | null;
   preferMjpeg: boolean;
   axOverlayEnabled: boolean;
   setAxOverlayEnabled: React.Dispatch<React.SetStateAction<boolean>>;
@@ -405,6 +414,7 @@ function AppWithConfig({
   config,
   deviceName,
   deviceRuntime,
+  chrome,
   preferMjpeg,
   axOverlayEnabled,
   setAxOverlayEnabled,
@@ -494,6 +504,25 @@ function AppWithConfig({
     ? frameDisplayConfig.width / frameDisplayConfig.height
     : 1;
 
+  // DeviceKit chrome wraps the live stream in the real device bezel (with
+  // working hardware buttons). It's authored portrait, so in landscape we drop
+  // back to the bare rounded screen. When chromed, the on-screen container is
+  // the full frame (bezel + screen): `chromeScale` is how much bigger the frame
+  // is than the screen, so we scale the container up by it while keeping the
+  // *screen* at the same comfortable size — and resize / panel-collision math
+  // all operate on the frame dimensions.
+  const isLandscape = isLandscapeConfig(activeStreamConfig);
+  const useChrome = !!chrome && !isLandscape;
+  const chromeScale = useChrome ? chrome!.frame.width / chrome!.screen.width : 1;
+  const containerDefaultWidth = frameMaxWidth * chromeScale;
+  const containerAspectRatioValue = useChrome
+    ? chrome!.frame.width / chrome!.frame.height
+    : frameAspectRatioValue;
+  const containerAspectRatio = useChrome
+    ? `${chrome!.frame.width} / ${chrome!.frame.height}`
+    : frameAspectRatio;
+  const screenClipRadius = useChrome ? deviceKitScreenRadius(chrome!) : imgBorderRadius;
+
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
   const pendingWsMessagesRef = useRef<QueuedWsMessage[]>([]);
@@ -571,6 +600,21 @@ function AppWithConfig({
   const onStreamTouch = useCallback((data: any) => sendWs(0x03, data), [sendWs]);
   const onStreamMultiTouch = useCallback((data: any) => sendWs(0x05, data), [sendWs]);
   const onStreamButton = useCallback((button: string) => sendWs(0x04, { button }), [sendWs]);
+  // A hardware button on the device chrome was pressed/released. Forward its HID
+  // (page, usage) so the helper injects it via arbitrary HID — `down`/`up` phases
+  // let power / side buttons be held for their long-press menus.
+  const handleChromeButton = useCallback(
+    ({ phase, button }: ChromeButtonPress) => {
+      if (button.usagePage == null || button.usage == null) return;
+      sendWs(0x04, {
+        button: button.name,
+        page: button.usagePage,
+        usage: button.usage,
+        phase,
+      });
+    },
+    [sendWs],
+  );
   const onStreamDigitalCrown = useCallback((delta: number) => sendWs(0x0a, { delta }), [sendWs]);
   const onStreamScroll = useCallback((data: { dx: number; dy: number; x: number; y: number }) => sendWs(0x0b, data), [sendWs]);
   const onScreenConfigChange = useCallback((next: StreamConfig) => {
@@ -783,10 +827,10 @@ function AppWithConfig({
   });
 
   const simulatorResize = useSimulatorResize({
-    defaultWidth: frameMaxWidth,
+    defaultWidth: containerDefaultWidth,
     viewportWidth,
     viewportHeight,
-    aspectRatio: frameAspectRatioValue,
+    aspectRatio: containerAspectRatioValue,
     onStart: () => setSimFocused(false),
   });
 
@@ -877,7 +921,7 @@ function AppWithConfig({
           className="relative max-h-full"
           style={{
             width: simulatorResize.width,
-            aspectRatio: frameAspectRatio,
+            aspectRatio: containerAspectRatio,
             transition:
               simulatorResize.isResizing || simulatorResize.isInertia
                 ? SIMULATOR_RESIZE_DRAG_TRANSITION
@@ -887,47 +931,74 @@ function AppWithConfig({
           }}
           {...mediaDrop.dropZoneProps}
         >
-          <SimulatorView
-            url={config.url}
-            style={{
-              width: "100%",
-              height: "100%",
-              border: "none",
-              pointerEvents:
-                simulatorResize.isResizing || simulatorResize.isInertia ? "none" : undefined,
-            }}
-            imageStyle={{
-              borderRadius: imgBorderRadius,
-              cornerShape: "superellipse(1.3)",
-              // Subtle screen bezel as an INSET shadow rather than a border: a
-              // 1px border sits outside the content and, on the <canvas> path,
-              // composites its semi-transparent white against the black page as
-              // a visible outline. An inset shadow paints over the (opaque)
-              // video edge instead, so no white rim shows.
-              boxShadow: "inset 0 0 0 1px rgba(255, 255, 255, 0.2)",
-            } as CSSProperties}
-            hideControls
-            onStreamingChange={setStreaming}
-            onStreamTouch={onStreamTouch}
-            onStreamMultiTouch={onStreamMultiTouch}
-            onStreamButton={onStreamButton}
-            onStreamDigitalCrown={onStreamDigitalCrown}
-            onStreamScroll={onStreamScroll}
-            codec={useAvccVideo ? "avcc" : "mjpeg"}
-            subscribeFrame={useAvccVideo ? undefined : mjpeg.subscribeFrame}
-            streamFrame={useAvccVideo ? undefined : mjpeg.frame}
-            streamConfig={activeStreamConfig}
-            enableDigitalCrown={deviceType === "watch"}
-            onScreenConfigChange={onScreenConfigChange}
-          />
-          {axOverlayEnabled && <AxDomOverlay />}
+          {(() => {
+            const streamView = (
+              <SimulatorView
+                url={config.url}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  border: "none",
+                  pointerEvents:
+                    simulatorResize.isResizing || simulatorResize.isInertia ? "none" : undefined,
+                }}
+                imageStyle={{
+                  // With chrome the screen slot clips (rounded) and the bezel
+                  // provides the edge, so the stream itself is square + flush.
+                  // Without chrome, round the screen and add a subtle bezel as an
+                  // INSET shadow (not a border): a 1px border sits outside the
+                  // content and, on the <canvas> path, composites its
+                  // semi-transparent white against the black page as a visible
+                  // outline. An inset shadow paints over the (opaque) video edge.
+                  borderRadius: useChrome ? 0 : screenClipRadius,
+                  cornerShape: useChrome ? undefined : "superellipse(1.3)",
+                  ...(useChrome
+                    ? {}
+                    : { boxShadow: "inset 0 0 0 1px rgba(255, 255, 255, 0.2)" }),
+                } as CSSProperties}
+                hideControls
+                onStreamingChange={setStreaming}
+                onStreamTouch={onStreamTouch}
+                onStreamMultiTouch={onStreamMultiTouch}
+                onStreamButton={onStreamButton}
+                onStreamDigitalCrown={onStreamDigitalCrown}
+                onStreamScroll={onStreamScroll}
+                codec={useAvccVideo ? "avcc" : "mjpeg"}
+                subscribeFrame={useAvccVideo ? undefined : mjpeg.subscribeFrame}
+                streamFrame={useAvccVideo ? undefined : mjpeg.frame}
+                streamConfig={activeStreamConfig}
+                enableDigitalCrown={deviceType === "watch"}
+                onScreenConfigChange={onScreenConfigChange}
+              />
+            );
+            const screenContent = (
+              <>
+                {streamView}
+                {axOverlayEnabled && <AxDomOverlay />}
+              </>
+            );
+            if (!useChrome) return screenContent;
+            // The screen slot is the bezel's true opening; the stream letterboxes
+            // (contains) inside it, filling the constraining axis and leaving a
+            // thin black margin on the other — the device's own black screen
+            // border. Containing (not covering) keeps the stream from ever
+            // overflowing past the bezel.
+            return (
+              <DeviceKitChrome
+                chrome={chrome!}
+                interactive
+                onButton={handleChromeButton}
+                screen={screenContent}
+              />
+            );
+          })()}
           {mediaDrop.isDragOver && (
             <div
               // No backdrop-blur here: the canvas underneath repaints every
               // stream frame, and backdrop-filter forces a full re-blur per
               // frame for the whole drag — the tint alone stays cheap.
               className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-accent bg-[rgba(99,102,241,0.18)] text-accent pointer-events-none z-20"
-              style={{ borderRadius: imgBorderRadius }}
+              style={{ borderRadius: useChrome ? undefined : imgBorderRadius }}
             >
               <Upload size={32} strokeWidth={1.5} />
               <span className="text-[13px] font-medium">Drop media or .ipa</span>
@@ -940,14 +1011,14 @@ function AppWithConfig({
             containerWidth={deviceRenderedWidth || simulatorResize.width}
             containerHeight={
               deviceRenderedHeight ||
-              (frameAspectRatioValue > 0 ? simulatorResize.width / frameAspectRatioValue : 0)
+              (containerAspectRatioValue > 0 ? simulatorResize.width / containerAspectRatioValue : 0)
             }
           />
           <SimulatorResizeSizeBadge
             width={deviceRenderedWidth || simulatorResize.width}
             height={
               deviceRenderedHeight ||
-              (frameAspectRatioValue > 0 ? simulatorResize.width / frameAspectRatioValue : 0)
+              (containerAspectRatioValue > 0 ? simulatorResize.width / containerAspectRatioValue : 0)
             }
             visible={simulatorResize.isResizing || simulatorResize.isInertia}
           />

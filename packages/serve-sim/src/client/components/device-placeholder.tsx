@@ -9,10 +9,10 @@ import { useState, type CSSProperties, type ReactNode } from "react";
 import type {
   DeviceKitChromeDescriptor,
   DevicePlaceholderAssetDescriptor,
-  GridRect,
 } from "../utils/grid";
 import { runtimeLabel } from "../utils/grid";
 import { simEndpoint } from "../utils/sim-endpoint";
+import { DeviceKitChrome } from "./device-chrome-frame";
 
 // Shown in the main view when the selected device isn't streaming yet: a static
 // device frame, the device name + runtime, and a Start button that boots/streams
@@ -75,7 +75,9 @@ export function DevicePlaceholder({
         {activeAsset ? (
           <AssetPlaceholderChrome name={activeAsset.name} fallback={fallbackChrome} />
         ) : activeChrome ? (
-          <DeviceKitPlaceholderChrome chrome={activeChrome} />
+          <div className="absolute inset-0 pointer-events-none">
+            <DeviceKitChrome chrome={activeChrome} />
+          </div>
         ) : (
           fallbackChrome
         )}
@@ -255,200 +257,7 @@ function VisionPlaceholderFallback() {
     </svg>
   );
 }
-
-function DeviceKitPlaceholderChrome({ chrome }: { chrome: DeviceKitChromeDescriptor }) {
-  const screenRadius = `${(chrome.innerCornerRadius / chrome.screen.width) * 100}% / ${
-    (chrome.innerCornerRadius / chrome.screen.height) * 100
-  }%`;
-  const buttons = chrome.compositeImage
-    ? chrome.buttons.filter((button) => button.onTop)
-    : chrome.buttons;
-
-  return (
-    <div className="absolute inset-0 pointer-events-none">
-      {buttons.map((button) => (
-        <ChromeImage
-          key={`button-${button.name}`}
-          chrome={chrome}
-          image={button.image}
-          rect={button.frame}
-          zIndex={button.onTop ? 4 : 0}
-        />
-      ))}
-
-      <div
-        className="absolute bg-black"
-        style={{
-          ...rectStyle(chrome, chrome.screen, 1),
-          borderRadius: screenRadius,
-        }}
-      />
-
-      {chrome.compositeImage ? (
-        <ChromeImage
-          chrome={chrome}
-          image={chrome.compositeImage}
-          rect={chrome.body}
-          zIndex={2}
-        />
-      ) : chrome.slice && chrome.corner ? (
-        <NineSliceChrome chrome={chrome} />
-      ) : null}
-    </div>
-  );
-}
-
-function NineSliceChrome({ chrome }: { chrome: DeviceKitChromeDescriptor }) {
-  if (!chrome.slice || !chrome.corner) return null;
-  const { body, corner, slice } = chrome;
-  const midWidth = Math.max(body.width - corner.width * 2, 0);
-  const midHeight = Math.max(body.height - corner.height * 2, 0);
-  const pieces: Array<{ key: string; image: string; rect: GridRect }> = [
-    {
-      key: "top-left",
-      image: slice.topLeft,
-      rect: { x: body.x, y: body.y, width: corner.width, height: corner.height },
-    },
-    {
-      key: "top-right",
-      image: slice.topRight,
-      rect: {
-        x: body.x + body.width - corner.width,
-        y: body.y,
-        width: corner.width,
-        height: corner.height,
-      },
-    },
-    {
-      key: "bottom-left",
-      image: slice.bottomLeft,
-      rect: {
-        x: body.x,
-        y: body.y + body.height - corner.height,
-        width: corner.width,
-        height: corner.height,
-      },
-    },
-    {
-      key: "bottom-right",
-      image: slice.bottomRight,
-      rect: {
-        x: body.x + body.width - corner.width,
-        y: body.y + body.height - corner.height,
-        width: corner.width,
-        height: corner.height,
-      },
-    },
-    {
-      key: "top",
-      image: slice.top,
-      rect: {
-        x: body.x + corner.width,
-        y: body.y,
-        width: midWidth,
-        height: corner.height,
-      },
-    },
-    {
-      key: "bottom",
-      image: slice.bottom,
-      rect: {
-        x: body.x + corner.width,
-        y: body.y + body.height - corner.height,
-        width: midWidth,
-        height: corner.height,
-      },
-    },
-    {
-      key: "left",
-      image: slice.left,
-      rect: {
-        x: body.x,
-        y: body.y + corner.height,
-        width: corner.width,
-        height: midHeight,
-      },
-    },
-    {
-      key: "right",
-      image: slice.right,
-      rect: {
-        x: body.x + body.width - corner.width,
-        y: body.y + corner.height,
-        width: corner.width,
-        height: midHeight,
-      },
-    },
-  ];
-
-  return (
-    <>
-      {pieces
-        .filter((piece) => piece.rect.width > 0 && piece.rect.height > 0)
-        .map((piece) => (
-          <ChromeImage
-            key={piece.key}
-            chrome={chrome}
-            image={piece.image}
-            rect={piece.rect}
-            zIndex={2}
-          />
-        ))}
-    </>
-  );
-}
-
-function ChromeImage({
-  chrome,
-  image,
-  rect,
-  zIndex,
-}: {
-  chrome: DeviceKitChromeDescriptor;
-  image: string;
-  rect: GridRect;
-  zIndex: number;
-}) {
-  return (
-    <img
-      alt=""
-      aria-hidden
-      draggable={false}
-      src={chromeAssetUrl(chrome.identifier, image)}
-      className="absolute select-none"
-      style={{
-        ...rectStyle(chrome, rect, zIndex),
-        objectFit: "fill",
-        WebkitUserDrag: "none",
-      } as CSSProperties}
-    />
-  );
-}
-
-function chromeAssetUrl(identifier: string, image: string): string {
-  const path = `grid/api/devicekit-chrome?chrome=${encodeURIComponent(identifier)}&image=${encodeURIComponent(image)}`;
-  return typeof window === "undefined" ? `/${path}` : simEndpoint(path);
-}
-
 function placeholderAssetUrl(name: string): string {
   const path = `grid/api/device-placeholder-asset?name=${encodeURIComponent(name)}`;
   return typeof window === "undefined" ? `/${path}` : simEndpoint(path);
-}
-
-function rectStyle(
-  chrome: DeviceKitChromeDescriptor,
-  rect: GridRect,
-  zIndex: number,
-): CSSProperties {
-  return {
-    left: pct(rect.x, chrome.frame.width),
-    top: pct(rect.y, chrome.frame.height),
-    width: pct(rect.width, chrome.frame.width),
-    height: pct(rect.height, chrome.frame.height),
-    zIndex,
-  };
-}
-
-function pct(value: number, total: number): string {
-  return `${(value / total) * 100}%`;
 }

@@ -31,8 +31,13 @@ export interface DeviceKitChromeDescriptor {
 export interface DeviceKitChromeButton {
   name: string;
   image: string;
+  imageDown: string | null;
   onTop: boolean;
   frame: GridRect;
+  hover: { x: number; y: number };
+  raised: boolean;
+  usagePage: number | null;
+  usage: number | null;
 }
 
 export interface DeviceKitChromeSlice {

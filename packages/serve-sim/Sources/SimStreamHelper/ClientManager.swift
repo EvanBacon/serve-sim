@@ -27,6 +27,9 @@ final class ClientManager {
 
     var onTouch: ((TouchEventPayload) -> Void)?
     var onButton: ((String) -> Void)?
+    /// Arbitrary HID hardware button by (page, usage, phase) — power / volume /
+    /// action / side button, etc. Carried from DeviceKit chrome.json.
+    var onButtonHID: ((_ page: UInt32, _ usage: UInt32, _ phase: String) -> Void)?
     var onMultiTouch: ((MultiTouchEventPayload) -> Void)?
     var onKey: ((KeyEventPayload) -> Void)?
     var onOrientation: ((UInt32) -> Bool)?
@@ -208,7 +211,11 @@ final class ClientManager {
             onTouch?(json)
         } else if type == 0x04 { // WS_MSG_BUTTON
             guard let json = try? JSONDecoder().decode(ButtonEventPayload.self, from: data[1...]) else { return }
-            onButton?(json.button)
+            if let page = json.page, let usage = json.usage {
+                onButtonHID?(page, usage, json.phase ?? "press")
+            } else {
+                onButton?(json.button)
+            }
         } else if type == 0x05 { // WS_MSG_MULTI_TOUCH
             guard let json = try? JSONDecoder().decode(MultiTouchEventPayload.self, from: data[1...]) else { return }
             onMultiTouch?(json)

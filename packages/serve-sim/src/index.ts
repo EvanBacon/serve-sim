@@ -993,6 +993,19 @@ async function rotate(orientation: string, deviceArg?: string) {
   });
 }
 
+// HID (page, usage) codes for hardware buttons not backed by a named idb event
+// source, mirroring DeviceKit chrome.json's per-input `usagePage`/`usage`. The
+// helper injects these through IndigoHIDMessageForHIDArbitrary.
+const HID_BUTTON_CODES: Record<string, { page: number; usage: number }> = {
+  power: { page: 12, usage: 48 },
+  "volume-up": { page: 12, usage: 233 },
+  "volume-down": { page: 12, usage: 234 },
+  action: { page: 11, usage: 45 },
+  "side-button": { page: 12, usage: 149 },
+  "digital-crown": { page: 12, usage: 64 },
+  "left-side-button": { page: 65281, usage: 512 },
+};
+
 async function button(buttonName = "home", deviceArg?: string) {
   const state = readState(deviceArg);
   if (!state) {
@@ -1000,12 +1013,15 @@ async function button(buttonName = "home", deviceArg?: string) {
     process.exit(1);
   }
 
+  const hid = HID_BUTTON_CODES[buttonName];
+  const payload = hid ? { button: buttonName, ...hid } : { button: buttonName };
+
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify({ button: buttonName }));
+      const json = new TextEncoder().encode(JSON.stringify(payload));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x04;
       msg.set(json, 1);

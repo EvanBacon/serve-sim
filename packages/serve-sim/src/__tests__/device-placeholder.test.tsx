@@ -82,7 +82,7 @@ describe("DevicePlaceholder", () => {
     }
   });
 
-  test("does not duplicate baked-in buttons for composite DeviceKit chrome", () => {
+  test("draws all hardware buttons for composite DeviceKit chrome", () => {
     const chrome = {
       identifier: "phone11",
       frame: { width: 120, height: 140 },
@@ -96,16 +96,26 @@ describe("DevicePlaceholder", () => {
       corner: null,
       buttons: [
         {
-          name: "digital-crown",
-          image: "DigitalCrown",
+          name: "side-button",
+          image: "SideButton",
+          imageDown: "SideButton Dn",
           onTop: false,
           frame: { x: 110, y: 30, width: 8, height: 20 },
+          hover: { x: 0.1, y: 0 },
+          raised: false,
+          usagePage: 12,
+          usage: 149,
         },
         {
           name: "left-side-button",
           image: "StingButton",
+          imageDown: "StingButton Dn",
           onTop: true,
           frame: { x: 2, y: 44, width: 4, height: 24 },
+          hover: { x: -0.1, y: 0 },
+          raised: false,
+          usagePage: 65281,
+          usage: 512,
         },
       ],
     } satisfies DeviceKitChromeDescriptor;
@@ -116,8 +126,10 @@ describe("DevicePlaceholder", () => {
       chrome,
     });
 
+    // The composite pictures only the bezel; every hardware button is drawn as a
+    // separate sprite (onTop above the bezel, the rest poking out behind it).
     expect(html).toContain("WatchComposite");
     expect(html).toContain("StingButton");
-    expect(html).not.toContain("DigitalCrown");
+    expect(html).toContain("SideButton");
   });
 });

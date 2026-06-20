@@ -32,6 +32,14 @@ final class HIDInjector {
     private typealias IndigoButtonFunc = @convention(c) (Int32, Int32, Int32) -> UnsafeMutableRawPointer?
     private var buttonFunc: IndigoButtonFunc?
 
+    // IndigoHIDMessageForHIDArbitrary(uint32 target, uint32 page, uint32 usage, uint32 direction) -> IndigoMessage*
+    // direction: 1 = down, 2 = up. Routes any (page, usage) HID pair — used for
+    // power / volume / action / side buttons whose codes ship in DeviceKit's
+    // chrome.json. Unlike IndigoHIDMessageForButton's home press, these are
+    // delivered to the digitizer target and are honored on Xcode 26.
+    private typealias IndigoHIDArbitraryFunc = @convention(c) (UInt32, UInt32, UInt32, UInt32) -> UnsafeMutableRawPointer?
+    private var hidArbitraryFunc: IndigoHIDArbitraryFunc?
+
     // IndigoHIDMessageForKeyboardArbitrary(uint32_t keyCode, uint32_t direction) -> IndigoMessage*
     // direction: 1 = key down, 2 = key up
     private typealias IndigoKeyboardFunc = @convention(c) (UInt32, UInt32) -> UnsafeMutableRawPointer?
@@ -65,6 +73,13 @@ final class HIDInjector {
             print("[hid] IndigoHIDMessageForButton loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForButton not found")
+        }
+
+        if let arbPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForHIDArbitrary") {
+            self.hidArbitraryFunc = unsafeBitCast(arbPtr, to: IndigoHIDArbitraryFunc.self)
+            print("[hid] IndigoHIDMessageForHIDArbitrary loaded")
+        } else {
+            print("[hid] Warning: IndigoHIDMessageForHIDArbitrary not found")
         }
 
         if let keyboardPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForKeyboardArbitrary") {
@@ -200,6 +215,10 @@ final class HIDInjector {
 
     // idb target constant (third arg)
     private static let buttonTargetHardware: Int32 = 0x33
+
+    // Target for arbitrary (page, usage) HID — the digitizer, matching the touch
+    // path that's honored on Xcode 26 (0x32).
+    private static let buttonHIDTarget: UInt32 = 0x32
 
     /// Synchronously build + send a hardware-button message. Call only inside an
     /// `inputQueue` block (button sequences below run there).
@@ -355,6 +374,37 @@ final class HIDInjector {
             }
             scrollEndWork = work
             inputQueue.asyncAfter(deadline: .now() + HIDInjector.scrollGestureIdle, execute: work)
+        }
+    }
+
+    /// Press an arbitrary hardware button identified by its HID (page, usage),
+    /// as shipped in DeviceKit chrome.json (`usagePage`/`usage`). Covers power,
+    /// volume up/down, the action button, and the watch side button.
+    /// - phase: "down" / "up" hold the button for natural long-presses (power
+    ///   off slider, side-button menus); "press" sends a momentary down+up.
+    func sendButtonHID(page: UInt32, usage: UInt32, phase: String) {
+        guard let arb = hidArbitraryFunc else {
+            print("[hid] Arbitrary HID injection unavailable (page=\(page) usage=\(usage))")
+            return
+        }
+        let target = Self.buttonHIDTarget
+        func emit(_ direction: UInt32) {
+            guard let msg = arb(target, page, usage, direction) else {
+                print("[hid] IndigoHIDMessageForHIDArbitrary returned nil (page=\(page) usage=\(usage) dir=\(direction))")
+                return
+            }
+            rawSend(msg)
+        }
+        print("[hid] HID button page=\(page) usage=\(usage) phase=\(phase)")
+        inputQueue.async {
+            switch phase {
+            case "down": emit(1)
+            case "up":   emit(2)
+            default:
+                emit(1)
+                Thread.sleep(forTimeInterval: 0.05)
+                emit(2)
+            }
         }
     }
 

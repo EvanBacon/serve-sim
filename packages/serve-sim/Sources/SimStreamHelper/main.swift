@@ -88,6 +88,9 @@ httpServer.clientManager.onTouch = { touch in
 httpServer.clientManager.onButton = { button in
     hidInjector.sendButton(button: button, deviceUDID: deviceUDID)
 }
+httpServer.clientManager.onButtonHID = { page, usage, phase in
+    hidInjector.sendButtonHID(page: page, usage: usage, phase: phase)
+}
 httpServer.clientManager.onMultiTouch = { multiTouch in
     hidInjector.sendMultiTouch(type: multiTouch.type,
                                x1: multiTouch.x1, y1: multiTouch.y1,

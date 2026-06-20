@@ -74,8 +74,20 @@ export type DeviceKitChromeDescriptor = {
 export type DeviceKitChromeButton = {
   name: string;
   image: string;
+  /** Pressed-state sprite (chrome.json `imageDown`), shown while held. */
+  imageDown: string | null;
   onTop: boolean;
   frame: Rect;
+  /** Hover/press travel as a fraction of the button image (rollover − normal). */
+  hover: Point;
+  /** The cap sits in a bezel cutout (watch crown/side) or is flagged onTop, so
+   * it's drawn ON TOP of the composite (full sprite). Otherwise it's drawn behind
+   * a solid bezel and only the overshoot past the edge shows (iPhone buttons). */
+  raised: boolean;
+  /** HID (page, usage) from chrome.json — dispatched via arbitrary HID injection
+   * when the button is pressed in the live view. Null for inputs without codes. */
+  usagePage: number | null;
+  usage: number | null;
 };
 
 export type DeviceKitChromeSlice = {
@@ -116,11 +128,14 @@ type ParsedChrome = {
 type ParsedButton = {
   name: string;
   image: string;
+  imageDown: string | null;
   onTop: boolean;
   anchor: "left" | "right" | "top" | "bottom";
   align: "leading" | "trailing";
   normalOffset: Point;
   rolloverOffset: Point;
+  usagePage: number | null;
+  usage: number | null;
 };
 
 let deviceTypeNameByIdentifier: Map<string, string> | null = null;
@@ -334,23 +349,61 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     width: resolvedBodySize.width + chrome.devicePadding.left + chrome.devicePadding.right,
     height: resolvedBodySize.height + chrome.devicePadding.top + chrome.devicePadding.bottom,
   };
-  const screen: Rect = {
-    x: body.x + chrome.insets.left,
-    y: body.y + chrome.insets.top,
-    width: screenSize.width,
-    height: screenSize.height,
-  };
+  // Prefer the composite's true screen opening (its opaque-black cutout) over the
+  // inset-derived rect: chrome.json `sizing` insets are nine-slice corner sizes
+  // and overstate the bezel by ~10px, which would leave a black border ring
+  // between the stream and the metal. Falls back to the inset rect (nine-slice
+  // chrome has no composite, and its screen area is genuinely transparent).
+  const opening = chrome.compositeImage
+    ? compositeScreenBounds(chrome.identifier, chrome.compositeImage)
+    : null;
+  const screen: Rect = opening
+    ? {
+        x: body.x + opening.x,
+        y: body.y + opening.y,
+        width: opening.width,
+        height: opening.height,
+      }
+    : {
+        x: body.x + chrome.insets.left,
+        y: body.y + chrome.insets.top,
+        width: screenSize.width,
+        height: screenSize.height,
+      };
 
   const corner = chrome.slice ? pdfAssetSize(chrome.identifier, chrome.slice.topLeft) : null;
+  // Some composites already picture certain buttons (Apple Watch's crown + side
+  // button are part of the case), while others don't (every iPhone button, the
+  // watch's action button). Sample the composite's opacity at each button's
+  // outer edge so the client can skip re-drawing a button the bezel already
+  // shows (drawing it would double/offset it) yet still draw the ones it must.
+  const opaqueMask = chrome.compositeImage
+    ? compositeOpaqueMask(chrome.identifier, chrome.compositeImage)
+    : null;
   const buttons = chrome.buttons.flatMap((button): DeviceKitChromeButton[] => {
     const imageSize = pdfAssetSize(chrome.identifier, button.image);
     if (!imageSize) return [];
     const topLeft = buttonTopLeft(button, imageSize, resolvedBodySize, chrome.devicePadding);
+    // Hover/press travel: the cap slides from rest toward the rollover offset.
+    // Expressed as a fraction of the button image so the client can translate it.
+    const hover = {
+      x: imageSize.width > 0 ? (button.rolloverOffset.x - button.normalOffset.x) / imageSize.width : 0,
+      y: imageSize.height > 0 ? (button.rolloverOffset.y - button.normalOffset.y) / imageSize.height : 0,
+    };
     return [{
       name: button.name,
       image: button.image,
+      imageDown: button.imageDown,
       onTop: button.onTop,
       frame: { ...topLeft, ...imageSize },
+      hover,
+      raised:
+        button.onTop ||
+        (opaqueMask
+          ? buttonInBezelNotch(opaqueMask, { x: topLeft.x - body.x, y: topLeft.y - body.y, ...imageSize }, button.anchor)
+          : false),
+      usagePage: button.usagePage,
+      usage: button.usage,
     }];
   });
 
@@ -573,6 +626,7 @@ function parseButton(json: JsonRecord): ParsedButton | null {
   return {
     name,
     image,
+    imageDown: stringValue(json.imageDown),
     onTop: json.onTop === true,
     anchor:
       anchorValue === "right" || anchorValue === "top" || anchorValue === "bottom"
@@ -581,6 +635,8 @@ function parseButton(json: JsonRecord): ParsedButton | null {
     align: alignValue === "trailing" ? "trailing" : "leading",
     normalOffset: normal ?? rollover ?? { x: 0, y: 0 },
     rolloverOffset: rollover ?? normal ?? { x: 0, y: 0 },
+    usagePage: numberOrNull(json.usagePage),
+    usage: numberOrNull(json.usage),
   };
 }
 
@@ -776,7 +832,11 @@ function pngSize(png: Buffer): Size {
   };
 }
 
-function alphaBounds(png: Buffer): Rect | null {
+type PixelPredicate = (r: number, g: number, b: number, a: number) => boolean;
+type PixelMask = { width: number; height: number; mask: Uint8Array };
+
+/** Decode an 8-bit RGBA/GA PNG into a per-pixel boolean mask of `predicate`. */
+function decodeMask(png: Buffer, predicate: PixelPredicate): PixelMask | null {
   const { width, height } = pngSize(png);
   let offset = 8;
   let bitDepth = 0;
@@ -801,17 +861,15 @@ function alphaBounds(png: Buffer): Rect | null {
 
   const bytesPerPixel = colorType === 6 ? 4 : colorType === 4 ? 2 : 0;
   if (bitDepth !== 8 || bytesPerPixel === 0 || idats.length === 0) {
-    return { x: 0, y: 0, width, height };
+    return null;
   }
+  const rgba = colorType === 6;
 
   const raw = inflateSync(Buffer.concat(idats));
   const stride = width * bytesPerPixel;
+  const mask = new Uint8Array(width * height);
   let previous = Buffer.alloc(stride);
   let inputOffset = 0;
-  let minX = width;
-  let minY = height;
-  let maxX = -1;
-  let maxY = -1;
   for (let y = 0; y < height; y++) {
     const filter = raw[inputOffset++] ?? 0;
     const row = Buffer.from(raw.subarray(inputOffset, inputOffset + stride));
@@ -819,23 +877,123 @@ function alphaBounds(png: Buffer): Rect | null {
     unfilterPngRow(row, previous, bytesPerPixel, filter);
 
     for (let x = 0; x < width; x++) {
-      const alpha = row[x * bytesPerPixel + bytesPerPixel - 1] ?? 0;
-      if (alpha <= 0) continue;
+      const base = x * bytesPerPixel;
+      const r = row[base] ?? 0;
+      const g = rgba ? row[base + 1] ?? 0 : r;
+      const b = rgba ? row[base + 2] ?? 0 : r;
+      const a = row[base + bytesPerPixel - 1] ?? 0;
+      if (predicate(r, g, b, a)) mask[y * width + x] = 1;
+    }
+    previous = row;
+  }
+  return { width, height, mask };
+}
+
+function alphaBounds(png: Buffer): Rect | null {
+  const { width, height } = pngSize(png);
+  const decoded = decodeMask(png, (_r, _g, _b, a) => a > 0);
+  if (!decoded) return { x: 0, y: 0, width, height };
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!decoded.mask[y * width + x]) continue;
       if (x < minX) minX = x;
       if (y < minY) minY = y;
       if (x > maxX) maxX = x;
       if (y > maxY) maxY = y;
     }
-    previous = row;
   }
+  if (maxX < minX || maxY < minY) return { x: 0, y: 0, width, height };
+  return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
 
-  if (maxX < minX || maxY < minY) return null;
-  return {
-    x: minX,
-    y: minY,
-    width: maxX - minX + 1,
-    height: maxY - minY + 1,
-  };
+/**
+ * The composite's true screen opening — Apple's composite PNG fills the display
+ * cutout with opaque black (the chrome.json `sizing` insets are nine-slice
+ * corner sizes, ~10px wider than the real bezel). Found by walking the
+ * contiguous black region OUT FROM THE SCREEN CENTER along the center row and
+ * column, so dark metal / button slots / shadows elsewhere in the image don't
+ * inflate the rect (a naive dark-pixel bounding box does — e.g. the watch side
+ * rails read dark). Returned in the composite's own pixel/point coordinates.
+ */
+function compositeScreenBounds(identifier: string, imageName: string): Rect | null {
+  const png = readCompositePng(identifier, imageName);
+  if (!png) return null;
+  const decoded = decodeMask(png, (r, g, b, a) => a > 200 && r < 30 && g < 30 && b < 30);
+  if (!decoded) return null;
+  const { width, height, mask } = decoded;
+  const cx = Math.floor(width / 2);
+  const cy = Math.floor(height / 2);
+  const dark = (x: number, y: number) => mask[y * width + x] === 1;
+  if (!dark(cx, cy)) return null; // center isn't the (black) screen — bail
+  let x0 = cx;
+  while (x0 > 0 && dark(x0 - 1, cy)) x0--;
+  let x1 = cx;
+  while (x1 < width - 1 && dark(x1 + 1, cy)) x1++;
+  let y0 = cy;
+  while (y0 > 0 && dark(cx, y0 - 1)) y0--;
+  let y1 = cy;
+  while (y1 < height - 1 && dark(cx, y1 + 1)) y1++;
+  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+}
+
+function readCompositePng(identifier: string, imageName: string): Buffer | null {
+  const pdfPath = chromeAssetPath(identifier, imageName);
+  if (!existsSync(pdfPath)) return null;
+  try {
+    return readFileSync(cachedPngPath(identifier, imageName, pdfPath));
+  } catch {
+    return null;
+  }
+}
+
+/** Opaque-pixel mask of the composite, in its own pixel/point coordinate space. */
+function compositeOpaqueMask(identifier: string, imageName: string): PixelMask | null {
+  const png = readCompositePng(identifier, imageName);
+  if (!png) return null;
+  return decodeMask(png, (_r, _g, _b, a) => a > 40);
+}
+
+/**
+ * Whether the button sits in a cutout in the bezel (a notch the cap fills) rather
+ * than poking past a solid edge. Sample the composite's opacity at the button's
+ * INNER edge (toward the screen): transparent there means the bezel is notched
+ * for the button (Apple Watch crown / side button), so the full cap is drawn ON
+ * TOP, filling the notch; opaque there means a solid bezel the cap pokes past
+ * (every iPhone button), so it's drawn behind and only the overshoot shows.
+ * `rect` is the button frame in the composite's coordinate space.
+ */
+function buttonInBezelNotch(
+  mask: PixelMask,
+  rect: Rect,
+  anchor: "left" | "right" | "top" | "bottom",
+): boolean {
+  const fx = (frac: number) => rect.x + rect.width * frac;
+  const fy = (frac: number) => rect.y + rect.height * frac;
+  let sx: number;
+  let sy: number;
+  switch (anchor) {
+    case "left":
+      sx = fx(0.85);
+      sy = fy(0.5);
+      break;
+    case "top":
+      sx = fx(0.5);
+      sy = fy(0.85);
+      break;
+    case "bottom":
+      sx = fx(0.5);
+      sy = fy(0.15);
+      break;
+    default: // right
+      sx = fx(0.15);
+      sy = fy(0.5);
+      break;
+  }
+  const x = Math.round(sx);
+  const y = Math.round(sy);
+  if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) return false;
+  return mask.mask[y * mask.width + x] !== 1;
 }
 
 function unfilterPngRow(
