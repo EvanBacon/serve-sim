@@ -801,6 +801,11 @@ function AppWithConfig({
         }
         return;
       }
+      if (e.code === "KeyK" && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
+        e.preventDefault();
+        if (type === "down" && !e.repeat) sendWs(0x0c, {});
+        return;
+      }
       const usage = hidUsageForCode(e.code);
       if (usage == null) return;
       e.preventDefault();

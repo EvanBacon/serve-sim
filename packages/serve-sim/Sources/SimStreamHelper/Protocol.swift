@@ -11,6 +11,7 @@ enum WSMessageType: UInt8 {
     case memoryWarning = 0x09  // client → server: empty body, triggers [SimDevice simulateMemoryWarning]
     case digitalCrown = 0x0A   // client → server: JSON Digital Crown rotation event
     case scroll = 0x0B         // client → server: JSON scroll-wheel / trackpad pan event
+    case toggleSoftwareKeyboard = 0x0C // client → server: empty body, toggles the on-screen keyboard
 }
 
 struct TouchEventPayload: Codable {

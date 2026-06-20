@@ -208,6 +208,8 @@ final class HIDInjector {
     private static let buttonSourceLock: Int32 = 0x1
     private static let buttonSourceSideButton: Int32 = 0xbb8
     private static let buttonSourceSiri: Int32 = 0x400002
+    // Software-keyboard toggle — the event source Simulator.app's ⌘K sends.
+    private static let buttonSourceSoftwareKeyboard: Int32 = 0x3f0
 
     // idb direction constants (second arg)
     private static let buttonDown: Int32 = 1
@@ -490,6 +492,21 @@ final class HIDInjector {
         let result = fn(device, sel, name as NSString, ObjCBool(enabled))
         print("[sim] setCADebugOption(\(name), \(enabled)) → \(result.boolValue)")
         return result.boolValue
+    }
+
+    /// Toggle the on-screen software keyboard, exactly like Simulator.app's
+    /// I/O → Keyboard → Toggle Software Keyboard (⌘K): a momentary Indigo HID
+    /// button press (event source 0x3f0) sent through the legacy HID client.
+    /// Instant, and leaves the hardware-keyboard state untouched.
+    func toggleSoftwareKeyboard() {
+        guard buttonFunc != nil else {
+            print("[hid] Software keyboard toggle unavailable (IndigoHIDMessageForButton not loaded)")
+            return
+        }
+        inputQueue.async { [self] in
+            sendHIDButton(eventSource: Self.buttonSourceSoftwareKeyboard, direction: Self.buttonDown)
+            sendHIDButton(eventSource: Self.buttonSourceSoftwareKeyboard, direction: Self.buttonUp)
+        }
     }
 
     /// Ask CoreSimulator to broadcast a memory warning to the simulated OS.
