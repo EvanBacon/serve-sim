@@ -158,12 +158,12 @@ function ChromeButton({
     [button, onButton],
   );
 
-  // zIndex vs the bezel (z1) and stream (z2): onTop caps (the watch's action
-  // button) sit above both; the rest sit BEHIND the bezel (z0) so the composite
-  // hides the cap where it pictures it (the watch's baked-in crown / side button
-  // show through the bezel) and reveals it where it doesn't (every iPhone button
-  // pokes past the transparent edge). No doubling, no per-button detection.
-  const zIndex = button.onTop ? 5 : 0;
+  // zIndex vs the bezel (z1) and stream (z2). Watch caps (crown / side / action)
+  // are drawn ABOVE the bezel so the whole cap shows and is the hit target —
+  // exactly where it's clicked. iPhone / iPad buttons sit BEHIND the bezel (z0)
+  // so only the overshoot past the bezel's transparent edge shows.
+  const isWatch = chrome.identifier.startsWith("watch");
+  const zIndex = button.onTop || isWatch ? 5 : 0;
 
   // The cap slides out on hover/press by its rollover travel; the depressed
   // sprite (or a brightened cap) reads the press.
