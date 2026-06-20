@@ -26,6 +26,13 @@ export type AvccFallbackEvent =
   | "frame"
   /** The startup window elapsed; fall back unless a frame already arrived. */
   | "timeout"
+  /**
+   * The WebCodecs decoder failed fatally mid-stream. Unlike `timeout`, this
+   * downgrades even after AVCC was working — hardware H.264 decode is no longer
+   * viable (e.g. a screen recorder is starving VideoToolbox), so retrying it
+   * just loops.
+   */
+  | "error"
   /** Target stream changed (device switch / reconnect) — re-arm AVCC. */
   | "reset";
 
@@ -48,6 +55,10 @@ export function avccFallbackReducer(
       return state.streamed || state.fellBack
         ? state
         : { ...state, fellBack: true };
+    case "error":
+      // A fatal decoder error downgrades unconditionally — even mid-stream
+      // after frames were flowing, since hardware decode just failed.
+      return state.fellBack ? state : { ...state, fellBack: true };
     case "reset":
       return initialAvccFallback;
   }

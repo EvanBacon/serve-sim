@@ -33,6 +33,14 @@ describe("avccFallbackReducer", () => {
     expect(run(["frame", "timeout", "timeout"]).fellBack).toBe(false);
   });
 
+  test("error downgrades a working stream where timeout does not", () => {
+    // The one behaviour that distinguishes the two: a transient stall (timeout)
+    // keeps a stream that already painted frames, but a fatal decoder error
+    // (e.g. a screen recorder starving VideoToolbox) downgrades it to MJPEG.
+    expect(run(["frame", "timeout"]).fellBack).toBe(false);
+    expect(run(["frame", "error"]).fellBack).toBe(true);
+  });
+
   test("reset re-arms AVCC after a device switch / reconnect", () => {
     const fellBack = run(["timeout"]);
     expect(fellBack.fellBack).toBe(true);

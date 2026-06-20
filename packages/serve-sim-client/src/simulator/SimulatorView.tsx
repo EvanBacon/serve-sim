@@ -85,6 +85,12 @@ export interface SimulatorViewProps {
    * `useAvcc` and `useAvccStream` only need `url` to read `/stream.avcc`.
    */
   codec?: "mjpeg" | "avcc";
+  /**
+   * Called when the AVCC (H.264) WebCodecs decoder fails fatally, so the parent
+   * can downgrade to MJPEG instead of retrying hardware decode forever. Fires
+   * only on the AVCC path; inert under MJPEG.
+   */
+  onAvccError?: () => void;
 }
 
 /**
@@ -117,6 +123,7 @@ export function SimulatorView({
   onStreamingChange,
   connectionQuality,
   codec = "avcc",
+  onAvccError,
 }: SimulatorViewProps) {
   const relayMode = !!onStreamTouch;
   // AVCC decode is independent of input relay: the H.264 pipeline only needs
@@ -312,6 +319,7 @@ export function SimulatorView({
     onFirstFrame: onAvccFirstFrame,
     onFrame: onAvccFrame,
     onError: setError,
+    onDecoderError: onAvccError,
   });
 
   const sendTouch = useCallback(

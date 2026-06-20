@@ -38,6 +38,10 @@ import { ScreenshotToast } from "./components/screenshot-toast";
 import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
 import { StreamStatusPill } from "./components/stream-status-pill";
 import { ToolsPanel } from "./components/tools-panel";
+import {
+  CODEC_PREFERENCE_STORAGE_KEY,
+  type CodecPreference,
+} from "./components/stream-settings-tool";
 import { WebKitDevtoolsPanel } from "./components/webkit-devtools-panel";
 import { useMediaDrop } from "./hooks/use-media-drop";
 import { useMjpegStream } from "./hooks/use-mjpeg-stream";
@@ -465,7 +469,19 @@ function AppWithConfig({
   const [forceMjpeg] = useState(
     () => new URLSearchParams(window.location.search).get("codec") === "mjpeg",
   );
-  const useAvccVideo = avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg;
+  // User-selectable codec preference (Video section of the tools panel). "mjpeg"
+  // forces the software path; the H.264 hardware decoder shares the GPU's
+  // VideoToolbox pipeline with screen recorders, so MJPEG is the fix when the
+  // stream stutters/drops while recording the browser window. Persisted so the
+  // choice survives reloads.
+  const [codecPreference, setCodecPreference] = useState<CodecPreference>(
+    () => (window.localStorage.getItem(CODEC_PREFERENCE_STORAGE_KEY) === "mjpeg" ? "mjpeg" : "auto"),
+  );
+  useEffect(() => {
+    window.localStorage.setItem(CODEC_PREFERENCE_STORAGE_KEY, codecPreference);
+  }, [codecPreference]);
+  const useAvccVideo =
+    avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
   const mjpeg = useMjpegStream(useAvccVideo ? null : config.streamUrl);
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
@@ -960,6 +976,7 @@ function AppWithConfig({
                 onStreamDigitalCrown={onStreamDigitalCrown}
                 onStreamScroll={onStreamScroll}
                 codec={useAvccVideo ? "avcc" : "mjpeg"}
+                onAvccError={() => dispatchAvccFallback("error")}
                 subscribeFrame={useAvccVideo ? undefined : mjpeg.subscribeFrame}
                 streamFrame={useAvccVideo ? undefined : mjpeg.frame}
                 streamConfig={activeStreamConfig}
@@ -1193,6 +1210,10 @@ function AppWithConfig({
         currentApp={currentApp}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+        codecPreference={codecPreference}
+        onCodecPreferenceChange={setCodecPreference}
+        activeCodec={useAvccVideo ? "h264" : "mjpeg"}
+        avccSupported={avcc.supported}
         width={toolsPanelWidth}
       />
       <ResizeHandle

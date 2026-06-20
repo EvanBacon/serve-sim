@@ -19,6 +19,15 @@ export interface UseAvccStreamOptions {
   onFrame?: () => void;
   /** Called with a human-readable message when the decode pipeline fails. */
   onError?: (message: string) => void;
+  /**
+   * Called when the WebCodecs decoder itself fails fatally (a `VideoDecoder`
+   * `error` event or a `configure()` throw) — as opposed to a network/stream
+   * hiccup. When provided it *replaces* {@link onError} for these failures: the
+   * consumer is expected to downgrade to MJPEG (hardware H.264 decode is no
+   * longer viable — e.g. a screen recorder starving VideoToolbox), so the
+   * failure is recovered from rather than surfaced as a user-facing error.
+   */
+  onDecoderError?: () => void;
 }
 
 const RETRY_DELAY_MS = 1000;
@@ -41,10 +50,11 @@ export function useAvccStream({
   onFirstFrame,
   onFrame,
   onError,
+  onDecoderError,
 }: UseAvccStreamOptions): void {
   // Latest-callback ref: keeps the decode effect off the callback identities.
-  const callbacks = useRef({ onFirstFrame, onFrame, onError });
-  callbacks.current = { onFirstFrame, onFrame, onError };
+  const callbacks = useRef({ onFirstFrame, onFrame, onError, onDecoderError });
+  callbacks.current = { onFirstFrame, onFrame, onError, onDecoderError };
 
   useEffect(() => {
     if (!enabled || !url || !isAvccSupported()) return;
@@ -58,6 +68,14 @@ export function useAvccStream({
     let decoder: VideoDecoder | null = null;
 
     const isLive = () => !stopped && !controller.signal.aborted;
+
+    // A fatal decode failure routes to onDecoderError (downgrade to MJPEG) when
+    // a handler is wired, else surfaces as a user-facing error. Routing to both
+    // would flash a red overlay over the stream the parent is about to recover.
+    const reportDecodeFailure = (message: string) => {
+      if (callbacks.current.onDecoderError) callbacks.current.onDecoderError();
+      else callbacks.current.onError?.(message);
+    };
 
     const paint = (source: CanvasImageSource, width: number, height: number) => {
       if (!isLive()) return;
@@ -86,7 +104,7 @@ export function useAvccStream({
             frame.close();
           }
         },
-        error: (err) => callbacks.current.onError?.(`decoder: ${err.message}`),
+        error: (err) => reportDecodeFailure(`decoder: ${err.message}`),
       });
 
     const paintSeed = async (jpeg: Uint8Array) => {
@@ -112,7 +130,7 @@ export function useAvccStream({
           hardwareAcceleration: "prefer-hardware",
         } as VideoDecoderConfig & { optimizeFor: "latency" });
       } catch (err) {
-        callbacks.current.onError?.(`config: ${(err as Error).message}`);
+        reportDecodeFailure(`config: ${(err as Error).message}`);
       }
     };
 
