@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
+import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
@@ -1773,7 +1773,15 @@ Examples:
 
 // ─── Serve preview ───
 
-async function serve(servePort: number, devices: string[], portExplicit: boolean, host: string) {
+type PreviewReadyInfo = { host: string; port: number; localUrl: string };
+
+async function serve(
+  servePort: number,
+  devices: string[],
+  portExplicit: boolean,
+  host: string,
+  onReady?: (info: PreviewReadyInfo) => void | Promise<void>,
+) {
   let targetDevice: string | undefined;
 
   if (devices.length > 0) {
@@ -1824,6 +1832,9 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
     process.exit(1);
   }
 
+  const localUrl = `http://localhost:${boundPort}`;
+  await onReady?.({ host, port: boundPort, localUrl });
+
   const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
   const networkIP = getLocalNetworkIP();
   console.log("");
@@ -1845,6 +1856,109 @@ async function serve(servePort: number, devices: string[], portExplicit: boolean
 
 function bindPreviewServer(port: number, middleware: ReturnType<typeof import("./middleware").simMiddleware>, host: string) {
   return servePreview({ port, middleware, host });
+}
+
+function getTailscaleName(): string | null {
+  try {
+    const output = execFileSync("tailscale", ["status", "--json"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5_000,
+    });
+    const status = JSON.parse(output) as {
+      BackendState?: string;
+      Self?: { DNSName?: string; HostName?: string };
+    };
+    if (status.BackendState && status.BackendState !== "Running") return null;
+    return status.Self?.DNSName?.replace(/\.$/, "") || status.Self?.HostName || null;
+  } catch {
+    return null;
+  }
+}
+
+function installTailscaleShareCleanup(command: "serve" | "funnel", target: string): void {
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      if (tailscaleTargets(command, target)) {
+        execFileSync("tailscale", [command, "--bg", target, "off"], {
+          stdio: "ignore",
+          timeout: 5_000,
+        });
+      }
+    } catch {}
+  };
+
+  process.once("SIGINT", () => {
+    cleanup();
+    process.exit(0);
+  });
+  process.once("SIGTERM", () => {
+    cleanup();
+    process.exit(0);
+  });
+  process.once("exit", cleanup);
+}
+
+function tailscaleTargets(command: "serve" | "funnel", target: string): boolean {
+  const output = execFileSync("tailscale", [command, "status", "--json"], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 5_000,
+  });
+  return collectStrings(JSON.parse(output)).some((value) => matchesServeTarget(value, target));
+}
+
+function collectStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(collectStrings);
+  if (value && typeof value === "object") {
+    return Object.entries(value).flatMap(([key, child]) => [key, ...collectStrings(child)]);
+  }
+  return [];
+}
+
+function matchesServeTarget(value: string, target: string): boolean {
+  if (value === target || value === target.replace("http://", "")) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && url.origin === target && (url.pathname === "" || url.pathname === "/");
+  } catch {
+    return false;
+  }
+}
+
+function formatHostForUrl(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+async function share(
+  servePort: number,
+  devices: string[],
+  portExplicit: boolean,
+  host: string,
+  publicFunnel: boolean,
+) {
+  const shareHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+  await serve(servePort, devices, portExplicit, host, ({ port }) => {
+    const target = `http://${formatHostForUrl(shareHost)}:${port}`;
+    const command = publicFunnel ? "funnel" : "serve";
+    execFileSync("tailscale", [command, "--bg", target], {
+      stdio: "ignore",
+      timeout: 10_000,
+    });
+    installTailscaleShareCleanup(command, target);
+
+    const name = getTailscaleName();
+    const url = name ? `https://${name}` : "(run `tailscale serve status` for URL)";
+    const mode = publicFunnel ? "public Funnel" : "private tailnet";
+    console.log(`\nTailscale ${mode}: ${url}`);
+    console.log(
+      "Warning: this URL exposes simulator video and controls. Share only with trusted users.",
+    );
+  });
 }
 
 // ─── Main ───
@@ -1900,7 +2014,18 @@ Examples:
       await follow(devices, startPort ?? 3100, !!opts.quiet);
     } else {
       await serve(startPort ?? 3200, devices, startPort !== undefined, opts.host);
-    }
+  }
+});
+
+program
+  .command("share")
+  .description("Expose preview over Tailscale Serve (private tailnet by default)")
+  .argument("[devices...]", "Simulator(s) target (udid or name; default: booted)")
+  .option("-p, --port <port>", "Preview port (default: 3200)", (v) => parseInt(v, 10))
+  .option("--host <addr>", "Interface bind preview server to", "127.0.0.1")
+  .option("--public", "Use Tailscale Funnel instead of private tailnet Serve")
+  .action(async (devices: string[], opts) => {
+    await share(opts.port ?? 3200, devices, opts.port !== undefined, opts.host, !!opts.public);
   });
 
 const deviceOpt = ["-d, --device <udid>", "Target a specific simulator (udid or name)"] as const;

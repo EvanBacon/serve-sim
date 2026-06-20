@@ -39,6 +39,7 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and Node.js 18+. `
 
 ```
 serve-sim [device...]                 Start preview server (default: localhost:3200)
+serve-sim share [device...]           Start preview and expose it with Tailscale Serve
 serve-sim --no-preview [device...]    Stream in foreground without a preview server
 serve-sim gesture '<json>' [-d udid]  Send a touch gesture
 serve-sim button [name] [-d udid]     Send a button press (default: home)
@@ -88,6 +89,9 @@ Camera options (used with `serve-sim camera <bundle-id>`):
 ```sh
 serve-sim                              # auto-detect booted sim, open preview
 serve-sim "iPhone 16 Pro"              # target a specific device
+serve-sim share                        # private tailnet URL via Tailscale Serve
+serve-sim share "iPhone 16 Pro" --public
+                                       # public URL via Tailscale Funnel
 serve-sim --detach                     # start a background helper, return JSON
 serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
@@ -117,6 +121,12 @@ serve-sim camera --stop-webcam
 ```
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
+
+### Remote access with Tailscale
+
+`serve-sim share [devices...]` starts the normal preview server and publishes it with [Tailscale Serve](https://tailscale.com/kb/1247/funnel-serve-use-cases) so other devices in your private tailnet can open it. Private tailnet Serve is the default. Use `--public` only when you explicitly want Tailscale Funnel.
+
+> **Security:** the shared URL exposes live simulator video and browser controls. Anyone who can open it can interact with the simulator. Share only with trusted users and stop the server when done.
 
 ### Camera
 
