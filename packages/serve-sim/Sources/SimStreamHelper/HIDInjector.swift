@@ -119,68 +119,71 @@ final class HIDInjector {
     static let edgeLeft: UInt32   = 1  // Left edge
     static let edgeRight: UInt32  = 4  // Right edge
 
-    func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) {
-        guard let client = hidClient, let sendSel = sendSel, let mouseFunc = mouseFunc else { return }
+    // All HID sends funnel through this one serial queue so concurrent input
+    // gestures (a scroll drag, a user touch, a button press) can never interleave
+    // their messages to the shared `hidClient`. One-shot events dispatch a single
+    // `rawSend`; multi-step gestures (scroll, swipe-home, multi-press buttons) run
+    // their whole sequence in one block using the synchronous helpers below.
+    private let inputQueue = DispatchQueue(label: "hid-input")
 
-        // x, y are normalized 0..1
-        var point = CGPoint(x: x, y: y)
-
-        let eventType: Int32
-        switch type {
-        case "begin": eventType = 1  // NSEventTypeLeftMouseDown
-        case "move":  eventType = 1  // Continued touch — use Down, not Dragged (C function rejects 6)
-        case "end":   eventType = 2  // NSEventTypeLeftMouseUp
-        default: return
-        }
-
-        // Pass NSSize(1.0, 1.0) so ratio = point / 1.0 = point (no manual patching needed).
-        guard let rawMsg = mouseFunc(&point, nil, 0x32, eventType, 1.0, 1.0, edge) else {
-            print("[hid] IndigoHIDMessageForMouseNSEvent returned nil for \(type)")
-            return
-        }
-
-        print("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
-
+    /// Synchronously hand an already-built Indigo message to the guest, freeing it.
+    /// Must run on `inputQueue`.
+    private func rawSend(_ msg: UnsafeMutableRawPointer) {
+        guard let client = hidClient, let sendSel = sendSel else { free(msg); return }
         typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
         guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
-            free(rawMsg)
+            free(msg)
             return
         }
-        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
-        sendFunc(client, sendSel, rawMsg, ObjCBool(true), nil, nil)
+        unsafeBitCast(sendIMP, to: SendFunc.self)(client, sendSel, msg, ObjCBool(true), nil, nil)
+    }
+
+    /// Build a single-finger touch message (normalized 0..1 coords). Pure — safe
+    /// to call off `inputQueue`. NSSize(1,1) makes ratio = point.
+    private func touchMessage(type: String, x: Double, y: Double, edge: UInt32) -> UnsafeMutableRawPointer? {
+        guard let mouseFunc = mouseFunc else { return nil }
+        let eventType: Int32
+        switch type {
+        case "begin", "move": eventType = 1  // Down (C function rejects Dragged=6)
+        case "end":           eventType = 2  // Up
+        default: return nil
+        }
+        var point = CGPoint(x: x, y: y)
+        return mouseFunc(&point, nil, 0x32, eventType, 1.0, 1.0, edge)
+    }
+
+    /// Synchronously build + send a single touch. For use inside gesture blocks
+    /// already running on `inputQueue`.
+    private func rawSendTouch(type: String, x: Double, y: Double, edge: UInt32 = 0) {
+        if let msg = touchMessage(type: type, x: x, y: y, edge: edge) { rawSend(msg) }
+    }
+
+    func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) {
+        guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return }
+        print("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
+        inputQueue.async { [self] in rawSend(msg) }
     }
 
     func sendMultiTouch(type: String, x1: Double, y1: Double, x2: Double, y2: Double, screenWidth: Int, screenHeight: Int) {
-        guard let client = hidClient, let sendSel = sendSel, let mouseFunc = mouseFunc else { return }
+        guard let mouseFunc = mouseFunc else { return }
 
         let eventType: Int32
         switch type {
-        case "begin": eventType = 1  // NSEventTypeLeftMouseDown
-        case "move":  eventType = 1  // Continued touch — use Down, not Dragged (C function rejects 6)
-        case "end":   eventType = 2  // NSEventTypeLeftMouseUp
+        case "begin", "move": eventType = 1
+        case "end":           eventType = 2
         default: return
         }
 
         // Pass both CGPoints to create a 3-block multi-touch message.
-        // NSSize(1.0, 1.0) makes ratio = point / 1.0 = point, so all fields
-        // (ratios + any derived values) are computed correctly by the C function.
         var point1 = CGPoint(x: x1, y: y1)
         var point2 = CGPoint(x: x2, y: y2)
-
         guard let rawMsg = mouseFunc(&point1, &point2, 0x32, eventType, 1.0, 1.0, 0) else {
             print("[hid] IndigoHIDMessageForMouseNSEvent returned nil for multi-touch \(type)")
             return
         }
 
         print("[hid] Multi-touch \(type) f1=(\(String(format:"%.3f",x1)),\(String(format:"%.3f",y1))) f2=(\(String(format:"%.3f",x2)),\(String(format:"%.3f",y2)))")
-
-        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
-        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
-            free(rawMsg)
-            return
-        }
-        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
-        sendFunc(client, sendSel, rawMsg, ObjCBool(true), nil, nil)
+        inputQueue.async { [self] in rawSend(rawMsg) }
     }
 
     // MARK: - Button events
@@ -198,27 +201,16 @@ final class HIDInjector {
     // idb target constant (third arg)
     private static let buttonTargetHardware: Int32 = 0x33
 
+    /// Synchronously build + send a hardware-button message. Call only inside an
+    /// `inputQueue` block (button sequences below run there).
     private func sendHIDButton(eventSource: Int32, direction: Int32) {
-        guard let client = hidClient, let sendSel = sendSel, let buttonFunc = buttonFunc else { return }
-
-        // IndigoHIDMessageForButton returns a ready-to-send message
-        // idb uses it directly with malloc_size to determine length
+        guard let buttonFunc = buttonFunc else { return }
         guard let msg = buttonFunc(eventSource, direction, Self.buttonTargetHardware) else {
             print("[hid] IndigoHIDMessageForButton returned nil")
             return
         }
-
-        // Send via SimDeviceLegacyHIDClient (freeWhenDone: true — runtime will free msg)
-        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
-        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
-            free(msg)
-            return
-        }
-        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
-        sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
+        rawSend(msg)
     }
-
-    private let buttonQueue = DispatchQueue(label: "hid-button")
 
     // MARK: - Keyboard events
 
@@ -227,7 +219,7 @@ final class HIDInjector {
     ///   - type: "down" or "up"
     ///   - usage: HID usage code (e.g. 0x04 = 'A', 0x28 = Enter, 0xE1 = LeftShift)
     func sendKey(type: String, usage: UInt32) {
-        guard let client = hidClient, let sendSel = sendSel, let keyboardFunc = keyboardFunc else {
+        guard let keyboardFunc = keyboardFunc else {
             print("[hid] Keyboard injection unavailable")
             return
         }
@@ -245,14 +237,7 @@ final class HIDInjector {
         }
 
         print("[hid] Key \(type) usage=0x\(String(usage, radix: 16))")
-
-        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
-        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
-            free(msg)
-            return
-        }
-        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
-        sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
+        inputQueue.async { [self] in rawSend(msg) }
     }
 
     // MARK: - Digital Crown events
@@ -261,31 +246,18 @@ final class HIDInjector {
     /// - Parameter delta: Raw scroll delta, matching SimulatorKit's wheel-to-crown path.
     func sendDigitalCrown(delta: Double) {
         guard delta.isFinite, delta != 0 else { return }
-        guard let client = hidClient, let sendSel = sendSel else {
-            print("[hid] Digital Crown injection unavailable")
-            return
-        }
-
         guard let digitalCrownFunc else {
             print("[hid] Digital Crown injection unavailable")
             return
         }
 
-        let msg = digitalCrownFunc(delta)
-        guard let msg else {
+        guard let msg = digitalCrownFunc(delta) else {
             print("[hid] IndigoHIDMessageForDigitalCrownEvent returned nil (delta=\(delta))")
             return
         }
 
         print("[hid] Digital Crown delta=\(String(format:"%.4f", delta))")
-
-        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
-        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
-            free(msg)
-            return
-        }
-        let sendFunc = unsafeBitCast(sendIMP, to: SendFunc.self)
-        sendFunc(client, sendSel, msg, ObjCBool(true), nil, nil)
+        inputQueue.async { [self] in rawSend(msg) }
     }
 
     // MARK: - Scroll events
@@ -310,14 +282,11 @@ final class HIDInjector {
     private static let scrollEdgeMargin: Double = 0.08   // re-anchor inside this margin
     private static let scrollGestureIdle: TimeInterval = 0.1
 
-    private let scrollQueue = DispatchQueue(label: "hid-scroll")
     private var scrollDragActive = false
     private var scrollFingerX = 0.5
     private var scrollFingerY = 0.5
     private var scrollAnchorX = 0.5   // where the gesture (re)starts — under the cursor
     private var scrollAnchorY = 0.5
-    private var scrollDimW = 0
-    private var scrollDimH = 0
     private var scrollEndWork: DispatchWorkItem?
 
     private func clampFinger(_ v: Double) -> Double {
@@ -325,9 +294,9 @@ final class HIDInjector {
     }
 
     /// Touch down to (re)start the scroll drag, then let iOS register the
-    /// touch-down before the finger moves. Runs on `scrollQueue`.
+    /// touch-down before the finger moves. Runs on `inputQueue`.
     private func beginDrag(x: Double, y: Double) {
-        sendTouch(type: "begin", x: x, y: y, screenWidth: scrollDimW, screenHeight: scrollDimH)
+        rawSendTouch(type: "begin", x: x, y: y)
         usleep(8000)
     }
 
@@ -346,10 +315,7 @@ final class HIDInjector {
         let aX = clampFinger(anchorX.flatMap { $0.isFinite ? $0 : nil } ?? 0.5)
         let aY = clampFinger(anchorY.flatMap { $0.isFinite ? $0 : nil } ?? 0.5)
 
-        scrollQueue.async { [self] in
-            scrollDimW = screenWidth
-            scrollDimH = screenHeight
-
+        inputQueue.async { [self] in
             if !scrollDragActive {
                 // Anchor a fresh gesture under the cursor so iOS hit-tests the
                 // right scroll view (e.g. a bottom sheet vs. the map behind it).
@@ -368,7 +334,7 @@ final class HIDInjector {
             // Re-beginning at the anchor keeps the gesture hit-testing the same view.
             if nextX <= HIDInjector.scrollEdgeMargin || nextX >= 1 - HIDInjector.scrollEdgeMargin ||
                nextY <= HIDInjector.scrollEdgeMargin || nextY >= 1 - HIDInjector.scrollEdgeMargin {
-                sendTouch(type: "end", x: scrollFingerX, y: scrollFingerY, screenWidth: scrollDimW, screenHeight: scrollDimH)
+                rawSendTouch(type: "end", x: scrollFingerX, y: scrollFingerY)
                 scrollFingerX = scrollAnchorX
                 scrollFingerY = scrollAnchorY
                 beginDrag(x: scrollFingerX, y: scrollFingerY)
@@ -378,17 +344,17 @@ final class HIDInjector {
 
             scrollFingerX = clampFinger(nextX)
             scrollFingerY = clampFinger(nextY)
-            sendTouch(type: "move", x: scrollFingerX, y: scrollFingerY, screenWidth: scrollDimW, screenHeight: scrollDimH)
+            rawSendTouch(type: "move", x: scrollFingerX, y: scrollFingerY)
 
             // End the drag shortly after the wheel goes idle.
             scrollEndWork?.cancel()
             let work = DispatchWorkItem { [self] in
                 guard scrollDragActive else { return }
-                sendTouch(type: "end", x: scrollFingerX, y: scrollFingerY, screenWidth: scrollDimW, screenHeight: scrollDimH)
+                rawSendTouch(type: "end", x: scrollFingerX, y: scrollFingerY)
                 scrollDragActive = false
             }
             scrollEndWork = work
-            scrollQueue.asyncAfter(deadline: .now() + HIDInjector.scrollGestureIdle, execute: work)
+            inputQueue.asyncAfter(deadline: .now() + HIDInjector.scrollGestureIdle, execute: work)
         }
     }
 
@@ -407,14 +373,14 @@ final class HIDInjector {
             launchSpringBoard(deviceUDID: deviceUDID)
 
         case "swipe_home":
-            buttonQueue.async { [self] in
+            inputQueue.async { [self] in
                 sendSwipeHome()
             }
 
         case "app_switcher":
             if buttonFunc != nil {
                 // Double home press with delay for app switcher
-                buttonQueue.async { [self] in
+                inputQueue.async { [self] in
                     sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonDown)
                     sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonUp)
                     Thread.sleep(forTimeInterval: 0.15)
@@ -426,21 +392,25 @@ final class HIDInjector {
             }
 
         case "lock":
-            sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonDown)
-            sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonUp)
+            inputQueue.async { [self] in
+                sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonDown)
+                sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonUp)
+            }
 
         case "siri":
             // Holding Siri for ~300ms matches Simulator.app's "hold side button
             // to invoke Siri" gesture; a tap is ignored.
-            buttonQueue.async { [self] in
+            inputQueue.async { [self] in
                 sendHIDButton(eventSource: Self.buttonSourceSiri, direction: Self.buttonDown)
                 Thread.sleep(forTimeInterval: 0.3)
                 sendHIDButton(eventSource: Self.buttonSourceSiri, direction: Self.buttonUp)
             }
 
         case "side_button":
-            sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonDown)
-            sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonUp)
+            inputQueue.async { [self] in
+                sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonDown)
+                sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonUp)
+            }
 
         default:
             print("[hid] Unknown button: \(button)")
@@ -501,19 +471,19 @@ final class HIDInjector {
         let edge = Self.edgeBottom
 
         // Touch down at bottom edge
-        sendTouch(type: "begin", x: xPos, y: yStart, screenWidth: 0, screenHeight: 0, edge: edge)
+        rawSendTouch(type: "begin", x: xPos, y: yStart, edge: edge)
         Thread.sleep(forTimeInterval: stepDelay)
 
         // Interpolated moves upward
         for i in 1...steps {
             let t = Double(i) / Double(steps)
             let y = yStart + (yEnd - yStart) * t
-            sendTouch(type: "move", x: xPos, y: y, screenWidth: 0, screenHeight: 0, edge: edge)
+            rawSendTouch(type: "move", x: xPos, y: y, edge: edge)
             Thread.sleep(forTimeInterval: stepDelay)
         }
 
         // Touch up
-        sendTouch(type: "end", x: xPos, y: yEnd, screenWidth: 0, screenHeight: 0, edge: edge)
+        rawSendTouch(type: "end", x: xPos, y: yEnd, edge: edge)
     }
 
     private func launchSpringBoard(deviceUDID: String) {
