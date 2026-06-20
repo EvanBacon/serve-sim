@@ -29,10 +29,10 @@ export function DeviceGlyph({
         <svg {...common}>
           {screenOn && (
             <rect
-              x="5.05"
-              y="3.55"
-              width="13.9"
-              height="16.45"
+              x="5"
+              y="3"
+              width="15"
+              height="19"
               rx="1.65"
               fill={SCREEN_ON_FILL}
               stroke="none"
@@ -62,10 +62,10 @@ export function DeviceGlyph({
         <svg {...common}>
           {screenOn && (
             <rect
-              x="7.45"
-              y="3.65"
-              width="9.1"
-              height="16.35"
+              x="6"
+              y="3"
+              width="11"
+              height="19"
               rx="2"
               fill={SCREEN_ON_FILL}
               stroke="none"

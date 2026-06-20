@@ -65,6 +65,9 @@ export type DeviceKitChromeDescriptor = {
   insets: Insets;
   outerCornerRadius: number;
   innerCornerRadius: number;
+  /** The screen cutout's own corner radius (composite px) — rounds the stream
+   * and the bezel's screen hole so the bezel frames the screen cleanly. */
+  screenRadius: number;
   compositeImage: string | null;
   slice: DeviceKitChromeSlice | null;
   corner: Size | null;
@@ -370,6 +373,9 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
         width: screenSize.width,
         height: screenSize.height,
       };
+  // The screen's own corner radius (from the composite cutout) — used to round
+  // the stream and the bezel's screen hole so the bezel frames it cleanly.
+  const screenRadius = opening && opening.radius > 0 ? opening.radius : chrome.innerCornerRadius;
 
   const corner = chrome.slice ? pdfAssetSize(chrome.identifier, chrome.slice.topLeft) : null;
   // Some composites already picture certain buttons (Apple Watch's crown + side
@@ -415,6 +421,7 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     insets: chrome.insets,
     outerCornerRadius: chrome.outerCornerRadius,
     innerCornerRadius: chrome.innerCornerRadius,
+    screenRadius,
     compositeImage: chrome.compositeImage,
     slice: chrome.slice,
     corner,
@@ -916,7 +923,7 @@ function alphaBounds(png: Buffer): Rect | null {
  * inflate the rect (a naive dark-pixel bounding box does — e.g. the watch side
  * rails read dark). Returned in the composite's own pixel/point coordinates.
  */
-function compositeScreenBounds(identifier: string, imageName: string): Rect | null {
+function compositeScreenBounds(identifier: string, imageName: string): (Rect & { radius: number }) | null {
   const png = readCompositePng(identifier, imageName);
   if (!png) return null;
   const decoded = decodeMask(png, (r, g, b, a) => a > 200 && r < 30 && g < 30 && b < 30);
@@ -924,7 +931,7 @@ function compositeScreenBounds(identifier: string, imageName: string): Rect | nu
   const { width, height, mask } = decoded;
   const cx = Math.floor(width / 2);
   const cy = Math.floor(height / 2);
-  const dark = (x: number, y: number) => mask[y * width + x] === 1;
+  const dark = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height && mask[y * width + x] === 1;
   if (!dark(cx, cy)) return null; // center isn't the (black) screen — bail
   let x0 = cx;
   while (x0 > 0 && dark(x0 - 1, cy)) x0--;
@@ -934,7 +941,17 @@ function compositeScreenBounds(identifier: string, imageName: string): Rect | nu
   while (y0 > 0 && dark(cx, y0 - 1)) y0--;
   let y1 = cy;
   while (y1 < height - 1 && dark(cx, y1 + 1)) y1++;
-  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+  // Corner radius: walk down the left edge column from the top; the rounded
+  // corner keeps it bezel (not dark) until ~r rows in. Measured from all four
+  // corners and averaged so a stray edge doesn't skew it.
+  const cornerInset = (x: number, dy: number): number => {
+    let n = 0;
+    while (n < (y1 - y0) && !dark(x, y0 + (dy > 0 ? n : y1 - y0 - n))) n++;
+    return n;
+  };
+  const radii = [cornerInset(x0, 1), cornerInset(x1, 1), cornerInset(x0, -1), cornerInset(x1, -1)];
+  const radius = radii.reduce((a, b) => a + b, 0) / radii.length;
+  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1, radius };
 }
 
 function readCompositePng(identifier: string, imageName: string): Buffer | null {

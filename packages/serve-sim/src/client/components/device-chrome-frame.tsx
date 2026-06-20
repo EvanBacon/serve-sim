@@ -54,14 +54,14 @@ export function DeviceKitChrome({
         />
       ))}
 
-      {/* The screen sits ABOVE the bezel: Apple's composite fills its own screen
-          region with opaque black, so the live stream has to be layered over it
-          (clipped to the screen rect) to be visible. The bezel's inner rim still
-          frames it because the stream is inset to exactly the screen bounds. */}
+      {/* The screen sits UNDER the bezel (z1): the live stream renders here and
+          the bezel's screen region is masked transparent (below) so the bezel's
+          rounded inner edge frames the screen on top, rather than the stream
+          covering the bezel. */}
       <div
         className="absolute overflow-hidden bg-black"
         style={{
-          ...rectStyle(chrome, chrome.screen, 3),
+          ...rectStyle(chrome, chrome.screen, 1),
           borderRadius: deviceKitScreenRadius(chrome),
         }}
       >
@@ -74,6 +74,7 @@ export function DeviceKitChrome({
           image={chrome.compositeImage}
           rect={chrome.body}
           zIndex={2}
+          maskCss={screenHoleMask(chrome)}
         />
       ) : chrome.slice && chrome.corner ? (
         <NineSliceChrome chrome={chrome} />
@@ -82,11 +83,35 @@ export function DeviceKitChrome({
   );
 }
 
-/** CSS border-radius for the screen cutout, matched to the chrome's inner corner. */
+/** CSS border-radius for the screen cutout, matched to its measured corner radius. */
 export function deviceKitScreenRadius(chrome: DeviceKitChromeDescriptor): string {
-  return `${(chrome.innerCornerRadius / chrome.screen.width) * 100}% / ${
-    (chrome.innerCornerRadius / chrome.screen.height) * 100
+  return `${(chrome.screenRadius / chrome.screen.width) * 100}% / ${
+    (chrome.screenRadius / chrome.screen.height) * 100
   }%`;
+}
+
+/**
+ * A CSS mask that punches the screen opening out of the composite bezel, so the
+ * stream rendered behind it shows through and the bezel frames it on top. The
+ * SVG is opaque (alpha 1) everywhere except a rounded rect over the screen
+ * (alpha 0), in the composite image's own (body) coordinate space.
+ */
+function screenHoleMask(chrome: DeviceKitChromeDescriptor): string {
+  const bw = chrome.body.width;
+  const bh = chrome.body.height;
+  const hx = chrome.screen.x - chrome.body.x;
+  const hy = chrome.screen.y - chrome.body.y;
+  const hw = chrome.screen.width;
+  const hh = chrome.screen.height;
+  const r = Math.max(0, Math.min(chrome.screenRadius, hw / 2, hh / 2));
+  const svg =
+    `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 ${bw} ${bh}' preserveAspectRatio='none'>` +
+    `<path fill='#000' fill-rule='evenodd' d='M0 0H${bw}V${bh}H0Z` +
+    `M${hx + r} ${hy}H${hx + hw - r}A${r} ${r} 0 0 1 ${hx + hw} ${hy + r}` +
+    `V${hy + hh - r}A${r} ${r} 0 0 1 ${hx + hw - r} ${hy + hh}` +
+    `H${hx + r}A${r} ${r} 0 0 1 ${hx} ${hy + hh - r}` +
+    `V${hy + r}A${r} ${r} 0 0 1 ${hx + r} ${hy}Z'/></svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
 }
 
 function ChromeButton({
@@ -295,11 +320,14 @@ export function ChromeImage({
   image,
   rect,
   zIndex,
+  maskCss,
 }: {
   chrome: DeviceKitChromeDescriptor;
   image: string;
   rect: GridRect;
   zIndex: number;
+  /** Optional CSS mask (e.g. punching the screen hole out of the bezel). */
+  maskCss?: string;
 }) {
   return (
     <img
@@ -314,6 +342,16 @@ export function ChromeImage({
         // The bezel must never swallow taps meant for the screen / buttons.
         pointerEvents: "none",
         WebkitUserDrag: "none",
+        ...(maskCss
+          ? {
+              maskImage: maskCss,
+              WebkitMaskImage: maskCss,
+              maskSize: "100% 100%",
+              WebkitMaskSize: "100% 100%",
+              maskRepeat: "no-repeat",
+              WebkitMaskRepeat: "no-repeat",
+            }
+          : {}),
       } as CSSProperties}
     />
   );

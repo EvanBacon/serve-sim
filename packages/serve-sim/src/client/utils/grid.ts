@@ -22,6 +22,7 @@ export interface DeviceKitChromeDescriptor {
   insets: GridInsets;
   outerCornerRadius: number;
   innerCornerRadius: number;
+  screenRadius: number;
   compositeImage: string | null;
   slice: DeviceKitChromeSlice | null;
   corner: GridSize | null;
