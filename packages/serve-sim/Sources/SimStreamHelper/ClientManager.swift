@@ -37,6 +37,7 @@ final class ClientManager {
     var onMemoryWarning: (() -> Void)?
     var onDigitalCrown: ((DigitalCrownEventPayload) -> Void)?
     var onScroll: ((ScrollEventPayload) -> Void)?
+    /// Toggle the on-screen software keyboard (⌘K), mirroring Simulator.app.
     var onToggleSoftwareKeyboard: (() -> Void)?
 
     // MARK: - Configuration
