@@ -75,7 +75,7 @@ const TOGGLE_OPTIONS = [
   { key: "voiceover", label: "VoiceOver" },
 ] as const;
 
-function SettingRow({
+export function SettingRow({
   icon,
   label,
   children,
@@ -187,7 +187,7 @@ function TextSizeSlider({
   );
 }
 
-function SettingSelect({
+export function SettingSelect({
   label,
   value,
   options,

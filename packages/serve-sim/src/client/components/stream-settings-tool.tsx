@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { CollapsibleSection } from "./collapsible-section";
-import { Select } from "./select";
+import { SettingRow, SettingSelect } from "./simulator-settings-tool";
 
 // Client-side video preference. "auto" decodes H.264 (AVCC via WebCodecs) when
 // the browser supports it; "mjpeg" forces the software JPEG path. H.264 decode
@@ -46,7 +46,9 @@ export function StreamSettingsTool({
   const value: CodecPreference = avccSupported ? preference : "mjpeg";
   // Auto resolved to MJPEG (startup fallback or a helper that doesn't serve
   // /stream.avcc) — surface it so the picker doesn't lie about what's on screen.
-  const downgraded = avccSupported && preference === "auto" && activeCodec === "mjpeg";
+  // `value` is already pinned to "mjpeg" when unsupported, so "auto" here implies
+  // the browser can decode H.264 but this stream fell back anyway.
+  const downgraded = value === "auto" && activeCodec === "mjpeg";
 
   return (
     <CollapsibleSection
@@ -64,22 +66,15 @@ export function StreamSettingsTool({
       }
     >
       <div className="flex flex-col gap-1.5 pb-1.5">
-        <div className="flex items-center justify-between gap-2 min-h-[30px]" data-setting-row="Codec">
-          <span className="flex shrink-0 items-center gap-2 text-[12px] text-white/90 whitespace-nowrap">
-            <span className="flex size-[18px] items-center justify-center text-white">{VideoIcon}</span>
-            Codec
-          </span>
-          <span className="flex min-w-0 justify-end">
-            <Select
-              label="Codec"
-              value={value}
-              options={CODEC_OPTIONS}
-              disabled={!avccSupported}
-              onChange={(v) => onPreferenceChange(v as CodecPreference)}
-              className="bg-white/[0.06] border border-white/10 rounded-md text-white/90 text-[12px] py-0.5 px-2 min-w-0 max-w-[150px] disabled:text-white/40"
-            />
-          </span>
-        </div>
+        <SettingRow icon={VideoIcon} label="Codec">
+          <SettingSelect
+            label="Codec"
+            value={value}
+            options={CODEC_OPTIONS}
+            disabled={!avccSupported}
+            onChange={(v) => onPreferenceChange(v as CodecPreference)}
+          />
+        </SettingRow>
         <p className="text-[11px] text-white/55 leading-snug px-0.5">
           {!avccSupported
             ? "This browser can't decode H.264, so the stream uses MJPEG."
