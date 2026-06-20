@@ -25,6 +25,13 @@ const VideoIcon = (
   </svg>
 );
 
+/**
+ * Tools-panel section letting the viewer pick the stream codec (H.264 vs MJPEG)
+ * and explaining the trade-off. The control reflects the effective codec —
+ * pinned to MJPEG when the browser can't decode H.264, and surfacing when an
+ * "auto" preference was downgraded mid-stream — so it never misrepresents what
+ * is actually painting.
+ */
 export function StreamSettingsTool({
   preference,
   onPreferenceChange,
