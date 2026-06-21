@@ -17,7 +17,6 @@
  *     published `serve-sim` the middleware would otherwise resolve.
  */
 import { readdirSync, readFileSync, existsSync, watch } from "fs";
-import { spawn } from "child_process";
 import { randomBytes } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { Socket } from "net";
@@ -234,13 +233,6 @@ ${clientError ? `<pre style="position:fixed;inset:0;z-index:9999;background:#1a0
 
 // ─── Dev-only routes ───
 
-const UUID_RE = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i;
-
-function sendJson(res: ServerResponse, status: number, payload: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-  res.end(JSON.stringify(payload));
-}
-
 // Browser auto-reload channel: each open page holds one of these and reloads
 // when a rebuild calls signalReload().
 function handleDevReload(req: IncomingMessage, res: ServerResponse): void {
@@ -254,50 +246,15 @@ function handleDevReload(req: IncomingMessage, res: ServerResponse): void {
   req.on("close", () => reloadClients.delete(res));
 }
 
-// Boot a helper from the local source (`bun src/index.ts --detach <udid>`)
-// rather than the published binary the middleware's grid-start would resolve.
-function handleGridStart(req: IncomingMessage, res: ServerResponse): void {
-  let body = "";
-  req.on("data", (chunk: Buffer | string) => { body += typeof chunk === "string" ? chunk : chunk.toString(); });
-  req.on("end", () => {
-    let udid = "";
-    try { udid = (JSON.parse(body) as { udid?: string }).udid ?? ""; } catch {}
-    if (!UUID_RE.test(udid)) {
-      sendJson(res, 400, { ok: false, error: "Invalid or missing udid" });
-      return;
-    }
-    const child = spawn("bun", [SERVE_SIM_BIN, "--detach", udid], {
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: false,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
-    child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
-    const timer = setTimeout(() => { try { child.kill("SIGTERM"); } catch {} }, 180_000);
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        sendJson(res, 200, { ok: true, stdout: stdout.trim() });
-      } else {
-        sendJson(res, 500, {
-          ok: false,
-          error: stderr.trim() || stdout.trim() || `serve-sim exited with code ${code}`,
-        });
-      }
-    });
-  });
-}
-
 // ─── Server ───
 
 // Dev-only routes intercept first; everything else falls through to the
-// production middleware (device list, devtools, exec, logs/appstate/ax SSE).
+// production middleware — including `/grid/api/start`, which now boots + serves
+// the device in-process (no spawned helper), so no dev override is needed.
 function devMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void): void {
   const path = (req.url ?? "").split("?")[0];
 
   if (path === "/__dev/reload") return handleDevReload(req, res);
-  if (path === "/grid/api/start" && req.method === "POST") return handleGridStart(req, res);
   if (path === "/" || path === "") {
     const device = new URLSearchParams((req.url ?? "").split("?")[1] ?? "").get("device");
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });

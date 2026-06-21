@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readSync, readFi
 import { createHash } from "crypto";
 import { homedir, networkInterfaces } from "os";
 import { join, resolve } from "path";
-import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
+import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
@@ -1788,24 +1788,6 @@ function resolveTargetDevices(devices: string[]): string[] {
   return [fallback.udid];
 }
 
-/**
- * State record for an in-process session served by this preview server. There's
- * no separate helper port — the stream/ws URLs point at the preview's own
- * same-origin `/helper/<device>/…` routes, which `simMiddleware` serves from a
- * NativeCapture/NativeHid DeviceSession.
- */
-function inProcessState(udid: string, port: number, host: string): ServerState {
-  const h = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  return {
-    pid: process.pid,
-    port,
-    device: udid,
-    url: `http://${h}:${port}`,
-    streamUrl: `http://${h}:${port}/helper/${udid}/stream.mjpeg`,
-    wsUrl: `ws://${h}:${port}/helper/${udid}/ws`,
-  };
-}
-
 async function serve(
   servePort: number,
   devices: string[],
@@ -1860,7 +1842,7 @@ async function serve(
   // Record in-process state so the preview/grid enumerate these devices and the
   // CLI input subcommands can reach the same-origin /helper ws.
   for (const udid of targetDevices) {
-    writeState(inProcessState(udid, boundPort, host));
+    writeState(inProcessServeSimState(udid, boundPort, "/", host));
   }
   const clearAll = () => {
     for (const udid of targetDevices) {

@@ -14,6 +14,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { getDeviceSession } from "./device-session";
 import { axFrontmost } from "./native";
+import { inProcessServeSimState, writeServeSimState } from "./state";
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
@@ -644,6 +645,38 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
   }
 }
 
+/**
+ * Boot a simulator (if needed) and record its in-process state so the grid /
+ * preview enumerate it. Replaces spawning `serve-sim --detach <udid>`; the
+ * preview server itself serves the device's /helper routes in-process. Resolves
+ * to an error string on boot failure, or null on success.
+ */
+export async function startDeviceInProcess(udid: string, port: number, base: string): Promise<string | null> {
+  // `simctl boot` errors when already booted — ignore and let bootstatus confirm.
+  await new Promise<void>((resolve) => execFile("xcrun", ["simctl", "boot", udid], () => resolve()));
+  const ready = await new Promise<boolean>((resolve) => {
+    execFile("xcrun", ["simctl", "bootstatus", udid, "-b"], { timeout: 180_000 }, (err) => resolve(!err));
+  });
+  if (!ready) {
+    // bootstatus can exit non-zero even when the device is actually ready;
+    // confirm against the real state before reporting failure.
+    const booted = await new Promise<boolean>((resolve) => {
+      execFile("xcrun", ["simctl", "list", "devices", "-j"], (err, stdout) => {
+        if (err) return resolve(false);
+        try {
+          const data = JSON.parse(stdout) as { devices: Record<string, Array<{ udid: string; state: string }>> };
+          resolve(Object.values(data.devices).flat().some((d) => d.udid === udid && d.state === "Booted"));
+        } catch {
+          resolve(false);
+        }
+      });
+    });
+    if (!booted) return `Device ${udid} failed to reach booted state`;
+  }
+  writeServeSimState(inProcessServeSimState(udid, port, base));
+  return null;
+}
+
 // Singleton noServer ws upgrader for in-process HID sockets.
 let hidWsServer: WebSocketServer | undefined;
 
@@ -1013,35 +1046,6 @@ function buildMemoryReport(): MemoryReport {
   };
 }
 
-/**
- * Locate the `serve-sim` CLI binary so the grid can spawn helpers via
- * `serve-sim --detach <udid>`. Tries, in order:
- *   1. argv[0] if it ends in `serve-sim` (we're running inside the
- *      compiled standalone binary, which IS the CLI)
- *   2. `serve-sim` on PATH (npm-installed / bun-installed CLI)
- * Returns the resolved command + args ready for spawn.
- */
-function resolveServeSimCommand(): { command: string; baseArgs: string[] } | null {
-  // 1. Compiled standalone binary: argv[0] is the serve-sim binary itself.
-  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
-    return { command: process.argv[0], baseArgs: [] };
-  }
-  // 2. Running the JS bundle directly: `node /path/to/serve-sim.js`.
-  if (process.argv[1] && /(^|\/)serve-sim\.js$/.test(process.argv[1])) {
-    return { command: process.argv[0]!, baseArgs: [process.argv[1]!] };
-  }
-  // 3. Global install: serve-sim is on PATH.
-  try {
-    const path = execSync("command -v serve-sim", {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 1_500,
-    }).trim();
-    if (path) return { command: path, baseArgs: [] };
-  } catch {}
-  return null;
-}
-
 export interface SimMiddlewareOptions {
   /** Base path to serve the preview at. Default: "/.sim" */
   basePath?: string;
@@ -1336,7 +1340,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
 
-    // Spawn a serve-sim helper (auto-boots if needed).
+    // Start streaming a device in-process (auto-boots if needed). The preview
+    // server serves its /helper routes directly — no spawned helper.
     if (url === base + "/grid/api/start" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk: Buffer | string) => {
@@ -1350,44 +1355,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
           return;
         }
-        const resolved = resolveServeSimCommand();
-        if (!resolved) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            ok: false,
-            error: "serve-sim CLI not found in PATH. Install it (npm i -g serve-sim) and retry.",
-          }));
-          return;
-        }
-        const child = spawn(
-          resolved.command,
-          [...resolved.baseArgs, "--detach", udid],
-          { stdio: ["ignore", "pipe", "pipe"], detached: false },
-        );
-        let stdout = "";
-        let stderr = "";
-        child.stdout?.on("data", (c: Buffer) => { stdout += c.toString(); });
-        child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
-        // A cold iOS simulator can take 60-90s to reach `bootstatus -b`
-        // readiness; the prior 60s ceiling was killing serve-sim mid-boot
-        // and the helper never got a chance to spawn, so the click ended
-        // with an error and no state file. 3 minutes is a comfortable
-        // upper bound that covers slow first-boots without leaving a
-        // wedged child around indefinitely.
-        const timer = setTimeout(() => {
-          try { child.kill("SIGTERM"); } catch {}
-        }, 180_000);
-        child.on("close", (code) => {
-          clearTimeout(timer);
-          if (code === 0) {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: true, stdout: stdout.trim() }));
-          } else {
+        const port = req.socket.localPort ?? 0;
+        void startDeviceInProcess(udid, port, base).then((error) => {
+          if (res.writableEnded) return;
+          if (error) {
             res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({
-              ok: false,
-              error: stderr.trim() || stdout.trim() || `serve-sim exited with code ${code}`,
-            }));
+            res.end(JSON.stringify({ ok: false, error }));
+          } else {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
           }
         });
       });
