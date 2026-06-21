@@ -29,11 +29,16 @@ enum AVCCEnvelope {
     static let keyframeTag: UInt8 = 0x02
     static let deltaTag: UInt8 = 0x03
     static let seedTag: UInt8 = 0x04
+    // Empty-payload signal: VideoToolbox H.264 encode is unavailable on this
+    // host (e.g. virtualized macOS), so the viewer should switch to MJPEG now
+    // instead of waiting out its no-frame timeout.
+    static let downgradeTag: UInt8 = 0x05
 
     static func description(avcc: Data) -> Data { wrap(tag: descriptionTag, payload: avcc) }
     static func keyframe(avcc: Data) -> Data { wrap(tag: keyframeTag, payload: avcc) }
     static func delta(avcc: Data) -> Data { wrap(tag: deltaTag, payload: avcc) }
     static func seed(jpeg: Data) -> Data { wrap(tag: seedTag, payload: jpeg) }
+    static func downgrade() -> Data { wrap(tag: downgradeTag, payload: Data()) }
 
     private static func wrap(tag: UInt8, payload: Data) -> Data {
         let length = UInt32(payload.count + 1)

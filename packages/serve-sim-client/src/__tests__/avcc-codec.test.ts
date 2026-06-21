@@ -6,6 +6,7 @@ import {
   AVCC_TAG_KEYFRAME,
   AVCC_TAG_DELTA,
   AVCC_TAG_SEED,
+  AVCC_TAG_DOWNGRADE,
 } from "../avcc-codec";
 
 /** Build one wire chunk: [len:u32-be][tag][payload]. len = payload + 1. */
@@ -96,6 +97,15 @@ describe("AvccDemuxer", () => {
     const rest = d.push(combined.slice(a.length + 3));
     expect(rest.map((c) => c.type)).toEqual(["delta"]);
     expect(Array.from(rest[0]!.payload)).toEqual([2, 3]);
+  });
+
+  test("parses the empty-payload downgrade signal", () => {
+    const d = new AvccDemuxer();
+    const chunks = d.push(
+      concat(frame(AVCC_TAG_SEED, [0xff, 0xd8]), frame(AVCC_TAG_DOWNGRADE, [])),
+    );
+    expect(chunks.map((c) => c.type)).toEqual(["seed", "downgrade"]);
+    expect(chunks[1]!.payload).toHaveLength(0);
   });
 
   test("skips unknown tags without stalling the stream", () => {

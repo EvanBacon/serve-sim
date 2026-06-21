@@ -162,6 +162,12 @@ export function useAvccStream({
         case "delta":
           decodeFrame(type, payload);
           return;
+        case "downgrade":
+          // The helper reports its VideoToolbox encoder can't produce H.264
+          // (virtualized macOS). Downgrade to MJPEG immediately rather than
+          // sitting on the frozen seed until the no-frame timeout fires.
+          reportDecodeFailure("server: H.264 encode unavailable");
+          return;
       }
     };
 

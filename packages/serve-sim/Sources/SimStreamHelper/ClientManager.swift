@@ -25,6 +25,12 @@ final class ClientManager {
     /// the new decoder needs an IDR before any delta will decode.
     var onAvccClientConnect: (() -> Void)?
 
+    /// Whether VideoToolbox H.264 encode actually produces output on this host.
+    /// `nil` until the startup probe decides; `false` on virtualized macOS where
+    /// encode silently no-ops. When `false`, AVCC viewers are told to downgrade
+    /// to MJPEG immediately instead of stalling on a frozen seed.
+    private var h264Supported: Bool?
+
     var onTouch: ((TouchEventPayload) -> Void)?
     var onButton: ((String) -> Void)?
     /// Arbitrary HID hardware button by (page, usage, phase) — power / volume /
@@ -60,11 +66,35 @@ final class ClientManager {
     func screenConfig() -> [String: Any] {
         configLock.lock()
         defer { configLock.unlock() }
-        return [
+        var config: [String: Any] = [
             "width": screenWidth,
             "height": screenHeight,
             "orientation": screenOrientation,
         ]
+        // Surface the probe result once known so the preview/diagnostics can
+        // see why a stream is on MJPEG (omitted while still undecided).
+        if let h264Supported { config["h264Supported"] = h264Supported }
+        return config
+    }
+
+    /// Record the startup H.264 probe result. When encode is unavailable, tell
+    /// any already-connected AVCC viewers to downgrade to MJPEG right away.
+    func setH264Supported(_ supported: Bool) {
+        configLock.lock()
+        let changed = h264Supported != supported
+        h264Supported = supported
+        configLock.unlock()
+        guard changed else { return }
+        if !supported {
+            broadcastAvcc(AVCCEnvelope.downgrade())
+        }
+        broadcastConfig()
+    }
+
+    private func h264SupportedSnapshot() -> Bool? {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return h264Supported
     }
 
     /// Tag for a server->client screen-config push. Distinct from the
@@ -147,15 +177,25 @@ final class ClientManager {
     /// replay the cached decoder description, then ask the owner to force a
     /// keyframe so an IDR follows promptly.
     func sendInitialAvcc(to client: AVCCClient) {
+        let supported = h264SupportedSnapshot()
         queue.async {
             if let jpeg = self.latestFrame {
                 client.send(AVCCEnvelope.seed(jpeg: jpeg))
+            }
+            // Encoder already known dead — paint the seed, then send the viewer
+            // straight to MJPEG without waiting for an IDR that won't come.
+            if supported == false {
+                client.send(AVCCEnvelope.downgrade())
+                return
             }
             if let desc = self.cachedAvccDescription {
                 client.send(desc)
             }
         }
-        onAvccClientConnect?()
+        // Only bother forcing a keyframe when H.264 might actually work.
+        if supported != false {
+            onAvccClientConnect?()
+        }
     }
 
     func removeAvccClient(_ client: AVCCClient) {
