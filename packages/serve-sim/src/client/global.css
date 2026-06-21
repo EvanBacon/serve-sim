@@ -6,6 +6,7 @@
   /* Panel / surface palette */
   --color-panel: #1c1c1e;
   --color-panel-bg: var(--serve-sim-panel-bg);
+  --color-panel-bg-translucent: var(--serve-sim-panel-bg-translucent);
   --color-panel-overlay: rgba(24, 24, 24, 0.65);
   --color-panel-deep: #111113;
   --color-page: #0a0a0a;
@@ -32,6 +33,9 @@
 :root {
   color-scheme: dark;
   --serve-sim-panel-bg: #181818;
+  /* Frosted-glass overlays (e.g. the resize badge) want the same backing color
+     but translucent so `backdrop-blur` still shows the stream through them. */
+  --serve-sim-panel-bg-translucent: rgba(24, 24, 24, 0.78);
   --serve-sim-panel-bg-transparent: rgba(24, 24, 24, 0);
 }
 
