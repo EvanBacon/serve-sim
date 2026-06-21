@@ -77,7 +77,10 @@ describeWithSim(`serve-sim AVCC endpoint (booted sim ${bootedUdid ?? "<skipped>"
 
   afterAll(() => {
     try { execFileSync("bun", ["run", CLI_PATH, "--kill", bootedUdid!], { stdio: "pipe" }); } catch {}
-  });
+    // `bun run <cli> --kill` (bun startup + simctl teardown) can run past bun's
+    // 5s default hook timeout on a loaded CI runner, flaking the whole file with
+    // an "(unnamed) hook timed out". Give the teardown a generous budget.
+  }, 30_000);
 
   test("emits a decoder description and a keyframe", async () => {
     const controller = new AbortController();
