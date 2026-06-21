@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useRef,
   useState,
   type ButtonHTMLAttributes,
   type CSSProperties,
@@ -62,7 +63,7 @@ const toolbarStyle: CSSProperties = {
   gap: "4px 12px",
   padding: "8px 12px",
   borderRadius: 24,
-  background: "#1c1c1e",
+  background: "var(--serve-sim-panel-bg, #181818)",
   border: "1px solid rgba(255,255,255,0.1)",
   boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
   minWidth: 240,
@@ -261,8 +262,10 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
     title,
     onMouseEnter,
     onMouseLeave,
+    onPointerDown,
     onFocus,
     onBlur,
+    onClick,
     children,
     "aria-label": ariaLabel,
     ...rest
@@ -273,6 +276,7 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
   const effectiveDisabled = disabled || forceDisabled || ctx?.disabled;
   const [hover, setHover] = useState(false);
   const [focus, setFocus] = useState(false);
+  const pointerFocusedRef = useRef(false);
   const tooltipId = useId();
   const tooltipLabel = tooltip ?? title ?? (typeof ariaLabel === "string" ? ariaLabel : null);
   const tooltipVisible = !!tooltipLabel && !effectiveDisabled && (hover || focus);
@@ -284,6 +288,10 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
       disabled={effectiveDisabled}
       aria-label={ariaLabel}
       aria-describedby={tooltipLabel ? tooltipId : undefined}
+      onPointerDown={(e) => {
+        pointerFocusedRef.current = true;
+        onPointerDown?.(e);
+      }}
       onMouseEnter={(e) => {
         setHover(true);
         onMouseEnter?.(e);
@@ -293,12 +301,19 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
         onMouseLeave?.(e);
       }}
       onFocus={(e) => {
-        setFocus(true);
+        setFocus(!pointerFocusedRef.current);
         onFocus?.(e);
       }}
       onBlur={(e) => {
+        pointerFocusedRef.current = false;
         setFocus(false);
         onBlur?.(e);
+      }}
+      onClick={(e) => {
+        setHover(false);
+        setFocus(false);
+        e.currentTarget.blur();
+        onClick?.(e);
       }}
       style={{
         ...buttonStyle,
@@ -326,7 +341,7 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
             whiteSpace: "nowrap",
             padding: "4px 7px",
             borderRadius: 6,
-            background: "rgba(30,30,32,0.96)",
+            background: "var(--serve-sim-panel-bg, #181818)",
             border: "1px solid rgba(255,255,255,0.12)",
             color: "rgba(255,255,255,0.92)",
             fontSize: 11,

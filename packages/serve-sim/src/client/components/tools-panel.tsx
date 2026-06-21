@@ -5,6 +5,7 @@ import { AppDetectionTool } from "./app-detection-tool";
 import { AppPermissionsTool } from "./app-permissions-tool";
 import { AxTreeTool } from "./ax-tree-tool";
 import { CameraTool } from "./camera-tool";
+import { PANEL_BACKGROUND } from "./panel-colors";
 import { SimulatorSettingsTool } from "./simulator-settings-tool";
 import { StreamSettingsTool, type CodecPreference } from "./stream-settings-tool";
 
@@ -36,7 +37,7 @@ export function ToolsPanel({
   width: number;
 }) {
   return (
-    <Panel open={open} width={width}>
+    <Panel open={open} width={width} style={{ backgroundColor: PANEL_BACKGROUND }}>
       <PanelHeader>
         <PanelTitle>Tools</PanelTitle>
         <PanelCloseButton onClick={onClose} />
