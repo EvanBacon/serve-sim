@@ -43,7 +43,11 @@
     "Sources/SimCameraHelper/main.m",
     "Sources/SimCameraHelper/build.sh",
     "Sources/SimAXSettings/sim-ax-settings.m",
-    "Sources/SimAXSettings/build.sh"
+    "Sources/SimAXSettings/build.sh",
+    "dist/native/serve-sim-native.node",
+    "Sources/SimNative/sim-native.swift",
+    "Sources/SimNative/sim-native.mm",
+    "Sources/SimNative/build.sh"
   ],
   "exports": {
     "./middleware": {
@@ -71,6 +75,7 @@
     "commander": "^14.0.1",
     "debug": "^4.4.3",
     "lucide-react": "^1.20.0",
+    "node-api-headers": "^1.9.0",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

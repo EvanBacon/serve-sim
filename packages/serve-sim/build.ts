@@ -237,4 +237,22 @@ if (axSettingsBuild.status !== 0) {
 }
 console.log("dist/simax/serve-sim-ax-settings");
 
+// ─── 8. serve-sim-native.node — in-process N-API addon ───────────────────
+// Replaces the spawned serve-sim-bin helper. Fat arm64+x86_64; loaded by path
+// from both the node bundle (createRequire) and the bun-compiled executable.
+
+const nativeBuild = spawnSync(
+  "bash",
+  [
+    resolve(root, "Sources/SimNative/build.sh"),
+    resolve(distDir, "native"),
+  ],
+  { stdio: "inherit" },
+);
+if (nativeBuild.status !== 0) {
+  console.error("SimNative addon build failed.");
+  process.exit(nativeBuild.status ?? 1);
+}
+console.log("dist/native/serve-sim-native.node");
+
 console.log("Done.");
