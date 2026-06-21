@@ -42,6 +42,9 @@ void sim_capture_request_keyframe(void *handle);
 void sim_capture_screen_size(void *handle, int32_t *outW, int32_t *outH);
 void sim_capture_stop(void *handle);
 void sim_capture_destroy(void *handle);
+
+char *sim_ax_describe(const char *udid, char **errOut);   // axe-shaped JSON, caller frees
+char *sim_ax_frontmost(const char *udid, char **errOut);  // {bundleId, pid} JSON, caller frees
 }
 
 // ─── N-API helpers ───────────────────────────────────────────────────────
@@ -403,6 +406,42 @@ static napi_value CaptureStop(napi_env env, napi_callback_info info) {
   return nullptr;
 }
 
+// ─── Accessibility surface ───────────────────────────────────────────────
+// Shared by axDescribe/axFrontmost: call the Swift dump, return its JSON string,
+// or throw with the Swift error message.
+static napi_value AxDump(napi_env env, napi_callback_info info,
+                         char *(*fn)(const char *, char **)) {
+  size_t argc = 1;
+  napi_value argv[1];
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr));
+  std::string udid = GetString(env, argv[0]);
+  char *err = nullptr;
+  char *json = fn(udid.c_str(), &err);
+  if (!json) {
+    napi_throw_error(env, nullptr, err ? err : "accessibility query failed");
+    free(err);
+    return nullptr;
+  }
+  napi_value result;
+  napi_status status = napi_create_string_utf8(env, json, NAPI_AUTO_LENGTH, &result);
+  free(json);
+  if (status != napi_ok) {
+    napi_throw_error(env, nullptr, "create_string failed");
+    return nullptr;
+  }
+  return result;
+}
+
+// axDescribe(udid): string — axe-shaped accessibility-tree JSON.
+static napi_value AxDescribe(napi_env env, napi_callback_info info) {
+  return AxDump(env, info, sim_ax_describe);
+}
+
+// axFrontmost(udid): string — `{bundleId, pid}` JSON for the visible app.
+static napi_value AxFrontmost(napi_env env, napi_callback_info info) {
+  return AxDump(env, info, sim_ax_frontmost);
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor props[] = {
       {"version", nullptr, Version, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -425,6 +464,8 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"captureRequestKeyframe", nullptr, CaptureRequestKeyframe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureScreenSize", nullptr, CaptureScreenSize, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureStop", nullptr, CaptureStop, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"axDescribe", nullptr, AxDescribe, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"axFrontmost", nullptr, AxFrontmost, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props);
   return exports;

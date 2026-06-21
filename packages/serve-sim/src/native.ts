@@ -37,6 +37,8 @@ interface NativeAddon {
   captureRequestKeyframe(h: Handle): void;
   captureScreenSize(h: Handle): { width: number; height: number };
   captureStop(h: Handle): void;
+  axDescribe(udid: string): string;
+  axFrontmost(udid: string): string;
 }
 
 // (codec, data, width, height, flags) — codec 0=MJPEG 1=AVCC; flags bit0=desc bit1=keyframe.
@@ -201,6 +203,20 @@ export class NativeCapture {
   stop(): void {
     this.n.captureStop(this.handle);
   }
+}
+
+/**
+ * Accessibility-tree dump for `udid`, as an axe-shaped JSON string (the
+ * src/ax.ts normalizer consumes it unchanged). Throws if the sim's AX service
+ * isn't reachable yet.
+ */
+export function axDescribe(udid: string): string {
+  return load().axDescribe(udid);
+}
+
+/** Frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */
+export function axFrontmost(udid: string): string {
+  return load().axFrontmost(udid);
 }
 
 /** Native addon version banner — also a cheap load smoke-test. */
