@@ -1773,6 +1773,39 @@ Examples:
 
 // ─── Serve preview ───
 
+/** Resolve which simulators to stream, without spawning anything. */
+function resolveTargetDevices(devices: string[]): string[] {
+  if (devices.length > 0) return devices.map(resolveDevice);
+  const existing = readAllStates();
+  if (existing.length > 0) return [existing[0]!.device];
+  const booted = findBootedDevice();
+  if (booted) return [booted];
+  const fallback = pickDefaultDevice();
+  if (!fallback) {
+    console.error("No device specified and no available iOS simulator found.");
+    process.exit(1);
+  }
+  return [fallback.udid];
+}
+
+/**
+ * State record for an in-process session served by this preview server. There's
+ * no separate helper port — the stream/ws URLs point at the preview's own
+ * same-origin `/helper/<device>/…` routes, which `simMiddleware` serves from a
+ * NativeCapture/NativeHid DeviceSession.
+ */
+function inProcessState(udid: string, port: number, host: string): ServerState {
+  const h = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  return {
+    pid: process.pid,
+    port,
+    device: udid,
+    url: `http://${h}:${port}`,
+    streamUrl: `http://${h}:${port}/helper/${udid}/stream.mjpeg`,
+    wsUrl: `ws://${h}:${port}/helper/${udid}/ws`,
+  };
+}
+
 async function serve(
   servePort: number,
   devices: string[],
@@ -1780,22 +1813,14 @@ async function serve(
   host: string,
   codec: string | undefined,
 ) {
-  let targetDevice: string | undefined;
-
-  if (devices.length > 0) {
-    const states = await detach(devices, 3100);
-    targetDevice = states[0]?.device;
-  } else {
-    // Ensure a serve-sim stream is running (start one if not)
-    const existing = readAllStates();
-    if (existing.length > 0) {
-      targetDevice = existing[0]?.device;
-    } else {
-      console.log("Starting simulator stream...");
-      const states = await detach(devices, 3100);
-      targetDevice = states[0]?.device;
-    }
+  // Boot the target simulators; the preview server streams them in-process
+  // (no spawned helper). Sessions are created lazily on the first stream request.
+  const targetDevices = resolveTargetDevices(devices);
+  if (devices.length === 0 && readAllStates().length === 0) {
+    console.log("Starting simulator stream...");
   }
+  for (const udid of targetDevices) await ensureBooted(udid);
+  const targetDevice = targetDevices[0];
 
   const { simMiddleware } = await import("./middleware");
   // Standalone serve-sim owns its HTTP server and wires WebSocket upgrades, so
@@ -1831,6 +1856,18 @@ async function serve(
     }
     process.exit(1);
   }
+
+  // Record in-process state so the preview/grid enumerate these devices and the
+  // CLI input subcommands can reach the same-origin /helper ws.
+  for (const udid of targetDevices) {
+    writeState(inProcessState(udid, boundPort, host));
+  }
+  const clearAll = () => {
+    for (const udid of targetDevices) {
+      try { clearState(udid); } catch {}
+    }
+  };
+  process.on("exit", clearAll);
 
   const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
   const networkIP = getLocalNetworkIP();

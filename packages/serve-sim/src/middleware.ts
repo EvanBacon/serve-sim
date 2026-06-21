@@ -13,6 +13,7 @@ import type { Socket } from "net";
 import { WebSocket, WebSocketServer } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { getDeviceSession } from "./device-session";
+import { axFrontmost } from "./native";
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
@@ -1630,7 +1631,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       });
       res.write(":\n\n");
       axStreamerCache.prune(states.map((s) => s.device));
-      const ax = axStreamerCache.get(state.device, state.port);
+      const ax = axStreamerCache.get(state.device);
       const removeClient = ax.addClient(res);
       req.on("close", removeClient);
       return;
@@ -1741,12 +1742,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       let lastBundle = "";
       void (async () => {
         try {
-          const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 1500);
-          const r = await fetch(`http://127.0.0.1:${state.port}/foreground`, { signal: ctrl.signal });
-          clearTimeout(timer);
-          if (!r.ok) return;
-          const info = await r.json() as { bundleId?: string; pid?: number };
+          const info = JSON.parse(axFrontmost(udid)) as { bundleId?: string; pid?: number };
           if (!info.bundleId || !isUserFacingBundle(info.bundleId)) return;
           if (res.writableEnded) return;
           lastBundle = info.bundleId;
@@ -1754,7 +1750,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           if (res.writableEnded) return;
           res.write("data: " + JSON.stringify({ bundleId: info.bundleId, pid: info.pid, isReactNative }) + "\n\n");
         } catch {
-          // Helper may be coming up — log tail will fill in once anything moves.
+          // AX bridge may be warming up — the log tail fills in once anything moves.
         }
       })();
 
