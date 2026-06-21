@@ -48,6 +48,8 @@
     "dist/native/serve-sim-native.node",
     "Sources/SimNative/sim-native.swift",
     "Sources/SimNative/sim-native.mm",
+    "Sources/SimNative/sim-hid.swift",
+    "Sources/SimNative/sim-capture.swift",
     "Sources/SimNative/build.sh"
   ],
   "exports": {

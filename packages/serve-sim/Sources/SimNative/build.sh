@@ -29,8 +29,12 @@ STREAM="$HERE/../SimStreamHelper"
 SWIFT_SRC=(
   "$HERE/sim-native.swift"
   "$HERE/sim-hid.swift"
+  "$HERE/sim-capture.swift"
   "$STREAM/HIDInjector.swift"
   "$STREAM/FrameCapture.swift"
+  "$STREAM/VideoEncoder.swift"
+  "$STREAM/H264Encoder.swift"
+  "$STREAM/StreamFormat.swift"
   "$STREAM/SimFrameworks.swift"
   "$STREAM/Xcode.swift"
 )
@@ -53,6 +57,7 @@ for ARCH in arm64 x86_64; do
     -o "$TMP/native-$ARCH.dylib" \
     "${SWIFT_SRC[@]}" "$TMP/glue-$ARCH.o" \
     -framework CoreVideo -framework CoreMedia -framework IOSurface -framework CoreGraphics \
+    -framework VideoToolbox -framework ImageIO -framework CoreFoundation \
     -Xlinker -undefined -Xlinker dynamic_lookup
   SLICES+=("$TMP/native-$ARCH.dylib")
 done

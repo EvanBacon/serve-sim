@@ -31,6 +31,32 @@ interface NativeAddon {
   hidMemoryWarning(h: Handle): void;
   hidSoftwareKeyboard(h: Handle): void;
   hidCaDebug(h: Handle, name: string, enabled: boolean): boolean;
+  captureCreate(udid: string, onFrame: RawFrameCallback): Handle;
+  captureStart(h: Handle): void;
+  captureSetAvccActive(h: Handle, active: boolean): void;
+  captureRequestKeyframe(h: Handle): void;
+  captureScreenSize(h: Handle): { width: number; height: number };
+  captureStop(h: Handle): void;
+}
+
+// (codec, data, width, height, flags) — codec 0=MJPEG 1=AVCC; flags bit0=desc bit1=keyframe.
+type RawFrameCallback = (codec: number, data: Buffer, width: number, height: number, flags: number) => void;
+
+const CODEC_AVCC = 1;
+const FLAG_DESCRIPTION = 1 << 0;
+const FLAG_KEYFRAME = 1 << 1;
+
+export interface NativeFrame {
+  /** `mjpeg` = a full JPEG; `avcc` = a length-prefixed AVCC envelope chunk. */
+  codec: "mjpeg" | "avcc";
+  /** Encoded bytes, ready to write to the stream wire. */
+  data: Buffer;
+  width: number;
+  height: number;
+  /** AVCC only: this chunk is the avcC parameter-set blob (decoder config). */
+  isDescription: boolean;
+  /** AVCC only: this chunk is an IDR keyframe (a decoder can start here). */
+  isKeyframe: boolean;
 }
 
 export type TouchType = "begin" | "move" | "end";
@@ -125,6 +151,55 @@ export class NativeHid {
 
   caDebug(name: string, enabled: boolean): boolean {
     return this.n.hidCaDebug(this.handle, name, enabled);
+  }
+}
+
+/**
+ * In-process frame capture + encode for one simulator. Replaces the spawned
+ * helper's capture pipeline: MJPEG frames are always produced; H.264/AVCC runs
+ * only while `setAvccActive(true)`. Encoded frames arrive via the `onFrame`
+ * callback on the JS thread (marshalled from the native encode thread).
+ */
+export class NativeCapture {
+  private readonly n: NativeAddon;
+  private readonly handle: Handle;
+
+  constructor(udid: string, onFrame: (frame: NativeFrame) => void) {
+    this.n = load();
+    this.handle = this.n.captureCreate(udid, (codec, data, width, height, flags) => {
+      onFrame({
+        codec: codec === CODEC_AVCC ? "avcc" : "mjpeg",
+        data,
+        width,
+        height,
+        isDescription: (flags & FLAG_DESCRIPTION) !== 0,
+        isKeyframe: (flags & FLAG_KEYFRAME) !== 0,
+      });
+    });
+  }
+
+  /** Begin capturing. Throws if the device isn't booted. */
+  start(): void {
+    this.n.captureStart(this.handle);
+  }
+
+  /** Enable/disable H.264 encoding (forces an IDR on the next frame when enabled). */
+  setAvccActive(active: boolean): void {
+    this.n.captureSetAvccActive(this.handle, active);
+  }
+
+  /** Force the next H.264 frame to a keyframe (e.g. when a new AVCC viewer joins). */
+  requestKeyframe(): void {
+    this.n.captureRequestKeyframe(this.handle);
+  }
+
+  screenSize(): { width: number; height: number } {
+    return this.n.captureScreenSize(this.handle);
+  }
+
+  /** Halt frame production. Full teardown happens when this object is GC'd. */
+  stop(): void {
+    this.n.captureStop(this.handle);
   }
 }
 

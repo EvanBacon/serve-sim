@@ -31,6 +31,17 @@ bool sim_hid_orientation(void *handle, unsigned orientation);
 void sim_hid_memory_warning(void *handle);
 void sim_hid_software_keyboard(void *handle);
 bool sim_hid_ca_debug(void *handle, const char *name, bool enabled);
+
+// Frame callback invoked on a native encode thread (codec: 0=MJPEG, 1=AVCC).
+typedef void (*sim_frame_cb)(void *ctx, int32_t codec, const uint8_t *data, size_t len,
+                             int32_t width, int32_t height, int32_t flags);
+void *sim_capture_create(const char *udid, sim_frame_cb cb, void *ctx);
+bool sim_capture_start(void *handle, char **errOut);
+void sim_capture_set_avcc_active(void *handle, bool active);
+void sim_capture_request_keyframe(void *handle);
+void sim_capture_screen_size(void *handle, int32_t *outW, int32_t *outH);
+void sim_capture_stop(void *handle);
+void sim_capture_destroy(void *handle);
 }
 
 // ─── N-API helpers ───────────────────────────────────────────────────────
@@ -227,6 +238,171 @@ static napi_value HidCaDebug(napi_env env, napi_callback_info info) {
   return result;
 }
 
+// ─── Capture surface ─────────────────────────────────────────────────────
+//
+// Frames are encoded on a native GCD thread and marshalled to JS through a
+// threadsafe function. Lifetime: the encode-thread trampoline copies the bytes
+// into a FramePayload and enqueues it; FrameCallJs (JS thread) hands JS an
+// external Buffer over those bytes and frees them on GC. Teardown
+// (CaptureExternalFinalize) calls sim_capture_destroy FIRST — which drains the
+// encode queues so no trampoline can fire afterwards — then releases the tsfn;
+// the binding is freed in CaptureTsfnFinalize once the tsfn is fully torn down.
+
+struct CaptureBinding {
+  void *handle;
+  napi_threadsafe_function tsfn;
+};
+
+struct FramePayload {
+  int32_t codec;
+  uint8_t *bytes;  // owned; freed after the Buffer is GC'd (or on drop)
+  size_t len;
+  int32_t width;
+  int32_t height;
+  int32_t flags;
+};
+
+// Runs on the encode thread. Copies the frame and queues it for JS.
+static void FrameTrampoline(void *ctx, int32_t codec, const uint8_t *data, size_t len,
+                            int32_t width, int32_t height, int32_t flags) {
+  CaptureBinding *b = static_cast<CaptureBinding *>(ctx);
+  FramePayload *p = static_cast<FramePayload *>(malloc(sizeof(FramePayload)));
+  if (!p) return;
+  p->bytes = static_cast<uint8_t *>(malloc(len ? len : 1));
+  if (!p->bytes) { free(p); return; }
+  memcpy(p->bytes, data, len);
+  p->codec = codec; p->len = len; p->width = width; p->height = height; p->flags = flags;
+  // Non-blocking: under backpressure (queue full / closing) drop the frame.
+  if (napi_call_threadsafe_function(b->tsfn, p, napi_tsfn_nonblocking) != napi_ok) {
+    free(p->bytes);
+    free(p);
+  }
+}
+
+// Runs on the JS thread for each queued frame. env is null while the tsfn is
+// being aborted — just free in that case.
+//
+// We copy the bytes into a managed Buffer (napi_create_buffer_copy) rather than
+// wrapping them in an external Buffer: external buffers crash Bun's GC under
+// high frame churn, and the production CLI is a bun-compiled binary. The copy
+// is a single memcpy of the *encoded* frame (tens of KB) — negligible next to
+// the JPEG/H.264 encode it follows.
+static void FrameCallJs(napi_env env, napi_value js_cb, void *, void *data) {
+  FramePayload *p = static_cast<FramePayload *>(data);
+  if (env == nullptr || js_cb == nullptr) {
+    free(p->bytes);
+    free(p);
+    return;
+  }
+  napi_value undefined, codec, buffer, w, h, flags;
+  napi_get_undefined(env, &undefined);
+  napi_create_int32(env, p->codec, &codec);
+  napi_create_int32(env, p->width, &w);
+  napi_create_int32(env, p->height, &h);
+  napi_create_int32(env, p->flags, &flags);
+  void *dst = nullptr;
+  napi_create_buffer_copy(env, p->len, p->bytes, &dst, &buffer);
+  free(p->bytes);
+  free(p);
+  napi_value argv[5] = {codec, buffer, w, h, flags};
+  napi_call_function(env, undefined, js_cb, 5, argv, nullptr);
+}
+
+static void CaptureTsfnFinalize(napi_env, void *finalize_data, void *) {
+  free(finalize_data);  // the CaptureBinding, once the tsfn is fully released
+}
+
+static void CaptureExternalFinalize(napi_env, void *data, void *) {
+  CaptureBinding *b = static_cast<CaptureBinding *>(data);
+  sim_capture_destroy(b->handle);  // drains encode queues → no more trampoline calls
+  napi_release_threadsafe_function(b->tsfn, napi_tsfn_abort);  // → CaptureTsfnFinalize frees b
+}
+
+// captureCreate(udid, onFrame): External
+static napi_value CaptureCreate(napi_env env, napi_callback_info info) {
+  READ_ARGS(env, info, 2);
+  std::string udid = GetString(env, argv[0]);
+
+  CaptureBinding *b = static_cast<CaptureBinding *>(calloc(1, sizeof(CaptureBinding)));
+  if (!b) {
+    napi_throw_error(env, nullptr, "alloc failed");
+    return nullptr;
+  }
+  napi_value name;
+  napi_create_string_utf8(env, "simCapture", NAPI_AUTO_LENGTH, &name);
+  if (napi_create_threadsafe_function(env, argv[1], nullptr, name, /*max_queue*/ 16,
+                                      /*initial_threads*/ 1, /*finalize_data*/ b,
+                                      CaptureTsfnFinalize, /*context*/ nullptr, FrameCallJs,
+                                      &b->tsfn) != napi_ok) {
+    free(b);
+    napi_throw_error(env, nullptr, "create_threadsafe_function failed");
+    return nullptr;
+  }
+  // Don't let the frame pipeline by itself keep the event loop alive.
+  napi_unref_threadsafe_function(env, b->tsfn);
+
+  b->handle = sim_capture_create(udid.c_str(), FrameTrampoline, b);
+
+  napi_value external;
+  if (napi_create_external(env, b, CaptureExternalFinalize, nullptr, &external) != napi_ok) {
+    sim_capture_destroy(b->handle);
+    napi_release_threadsafe_function(b->tsfn, napi_tsfn_abort);
+    napi_throw_error(env, nullptr, "create_external failed");
+    return nullptr;
+  }
+  return external;
+}
+
+static void *GetCaptureHandle(napi_env env, napi_value v) {
+  void *b = nullptr;
+  napi_get_value_external(env, v, &b);
+  return b ? static_cast<CaptureBinding *>(b)->handle : nullptr;
+}
+
+// captureStart(ext) — throws on failure (e.g. device not booted).
+static napi_value CaptureStart(napi_env env, napi_callback_info info) {
+  READ_ARGS(env, info, 1);
+  char *err = nullptr;
+  if (!sim_capture_start(GetCaptureHandle(env, argv[0]), &err)) {
+    napi_throw_error(env, nullptr, err ? err : "capture start failed");
+    free(err);
+  }
+  return nullptr;
+}
+
+static napi_value CaptureSetAvccActive(napi_env env, napi_callback_info info) {
+  READ_ARGS(env, info, 2);
+  sim_capture_set_avcc_active(GetCaptureHandle(env, argv[0]), GetBool(env, argv[1]));
+  return nullptr;
+}
+
+static napi_value CaptureRequestKeyframe(napi_env env, napi_callback_info info) {
+  READ_ARGS(env, info, 1);
+  sim_capture_request_keyframe(GetCaptureHandle(env, argv[0]));
+  return nullptr;
+}
+
+// captureScreenSize(ext): { width, height }
+static napi_value CaptureScreenSize(napi_env env, napi_callback_info info) {
+  READ_ARGS(env, info, 1);
+  int32_t w = 0, h = 0;
+  sim_capture_screen_size(GetCaptureHandle(env, argv[0]), &w, &h);
+  napi_value obj, nw, nh;
+  NAPI_CALL(env, napi_create_object(env, &obj));
+  NAPI_CALL(env, napi_create_int32(env, w, &nw));
+  NAPI_CALL(env, napi_create_int32(env, h, &nh));
+  napi_set_named_property(env, obj, "width", nw);
+  napi_set_named_property(env, obj, "height", nh);
+  return obj;
+}
+
+// captureStop(ext) — halt frames without releasing the handle.
+static napi_value CaptureStop(napi_env env, napi_callback_info info) {
+  READ_ARGS(env, info, 1);
+  sim_capture_stop(GetCaptureHandle(env, argv[0]));
+  return nullptr;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor props[] = {
       {"version", nullptr, Version, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -243,6 +419,12 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"hidMemoryWarning", nullptr, HidMemoryWarning, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"hidSoftwareKeyboard", nullptr, HidSoftwareKeyboard, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"hidCaDebug", nullptr, HidCaDebug, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"captureCreate", nullptr, CaptureCreate, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"captureStart", nullptr, CaptureStart, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"captureSetAvccActive", nullptr, CaptureSetAvccActive, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"captureRequestKeyframe", nullptr, CaptureRequestKeyframe, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"captureScreenSize", nullptr, CaptureScreenSize, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"captureStop", nullptr, CaptureStop, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props);
   return exports;
