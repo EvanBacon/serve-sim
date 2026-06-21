@@ -22,6 +22,19 @@ MIN=14.0
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Swift sources: the SimNative C-ABI shims + the SimStreamHelper logic they
+# reuse verbatim (HIDInjector and its deps). They compile as one Swift module,
+# so internal symbols resolve across files.
+STREAM="$HERE/../SimStreamHelper"
+SWIFT_SRC=(
+  "$HERE/sim-native.swift"
+  "$HERE/sim-hid.swift"
+  "$STREAM/HIDInjector.swift"
+  "$STREAM/FrameCapture.swift"
+  "$STREAM/SimFrameworks.swift"
+  "$STREAM/Xcode.swift"
+)
+
 SLICES=()
 for ARCH in arm64 x86_64; do
   # Objective-C++ N-API glue → object (clang++).
@@ -31,12 +44,15 @@ for ARCH in arm64 x86_64; do
     -I "$NAPI_INC" \
     -c "$HERE/sim-native.mm" -o "$TMP/glue-$ARCH.o"
 
-  # Swift shims + glue object → per-arch dylib (swiftc links the Swift runtime).
+  # Swift sources + glue object → per-arch dylib (swiftc links the Swift
+  # runtime + autolinks imported frameworks). napi_* stay undefined and resolve
+  # against the host at dlopen via -undefined dynamic_lookup.
   xcrun --sdk macosx swiftc \
     -target "$ARCH-apple-macosx$MIN" \
     -O -emit-library \
     -o "$TMP/native-$ARCH.dylib" \
-    "$HERE/sim-native.swift" "$TMP/glue-$ARCH.o" \
+    "${SWIFT_SRC[@]}" "$TMP/glue-$ARCH.o" \
+    -framework CoreVideo -framework CoreMedia -framework IOSurface -framework CoreGraphics \
     -Xlinker -undefined -Xlinker dynamic_lookup
   SLICES+=("$TMP/native-$ARCH.dylib")
 done

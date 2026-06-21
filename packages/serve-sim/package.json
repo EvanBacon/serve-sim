@@ -33,6 +33,7 @@
     "src/ax-shared.ts",
     "src/ax.ts",
     "src/middleware.ts",
+    "src/native.ts",
     "src/state.ts",
     "bin/serve-sim-bin",
     "Sources/SimCameraInjector/SimCameraInjector.m",
