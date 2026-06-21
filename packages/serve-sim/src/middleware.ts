@@ -10,8 +10,9 @@ import type { Socket } from "net";
 // helper/devtools proxy. Node only exposes a global `WebSocket` on newer LTS
 // lines, and `serve-sim/middleware` is embedded in third-party dev servers, so
 // importing the dependency keeps the proxy working regardless of runtime.
-import { WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { createAxStreamerCache } from "./ax";
+import { getDeviceSession } from "./device-session";
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
@@ -617,6 +618,48 @@ function bridgeHelperWebSocket(req: SimReq, socket: Socket, head: Buffer, state:
   bridgeWebSocketFrames(req, socket, head, state.wsUrl);
 }
 
+/**
+ * Serve a helper endpoint from an in-process DeviceSession (NativeCapture +
+ * NativeHid) instead of proxying to a spawned serve-sim-bin. Returns false when
+ * no session can serve it (device not booted, or an endpoint this path doesn't
+ * own) so the caller can fall back to the legacy spawned-helper proxy.
+ */
+function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, upstreamPath: string): boolean {
+  if (!device) return false;
+  let session;
+  try {
+    session = getDeviceSession(device);
+  } catch {
+    return false; // not booted / capture unavailable → fall back to proxy
+  }
+  switch (upstreamPath.split("?")[0]) {
+    case "/stream.mjpeg": session.handleMjpeg(req, res); return true;
+    case "/stream.avcc": session.handleAvcc(req, res); return true;
+    case "/config": session.handleConfig(req, res); return true;
+    case "/health": session.handleHealth(req, res); return true;
+    case "/ax": session.handleAx(req, res); return true;
+    case "/foreground": session.handleForeground(req, res); return true;
+    default: return false;
+  }
+}
+
+// Singleton noServer ws upgrader for in-process HID sockets.
+let hidWsServer: WebSocketServer | undefined;
+
+/** Upgrade an in-process HID `/ws` socket onto a DeviceSession. Returns false to fall back. */
+function attachHidInProcess(req: SimReq, socket: Socket, head: Buffer, device: string | null): boolean {
+  if (!device) return false;
+  let session;
+  try {
+    session = getDeviceSession(device);
+  } catch {
+    return false;
+  }
+  if (!hidWsServer) hidWsServer = new WebSocketServer({ noServer: true });
+  hidWsServer.handleUpgrade(req, socket, head, (ws) => session.attachHidSocket(ws));
+  return true;
+}
+
 export function previewConfigForState(
   state: ServeSimState,
   base: string,
@@ -1092,8 +1135,12 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
     const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
     if (helperTarget) {
+      const device = helperTarget.device ?? selectedDevice;
+      // Prefer the in-process DeviceSession; fall back to a spawned helper proxy
+      // only when no session can serve (e.g. a remote/legacy helper).
+      if (serveHelperInProcess(req, res, device, helperTarget.upstreamPath)) return;
       const states = readServeSimStates();
-      const state = selectServeSimState(states, helperTarget.device ?? selectedDevice);
+      const state = selectServeSimState(states, device);
       if (!state) {
         res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("No serve-sim device");
@@ -1785,13 +1832,16 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       socket.destroy();
       return;
     }
-    const states = readServeSimStates();
-    const state = selectServeSimState(states, helperTarget.device ?? selectedDevice);
-    if (!state) {
-      socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
-      return;
-    }
+    const device = helperTarget.device ?? selectedDevice;
     if (helperTarget.upstreamPath === "/ws") {
+      // Prefer an in-process DeviceSession; fall back to the spawned-helper bridge.
+      if (attachHidInProcess(req, socket, head, device)) return;
+      const states = readServeSimStates();
+      const state = selectServeSimState(states, device);
+      if (!state) {
+        socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
+        return;
+      }
       bridgeHelperWebSocket(req, socket, head, state);
       return;
     }
