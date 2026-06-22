@@ -65,7 +65,7 @@ describeIfSim(`serve-sim malformed HID input (booted sim ${bootedUdid ?? "<skipp
   let wsUrl: string;
   let configUrl: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     try { execFileSync("node", [CLI, "--kill", bootedUdid!], { stdio: "pipe" }); } catch {}
 
     const startPort = 40_000 + Math.floor(Math.random() * 20_000);
@@ -83,6 +83,17 @@ describeIfSim(`serve-sim malformed HID input (booted sim ${bootedUdid ?? "<skipp
     const state = JSON.parse(detach.stdout.trim()) as { wsUrl: string; streamUrl: string };
     wsUrl = state.wsUrl;
     configUrl = state.streamUrl.replace("stream.mjpeg", "config");
+
+    // `--detach` returns once the child is spawned, but on a cold CI runner the
+    // server may not be listening yet. Poll /config until it answers so the
+    // test's "still alive" checks measure crashes, not a slow cold start.
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      try {
+        if ((await fetch(configUrl)).ok) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 250));
+    }
   }, 60_000);
 
   afterAll(() => {

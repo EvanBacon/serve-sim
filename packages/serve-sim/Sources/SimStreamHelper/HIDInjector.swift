@@ -2,6 +2,18 @@ import Foundation
 import ObjectiveC
 import Darwin
 
+/// Per-event HID logging is gated behind `SERVE_SIM_DEBUG_HID`. These lines fire
+/// on every touch/move/button/key/crown event — a single drag emits a dozen —
+/// so by default they flood stdout (and anything mirroring it) for no benefit.
+/// Failure diagnostics ("returned nil", "unavailable", "not found") stay on
+/// `print` so real problems are always visible.
+private let hidDebugEnabled = ProcessInfo.processInfo.environment["SERVE_SIM_DEBUG_HID"] != nil
+
+@inline(__always)
+private func hidLog(_ message: @autoclosure () -> String) {
+    if hidDebugEnabled { print(message()) }
+}
+
 /// Injects touch, button, and orientation HID events into the iOS Simulator.
 ///
 /// Uses IndigoHIDMessageForMouseNSEvent to create touch messages and
@@ -70,28 +82,28 @@ final class HIDInjector {
 
         if let buttonPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForButton") {
             self.buttonFunc = unsafeBitCast(buttonPtr, to: IndigoButtonFunc.self)
-            print("[hid] IndigoHIDMessageForButton loaded")
+            hidLog("[hid] IndigoHIDMessageForButton loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForButton not found")
         }
 
         if let arbPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForHIDArbitrary") {
             self.hidArbitraryFunc = unsafeBitCast(arbPtr, to: IndigoHIDArbitraryFunc.self)
-            print("[hid] IndigoHIDMessageForHIDArbitrary loaded")
+            hidLog("[hid] IndigoHIDMessageForHIDArbitrary loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForHIDArbitrary not found")
         }
 
         if let keyboardPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForKeyboardArbitrary") {
             self.keyboardFunc = unsafeBitCast(keyboardPtr, to: IndigoKeyboardFunc.self)
-            print("[hid] IndigoHIDMessageForKeyboardArbitrary loaded")
+            hidLog("[hid] IndigoHIDMessageForKeyboardArbitrary loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForKeyboardArbitrary not found")
         }
 
         if let crownPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForDigitalCrownEvent") {
             self.digitalCrownFunc = unsafeBitCast(crownPtr, to: IndigoDigitalCrownFunc.self)
-            print("[hid] IndigoHIDMessageForDigitalCrownEvent loaded")
+            hidLog("[hid] IndigoHIDMessageForDigitalCrownEvent loaded")
         } else {
             print("[hid] Warning: IndigoHIDMessageForDigitalCrownEvent not found")
         }
@@ -120,8 +132,8 @@ final class HIDInjector {
 
         self.hidClient = clientObj
         self.sendSel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
-        print("[hid] SimDeviceLegacyHIDClient created")
-        print("[hid] IndigoHIDMessageForMouseNSEvent loaded (with edge gesture support)")
+        hidLog("[hid] SimDeviceLegacyHIDClient created")
+        hidLog("[hid] IndigoHIDMessageForMouseNSEvent loaded (with edge gesture support)")
     }
 
     // IndigoHIDEdge values (x4 param to IndigoHIDMessageForMouseNSEvent).
@@ -175,7 +187,7 @@ final class HIDInjector {
 
     func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) {
         guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return }
-        print("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
+        hidLog("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
         inputQueue.async { [self] in rawSend(msg) }
     }
 
@@ -197,7 +209,7 @@ final class HIDInjector {
             return
         }
 
-        print("[hid] Multi-touch \(type) f1=(\(String(format:"%.3f",x1)),\(String(format:"%.3f",y1))) f2=(\(String(format:"%.3f",x2)),\(String(format:"%.3f",y2)))")
+        hidLog("[hid] Multi-touch \(type) f1=(\(String(format:"%.3f",x1)),\(String(format:"%.3f",y1))) f2=(\(String(format:"%.3f",x2)),\(String(format:"%.3f",y2)))")
         inputQueue.async { [self] in rawSend(rawMsg) }
     }
 
@@ -257,7 +269,7 @@ final class HIDInjector {
             return
         }
 
-        print("[hid] Key \(type) usage=0x\(String(usage, radix: 16))")
+        hidLog("[hid] Key \(type) usage=0x\(String(usage, radix: 16))")
         inputQueue.async { [self] in rawSend(msg) }
     }
 
@@ -277,7 +289,7 @@ final class HIDInjector {
             return
         }
 
-        print("[hid] Digital Crown delta=\(String(format:"%.4f", delta))")
+        hidLog("[hid] Digital Crown delta=\(String(format:"%.4f", delta))")
         inputQueue.async { [self] in rawSend(msg) }
     }
 
@@ -397,7 +409,7 @@ final class HIDInjector {
             }
             rawSend(msg)
         }
-        print("[hid] HID button page=\(page) usage=\(usage) phase=\(phase)")
+        hidLog("[hid] HID button page=\(page) usage=\(usage) phase=\(phase)")
         inputQueue.async {
             switch phase {
             case "down": emit(1)
@@ -411,7 +423,7 @@ final class HIDInjector {
     }
 
     func sendButton(button: String, deviceUDID: String) {
-        print("[hid] Sending button: \(button)")
+        hidLog("[hid] Sending button: \(button)")
 
         switch button {
         case "home":
@@ -490,7 +502,7 @@ final class HIDInjector {
         let imp = device.method(for: sel)
         let fn = unsafeBitCast(imp, to: Fn.self)
         let result = fn(device, sel, name as NSString, ObjCBool(enabled))
-        print("[sim] setCADebugOption(\(name), \(enabled)) → \(result.boolValue)")
+        hidLog("[sim] setCADebugOption(\(name), \(enabled)) → \(result.boolValue)")
         return result.boolValue
     }
 
@@ -523,7 +535,7 @@ final class HIDInjector {
             return
         }
         _ = device.perform(sel)
-        print("[sim] simulateMemoryWarning dispatched")
+        hidLog("[sim] simulateMemoryWarning dispatched")
     }
 
     /// Synthesize a swipe-up-from-bottom gesture (Face ID "go home" gesture).
@@ -629,7 +641,7 @@ final class HIDInjector {
                 fputs("[hid] sendOrientation: mach_msg_send failed (\(kr))\n", stderr)
                 return false
             } else {
-                print("[hid] Orientation set to \(orientation)")
+                hidLog("[hid] Orientation set to \(orientation)")
                 return true
             }
         }
