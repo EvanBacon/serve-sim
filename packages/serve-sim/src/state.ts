@@ -1,6 +1,6 @@
 import { tmpdir } from "os";
 import { join } from "path";
-import { readdirSync, mkdirSync, writeFileSync } from "fs";
+import { readdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
 
 /** Directory where serve-sim stores runtime state. */
 export const STATE_DIR = join(tmpdir(), "serve-sim");
@@ -37,7 +37,10 @@ export function inProcessServeSimState(
   host = "127.0.0.1",
 ): ServeSimDeviceState {
   const h = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const prefix = base === "/" || base === "" ? "" : base.replace(/\/+$/, "");
+  // Normalize to a leading-slash, no-trailing-slash prefix so a base without a
+  // leading slash (e.g. "foo") still yields well-formed `…:port/foo/helper/…`.
+  const trimmed = base.replace(/^\/+/, "").replace(/\/+$/, "");
+  const prefix = trimmed === "" ? "" : `/${trimmed}`;
   return {
     pid: process.pid,
     port,
@@ -48,10 +51,15 @@ export function inProcessServeSimState(
   };
 }
 
-/** Persist a device's state so other processes / the grid can enumerate it. */
+/** Persist a device's state so other processes / the grid can enumerate it.
+ *  Writes atomically (temp file + rename) so a concurrent reader never observes
+ *  a truncated or partially-written file. */
 export function writeServeSimState(state: ServeSimDeviceState): void {
   mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(stateFileForDevice(state.device), JSON.stringify(state, null, 2));
+  const file = stateFileForDevice(state.device);
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2));
+  renameSync(tmp, file);
 }
 
 /** List all per-device state files in the state directory. */

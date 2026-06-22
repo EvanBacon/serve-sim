@@ -1,6 +1,13 @@
 import Foundation
 import NodeAPI
 
+/// Safe Int→UInt32 for HID codes coming from JS. Plain `UInt32(x)` traps on
+/// negative or too-large values, which would crash the in-process server on
+/// malformed input; clamp out-of-range values to 0 (a harmless no-op code).
+private func u32(_ v: Int) -> UInt32 {
+    UInt32(exactly: v) ?? 0
+}
+
 // node-swift entrypoint for serve-sim-native — the in-process N-API addon that
 // replaces the spawned serve-sim-bin helper. The JS surface is expressed
 // directly in Swift (no Objective-C++ glue): HID and frame capture are
@@ -26,7 +33,7 @@ import NodeAPI
     @NodeMethod func touch(_ type: String, _ x: Double, _ y: Double,
                            _ w: Int, _ h: Int, _ edge: Int) {
         injector.sendTouch(type: type, x: x, y: y,
-                           screenWidth: w, screenHeight: h, edge: UInt32(edge))
+                           screenWidth: w, screenHeight: h, edge: u32(edge))
     }
 
     @NodeMethod func multiTouch(_ type: String, _ x1: Double, _ y1: Double,
@@ -40,11 +47,11 @@ import NodeAPI
     }
 
     @NodeMethod func buttonHid(_ page: Int, _ usage: Int, _ phase: String) {
-        injector.sendButtonHID(page: UInt32(page), usage: UInt32(usage), phase: phase)
+        injector.sendButtonHID(page: u32(page), usage: u32(usage), phase: phase)
     }
 
     @NodeMethod func key(_ type: String, _ usage: Int) {
-        injector.sendKey(type: type, usage: UInt32(usage))
+        injector.sendKey(type: type, usage: u32(usage))
     }
 
     /// NaN anchorX/anchorY mean "center" (the Swift API's nil).
@@ -61,7 +68,7 @@ import NodeAPI
     }
 
     @NodeMethod func orientation(_ orientation: Int) -> Bool {
-        injector.sendOrientation(orientation: UInt32(orientation))
+        injector.sendOrientation(orientation: u32(orientation))
     }
 
     @NodeMethod func memoryWarning() {

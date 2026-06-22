@@ -122,7 +122,7 @@ export class DeviceSession {
       for (const res of this.mjpegClients) this.writeMjpegFrame(res, header, f.data);
     } else {
       if (f.isDescription) this.cachedAvccDescription = f.data;
-      for (const res of this.avccClients) this.writeFrame(res, f.data);
+      for (const res of this.avccClients) this.writeAvccFrame(res, f.data);
     }
   }
 
@@ -136,9 +136,23 @@ export class DeviceSession {
     res.uncork();
   }
 
-  /** Write a frame to a streaming client, dropping it if the socket is backed up. */
-  private writeFrame(res: ServerResponse, chunk: Buffer): void {
-    if (res.writableEnded || res.writableLength > MAX_CLIENT_BACKLOG) return;
+  /**
+   * Write an AVCC chunk. AVCC is inter-frame H.264, so dropping a chunk corrupts
+   * the decoder until the next IDR (visible tearing). Rather than drop, evict a
+   * client whose socket is backed up: it reconnects via handleAvcc and is
+   * re-seeded with the cached description + a fresh keyframe, yielding a clean
+   * stream instead of a corrupted one.
+   */
+  private writeAvccFrame(res: ServerResponse, chunk: Buffer): void {
+    if (res.writableEnded) {
+      this.avccClients.delete(res);
+      return;
+    }
+    if (res.writableLength > MAX_CLIENT_BACKLOG) {
+      this.avccClients.delete(res);
+      res.end();
+      return;
+    }
     res.write(chunk);
   }
 
