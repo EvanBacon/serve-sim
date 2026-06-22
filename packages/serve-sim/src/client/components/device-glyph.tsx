@@ -1,4 +1,4 @@
-import type { DeviceType } from "serve-sim-client/simulator";
+import type { DeviceType } from "../simulator";
 
 const SCREEN_ON_FILL = "#47b7ff";
 

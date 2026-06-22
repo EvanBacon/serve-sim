@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { wheelDeltaToPixels } from "../simulator/scroll-wheel";
+import { wheelDeltaToPixels } from "../client/simulator/scroll-wheel";
 
 describe("wheelDeltaToPixels", () => {
   test("passes pixel-mode deltas through", () => {

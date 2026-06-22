@@ -6,7 +6,7 @@ import {
   AVCC_TAG_KEYFRAME,
   AVCC_TAG_DELTA,
   AVCC_TAG_SEED,
-} from "../avcc-codec";
+} from "../client/avcc-codec.js";
 
 /** Build one wire chunk: [len:u32-be][tag][payload]. len = payload + 1. */
 function frame(tag: number, payload: number[]): Uint8Array {

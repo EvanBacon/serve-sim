@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SimulatorFrame } from "../simulator/SimulatorFrame";
-import type { StreamAPI } from "../react";
-import type { SimulatorOrientation } from "../types";
+import { SimulatorFrame } from "../client/simulator/SimulatorFrame";
+import type { StreamAPI } from "../client/types";
+import type { SimulatorOrientation } from "../client/types";
 
 const exec = async () => ({ stdout: "", stderr: "", exitCode: 0 });
 

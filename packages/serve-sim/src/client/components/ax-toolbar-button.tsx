@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { SquareMousePointer } from "lucide-react";
-import { SimulatorToolbar } from "serve-sim-client/simulator";
+import { SimulatorToolbar } from "../simulator";
 import { useAxSnapshotContext } from "../hooks/use-ax-snapshot";
 
 export function AxToolbarButton({

@@ -22,7 +22,7 @@ import {
   type DeviceType,
   type SimulatorOrientation,
   type StreamConfig,
-} from "serve-sim-client/simulator";
+} from "./simulator";
 
 import { Globe, PanelRight, Upload } from "lucide-react";
 import { ReloadIcon } from "./icons";

@@ -12,7 +12,7 @@
  * their PATH can still run `npx serve-sim` / mount the Connect middleware.
  * Runtime server and timing behavior is implemented with Node stdlib APIs.
  *
- * The preview HTML (bundled client.tsx + Preact + serve-sim-client, base64
+ * The preview HTML (bundled client.tsx + Preact, base64
  * encoded) is injected into every artifact that could need to serve the UI
  * via the __PREVIEW_HTML_B64__ build-time define.
  */

@@ -1,4 +1,4 @@
-import { getDeviceType } from "serve-sim-client/simulator";
+import { getDeviceType } from "../simulator";
 import { X } from "lucide-react";
 import { type GridDevice, runtimeVersion } from "../utils/grid";
 import { DeviceGlyph } from "./device-glyph";

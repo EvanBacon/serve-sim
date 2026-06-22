@@ -5,7 +5,7 @@ import {
   simulatorAspectRatio,
   simulatorMaxWidth,
   simulatorResizeCornerArc,
-} from "../simulator/deviceFrames";
+} from "../client/simulator/deviceFrames";
 import {
   displayStreamConfig,
   HID_EDGE_BOTTOM,
@@ -16,7 +16,7 @@ import {
   rawPointForDisplayPoint,
   rotationDegreesForOrientation,
   streamDisplayGeometry,
-} from "../simulator/orientation";
+} from "../client/simulator/orientation";
 
 describe("simulator geometry helpers", () => {
   test("detects landscape from live stream dimensions", () => {

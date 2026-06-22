@@ -4,7 +4,7 @@ import {
   fallbackScreenSize,
   getDeviceType,
   simulatorMaxWidth,
-} from "serve-sim-client/simulator";
+} from "../simulator";
 import { useState, type CSSProperties, type ReactNode } from "react";
 import type {
   DeviceKitChromeDescriptor,

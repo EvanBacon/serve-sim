@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type CSSProperties } from "react";
-import type { StreamAPI } from "../react.js";
+import type { StreamAPI } from "../types.js";
 import type { StreamConfig } from "../types.js";
 import { SimulatorView } from "./SimulatorView.js";
 import { useSimStream } from "./useSimStream.js";
