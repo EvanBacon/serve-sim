@@ -116,49 +116,65 @@ export class NativeHid {
     this.handle = new (load().SimHID)(udid);
   }
 
+  // The N-API bindings throw synchronously when a JS value can't be coerced to
+  // the native parameter type (e.g. a touch with a non-string `type` →
+  // "Could not convert parameter 0 to type String"). HID now runs in-process,
+  // so an unhandled throw here crashes the whole server — and if it lands
+  // mid-gesture, the guest is left with a stuck finger that wedges input until
+  // the sim reboots. The spawned helper used to absorb this in its own process;
+  // `guard` restores that isolation by swallowing malformed-input errors.
+  private guard<T>(op: string, fn: () => T, fallback: T): T {
+    try {
+      return fn();
+    } catch (err) {
+      console.error(`[hid] ${op} ignored bad input:`, err instanceof Error ? err.message : err);
+      return fallback;
+    }
+  }
+
   touch(type: TouchType, x: number, y: number, w: number, h: number, edge = 0): void {
-    this.handle.touch(type, x, y, w, h, edge);
+    this.guard("touch", () => this.handle.touch(type, x, y, w, h, edge), undefined);
   }
 
   multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, h: number): void {
-    this.handle.multiTouch(type, x1, y1, x2, y2, w, h);
+    this.guard("multiTouch", () => this.handle.multiTouch(type, x1, y1, x2, y2, w, h), undefined);
   }
 
   button(button: string): void {
-    this.handle.button(button);
+    this.guard("button", () => this.handle.button(button), undefined);
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): void {
-    this.handle.buttonHid(page, usage, phase);
+    this.guard("buttonHid", () => this.handle.buttonHid(page, usage, phase), undefined);
   }
 
   key(type: KeyType, usage: number): void {
-    this.handle.key(type, usage);
+    this.guard("key", () => this.handle.key(type, usage), undefined);
   }
 
   /** anchorX/anchorY default to screen center when omitted. */
   scroll(dx: number, dy: number, w: number, h: number, anchorX?: number, anchorY?: number): void {
-    this.handle.scroll(dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h);
+    this.guard("scroll", () => this.handle.scroll(dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h), undefined);
   }
 
   digitalCrown(delta: number): void {
-    this.handle.digitalCrown(delta);
+    this.guard("digitalCrown", () => this.handle.digitalCrown(delta), undefined);
   }
 
   orientation(orientation: number): boolean {
-    return this.handle.orientation(orientation);
+    return this.guard("orientation", () => this.handle.orientation(orientation), false);
   }
 
   memoryWarning(): void {
-    this.handle.memoryWarning();
+    this.guard("memoryWarning", () => this.handle.memoryWarning(), undefined);
   }
 
   softwareKeyboard(): void {
-    this.handle.softwareKeyboard();
+    this.guard("softwareKeyboard", () => this.handle.softwareKeyboard(), undefined);
   }
 
   caDebug(name: string, enabled: boolean): boolean {
-    return this.handle.caDebug(name, enabled);
+    return this.guard("caDebug", () => this.handle.caDebug(name, enabled), false);
   }
 }
 
