@@ -116,6 +116,14 @@ jobs:
           open -ga Simulator || true
           echo "udid=$UDID" >> $GITHUB_OUTPUT
 
+      # The serve-sim e2e tests load the in-process native addon
+      # (dist/native/serve-sim-native.node), so build it before running them.
+      # (The publish step below rebuilds after the version bump to embed it.)
+      - name: Build serve-sim
+        if: steps.changes.outputs.sim == 'true'
+        run: bun run build.ts
+        working-directory: packages/serve-sim
+
       - name: serve-sim tests (idle floor regression)
         if: steps.changes.outputs.sim == 'true'
         run: bun test packages/serve-sim/src/__tests__/
