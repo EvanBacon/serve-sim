@@ -15,8 +15,20 @@
  * those exactly so the existing browser client is unchanged.
  */
 import type { IncomingMessage, ServerResponse } from "http";
-import type { WebSocket } from "ws";
 import { NativeCapture, NativeHid, Orientation, axDescribe, axFrontmost, type NativeFrame } from "./native";
+
+/**
+ * Minimal WebSocket surface the HID input channel needs. Satisfied by both the
+ * `ws` library and the raw-socket adapter the middleware uses under Bun (where
+ * `ws`'s server-side handshake doesn't flush). Messages arrive as binary
+ * `[tag][JSON]` frames; `send` writes a binary frame.
+ */
+export interface HidSocket {
+  send(data: Buffer): void;
+  on(event: "message", cb: (data: Buffer) => void): void;
+  on(event: "close" | "error", cb: () => void): void;
+  close(): void;
+}
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -68,7 +80,7 @@ export class DeviceSession {
   private cachedAvccDescription: Buffer | null = null;
   private readonly mjpegClients = new Set<ServerResponse>();
   private readonly avccClients = new Set<ServerResponse>();
-  private readonly hidSockets = new Set<WebSocket>();
+  private readonly hidSockets = new Set<HidSocket>();
 
   constructor(public readonly udid: string) {
     this.hid = new NativeHid(udid);
@@ -188,7 +200,7 @@ export class DeviceSession {
 
   // ── HID WebSocket ────────────────────────────────────────────────────────
 
-  attachHidSocket(ws: WebSocket): void {
+  attachHidSocket(ws: HidSocket): void {
     this.hidSockets.add(ws);
     const cfg = this.configFrame();
     if (cfg) ws.send(cfg); // seed dimensions/orientation, replacing the old poll

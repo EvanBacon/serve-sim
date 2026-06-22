@@ -10,9 +10,9 @@ import type { Socket } from "net";
 // helper/devtools proxy. Node only exposes a global `WebSocket` on newer LTS
 // lines, and `serve-sim/middleware` is embedded in third-party dev servers, so
 // importing the dependency keeps the proxy working regardless of runtime.
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
-import { getDeviceSession } from "./device-session";
+import { getDeviceSession, type HidSocket } from "./device-session";
 import { axFrontmost } from "./native";
 import { inProcessServeSimState, writeServeSimState } from "./state";
 import { debugMw } from "./debug";
@@ -645,10 +645,64 @@ export async function startDeviceInProcess(udid: string, port: number, base: str
   return null;
 }
 
-// Singleton noServer ws upgrader for in-process HID sockets.
-let hidWsServer: WebSocketServer | undefined;
+/**
+ * Adapt a raw upgraded socket into the minimal HidSocket the DeviceSession
+ * needs. We do the WebSocket framing by hand (same helpers as the DevTools
+ * bridge) rather than via `ws`'s server, whose handshake doesn't flush under
+ * Bun — and the production CLI is a bun-compiled binary.
+ */
+function rawHidSocket(socket: Socket, head: Buffer): HidSocket {
+  const messageCbs: Array<(d: Buffer) => void> = [];
+  const closeCbs: Array<() => void> = [];
+  let buffered = Buffer.from(head);
+  let closed = false;
 
-/** Upgrade an in-process HID `/ws` socket onto a DeviceSession. Returns false to fall back. */
+  const fireClose = () => {
+    if (closed) return;
+    closed = true;
+    for (const cb of closeCbs) cb();
+  };
+  const shutdown = () => {
+    fireClose();
+    try { socket.end(websocketFrame(0x8, Buffer.alloc(0))); } catch {}
+    try { socket.destroy(); } catch {}
+  };
+
+  const drain = () => {
+    for (;;) {
+      let frame: ParsedWebSocketFrame | null;
+      try {
+        frame = parseWebSocketFrame(buffered);
+      } catch {
+        shutdown();
+        return;
+      }
+      if (!frame) return;
+      buffered = buffered.subarray(frame.consumed);
+      if (frame.opcode === 0x8) return shutdown();       // close
+      if (frame.opcode === 0x9) { sendBrowserFrame(socket, 0xa, frame.payload); continue; } // ping → pong
+      if (frame.opcode === 0x1 || frame.opcode === 0x2) {
+        for (const cb of messageCbs) cb(frame.payload);
+      }
+    }
+  };
+
+  socket.on("data", (chunk: Buffer) => { buffered = Buffer.concat([buffered, chunk]); drain(); });
+  socket.on("close", fireClose);
+  socket.on("error", fireClose);
+  if (head.length) drain();
+
+  return {
+    send(data: Buffer) { sendBrowserFrame(socket, 0x2, data); },
+    on(event: "message" | "close" | "error", cb: (data: Buffer) => void) {
+      if (event === "message") messageCbs.push(cb);
+      else closeCbs.push(cb as () => void);
+    },
+    close: shutdown,
+  };
+}
+
+/** Upgrade an in-process HID `/ws` socket onto a DeviceSession. Returns false when no session can serve it. */
 function attachHidInProcess(req: SimReq, socket: Socket, head: Buffer, device: string | null): boolean {
   if (!device) return false;
   let session;
@@ -657,8 +711,21 @@ function attachHidInProcess(req: SimReq, socket: Socket, head: Buffer, device: s
   } catch {
     return false;
   }
-  if (!hidWsServer) hidWsServer = new WebSocketServer({ noServer: true });
-  hidWsServer.handleUpgrade(req, socket, head, (ws) => session.attachHidSocket(ws));
+  const key = req.headers["sec-websocket-key"];
+  if (typeof key !== "string") {
+    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+    return true;
+  }
+  const accept = createHash("sha1").update(key + WS_ACCEPT_GUID).digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+    "Upgrade: websocket\r\n" +
+    "Connection: Upgrade\r\n" +
+    `Sec-WebSocket-Accept: ${accept}\r\n` +
+    "\r\n",
+  );
+  socket.resume();
+  session.attachHidSocket(rawHidSocket(socket, head));
   return true;
 }
 
