@@ -1,7 +1,7 @@
 /**
  * In-process device session — the replacement for the spawned serve-sim-bin
  * helper. One session per booted simulator owns a NativeCapture + NativeHid and
- * serves the same wire endpoints the helper's Swifter server did, byte-for-byte:
+ * serves the same wire endpoints the helper's HTTP server did, byte-for-byte:
  *
  *   /stream.mjpeg  multipart/x-mixed-replace JPEG fan-out (?raw=1 → octet-stream)
  *   /stream.avcc   length-prefixed AVCC envelopes (seed + decoder config replay)
@@ -11,8 +11,8 @@
  *   /ax            axe-shaped accessibility JSON (one-shot)
  *   /foreground    { bundleId, pid }
  *
- * Replaces HTTPServer.swift + ClientManager.swift; the framing here mirrors
- * those exactly so the existing browser client is unchanged.
+ * Replaces the helper's HTTP/client layer; the framing here mirrors the
+ * original byte-for-byte so the existing browser client is unchanged.
  */
 import type { IncomingMessage, ServerResponse } from "http";
 import { NativeCapture, NativeHid, Orientation, axDescribeAsync, axFrontmostAsync, type NativeFrame } from "./native";
@@ -47,9 +47,10 @@ const AVCC_SEED_TAG = 0x04;
 // WS server→client screen-config push (ClientManager.wsMsgConfig).
 const WS_MSG_CONFIG = 0x82;
 
-function mjpegChunk(jpeg: Buffer): Buffer {
-  const header = `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`;
-  return Buffer.concat([Buffer.from(header, "ascii"), jpeg, Buffer.from("\r\n", "ascii")]);
+const MJPEG_TRAILER = Buffer.from("\r\n", "ascii");
+
+function mjpegHeader(jpegLength: number): Buffer {
+  return Buffer.from(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpegLength}\r\n\r\n`, "ascii");
 }
 
 function avccSeed(jpeg: Buffer): Buffer {
@@ -115,12 +116,24 @@ export class DeviceSession {
         this.broadcastConfig();
       }
       if (this.mjpegClients.size === 0) return;
-      const chunk = mjpegChunk(f.data);
-      for (const res of this.mjpegClients) this.writeFrame(res, chunk);
+      // Build only the small header once; the JPEG itself is written by
+      // reference to every client, avoiding a full-frame copy per frame.
+      const header = mjpegHeader(f.data.length);
+      for (const res of this.mjpegClients) this.writeMjpegFrame(res, header, f.data);
     } else {
       if (f.isDescription) this.cachedAvccDescription = f.data;
       for (const res of this.avccClients) this.writeFrame(res, f.data);
     }
+  }
+
+  /** Write a multipart JPEG part (header + shared frame + boundary) without copying the JPEG. */
+  private writeMjpegFrame(res: ServerResponse, header: Buffer, jpeg: Buffer): void {
+    if (res.writableEnded || res.writableLength > MAX_CLIENT_BACKLOG) return;
+    res.cork();
+    res.write(header);
+    res.write(jpeg);
+    res.write(MJPEG_TRAILER);
+    res.uncork();
   }
 
   /** Write a frame to a streaming client, dropping it if the socket is backed up. */
@@ -140,7 +153,7 @@ export class DeviceSession {
       ...CORS,
     });
     this.mjpegClients.add(res);
-    if (this.latestJpeg) res.write(mjpegChunk(this.latestJpeg)); // paint immediately
+    if (this.latestJpeg) this.writeMjpegFrame(res, mjpegHeader(this.latestJpeg.length), this.latestJpeg); // paint immediately
     const drop = () => this.mjpegClients.delete(res);
     res.on("close", drop);
     res.on("error", drop);
@@ -176,29 +189,24 @@ export class DeviceSession {
     this.sendJson(res, 200, { status: "ok" });
   }
 
-  async handleAx(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const json = await axDescribeAsync(this.udid);
-      if (res.writableEnded) return;
-      this.sendJsonString(res, 200, json);
-    } catch (err) {
-      if (res.writableEnded) return;
-      this.sendJson(res, 503, {
-        error: "ax_unavailable",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
+  handleAx(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    return this.serveAxJson(res, () => axDescribeAsync(this.udid), "ax_unavailable");
   }
 
-  async handleForeground(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  handleForeground(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    return this.serveAxJson(res, () => axFrontmostAsync(this.udid), "foreground_unavailable");
+  }
+
+  /** Run a native AX probe and stream its JSON, or 503 with `errorCode` if it's not ready. */
+  private async serveAxJson(res: ServerResponse, probe: () => Promise<string>, errorCode: string): Promise<void> {
     try {
-      const json = await axFrontmostAsync(this.udid);
+      const json = await probe();
       if (res.writableEnded) return;
       this.sendJsonString(res, 200, json);
     } catch (err) {
       if (res.writableEnded) return;
       this.sendJson(res, 503, {
-        error: "foreground_unavailable",
+        error: errorCode,
         message: err instanceof Error ? err.message : String(err),
       });
     }
@@ -349,18 +357,10 @@ export function getDeviceSession(udid: string): DeviceSession {
   return session;
 }
 
-export function peekDeviceSession(udid: string): DeviceSession | undefined {
-  return sessions.get(udid);
-}
-
 export function closeDeviceSession(udid: string): void {
   const session = sessions.get(udid);
   if (session) {
     session.close();
     sessions.delete(udid);
   }
-}
-
-export function listDeviceSessions(): string[] {
-  return [...sessions.keys()];
 }

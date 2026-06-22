@@ -27,7 +27,6 @@ trap 'rm -rf "$TMP"' EXIT
 # so internal symbols resolve across files.
 STREAM="$HERE/../SimStreamHelper"
 SWIFT_SRC=(
-  "$HERE/sim-native.swift"
   "$HERE/sim-hid.swift"
   "$HERE/sim-capture.swift"
   "$HERE/sim-ax.swift"

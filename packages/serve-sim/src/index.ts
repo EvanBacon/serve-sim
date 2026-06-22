@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unl
 import { createHash } from "crypto";
 import { networkInterfaces } from "os";
 import { join, resolve } from "path";
-import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState } from "./state";
+import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, type ServeSimDeviceState } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
@@ -37,14 +37,7 @@ function resolveVersion(): string {
 // real file on disk; inside a compiled binary it points at bun's virtual FS
 // and we extract the bytes to a cached location on first use.
 
-interface ServerState {
-  pid: number;
-  port: number;
-  device: string;
-  url: string;
-  streamUrl: string;
-  wsUrl: string;
-}
+type ServerState = ServeSimDeviceState;
 
 function ensureStateDir() {
   if (!existsSync(STATE_DIR)) {
@@ -318,7 +311,6 @@ async function ensureBooted(udid: string): Promise<void> {
 
 // ─── Preview server lifecycle ───
 
-/** Boot + spawn helper with retry logic. Returns pid on success, exits on failure. */
 /** Resolve the command to re-exec this CLI (compiled binary or `node …js`). */
 function reExecArgs(extra: string[]): { command: string; args: string[] } {
   // Compiled standalone binary: argv[0] is the serve-sim binary itself.

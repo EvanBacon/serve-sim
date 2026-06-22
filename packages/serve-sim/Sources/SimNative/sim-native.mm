@@ -2,8 +2,8 @@
 //
 // This is the in-process replacement boundary for the spawned serve-sim-bin
 // helper. It exposes the SimStreamHelper logic (reused verbatim, behind @_cdecl
-// shims in sim-hid.swift / sim-native.swift) as JS functions. HID is the first
-// real surface; frame capture + encoders follow.
+// shims in sim-hid.swift / sim-capture.swift / sim-ax.swift) as JS functions:
+// HID injection, frame capture + encoders, and accessibility dumps.
 
 #include <node_api.h>
 #include <cstdlib>
@@ -12,9 +12,6 @@
 
 // ─── Swift @_cdecl exports ───────────────────────────────────────────────
 extern "C" {
-char *sim_native_version(void);
-int sim_native_add(int a, int b);
-
 void *sim_hid_create(const char *udid, char **errOut);
 void sim_hid_destroy(void *handle);
 void sim_hid_touch(void *handle, const char *type, double x, double y,
@@ -101,28 +98,6 @@ static void *GetHandle(napi_env env, napi_value v) {
   size_t argc = (n);                                                      \
   napi_value argv[(n)];                                                   \
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr))
-
-// ─── MVP self-test functions ─────────────────────────────────────────────
-static napi_value Version(napi_env env, napi_callback_info info) {
-  char *banner = sim_native_version();
-  napi_value result;
-  napi_status status =
-      napi_create_string_utf8(env, banner ? banner : "", NAPI_AUTO_LENGTH, &result);
-  free(banner);
-  if (status != napi_ok) {
-    napi_throw_error(env, nullptr, "create_string failed");
-    return nullptr;
-  }
-  return result;
-}
-
-static napi_value Add(napi_env env, napi_callback_info info) {
-  READ_ARGS(env, info, 2);
-  napi_value result;
-  NAPI_CALL(env, napi_create_int32(env, sim_native_add(GetInt32(env, argv[0]),
-                                                       GetInt32(env, argv[1])), &result));
-  return result;
-}
 
 // ─── HID surface ─────────────────────────────────────────────────────────
 static void HidFinalize(napi_env, void *handle, void *) {
@@ -412,41 +387,6 @@ static napi_value CaptureStop(napi_env env, napi_callback_info info) {
 }
 
 // ─── Accessibility surface ───────────────────────────────────────────────
-// Shared by axDescribe/axFrontmost: call the Swift dump, return its JSON string,
-// or throw with the Swift error message.
-static napi_value AxDump(napi_env env, napi_callback_info info,
-                         char *(*fn)(const char *, char **)) {
-  size_t argc = 1;
-  napi_value argv[1];
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr));
-  std::string udid = GetString(env, argv[0]);
-  char *err = nullptr;
-  char *json = fn(udid.c_str(), &err);
-  if (!json) {
-    napi_throw_error(env, nullptr, err ? err : "accessibility query failed");
-    free(err);
-    return nullptr;
-  }
-  napi_value result;
-  napi_status status = napi_create_string_utf8(env, json, NAPI_AUTO_LENGTH, &result);
-  free(json);
-  if (status != napi_ok) {
-    napi_throw_error(env, nullptr, "create_string failed");
-    return nullptr;
-  }
-  return result;
-}
-
-// axDescribe(udid): string — axe-shaped accessibility-tree JSON.
-static napi_value AxDescribe(napi_env env, napi_callback_info info) {
-  return AxDump(env, info, sim_ax_describe);
-}
-
-// axFrontmost(udid): string — `{bundleId, pid}` JSON for the visible app.
-static napi_value AxFrontmost(napi_env env, napi_callback_info info) {
-  return AxDump(env, info, sim_ax_frontmost);
-}
-
 struct AxAsyncRequest {
   napi_async_work work;
   napi_deferred deferred;
@@ -543,8 +483,6 @@ static napi_value AxFrontmostAsync(napi_env env, napi_callback_info info) {
 
 static napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor props[] = {
-      {"version", nullptr, Version, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"add", nullptr, Add, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"hidCreate", nullptr, HidCreate, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"hidTouch", nullptr, HidTouch, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"hidMultiTouch", nullptr, HidMultiTouch, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -563,8 +501,6 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"captureRequestKeyframe", nullptr, CaptureRequestKeyframe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureScreenSize", nullptr, CaptureScreenSize, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"captureStop", nullptr, CaptureStop, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"axDescribe", nullptr, AxDescribe, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"axFrontmost", nullptr, AxFrontmost, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"axDescribeAsync", nullptr, AxDescribeAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"axFrontmostAsync", nullptr, AxFrontmostAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
   };

@@ -17,8 +17,6 @@ const require = createRequire(import.meta.url);
 type Handle = unknown;
 
 interface NativeAddon {
-  version(): string;
-  add(a: number, b: number): number;
   hidCreate(udid: string): Handle;
   hidTouch(h: Handle, type: TouchType, x: number, y: number, w: number, hh: number, edge: number): void;
   hidMultiTouch(h: Handle, type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, hh: number): void;
@@ -37,8 +35,6 @@ interface NativeAddon {
   captureRequestKeyframe(h: Handle): void;
   captureScreenSize(h: Handle): { width: number; height: number };
   captureStop(h: Handle): void;
-  axDescribe(udid: string): string;
-  axFrontmost(udid: string): string;
   axDescribeAsync(udid: string): Promise<string>;
   axFrontmostAsync(udid: string): Promise<string>;
 }
@@ -208,30 +204,15 @@ export class NativeCapture {
 }
 
 /**
- * Accessibility-tree dump for `udid`, as an axe-shaped JSON string (the
- * src/ax.ts normalizer consumes it unchanged). Throws if the sim's AX service
- * isn't reachable yet.
+ * Async accessibility-tree dump for `udid`, as an axe-shaped JSON string (the
+ * src/ax.ts normalizer consumes it unchanged). Runs native AX work off the JS
+ * event loop. Rejects if the sim's AX service isn't reachable yet.
  */
-export function axDescribe(udid: string): string {
-  return load().axDescribe(udid);
-}
-
-/** Async accessibility-tree dump. Runs native AX work off the JS event loop. */
 export function axDescribeAsync(udid: string): Promise<string> {
   return load().axDescribeAsync(udid);
 }
 
-/** Frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */
-export function axFrontmost(udid: string): string {
-  return load().axFrontmost(udid);
-}
-
-/** Async frontmost-app probe. Runs native AX work off the JS event loop. */
+/** Async frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */
 export function axFrontmostAsync(udid: string): Promise<string> {
   return load().axFrontmostAsync(udid);
-}
-
-/** Native addon version banner — also a cheap load smoke-test. */
-export function nativeVersion(): string {
-  return load().version();
 }

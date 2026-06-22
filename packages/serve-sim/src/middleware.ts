@@ -14,7 +14,7 @@ import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { getDeviceSession, type HidSocket } from "./device-session";
 import { axFrontmostAsync } from "./native";
-import { inProcessServeSimState, writeServeSimState } from "./state";
+import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
@@ -97,14 +97,8 @@ type ReleaseRequestBody = { targetId?: string };
 type HighlightRequestBody = { targetId?: string; on?: boolean };
 type ExecRequestBody = { command?: string };
 
-export interface ServeSimState {
-  pid: number;
-  port: number;
-  device: string;
-  url: string;
-  streamUrl: string;
-  wsUrl: string;
-}
+/** Re-exported alias for the canonical device-state record in `./state`. */
+export type ServeSimState = ServeSimDeviceState;
 
 const axStreamerCache = createAxStreamerCache();
 
@@ -496,15 +490,18 @@ function webSocketBinary(payload: Buffer<ArrayBufferLike>): Uint8Array<ArrayBuff
   return bytes;
 }
 
-function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstreamUrl: string): void {
+/**
+ * Complete the server side of a WebSocket upgrade by hand (the `ws` server's
+ * handshake doesn't flush under Bun). Writes the 101 response and resumes the
+ * socket on success; on a missing key writes 400 and returns false.
+ */
+function writeWebSocketAccept(req: SimReq, socket: Socket): boolean {
   const key = req.headers["sec-websocket-key"];
   if (typeof key !== "string") {
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
-    return;
+    return false;
   }
-  const accept = createHash("sha1")
-    .update(key + WS_ACCEPT_GUID)
-    .digest("base64");
+  const accept = createHash("sha1").update(key + WS_ACCEPT_GUID).digest("base64");
   socket.write(
     "HTTP/1.1 101 Switching Protocols\r\n" +
     "Upgrade: websocket\r\n" +
@@ -513,6 +510,11 @@ function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstre
     "\r\n",
   );
   socket.resume();
+  return true;
+}
+
+function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstreamUrl: string): void {
+  if (!writeWebSocketAccept(req, socket)) return;
 
   const upstream = new WebSocket(upstreamUrl);
   upstream.binaryType = "arraybuffer";
@@ -590,9 +592,8 @@ function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstre
 
 /**
  * Serve a helper endpoint from an in-process DeviceSession (NativeCapture +
- * NativeHid) instead of proxying to a spawned serve-sim-bin. Returns false when
- * no session can serve it (device not booted, or an endpoint this path doesn't
- * own) so the caller can fall back to the legacy spawned-helper proxy.
+ * NativeHid). Returns false when no session can serve it (device not booted, or
+ * an endpoint this path doesn't own) so the caller can respond 404.
  */
 function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, upstreamPath: string): boolean {
   if (!device) return false;
@@ -600,7 +601,7 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
   try {
     session = getDeviceSession(device);
   } catch {
-    return false; // not booted / capture unavailable → fall back to proxy
+    return false; // not booted / capture unavailable → 404
   }
   switch (upstreamPath.split("?")[0]) {
     case "/stream.mjpeg": session.handleMjpeg(req, res); return true;
@@ -711,20 +712,7 @@ function attachHidInProcess(req: SimReq, socket: Socket, head: Buffer, device: s
   } catch {
     return false;
   }
-  const key = req.headers["sec-websocket-key"];
-  if (typeof key !== "string") {
-    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
-    return true;
-  }
-  const accept = createHash("sha1").update(key + WS_ACCEPT_GUID).digest("base64");
-  socket.write(
-    "HTTP/1.1 101 Switching Protocols\r\n" +
-    "Upgrade: websocket\r\n" +
-    "Connection: Upgrade\r\n" +
-    `Sec-WebSocket-Accept: ${accept}\r\n` +
-    "\r\n",
-  );
-  socket.resume();
+  if (!writeWebSocketAccept(req, socket)) return true; // bad request handled
   session.attachHidSocket(rawHidSocket(socket, head));
   return true;
 }
