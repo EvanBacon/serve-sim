@@ -14,29 +14,37 @@ import { fileURLToPath } from "url";
 
 const require = createRequire(import.meta.url);
 
-type Handle = unknown;
+// The addon exposes two NodeClasses (SimHID, SimCapture) plus two async
+// functions. NodeClass instances clean up their native resources when the JS
+// handle is garbage-collected (Swift `deinit`), so there are no explicit
+// destroy/free calls here.
+interface SimHIDHandle {
+  touch(type: TouchType, x: number, y: number, w: number, hh: number, edge: number): void;
+  multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, hh: number): void;
+  button(button: string): void;
+  buttonHid(page: number, usage: number, phase: ButtonPhase): void;
+  key(type: KeyType, usage: number): void;
+  scroll(dx: number, dy: number, anchorX: number, anchorY: number, w: number, hh: number): void;
+  digitalCrown(delta: number): void;
+  orientation(orientation: number): boolean;
+  memoryWarning(): void;
+  softwareKeyboard(): void;
+  caDebug(name: string, enabled: boolean): boolean;
+}
+
+interface SimCaptureHandle {
+  start(): void;
+  setAvccActive(active: boolean): void;
+  requestKeyframe(): void;
+  screenSize(): { width: number; height: number };
+  stop(): void;
+}
 
 interface NativeAddon {
-  hidCreate(udid: string): Handle;
-  hidTouch(h: Handle, type: TouchType, x: number, y: number, w: number, hh: number, edge: number): void;
-  hidMultiTouch(h: Handle, type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, hh: number): void;
-  hidButton(h: Handle, button: string, udid: string): void;
-  hidButtonHid(h: Handle, page: number, usage: number, phase: ButtonPhase): void;
-  hidKey(h: Handle, type: KeyType, usage: number): void;
-  hidScroll(h: Handle, dx: number, dy: number, anchorX: number, anchorY: number, w: number, hh: number): void;
-  hidDigitalCrown(h: Handle, delta: number): void;
-  hidOrientation(h: Handle, orientation: number): boolean;
-  hidMemoryWarning(h: Handle): void;
-  hidSoftwareKeyboard(h: Handle): void;
-  hidCaDebug(h: Handle, name: string, enabled: boolean): boolean;
-  captureCreate(udid: string, onFrame: RawFrameCallback): Handle;
-  captureStart(h: Handle): void;
-  captureSetAvccActive(h: Handle, active: boolean): void;
-  captureRequestKeyframe(h: Handle): void;
-  captureScreenSize(h: Handle): { width: number; height: number };
-  captureStop(h: Handle): void;
-  axDescribeAsync(udid: string): Promise<string>;
-  axFrontmostAsync(udid: string): Promise<string>;
+  SimHID: new (udid: string) => SimHIDHandle;
+  SimCapture: new (udid: string, onFrame: RawFrameCallback) => SimCaptureHandle;
+  axDescribe(udid: string): Promise<string>;
+  axFrontmost(udid: string): Promise<string>;
 }
 
 // (codec, data, width, height, flags) — codec 0=MJPEG 1=AVCC; flags bit0=desc bit1=keyframe.
@@ -100,57 +108,55 @@ function load(): NativeAddon {
  * the spawned helper used to handle, but as direct native calls.
  */
 export class NativeHid {
-  private readonly n: NativeAddon;
-  private readonly handle: Handle;
+  private readonly handle: SimHIDHandle;
 
-  constructor(private readonly udid: string) {
-    this.n = load();
-    this.handle = this.n.hidCreate(udid);
+  constructor(udid: string) {
+    this.handle = new (load().SimHID)(udid);
   }
 
   touch(type: TouchType, x: number, y: number, w: number, h: number, edge = 0): void {
-    this.n.hidTouch(this.handle, type, x, y, w, h, edge);
+    this.handle.touch(type, x, y, w, h, edge);
   }
 
   multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, h: number): void {
-    this.n.hidMultiTouch(this.handle, type, x1, y1, x2, y2, w, h);
+    this.handle.multiTouch(type, x1, y1, x2, y2, w, h);
   }
 
   button(button: string): void {
-    this.n.hidButton(this.handle, button, this.udid);
+    this.handle.button(button);
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): void {
-    this.n.hidButtonHid(this.handle, page, usage, phase);
+    this.handle.buttonHid(page, usage, phase);
   }
 
   key(type: KeyType, usage: number): void {
-    this.n.hidKey(this.handle, type, usage);
+    this.handle.key(type, usage);
   }
 
   /** anchorX/anchorY default to screen center when omitted. */
   scroll(dx: number, dy: number, w: number, h: number, anchorX?: number, anchorY?: number): void {
-    this.n.hidScroll(this.handle, dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h);
+    this.handle.scroll(dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h);
   }
 
   digitalCrown(delta: number): void {
-    this.n.hidDigitalCrown(this.handle, delta);
+    this.handle.digitalCrown(delta);
   }
 
   orientation(orientation: number): boolean {
-    return this.n.hidOrientation(this.handle, orientation);
+    return this.handle.orientation(orientation);
   }
 
   memoryWarning(): void {
-    this.n.hidMemoryWarning(this.handle);
+    this.handle.memoryWarning();
   }
 
   softwareKeyboard(): void {
-    this.n.hidSoftwareKeyboard(this.handle);
+    this.handle.softwareKeyboard();
   }
 
   caDebug(name: string, enabled: boolean): boolean {
-    return this.n.hidCaDebug(this.handle, name, enabled);
+    return this.handle.caDebug(name, enabled);
   }
 }
 
@@ -161,12 +167,10 @@ export class NativeHid {
  * callback on the JS thread (marshalled from the native encode thread).
  */
 export class NativeCapture {
-  private readonly n: NativeAddon;
-  private readonly handle: Handle;
+  private readonly handle: SimCaptureHandle;
 
   constructor(udid: string, onFrame: (frame: NativeFrame) => void) {
-    this.n = load();
-    this.handle = this.n.captureCreate(udid, (codec, data, width, height, flags) => {
+    this.handle = new (load().SimCapture)(udid, (codec, data, width, height, flags) => {
       onFrame({
         codec: codec === CODEC_AVCC ? "avcc" : "mjpeg",
         data,
@@ -180,26 +184,26 @@ export class NativeCapture {
 
   /** Begin capturing. Throws if the device isn't booted. */
   start(): void {
-    this.n.captureStart(this.handle);
+    this.handle.start();
   }
 
   /** Enable/disable H.264 encoding (forces an IDR on the next frame when enabled). */
   setAvccActive(active: boolean): void {
-    this.n.captureSetAvccActive(this.handle, active);
+    this.handle.setAvccActive(active);
   }
 
   /** Force the next H.264 frame to a keyframe (e.g. when a new AVCC viewer joins). */
   requestKeyframe(): void {
-    this.n.captureRequestKeyframe(this.handle);
+    this.handle.requestKeyframe();
   }
 
   screenSize(): { width: number; height: number } {
-    return this.n.captureScreenSize(this.handle);
+    return this.handle.screenSize();
   }
 
   /** Halt frame production. Full teardown happens when this object is GC'd. */
   stop(): void {
-    this.n.captureStop(this.handle);
+    this.handle.stop();
   }
 }
 
@@ -209,10 +213,10 @@ export class NativeCapture {
  * event loop. Rejects if the sim's AX service isn't reachable yet.
  */
 export function axDescribeAsync(udid: string): Promise<string> {
-  return load().axDescribeAsync(udid);
+  return load().axDescribe(udid);
 }
 
 /** Async frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */
 export function axFrontmostAsync(udid: string): Promise<string> {
-  return load().axFrontmostAsync(udid);
+  return load().axFrontmost(udid);
 }

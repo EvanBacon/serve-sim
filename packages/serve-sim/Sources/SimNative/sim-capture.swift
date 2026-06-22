@@ -2,30 +2,26 @@ import Foundation
 import CoreVideo
 import CoreMedia
 
-// C-ABI wrapper around the existing FrameCapture + VideoEncoder + H264Encoder,
-// reused verbatim from SimStreamHelper. Replicates main.swift's frameHandler:
-// MJPEG always encodes while clients exist; H.264 runs only while AVCC is active.
-// Encoded bytes (JPEG, or natively-framed AVCC envelopes) are handed to the
-// Objective-C++ N-API layer through a @convention(c) callback, which marshals
-// them onto the JS thread via a threadsafe function.
+// The capture + encode engine, reused verbatim from SimStreamHelper. Replicates
+// main.swift's frameHandler: MJPEG always encodes while clients exist; H.264 runs
+// only while AVCC is active. Encoded bytes (JPEG, or natively-framed AVCC
+// envelopes) are handed back through a Swift closure on a native encode thread;
+// the node-swift binding (sim-module.swift) marshals them onto the JS thread via
+// a NodeAsyncQueue (threadsafe function).
 
-/// (ctx, codec, dataPtr, len, width, height, flags) -> Void.
-/// codec: 0 = MJPEG, 1 = AVCC. flags (AVCC): bit0 = description, bit1 = keyframe.
-/// The data pointer is only valid for the duration of the call — the N-API layer
-/// copies before returning.
-public typealias SimFrameCallback = @convention(c) (
-    UnsafeMutableRawPointer?, Int32, UnsafePointer<UInt8>?, Int, Int32, Int32, Int32
-) -> Void
+/// (codec, data, width, height, flags) -> Void, invoked on a native encode
+/// thread. codec: 0 = MJPEG, 1 = AVCC. flags (AVCC): bit0 = description,
+/// bit1 = keyframe. `data` is a freshly-copied value safe to retain.
+typealias SimFrameCallback = (Int32, Data, Int32, Int32, Int32) -> Void
 
-final class SimCapture {
+final class CaptureEngine {
     static let codecMJPEG: Int32 = 0
     static let codecAVCC: Int32 = 1
     static let flagDescription: Int32 = 1 << 0
     static let flagKeyframe: Int32 = 1 << 1
 
     private let deviceUDID: String
-    private let cb: SimFrameCallback
-    private let ctx: UnsafeMutableRawPointer?
+    private let onFrame: SimFrameCallback
 
     private let frameCapture = FrameCapture()
     private let videoEncoder = VideoEncoder(quality: 0.7)
@@ -47,10 +43,9 @@ final class SimCapture {
     private var started = false
     private var stopped = false
 
-    init(deviceUDID: String, cb: @escaping SimFrameCallback, ctx: UnsafeMutableRawPointer?) {
+    init(deviceUDID: String, onFrame: @escaping SimFrameCallback) {
         self.deviceUDID = deviceUDID
-        self.cb = cb
-        self.ctx = ctx
+        self.onFrame = onFrame
 
         h264Encoder.onEncoded = { [weak self] encoded in
             guard let self else { return }
@@ -69,14 +64,11 @@ final class SimCapture {
         }
     }
 
-    /// Hand encoded bytes to the N-API layer. Gated by `stopped` so no callback
-    /// fires once teardown has begun.
+    /// Hand encoded bytes to the binding. Gated by `stopped` so no callback fires
+    /// once teardown has begun.
     private func emit(codec: Int32, data: Data, flags: Int32) {
         if stopped { return }
-        let w = Int32(screenWidth), h = Int32(screenHeight)
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            cb(ctx, codec, raw.bindMemory(to: UInt8.self).baseAddress, data.count, w, h, flags)
-        }
+        onFrame(codec, data, Int32(screenWidth), Int32(screenHeight), flags)
     }
 
     func start() throws {
@@ -227,69 +219,4 @@ final class SimCapture {
         videoEncoder.stop()
         h264Encoder.stop()
     }
-}
-
-// MARK: - C ABI
-
-private func capture(_ handle: UnsafeMutableRawPointer) -> SimCapture {
-    Unmanaged<SimCapture>.fromOpaque(handle).takeUnretainedValue()
-}
-
-@_cdecl("sim_capture_create")
-public func sim_capture_create(
-    _ udid: UnsafePointer<CChar>,
-    _ cb: @escaping SimFrameCallback,
-    _ ctx: UnsafeMutableRawPointer?
-) -> UnsafeMutableRawPointer {
-    let cap = SimCapture(deviceUDID: String(cString: udid), cb: cb, ctx: ctx)
-    return Unmanaged.passRetained(cap).toOpaque()
-}
-
-@_cdecl("sim_capture_start")
-public func sim_capture_start(
-    _ handle: UnsafeMutableRawPointer,
-    _ errOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
-) -> Bool {
-    do {
-        try capture(handle).start()
-        return true
-    } catch {
-        errOut.pointee = strdup(error.localizedDescription)
-        return false
-    }
-}
-
-@_cdecl("sim_capture_set_avcc_active")
-public func sim_capture_set_avcc_active(_ handle: UnsafeMutableRawPointer, _ active: Bool) {
-    capture(handle).setAvccActive(active)
-}
-
-@_cdecl("sim_capture_request_keyframe")
-public func sim_capture_request_keyframe(_ handle: UnsafeMutableRawPointer) {
-    capture(handle).requestKeyframe()
-}
-
-@_cdecl("sim_capture_screen_size")
-public func sim_capture_screen_size(
-    _ handle: UnsafeMutableRawPointer,
-    _ outW: UnsafeMutablePointer<Int32>,
-    _ outH: UnsafeMutablePointer<Int32>
-) {
-    let (w, h) = capture(handle).screenSize()
-    outW.pointee = Int32(w)
-    outH.pointee = Int32(h)
-}
-
-/// Stop capture + encoders. Safe to call before destroy; idempotent.
-@_cdecl("sim_capture_stop")
-public func sim_capture_stop(_ handle: UnsafeMutableRawPointer) {
-    capture(handle).stop()
-}
-
-/// Stop (if needed) and release the retained SimCapture.
-@_cdecl("sim_capture_destroy")
-public func sim_capture_destroy(_ handle: UnsafeMutableRawPointer) {
-    let cap = Unmanaged<SimCapture>.fromOpaque(handle)
-    cap.takeUnretainedValue().stop()
-    cap.release()
 }

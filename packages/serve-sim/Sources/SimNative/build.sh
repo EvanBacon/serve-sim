@@ -1,71 +1,53 @@
 #!/bin/bash
 # Builds serve-sim-native.node — the in-process N-API addon that replaces the
-# spawned serve-sim-bin helper. Mirrors the SimCameraHelper build.sh fat-binary
-# pattern, but the final per-arch link is done with `swiftc` so the Swift
-# runtime is linked correctly; napi_* symbols stay undefined and resolve against
-# the host (Node/Bun) at dlopen time via `-undefined dynamic_lookup`.
+# spawned serve-sim-bin helper. The JS bindings are written in Swift with
+# node-swift (see ../../Package.swift and sim-module.swift).
+#
+# We drive `swift build` directly rather than `node-swift rebuild` for two
+# reasons: we need a universal (arm64 + x86_64) binary, which we get from
+# `--arch arm64 --arch x86_64` (native multi-arch on the host toolchain, so the
+# #NodeModule macro keeps working — cross-compiling per-arch with `--triple`
+# breaks macros); and we emit to a fixed dist path. napi_* symbols stay
+# undefined and resolve against the host (Node/Bun) at dlopen via
+# `-undefined dynamic_lookup`, exactly as node-swift's own builder does.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT_DIR="${1:-$HERE/../../dist/native}"
+PKG="$(cd "$HERE/../.." && pwd)"          # packages/serve-sim (Package.swift root)
+OUT_DIR="${1:-$PKG/dist/native}"
+BUILD_DIR="$PKG/.build"
+PRODUCT="serve-sim-native"
 mkdir -p "$OUT_DIR"
 
-# node-api-headers ships the ABI-stable C headers; N-API is version-independent
-# so a single prebuilt .node works across all supported Node versions.
-NAPI_INC="$HERE/../../node_modules/node-api-headers/include"
-if [ ! -f "$NAPI_INC/node_api.h" ]; then
-  echo "node-api-headers not found at $NAPI_INC (run: bun install)" >&2
+if [ ! -d "$PKG/node_modules/node-swift" ]; then
+  echo "node-swift not found at $PKG/node_modules/node-swift (run: bun install)" >&2
   exit 1
 fi
 
-SDK="$(xcrun --sdk macosx --show-sdk-path)"
-MIN=14.0
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+swift build \
+  -c release \
+  --product "$PRODUCT" \
+  --arch arm64 --arch x86_64 \
+  --package-path "$PKG" \
+  --build-path "$BUILD_DIR" \
+  -Xlinker -undefined -Xlinker dynamic_lookup
 
-# Swift sources: the SimNative C-ABI shims + the SimStreamHelper logic they
-# reuse verbatim (HIDInjector and its deps). They compile as one Swift module,
-# so internal symbols resolve across files.
-STREAM="$HERE/../SimStreamHelper"
-SWIFT_SRC=(
-  "$HERE/sim-hid.swift"
-  "$HERE/sim-capture.swift"
-  "$HERE/sim-ax.swift"
-  "$STREAM/HIDInjector.swift"
-  "$STREAM/FrameCapture.swift"
-  "$STREAM/VideoEncoder.swift"
-  "$STREAM/H264Encoder.swift"
-  "$STREAM/StreamFormat.swift"
-  "$STREAM/AccessibilityBridge.swift"
-  "$STREAM/SimFrameworks.swift"
-  "$STREAM/Xcode.swift"
-)
+# With --arch, the merged universal dylib lives under Products/Release while
+# single-arch slices sit in per-arch intermediate dirs; pick the fat one.
+DYLIB=""
+while IFS= read -r f; do
+  case "$(lipo -archs "$f" 2>/dev/null)" in
+    *arm64*x86_64* | *x86_64*arm64*) DYLIB="$f"; break ;;
+  esac
+done < <(find "$BUILD_DIR" -name "lib${PRODUCT}.dylib" -type f -not -path '*.dSYM*')
 
-SLICES=()
-for ARCH in arm64 x86_64; do
-  # Objective-C++ N-API glue → object (clang++).
-  xcrun --sdk macosx clang++ \
-    -arch "$ARCH" -mmacosx-version-min="$MIN" -isysroot "$SDK" \
-    -std=c++17 -fobjc-arc -O2 \
-    -I "$NAPI_INC" \
-    -c "$HERE/sim-native.mm" -o "$TMP/glue-$ARCH.o"
+if [ -z "$DYLIB" ]; then
+  echo "Build succeeded but no universal lib${PRODUCT}.dylib was found under $BUILD_DIR" >&2
+  exit 1
+fi
 
-  # Swift sources + glue object → per-arch dylib (swiftc links the Swift
-  # runtime + autolinks imported frameworks). napi_* stay undefined and resolve
-  # against the host at dlopen via -undefined dynamic_lookup.
-  xcrun --sdk macosx swiftc \
-    -target "$ARCH-apple-macosx$MIN" \
-    -O -emit-library \
-    -o "$TMP/native-$ARCH.dylib" \
-    "${SWIFT_SRC[@]}" "$TMP/glue-$ARCH.o" \
-    -framework CoreVideo -framework CoreMedia -framework IOSurface -framework CoreGraphics \
-    -framework VideoToolbox -framework ImageIO -framework CoreFoundation -framework AppKit \
-    -Xlinker -undefined -Xlinker dynamic_lookup
-  SLICES+=("$TMP/native-$ARCH.dylib")
-done
-
-OUT="$OUT_DIR/serve-sim-native.node"
-lipo -create "${SLICES[@]}" -output "$OUT"
+OUT="$OUT_DIR/${PRODUCT}.node"
+cp "$DYLIB" "$OUT"
 codesign -s - -f "$OUT" 2>/dev/null || true
 
 echo "Built: $OUT"
-file "$OUT"
+lipo -info "$OUT"
