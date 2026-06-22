@@ -13,6 +13,9 @@ import { join } from "path";
  * accepted key event, which is what we assert against — proving the event
  * round-tripped all the way to the sim, not just to the helper's WS reader.
  *
+ * Those per-event HID logs are gated behind `SERVE_SIM_DEBUG_HID` (they otherwise
+ * flood stdout), so the server is started with that env set to make them visible.
+ *
  * Skipped automatically when no iOS simulator is booted, so this stays green
  * on machines without one. The macOS CI job boots a sim explicitly and runs
  * `bun test packages/serve-sim/src/__tests__/`, so it runs there.
@@ -48,6 +51,9 @@ describeWithSim(`serve-sim type e2e (booted sim ${bootedUdid ?? "<skipped>"})`, 
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "inherit"],
       timeout: 45_000,
+      // Surface the per-event `[hid] Key …` lines this test asserts on; the
+      // env propagates to the detached `serve` child the CLI re-execs.
+      env: { ...process.env, SERVE_SIM_DEBUG_HID: "1" },
     });
     if (detach.status !== 0 || !detach.stdout) {
       throw new Error(
