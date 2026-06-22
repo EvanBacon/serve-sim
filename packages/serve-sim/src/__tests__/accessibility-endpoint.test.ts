@@ -61,8 +61,10 @@ describeWithSim(`serve-sim accessibility endpoint (booted sim ${bootedUdid ?? "<
       );
     }
 
-    const state = JSON.parse(detach.stdout.trim()) as { url: string };
-    axUrl = `${state.url}/ax`;
+    // The raw axe-shaped tree is served in-process at /helper/<device>/ax
+    // (the root /ax is the normalized SSE stream). Derive it from streamUrl.
+    const state = JSON.parse(detach.stdout.trim()) as { streamUrl: string };
+    axUrl = state.streamUrl.replace("stream.mjpeg", "ax");
   }, 60_000);
 
   afterAll(() => {
