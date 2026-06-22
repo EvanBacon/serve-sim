@@ -3,13 +3,16 @@
 # spawned serve-sim-bin helper. The JS bindings are written in Swift with
 # node-swift (see ../../Package.swift and sim-module.swift).
 #
-# We drive `swift build` directly rather than `node-swift rebuild` for two
-# reasons: we need a universal (arm64 + x86_64) binary, which we get from
-# `--arch arm64 --arch x86_64` (native multi-arch on the host toolchain, so the
-# #NodeModule macro keeps working — cross-compiling per-arch with `--triple`
-# breaks macros); and we emit to a fixed dist path. napi_* symbols stay
+# Host-arch only (arm64 on Apple Silicon / CI). We use a plain `swift build`,
+# i.e. the NATIVE SwiftPM build system, because that is the only mode that
+# resolves node-swift's #NodeModule macro plugin: both `--arch X --arch Y`
+# (universal) and `--triple <other-arch>` force Xcode's XCBuild, which fails to
+# resolve the NodeAPIMacros plugin on stock toolchains ("missing target
+# NodeAPIMacros" / "unable to resolve module SwiftSyntax"). Cross-compiling the
+# x86_64 slice would therefore require an x86_64-native toolchain (Rosetta),
+# which isn't available everywhere; serve-sim targets Apple Silicon. napi_* stay
 # undefined and resolve against the host (Node/Bun) at dlopen via
-# `-undefined dynamic_lookup`, exactly as node-swift's own builder does.
+# `-undefined dynamic_lookup`.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PKG="$(cd "$HERE/../.." && pwd)"          # packages/serve-sim (Package.swift root)
@@ -26,22 +29,13 @@ fi
 swift build \
   -c release \
   --product "$PRODUCT" \
-  --arch arm64 --arch x86_64 \
   --package-path "$PKG" \
   --build-path "$BUILD_DIR" \
   -Xlinker -undefined -Xlinker dynamic_lookup
 
-# With --arch, the merged universal dylib lives under Products/Release while
-# single-arch slices sit in per-arch intermediate dirs; pick the fat one.
-DYLIB=""
-while IFS= read -r f; do
-  case "$(lipo -archs "$f" 2>/dev/null)" in
-    *arm64*x86_64* | *x86_64*arm64*) DYLIB="$f"; break ;;
-  esac
-done < <(find "$BUILD_DIR" -name "lib${PRODUCT}.dylib" -type f -not -path '*.dSYM*')
-
+DYLIB="$(find "$BUILD_DIR" -name "lib${PRODUCT}.dylib" -type f -not -path '*.dSYM*' | head -1)"
 if [ -z "$DYLIB" ]; then
-  echo "Build succeeded but no universal lib${PRODUCT}.dylib was found under $BUILD_DIR" >&2
+  echo "Build succeeded but lib${PRODUCT}.dylib was not found under $BUILD_DIR" >&2
   exit 1
 fi
 

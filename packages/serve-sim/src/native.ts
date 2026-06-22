@@ -82,6 +82,8 @@ export const Orientation = {
 function resolveAddon(): string {
   const candidates = [
     // Beside the bun-compiled executable (dist/serve-sim → dist/native/…).
+    // arm64-only (Apple Silicon); loaded by path so it works under npx, the
+    // compiled binary, and the dev server alike.
     join(dirname(process.execPath), "native", "serve-sim-native.node"),
     // Beside the bundled JS (dist/serve-sim.js or dist/middleware.js).
     join(dirname(fileURLToPath(import.meta.url)), "native", "serve-sim-native.node"),
