@@ -275,8 +275,13 @@ static void FrameTrampoline(void *ctx, int32_t codec, const uint8_t *data, size_
   if (!p->bytes) { free(p); return; }
   memcpy(p->bytes, data, len);
   p->codec = codec; p->len = len; p->width = width; p->height = height; p->flags = flags;
-  // Non-blocking: under backpressure (queue full / closing) drop the frame.
-  if (napi_call_threadsafe_function(b->tsfn, p, napi_tsfn_nonblocking) != napi_ok) {
+  // MJPEG is stateless, so dropping under JS backpressure is harmless. AVCC is
+  // inter-frame H.264: dropping a delta corrupts the decoder until the next IDR,
+  // which shows up as screen tearing/ripping. Preserve AVCC ordering even if the
+  // JS thread is briefly behind.
+  napi_threadsafe_function_call_mode mode =
+      codec == 1 ? napi_tsfn_blocking : napi_tsfn_nonblocking;
+  if (napi_call_threadsafe_function(b->tsfn, p, mode) != napi_ok) {
     free(p->bytes);
     free(p);
   }
@@ -442,6 +447,100 @@ static napi_value AxFrontmost(napi_env env, napi_callback_info info) {
   return AxDump(env, info, sim_ax_frontmost);
 }
 
+struct AxAsyncRequest {
+  napi_async_work work;
+  napi_deferred deferred;
+  std::string udid;
+  char *json;
+  char *err;
+  char *(*fn)(const char *, char **);
+};
+
+static void AxAsyncExecute(napi_env, void *data) {
+  AxAsyncRequest *req = static_cast<AxAsyncRequest *>(data);
+  req->json = req->fn(req->udid.c_str(), &req->err);
+}
+
+static void AxAsyncComplete(napi_env env, napi_status status, void *data) {
+  AxAsyncRequest *req = static_cast<AxAsyncRequest *>(data);
+  if (status == napi_ok && req->json) {
+    napi_value result;
+    if (napi_create_string_utf8(env, req->json, NAPI_AUTO_LENGTH, &result) == napi_ok) {
+      napi_resolve_deferred(env, req->deferred, result);
+    } else {
+      napi_value message, error;
+      napi_create_string_utf8(env, "create_string failed", NAPI_AUTO_LENGTH, &message);
+      napi_create_error(env, nullptr, message, &error);
+      napi_reject_deferred(env, req->deferred, error);
+    }
+  } else {
+    napi_value message, error;
+    const char *msg = req->err ? req->err : "accessibility query failed";
+    napi_create_string_utf8(env, msg, NAPI_AUTO_LENGTH, &message);
+    napi_create_error(env, nullptr, message, &error);
+    napi_reject_deferred(env, req->deferred, error);
+  }
+  free(req->json);
+  free(req->err);
+  napi_delete_async_work(env, req->work);
+  delete req;
+}
+
+static napi_value AxDumpAsync(napi_env env, napi_callback_info info,
+                              char *(*fn)(const char *, char **),
+                              const char *name) {
+  size_t argc = 1;
+  napi_value argv[1];
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr));
+
+  napi_value promise;
+  napi_deferred deferred;
+  NAPI_CALL(env, napi_create_promise(env, &deferred, &promise));
+
+  napi_value resource_name;
+  NAPI_CALL(env, napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &resource_name));
+
+  AxAsyncRequest *req = new AxAsyncRequest{
+      nullptr,
+      deferred,
+      GetString(env, argv[0]),
+      nullptr,
+      nullptr,
+      fn,
+  };
+
+  napi_status status = napi_create_async_work(
+      env, nullptr, resource_name, AxAsyncExecute, AxAsyncComplete, req, &req->work);
+  if (status != napi_ok) {
+    napi_value message, error;
+    napi_create_string_utf8(env, "create_async_work failed", NAPI_AUTO_LENGTH, &message);
+    napi_create_error(env, nullptr, message, &error);
+    napi_reject_deferred(env, deferred, error);
+    delete req;
+  } else {
+    status = napi_queue_async_work(env, req->work);
+    if (status != napi_ok) {
+      napi_value message, error;
+      napi_create_string_utf8(env, "queue_async_work failed", NAPI_AUTO_LENGTH, &message);
+      napi_create_error(env, nullptr, message, &error);
+      napi_reject_deferred(env, deferred, error);
+      napi_delete_async_work(env, req->work);
+      delete req;
+    }
+  }
+  return promise;
+}
+
+// axDescribeAsync(udid): Promise<string> — async-work version of axDescribe.
+static napi_value AxDescribeAsync(napi_env env, napi_callback_info info) {
+  return AxDumpAsync(env, info, sim_ax_describe, "simAxDescribe");
+}
+
+// axFrontmostAsync(udid): Promise<string> — async-work version of axFrontmost.
+static napi_value AxFrontmostAsync(napi_env env, napi_callback_info info) {
+  return AxDumpAsync(env, info, sim_ax_frontmost, "simAxFrontmost");
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor props[] = {
       {"version", nullptr, Version, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -466,6 +565,8 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"captureStop", nullptr, CaptureStop, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"axDescribe", nullptr, AxDescribe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"axFrontmost", nullptr, AxFrontmost, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"axDescribeAsync", nullptr, AxDescribeAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"axFrontmostAsync", nullptr, AxFrontmostAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props);
   return exports;

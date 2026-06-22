@@ -1,6 +1,6 @@
 import { AX_UNAVAILABLE_ERROR } from "./ax-shared";
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
-import { axDescribe } from "./native";
+import { axDescribeAsync } from "./native";
 
 export type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
@@ -79,10 +79,10 @@ function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   };
 }
 
-function snapshotFromNative(udid: string): AxSnapshot {
+async function snapshotFromNative(udid: string): Promise<AxSnapshot> {
   let raw: RawAxeNode[];
   try {
-    raw = JSON.parse(axDescribe(udid)) as RawAxeNode[];
+    raw = JSON.parse(await axDescribeAsync(udid)) as RawAxeNode[];
   } catch {
     // The in-process AX bridge throws when the simulator can't satisfy
     // accessibility right now (framework missing, SpringBoard restarting,
@@ -109,11 +109,11 @@ function isUsableAxSnapshot(snapshot: AxSnapshot) {
   );
 }
 
-function collectAxSnapshot(udid: string): AxSnapshot {
+async function collectAxSnapshot(udid: string): Promise<AxSnapshot> {
   const errors: string[] = [];
 
   try {
-    const snapshot = snapshotFromNative(udid);
+    const snapshot = await snapshotFromNative(udid);
     if (snapshot.errors?.length) return snapshot;
     if (!isUsableAxSnapshot(snapshot)) {
       throw new Error(
@@ -166,7 +166,7 @@ function createAxStreamer({ udid }: { udid: string }): AxStreamer {
 
     polling = true;
     try {
-      const next = collectAxSnapshot(udid);
+      const next = await collectAxSnapshot(udid);
       const nextMessage = sseMessage(next);
       if (nextMessage !== latestMessage) {
         for (const client of clients) client.write(nextMessage);

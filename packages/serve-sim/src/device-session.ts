@@ -15,7 +15,7 @@
  * those exactly so the existing browser client is unchanged.
  */
 import type { IncomingMessage, ServerResponse } from "http";
-import { NativeCapture, NativeHid, Orientation, axDescribe, axFrontmost, type NativeFrame } from "./native";
+import { NativeCapture, NativeHid, Orientation, axDescribeAsync, axFrontmostAsync, type NativeFrame } from "./native";
 
 /**
  * Minimal WebSocket surface the HID input channel needs. Satisfied by both the
@@ -176,10 +176,13 @@ export class DeviceSession {
     this.sendJson(res, 200, { status: "ok" });
   }
 
-  handleAx(_req: IncomingMessage, res: ServerResponse): void {
+  async handleAx(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      this.sendJsonString(res, 200, axDescribe(this.udid));
+      const json = await axDescribeAsync(this.udid);
+      if (res.writableEnded) return;
+      this.sendJsonString(res, 200, json);
     } catch (err) {
+      if (res.writableEnded) return;
       this.sendJson(res, 503, {
         error: "ax_unavailable",
         message: err instanceof Error ? err.message : String(err),
@@ -187,10 +190,13 @@ export class DeviceSession {
     }
   }
 
-  handleForeground(_req: IncomingMessage, res: ServerResponse): void {
+  async handleForeground(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      this.sendJsonString(res, 200, axFrontmost(this.udid));
+      const json = await axFrontmostAsync(this.udid);
+      if (res.writableEnded) return;
+      this.sendJsonString(res, 200, json);
     } catch (err) {
+      if (res.writableEnded) return;
       this.sendJson(res, 503, {
         error: "foreground_unavailable",
         message: err instanceof Error ? err.message : String(err),

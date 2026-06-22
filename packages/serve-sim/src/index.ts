@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command, InvalidArgumentError } from "commander";
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
-import { homedir, networkInterfaces } from "os";
+import { networkInterfaces } from "os";
 import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";

@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createServer as createNetServer } from "net";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
-import { request as httpRequest, type IncomingMessage, type ServerResponse } from "http";
+import type { IncomingMessage, ServerResponse } from "http";
 import type { Socket } from "net";
 // `ws` (kept external in the build) supplies a WebSocket *client* for the
 // helper/devtools proxy. Node only exposes a global `WebSocket` on newer LTS
@@ -13,7 +13,7 @@ import type { Socket } from "net";
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { getDeviceSession, type HidSocket } from "./device-session";
-import { axFrontmost } from "./native";
+import { axFrontmostAsync } from "./native";
 import { inProcessServeSimState, writeServeSimState } from "./state";
 import { debugMw } from "./debug";
 import {
@@ -1747,7 +1747,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       let lastBundle = "";
       void (async () => {
         try {
-          const info = JSON.parse(axFrontmost(udid)) as { bundleId?: string; pid?: number };
+          const info = JSON.parse(await axFrontmostAsync(udid)) as { bundleId?: string; pid?: number };
           if (!info.bundleId || !isUserFacingBundle(info.bundleId)) return;
           if (res.writableEnded) return;
           lastBundle = info.bundleId;

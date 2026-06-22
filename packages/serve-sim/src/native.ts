@@ -39,6 +39,8 @@ interface NativeAddon {
   captureStop(h: Handle): void;
   axDescribe(udid: string): string;
   axFrontmost(udid: string): string;
+  axDescribeAsync(udid: string): Promise<string>;
+  axFrontmostAsync(udid: string): Promise<string>;
 }
 
 // (codec, data, width, height, flags) — codec 0=MJPEG 1=AVCC; flags bit0=desc bit1=keyframe.
@@ -214,9 +216,19 @@ export function axDescribe(udid: string): string {
   return load().axDescribe(udid);
 }
 
+/** Async accessibility-tree dump. Runs native AX work off the JS event loop. */
+export function axDescribeAsync(udid: string): Promise<string> {
+  return load().axDescribeAsync(udid);
+}
+
 /** Frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */
 export function axFrontmost(udid: string): string {
   return load().axFrontmost(udid);
+}
+
+/** Async frontmost-app probe. Runs native AX work off the JS event loop. */
+export function axFrontmostAsync(udid: string): Promise<string> {
+  return load().axFrontmostAsync(udid);
 }
 
 /** Native addon version banner — also a cheap load smoke-test. */
