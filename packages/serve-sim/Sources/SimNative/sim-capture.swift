@@ -73,10 +73,12 @@ final class CaptureEngine {
 
     func start() throws {
         guard !started else { return }
-        started = true
+        // Latch `started` only after capture actually begins: if start() throws
+        // (e.g. device not booted), a later retry should still be allowed.
         try frameCapture.start(deviceUDID: deviceUDID) { [weak self] pixelBuffer, _ in
             self?.handleFrame(pixelBuffer)
         }
+        started = true
     }
 
     private func handleFrame(_ pixelBuffer: CVPixelBuffer) {

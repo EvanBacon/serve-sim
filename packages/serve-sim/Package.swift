@@ -57,13 +57,6 @@ let package = Package(
                 "SimStreamHelper/SimFrameworks.swift",
                 "SimStreamHelper/Xcode.swift",
             ],
-            // The reused SimStreamHelper logic was written against the standalone
-            // helper (plain swiftc, no strict concurrency). Build the whole target
-            // in Swift 5 language mode so its benign cross-queue captures stay
-            // warnings rather than Swift 6 errors; node-swift's API works in v5.
-            swiftSettings: [
-                .swiftLanguageMode(.v5),
-            ],
             linkerSettings: [
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("CoreMedia"),
@@ -74,5 +67,12 @@ let package = Package(
                 .linkedFramework("AppKit"),
             ]
         ),
-    ]
+    ],
+    // The reused SimStreamHelper logic was written against the standalone helper
+    // (plain swiftc, which defaults to Swift 5 mode). Build in Swift 5 mode so its
+    // benign cross-queue captures stay warnings rather than Swift 6 errors;
+    // node-swift's API works in v5. Declared at package level so the target's
+    // language mode is valid under stricter toolchains — CI rejects a target
+    // language mode that isn't among the package's declared modes.
+    swiftLanguageModes: [.v5]
 )
