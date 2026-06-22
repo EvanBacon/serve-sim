@@ -27,6 +27,8 @@ export {
   rawPointForDisplayPoint,
   rotationDegreesForOrientation,
   streamDisplayGeometry,
+  ROTATE_LEFT_CYCLE,
+  ROTATE_RIGHT_CYCLE,
 } from "./orientation.js";
 export type { StreamDisplayGeometry } from "./orientation.js";
 export type { DeviceType } from "./deviceFrames.js";

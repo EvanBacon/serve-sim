@@ -13,6 +13,7 @@ import {
 } from "react";
 import type { SimulatorOrientation } from "../types.js";
 import { getDeviceType, type DeviceType } from "./deviceFrames.js";
+import { ROTATE_LEFT_CYCLE } from "./orientation.js";
 
 type ExecFn = (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 type RotateFn = (orientation: SimulatorOrientation) => void | Promise<void>;
@@ -389,17 +390,7 @@ function watchHomeAppleScript(): string {
   return args.map((a) => `-e '${a}'`).reduce((acc, a) => `${acc} ${a}`, "osascript");
 }
 
-// Orientation cycle for the rotate button. Counter-clockwise ("Rotate Left"
-// in Simulator.app), matching the familiar Cmd+Left behavior. Values are
-// delivered to the guest as UIDeviceOrientation values via serve-sim's
-// PurpleWorkspacePort bridge — see HIDInjector.sendOrientation on the Swift
-// side.
-const ROTATE_LEFT_CYCLE: Record<SimulatorOrientation, SimulatorOrientation> = {
-  portrait: "landscape_left",
-  landscape_left: "portrait_upside_down",
-  portrait_upside_down: "landscape_right",
-  landscape_right: "portrait",
-};
+
 
 // -- Built-in action buttons -------------------------------------------
 

@@ -1,5 +1,19 @@
 import type { SimulatorOrientation, StreamConfig } from "../types.js";
 
+export const ROTATE_LEFT_CYCLE: Record<SimulatorOrientation, SimulatorOrientation> = {
+  portrait: "landscape_left",
+  landscape_left: "portrait_upside_down",
+  portrait_upside_down: "landscape_right",
+  landscape_right: "portrait",
+};
+
+export const ROTATE_RIGHT_CYCLE: Record<SimulatorOrientation, SimulatorOrientation> = {
+  portrait: "landscape_right",
+  landscape_right: "portrait_upside_down",
+  portrait_upside_down: "landscape_left",
+  landscape_left: "portrait",
+};
+
 export const HID_EDGE_LEFT = 1;
 export const HID_EDGE_TOP = 2;
 export const HID_EDGE_BOTTOM = 3;

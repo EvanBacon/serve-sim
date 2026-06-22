@@ -19,6 +19,8 @@ import {
   getDeviceType,
   simulatorAspectRatio,
   simulatorMaxWidth,
+  ROTATE_LEFT_CYCLE,
+  ROTATE_RIGHT_CYCLE,
   type DeviceType,
   type SimulatorOrientation,
   type StreamConfig,
@@ -79,20 +81,6 @@ import {
   sendOrQueueWsMessage,
   type QueuedWsMessage,
 } from "./utils/ws-send-queue";
-
-// Counter-clockwise cycle, matching Simulator.app's Cmd+Left ("Rotate Left").
-const ROTATE_LEFT_CYCLE: Record<SimulatorOrientation, SimulatorOrientation> = {
-  portrait: "landscape_left",
-  landscape_left: "portrait_upside_down",
-  portrait_upside_down: "landscape_right",
-  landscape_right: "portrait",
-};
-const ROTATE_RIGHT_CYCLE: Record<SimulatorOrientation, SimulatorOrientation> = {
-  portrait: "landscape_right",
-  landscape_right: "portrait_upside_down",
-  portrait_upside_down: "landscape_left",
-  landscape_left: "portrait",
-};
 
 // ─── App ───
 

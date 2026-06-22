@@ -23,7 +23,6 @@
         "dev.ts",
         "scripts/build-trails.ts"
       ]
-    },
-
+    }
   }
 }
