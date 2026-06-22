@@ -33,7 +33,11 @@ swift build \
   --build-path "$BUILD_DIR" \
   -Xlinker -undefined -Xlinker dynamic_lookup
 
-DYLIB="$(find "$BUILD_DIR" -name "lib${PRODUCT}.dylib" -type f -not -path '*.dSYM*' | head -1)"
+# `-print -quit` (not `| head`): under `pipefail`, head closing the pipe early
+# would SIGPIPE find and fail the script. Match by name rather than a fixed
+# subpath: the product dir varies by toolchain (native SwiftPM emits
+# .build/release/, the Xcode build system emits .build/out/Products/Release/).
+DYLIB="$(find "$BUILD_DIR" -name "lib${PRODUCT}.dylib" -type f -not -path '*.dSYM*' -print -quit)"
 if [ -z "$DYLIB" ]; then
   echo "Build succeeded but lib${PRODUCT}.dylib was not found under $BUILD_DIR" >&2
   exit 1
