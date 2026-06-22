@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 import { PanelLeft, Search, X } from "lucide-react";
-import { Panel, PanelHeader, PanelTitle } from "../Panel";
+import { Panel, PanelHeader } from "../Panel";
 import { useGridMemory } from "../hooks/use-grid-memory";
 import { type GridDevice, type MemoryReport, runtimeLabel } from "../utils/grid";
 import { simEndpoint } from "../utils/sim-endpoint";
 import { GridCapacityBanner } from "./grid-capacity-banner";
 import { DeviceRow } from "./device-row";
+import { PANEL_BACKGROUND, PANEL_BACKGROUND_TRANSPARENT } from "./panel-colors";
+import { ServeSimBrandLink } from "./serve-sim-brand-link";
 
 const DEVICE_SKELETON_ROWS = 12;
 
@@ -54,7 +56,7 @@ export function GridPanel({
   }, [devices, query]);
 
   return (
-    <Panel open={open} width={width} side={side}>
+    <Panel open={open} width={width} side={side} style={{ backgroundColor: PANEL_BACKGROUND }}>
       <PanelHeader
         style={{ justifyContent: "flex-start", paddingLeft: 16, paddingTop: 16, gap: 4 }}
       >
@@ -68,10 +70,10 @@ export function GridPanel({
         >
           <PanelLeft size={18} strokeWidth={1.75} />
         </button>
-        <PanelTitle>Devices</PanelTitle>
+        <ServeSimBrandLink />
       </PanelHeader>
 
-      <div className="px-3 pb-2 pt-0.5 shrink-0">
+      <div className="px-4 pb-2 pt-0.5 shrink-0">
         <label className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-white/6 focus-within:bg-white/10 [transition:background_0.12s]">
           <Search size={14} strokeWidth={2} className="text-white/40 shrink-0" />
           <input
@@ -94,7 +96,7 @@ export function GridPanel({
       </div>
 
       <div className="relative flex-1 min-h-0">
-        <div className="h-full min-h-0 overflow-y-auto px-2 py-2 [scrollbar-width:thin]">
+        <div className="h-full min-h-0 overflow-y-auto px-4 py-2 [scrollbar-width:thin]">
           {filtered === null ? (
             <DeviceListSkeleton />
           ) : filtered.length === 0 ? (
@@ -103,7 +105,7 @@ export function GridPanel({
             </div>
           ) : (
             <>
-              <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+              <div className="pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
                 Available
               </div>
               <div className="flex flex-col gap-0.5 pb-1">
@@ -124,11 +126,17 @@ export function GridPanel({
         </div>
         <div
           data-testid="device-list-top-fade"
-          className="absolute top-0 left-0 right-0 h-[16px] pointer-events-none bg-[linear-gradient(to_bottom,rgba(20,20,22,0.96)_0%,rgba(20,20,22,0)_100%)]"
+          className="absolute top-0 left-0 right-0 h-[16px] pointer-events-none"
+          style={{
+            background: `linear-gradient(to bottom, ${PANEL_BACKGROUND} 0%, ${PANEL_BACKGROUND_TRANSPARENT} 100%)`,
+          }}
         />
         <div
           data-testid="device-list-bottom-fade"
-          className="absolute bottom-0 left-0 right-0 h-[16px] pointer-events-none bg-[linear-gradient(to_top,rgba(20,20,22,0.96)_0%,rgba(20,20,22,0)_100%)]"
+          className="absolute bottom-0 left-0 right-0 h-[16px] pointer-events-none"
+          style={{
+            background: `linear-gradient(to top, ${PANEL_BACKGROUND} 0%, ${PANEL_BACKGROUND_TRANSPARENT} 100%)`,
+          }}
         />
       </div>
 

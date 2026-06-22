@@ -24,17 +24,18 @@ import {
   type StreamConfig,
 } from "serve-sim-client/simulator";
 
-import { Globe, PanelLeft, PanelRight, Upload } from "lucide-react";
+import { Globe, PanelRight, Upload } from "lucide-react";
 import { ReloadIcon } from "./icons";
 import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
+import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
-import { ScreenshotToast } from "./components/screenshot-toast";
+import { ServeSimToaster } from "./components/app-toasts";
 import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
 import { StreamStatusPill } from "./components/stream-status-pill";
 import { ToolsPanel } from "./components/tools-panel";
@@ -101,26 +102,6 @@ function previewConfigKey(config: PreviewConfig | null): string {
   return config
     ? `${config.device}:${config.pid}:${config.streamUrl}:${config.wsUrl}`
     : "";
-}
-
-// Left-edge rail button that reveals the device sidebar when it's collapsed.
-// Mirrors the right-edge tools/devtools rail so the affordance reads the same.
-function DeviceSidebarToggle({ open, onClick }: { open: boolean; onClick: () => void }) {
-  return (
-    <div
-      className={`fixed top-3 left-3 flex flex-col gap-1 p-1 [transition:opacity_0.18s_ease] z-40 ${open ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
-    >
-      <button
-        onClick={onClick}
-        className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
-        aria-label="Open devices sidebar"
-        aria-pressed={open}
-        title="Devices"
-      >
-        <PanelLeft size={18} strokeWidth={1.75} />
-      </button>
-    </div>
-  );
 }
 
 function App() {
@@ -370,6 +351,7 @@ function App() {
   return (
     <>
       {mainView}
+      <ServeSimToaster />
       {/* Persistent left device sidebar — overlays every main view so swapping
           streams never remounts (and refetches) the picker. */}
       <GridPanel
@@ -1121,67 +1103,6 @@ function AppWithConfig({
           </SimulatorToolbar>
         </div>
       </div>
-
-      {/* Upload toasts */}
-      {uploads.toasts.length > 0 && (
-        <div className="fixed bottom-4 right-4 flex flex-col gap-1.5 max-w-[320px] z-30">
-          {uploads.toasts.map((t) => {
-            const isError = t.status === "error";
-            const isUploading = t.status === "uploading";
-            // While transferring chunks, show "Uploading … N%". Once chunks
-            // are done, the install/addmedia step has no progress signal, so
-            // swap to a phase-specific verb and an indeterminate bar.
-            const transferring = isUploading && t.progress !== null;
-            const pct = t.progress != null ? Math.round(t.progress * 100) : 0;
-            return (
-              <div
-                key={t.id}
-                className={`flex flex-col gap-1.5 px-3 py-2 bg-panel border border-white/12 rounded-lg text-white/90 text-[12px] font-mono shadow-[0_4px_12px_rgba(0,0,0,0.4)] ${isError ? "select-text cursor-text" : "select-none cursor-default"}`}
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className="size-1.5 rounded-full shrink-0 [transition:background_0.3s]"
-                    style={{ background: isUploading ? "#a5b4fc" : t.status === "success" ? "#4ade80" : "#f87171" }}
-                  />
-                  <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-                    {isUploading && transferring &&
-                      `Uploading ${t.name}… ${pct}%`}
-                    {isUploading && !transferring &&
-                      (t.kind === "ipa" ? `Installing ${t.name}…` : `Adding ${t.name}…`)}
-                    {t.status === "success" &&
-                      (t.kind === "ipa" ? `Installed ${t.name}` : `Added ${t.name} to Photos`)}
-                    {isError && `${t.name}: ${t.message ?? "Upload failed"}`}
-                  </span>
-                </div>
-                {isUploading && (
-                  <div className="relative h-[3px] w-full bg-white/8 rounded-[2px] overflow-hidden">
-                    {transferring ? (
-                      <div
-                        className="h-full bg-accent rounded-[2px] [transition:width_120ms_linear]"
-                        style={{ width: `${pct}%` }}
-                      />
-                    ) : (
-                      <div className="serve-sim-toast-indeterminate absolute top-0 left-0 h-full w-[40%] bg-accent rounded-[2px]" />
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Screenshot pill — macOS-style "saved" popup: click reveals in Finder,
-          drag copies the file, and it animates out (timer pauses on hover). */}
-      {screenshot.toast && (
-        <ScreenshotToast
-          toast={screenshot.toast}
-          onReveal={screenshot.reveal}
-          onDismiss={screenshot.dismiss}
-          onPause={screenshot.pause}
-          onResume={screenshot.resume}
-        />
-      )}
 
       {/* The left device sidebar + its rail live in App so they persist across
           stream swaps; AppWithConfig only renders the streaming-specific UI. */}

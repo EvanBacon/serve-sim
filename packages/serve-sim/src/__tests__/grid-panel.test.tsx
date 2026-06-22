@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GridCapacityFooter, GridPanel } from "../client/components/grid-panel";
+import { SERVE_SIM_REPO_URL } from "../client/components/serve-sim-brand-link";
 import type { GridDevice, MemoryReport } from "../client/utils/grid";
 
 const devices: GridDevice[] = [
@@ -47,7 +48,7 @@ describe("GridPanel", () => {
     expect(html).not.toContain("No iOS simulators available.");
   });
 
-  test("aligns the close control to the closed sidebar opener", () => {
+  test("uses a consistent sidebar content gutter", () => {
     const html = renderToStaticMarkup(
       <GridPanel
         open
@@ -65,6 +66,52 @@ describe("GridPanel", () => {
 
     expect(html).toContain("padding-left:16px");
     expect(html).toContain("padding-top:16px");
+    expect(html).toContain("px-4 pb-2 pt-0.5");
+    expect(html).toContain("overflow-y-auto px-4 py-2");
+    expect(html).toContain("pt-1 pb-1 text-[11px]");
+  });
+
+  test("renders serve-sim branding linked to the OSS repo", () => {
+    const html = renderToStaticMarkup(
+      <GridPanel
+        open
+        onClose={noop}
+        width={320}
+        side="left"
+        devices={devices}
+        selectedUdid="one"
+        onSelect={noop}
+        starting={{}}
+        shuttingDown={{}}
+        onShutdown={noop}
+      />,
+    );
+
+    expect(html).toContain("serve-sim");
+    expect(html).toContain("text-white/65");
+    expect(html).toContain(`href="${SERVE_SIM_REPO_URL}"`);
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('title="Open serve-sim"');
+    expect(html).toContain('aria-label="Open serve-sim"');
+  });
+
+  test("uses the shared panel background variable", () => {
+    const html = renderToStaticMarkup(
+      <GridPanel
+        open
+        onClose={noop}
+        width={320}
+        side="left"
+        devices={devices}
+        selectedUdid="one"
+        onSelect={noop}
+        starting={{}}
+        shuttingDown={{}}
+        onShutdown={noop}
+      />,
+    );
+
+    expect(html).toContain("background-color:var(--serve-sim-panel-bg)");
   });
 
   test("renders gradient fades around the device list scroll area", () => {
@@ -85,8 +132,12 @@ describe("GridPanel", () => {
 
     expect(html).toContain('data-testid="device-list-top-fade"');
     expect(html).toContain('data-testid="device-list-bottom-fade"');
-    expect(html).toContain("linear-gradient(to_bottom");
-    expect(html).toContain("linear-gradient(to_top");
+    expect(html).toContain(
+      "linear-gradient(to bottom, var(--serve-sim-panel-bg) 0%, var(--serve-sim-panel-bg-transparent) 100%)",
+    );
+    expect(html).toContain(
+      "linear-gradient(to top, var(--serve-sim-panel-bg) 0%, var(--serve-sim-panel-bg-transparent) 100%)",
+    );
   });
 
   test("renders the capacity footer without a top border", () => {

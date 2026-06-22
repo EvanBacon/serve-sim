@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ScreenshotToast } from "../client/components/screenshot-toast";
+import {
+  ScreenshotToast,
+  shouldDismissScreenshotToastAfterDrag,
+} from "../client/components/screenshot-toast";
 import type { ScreenshotToast as ScreenshotToastState } from "../client/hooks/use-screenshot-toast";
 
 const noop = () => {};
@@ -18,6 +21,12 @@ function render(toast: ScreenshotToastState): string {
 }
 
 describe("ScreenshotToast drag image", () => {
+  test("dismisses after a completed drag but not a cancelled drag", () => {
+    expect(shouldDismissScreenshotToastAfterDrag("copy")).toBe(true);
+    expect(shouldDismissScreenshotToastAfterDrag("move")).toBe(true);
+    expect(shouldDismissScreenshotToastAfterDrag("none")).toBe(false);
+  });
+
   test("saved toast with a thumb renders an offscreen drag-image element", () => {
     const html = render({
       id: "1",
