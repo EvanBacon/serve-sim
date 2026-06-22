@@ -56,7 +56,7 @@ const describeWithSim = bootedUdid ? describe : describe.skip;
 describeWithSim(`serve-sim AVCC endpoint (booted sim ${bootedUdid ?? "<skipped>"})`, () => {
   let avccUrl: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     try { execFileSync("bun", ["run", CLI_PATH, "--kill", bootedUdid!], { stdio: "pipe" }); } catch {}
 
     const startPort = 40_000 + Math.floor(Math.random() * 20_000);
@@ -75,6 +75,24 @@ describeWithSim(`serve-sim AVCC endpoint (booted sim ${bootedUdid ?? "<skipped>"
     // /helper/<device>/… — derive the AVCC URL from the reported MJPEG one.
     const state = JSON.parse(detach.stdout.trim()) as { streamUrl: string };
     avccUrl = state.streamUrl.replace("stream.mjpeg", "stream.avcc");
+
+    // Wait for capture to warm before the AVCC test connects. The /stream.avcc
+    // response only flushes its 200 once the first envelope is written, and the
+    // on-connect JPEG seed is skipped until at least one frame has landed (so
+    // `latestJpeg` is non-null). On a cold/loaded runner the AVCC fetch can
+    // otherwise arrive before any frame and hang on headers for the whole
+    // budget — distinct from "encoder never warmed", which the test soft-passes.
+    // /config reports width 0 until the first frame, so poll it as the ready
+    // signal. MJPEG capture works even where the H.264 encoder doesn't.
+    const configUrl = state.streamUrl.replace("stream.mjpeg", "config");
+    const warmDeadline = Date.now() + 20_000;
+    while (Date.now() < warmDeadline) {
+      try {
+        const cfg = await fetch(configUrl).then((r) => (r.ok ? r.json() : null)) as { width?: number } | null;
+        if (cfg && (cfg.width ?? 0) > 0) break;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 250));
+    }
   }, 60_000);
 
   afterAll(() => {
