@@ -127,7 +127,6 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
           "
 
-          bun run build:swift
           bun run build
 
           npm publish --access public --tag latest --provenance

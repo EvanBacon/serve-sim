@@ -421,34 +421,6 @@ function helperProxyTarget(rawUrl: string, prefix: string): { device: string | n
   return { device, upstreamPath: `${suffix}${parsed.search}` };
 }
 
-function proxyHelperHttp(req: SimReq, res: SimRes, state: ServeSimState, upstreamPath: string): void {
-  const proxyReq = httpRequest(
-    {
-      host: "127.0.0.1",
-      port: state.port,
-      method: req.method,
-      path: upstreamPath,
-      headers: {
-        ...req.headers,
-        host: `127.0.0.1:${state.port}`,
-      },
-    },
-    (proxyRes) => {
-      res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
-      proxyRes.pipe(res);
-    },
-  );
-  proxyReq.on("error", (err) => {
-    if (res.headersSent) {
-      res.destroy(err);
-      return;
-    }
-    res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end(err instanceof Error ? err.message : "Helper proxy failed");
-  });
-  req.pipe(proxyReq);
-}
-
 const WS_ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 function websocketFrame(opcode: number, payload: Buffer<ArrayBufferLike>): Buffer {
@@ -614,10 +586,6 @@ function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstre
   socket.on("error", closeBoth);
   socket.on("close", closeBoth);
   drainFrames();
-}
-
-function bridgeHelperWebSocket(req: SimReq, socket: Socket, head: Buffer, state: ServeSimState): void {
-  bridgeWebSocketFrames(req, socket, head, state.wsUrl);
 }
 
 /**
@@ -1141,17 +1109,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
     if (helperTarget) {
       const device = helperTarget.device ?? selectedDevice;
-      // Prefer the in-process DeviceSession; fall back to a spawned helper proxy
-      // only when no session can serve (e.g. a remote/legacy helper).
+      // The device's helper endpoints are served from an in-process
+      // NativeCapture/NativeHid DeviceSession.
       if (serveHelperInProcess(req, res, device, helperTarget.upstreamPath)) return;
-      const states = readServeSimStates();
-      const state = selectServeSimState(states, device);
-      if (!state) {
-        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end("No serve-sim device");
-        return;
-      }
-      proxyHelperHttp(req, res, state, helperTarget.upstreamPath);
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("No serve-sim device");
       return;
     }
 
@@ -1806,15 +1768,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     }
     const device = helperTarget.device ?? selectedDevice;
     if (helperTarget.upstreamPath === "/ws") {
-      // Prefer an in-process DeviceSession; fall back to the spawned-helper bridge.
+      // HID input is delivered to the in-process DeviceSession.
       if (attachHidInProcess(req, socket, head, device)) return;
-      const states = readServeSimStates();
-      const state = selectServeSimState(states, device);
-      if (!state) {
-        socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
-        return;
-      }
-      bridgeHelperWebSocket(req, socket, head, state);
+      socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
       return;
     }
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");

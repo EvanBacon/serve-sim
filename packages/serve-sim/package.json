@@ -35,7 +35,6 @@
     "src/middleware.ts",
     "src/native.ts",
     "src/state.ts",
-    "bin/serve-sim-bin",
     "Sources/SimCameraInjector/SimCameraInjector.m",
     "Sources/SimCameraInjector/SimCam*.h",
     "Sources/SimCameraInjector/SimCam*.m",
@@ -65,7 +64,6 @@
   },
   "scripts": {
     "build": "bun run build.ts",
-    "build:swift": "./build.sh",
     "dev": "bun run dev.ts"
   },
   "devDependencies": {
