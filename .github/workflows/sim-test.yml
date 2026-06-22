@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   sim-test:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
           # single device instead. The first available name wins; fall back
           # to the full discovery+create path only if none boot.
           UDID=""
-          for NAME in "iPhone 16 Pro" "iPhone 16" "iPhone 15 Pro" "iPhone 15"; do
+          for NAME in "iPhone 17 Pro" "iPhone 16 Pro" "iPhone 16" "iPhone 15 Pro" "iPhone 15"; do
             echo "Trying to boot \"$NAME\"..."
             if OUT=$(xcrun simctl boot "$NAME" 2>&1); then
               UDID=$(xcrun simctl list devices booted -j | node -e "

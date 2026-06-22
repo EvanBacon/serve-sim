@@ -22,7 +22,7 @@ jobs:
   publish-stable:
     if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
     needs: [test]
-    runs-on: macos-latest
+    runs-on: macos-26
     permissions:
       contents: write
       id-token: write

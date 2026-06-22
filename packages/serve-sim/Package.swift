@@ -23,7 +23,7 @@ let package = Package(
         .library(
             name: "serve-sim-native",
             type: .dynamic,
-            targets: ["SimNativeModule"]
+            targets: ["SimNative"]
         ),
     ],
     dependencies: [
@@ -31,40 +31,19 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SimNativeModule",
+            name: "SimNative",
             dependencies: [
                 .product(name: "NodeAPI", package: "node-swift"),
                 .product(name: "NodeModuleSupport", package: "node-swift"),
             ],
-            path: "Sources",
-            // Sibling targets built by their own build.sh (Obj-C/ObjC++), not
-            // part of this SwiftPM package.
             exclude: [
-                "SimCameraInjector",
-                "SimCameraHelper",
-                "SimAXSettings",
-                "SimNative/build.sh",
-            ],
-            sources: [
-                "SimNative/sim-module.swift",
-                "SimNative/sim-capture.swift",
-                "SimStreamHelper/HIDInjector.swift",
-                "SimStreamHelper/FrameCapture.swift",
-                "SimStreamHelper/VideoEncoder.swift",
-                "SimStreamHelper/H264Encoder.swift",
-                "SimStreamHelper/StreamFormat.swift",
-                "SimStreamHelper/AccessibilityBridge.swift",
-                "SimStreamHelper/SimFrameworks.swift",
-                "SimStreamHelper/Xcode.swift",
+                "build.sh",
             ],
             linkerSettings: [
-                .linkedFramework("CoreVideo"),
-                .linkedFramework("CoreMedia"),
-                .linkedFramework("IOSurface"),
-                .linkedFramework("CoreGraphics"),
-                .linkedFramework("VideoToolbox"),
-                .linkedFramework("ImageIO"),
-                .linkedFramework("AppKit"),
+                .unsafeFlags([
+                    "-Xlinker", "-undefined",
+                    "-Xlinker", "dynamic_lookup",
+                ])
             ]
         ),
     ],

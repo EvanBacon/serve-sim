@@ -27,7 +27,7 @@ jobs:
   publish-beta:
     if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
     needs: [test]
-    runs-on: macos-latest
+    runs-on: macos-26
     permissions:
       contents: read
       id-token: write

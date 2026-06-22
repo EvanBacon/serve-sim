@@ -46,10 +46,8 @@
     "Sources/SimAXSettings/build.sh",
     "dist/native/serve-sim-native.node",
     "Package.swift",
-    "Sources/SimNative/sim-module.swift",
-    "Sources/SimNative/sim-capture.swift",
-    "Sources/SimNative/build.sh",
-    "Sources/SimStreamHelper/*.swift"
+    "Sources/SimNative/*.swift",
+    "Sources/SimNative/build.sh"
   ],
   "exports": {
     "./middleware": {
@@ -76,7 +74,7 @@
     "commander": "^14.0.1",
     "debug": "^4.4.3",
     "lucide-react": "^1.20.0",
-    "node-swift": "1.4.0",
+    "node-swift": "1.5.1",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
