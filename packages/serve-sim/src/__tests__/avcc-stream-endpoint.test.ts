@@ -71,8 +71,10 @@ describeWithSim(`serve-sim AVCC endpoint (booted sim ${bootedUdid ?? "<skipped>"
         `stdout: ${detach.stdout ?? "<none>"}`,
       );
     }
-    const state = JSON.parse(detach.stdout.trim()) as { url: string };
-    avccUrl = `${state.url}/stream.avcc`;
+    // The preview server serves the stream in-process under
+    // /helper/<device>/… — derive the AVCC URL from the reported MJPEG one.
+    const state = JSON.parse(detach.stdout.trim()) as { streamUrl: string };
+    avccUrl = state.streamUrl.replace("stream.mjpeg", "stream.avcc");
   }, 60_000);
 
   afterAll(() => {
