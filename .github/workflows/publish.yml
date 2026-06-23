@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "packages/**"
+      - "packages/serve-sim/**"
       - ".github/workflows/publish.yml"
   workflow_dispatch: {}
 
@@ -12,21 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install
-
-      - name: Client tests
-        run: bun test packages/serve-sim-client/src/__tests__/
-
   publish-beta:
     if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
-    needs: [test]
     runs-on: macos-26
     permissions:
       contents: read
@@ -46,10 +33,10 @@ jobs:
             exit 0
           fi
 
-          # Publish beta if serve-sim or bundled client source changed.
+          # Publish beta if serve-sim source changed.
           CHANGED=$(git diff --name-only HEAD~1 HEAD)
           SOURCE_CHANGED=false
-          if echo "$CHANGED" | grep -Eq "^packages/(serve-sim|serve-sim-client)/"; then
+          if echo "$CHANGED" | grep -Eq "^packages/serve-sim/"; then
             SOURCE_CHANGED=true
           fi
 
