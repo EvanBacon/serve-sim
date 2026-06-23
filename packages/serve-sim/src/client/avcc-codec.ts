@@ -43,43 +43,76 @@ const TAG_TO_TYPE: Record<number, AvccChunkType | undefined> = {
  * and retains any trailing partial bytes for the next call.
  */
 export class AvccDemuxer {
-  private buffer = new Uint8Array(0);
+  // Growable accumulation buffer. `len` is the logical end of valid bytes;
+  // `start` is the read cursor of already-consumed bytes. Appending in place
+  // (amortised doubling) instead of rebuilding the whole buffer per chunk keeps
+  // this O(bytes) overall rather than O(bytes²): a port-forward tunnel splits
+  // each frame — keyframes especially — into many small, separately-delivered
+  // reads, and the old per-chunk `new Uint8Array(...)` + double copy churned
+  // enough throwaway buffers to freeze the tab. See the matching note in
+  // `utils/mjpeg-frame-parser.ts`.
+  private buffer = new Uint8Array(64 * 1024);
+  private len = 0;
+  private start = 0;
+
+  private append(bytes: Uint8Array): void {
+    if (this.len + bytes.length > this.buffer.length) {
+      // Reclaim the consumed prefix first; only grow if still short.
+      if (this.start > 0) {
+        this.buffer.copyWithin(0, this.start, this.len);
+        this.len -= this.start;
+        this.start = 0;
+      }
+      if (this.len + bytes.length > this.buffer.length) {
+        let cap = this.buffer.length;
+        while (cap < this.len + bytes.length) cap *= 2;
+        const grown = new Uint8Array(cap);
+        grown.set(this.buffer.subarray(0, this.len));
+        this.buffer = grown;
+      }
+    }
+    this.buffer.set(bytes, this.len);
+    this.len += bytes.length;
+  }
 
   push(bytes: Uint8Array): AvccChunk[] {
-    if (bytes.length > 0) {
-      const merged = new Uint8Array(this.buffer.length + bytes.length);
-      merged.set(this.buffer);
-      merged.set(bytes, this.buffer.length);
-      this.buffer = merged;
-    }
+    if (bytes.length > 0) this.append(bytes);
 
     const chunks: AvccChunk[] = [];
-    let offset = 0;
-    while (this.buffer.length - offset >= 4) {
-      const view = new DataView(this.buffer.buffer, this.buffer.byteOffset + offset, 4);
-      const length = view.getUint32(0, false);
+    const buf = this.buffer;
+    while (this.len - this.start >= 4) {
+      const o = this.start;
+      // Big-endian u32; `>>> 0` keeps it unsigned (bit 31 would otherwise sign).
+      const length = ((buf[o]! << 24) | (buf[o + 1]! << 16) | (buf[o + 2]! << 8) | buf[o + 3]!) >>> 0;
       // length covers the tag byte + payload; need that many bytes after the
       // 4-byte header before the chunk is complete.
-      if (this.buffer.length - offset - 4 < length) break;
+      if (this.len - o - 4 < length) break;
       if (length < 1) {
         // Malformed (length must include the tag byte). Skip the header and
         // resync rather than spinning forever.
-        offset += 4;
+        this.start += 4;
         continue;
       }
-      const tag = this.buffer[offset + 4]!;
-      const payload = this.buffer.slice(offset + 5, offset + 4 + length);
+      const tag = buf[o + 4]!;
       const type = TAG_TO_TYPE[tag];
-      if (type) chunks.push({ type, payload });
-      offset += 4 + length;
+      // Copy the payload out: the backing buffer is reused/compacted in place.
+      if (type) chunks.push({ type, payload: buf.slice(o + 5, o + 4 + length) });
+      this.start += 4 + length;
     }
 
-    this.buffer = offset === 0 ? this.buffer : this.buffer.slice(offset);
+    // Compact the consumed prefix so the buffer only holds the unparsed tail.
+    if (this.start > 0) {
+      if (this.start < this.len) this.buffer.copyWithin(0, this.start, this.len);
+      this.len -= this.start;
+      this.start = 0;
+    }
     return chunks;
   }
 
   reset(): void {
-    this.buffer = new Uint8Array(0);
+    // Keep the allocated capacity; just drop any buffered bytes.
+    this.len = 0;
+    this.start = 0;
   }
 }
 

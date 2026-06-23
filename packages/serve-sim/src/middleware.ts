@@ -302,6 +302,29 @@ function queryDevice(rawUrl: string): string | null {
   return new URLSearchParams(rawUrl.slice(qIndex + 1)).get("device");
 }
 
+/**
+ * Parse `/grid/api` pagination params. `limit` absent → return the whole list
+ * (back-compat for embedded mounts that expect every device in one response).
+ * The full DeviceKit `chrome` descriptor is only resolved for the returned
+ * page, so a remote viewer over a tunnel fetches a small first page instead of
+ * the whole simulator catalog (~150KB) up front.
+ */
+export function parseGridPaging(rawUrl: string): { limit: number | null; offset: number } {
+  const qIndex = rawUrl.indexOf("?");
+  if (qIndex === -1) return { limit: null, offset: 0 };
+  const params = new URLSearchParams(rawUrl.slice(qIndex + 1));
+  const rawLimit = params.get("limit");
+  const rawOffset = params.get("offset");
+  // Clamp to sane bounds; ignore non-numeric/negative input rather than erroring.
+  const limit =
+    rawLimit == null || !/^\d+$/.test(rawLimit)
+      ? null
+      : Math.min(Math.max(Number(rawLimit), 1), 1000);
+  const offset =
+    rawOffset == null || !/^\d+$/.test(rawOffset) ? 0 : Math.max(Number(rawOffset), 0);
+  return { limit, offset };
+}
+
 function hostForRequest(req: SimReq): string | undefined {
   const host = req.headers?.host;
   if (host) return host;
@@ -1263,7 +1286,44 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       const states = readServeSimStates();
       const helperByUdid = new Map(states.map((s) => [s.device, s] as const));
       const sims = listAllSimulators();
-      const devices = sims.map((d) => {
+      // Order mirrors Xcode's Devices window: the devices the user is actually
+      // using float to the top — streaming first, then booted, then the
+      // simulator they last opened in Simulator.app — and everything else falls
+      // back to a stable family / newest-OS / name grouping. This surfaces the
+      // handful of relevant devices instead of burying them in an alphabetical
+      // wall of near-identical names. Sort on the cheap metadata BEFORE
+      // resolving the DeviceKit chrome descriptor, so pagination resolves chrome
+      // only for the page actually returned.
+      const preferredUdid = getPreferredDeviceUdid();
+      const familyRank = (name: string): number => {
+        if (/iphone/i.test(name)) return 0;
+        if (/ipad/i.test(name)) return 1;
+        if (/watch/i.test(name)) return 2;
+        if (/(apple\s*tv|^tv\b)/i.test(name)) return 3;
+        if (/vision|reality/i.test(name)) return 4;
+        return 5;
+      };
+      // Lower is higher in the list: streaming > booted > last-opened > rest.
+      const stateRank = (d: (typeof sims)[number]) =>
+        helperByUdid.has(d.udid) ? 0 : d.state === "Booted" ? 1 : d.udid === preferredUdid ? 2 : 3;
+      // Newest runtime first, so "iPhone 17 Pro (27.0)" sorts above its 26.x twins.
+      const runtimeRank = (runtime: string): number => {
+        const m = runtime.match(/-(\d+)-(\d+)/);
+        const major = m ? Number(m[1]) : 0;
+        const minor = m ? Number(m[2]) : 0;
+        return -(major * 1000 + minor);
+      };
+      sims.sort((a, b) =>
+        stateRank(a) - stateRank(b) ||
+        familyRank(a.name) - familyRank(b.name) ||
+        a.name.localeCompare(b.name) ||
+        runtimeRank(a.runtime) - runtimeRank(b.runtime),
+      );
+
+      const total = sims.length;
+      const { limit, offset } = parseGridPaging(rawUrl);
+      const page = limit == null ? sims : sims.slice(offset, offset + limit);
+      const devices = page.map((d) => {
         const helper = helperByUdid.get(d.udid);
         const remoteHelper = helper ? rewriteStateForRequestHost(helper, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
         return {
@@ -1283,42 +1343,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
             : null,
         };
       });
-      // Order mirrors Xcode's Devices window: the devices the user is actually
-      // using float to the top — streaming first, then booted, then the
-      // simulator they last opened in Simulator.app — and everything else falls
-      // back to a stable family / newest-OS / name grouping. This surfaces the
-      // handful of relevant devices instead of burying them in an alphabetical
-      // wall of near-identical names.
-      const preferredUdid = getPreferredDeviceUdid();
-      const familyRank = (name: string): number => {
-        if (/iphone/i.test(name)) return 0;
-        if (/ipad/i.test(name)) return 1;
-        if (/watch/i.test(name)) return 2;
-        if (/(apple\s*tv|^tv\b)/i.test(name)) return 3;
-        if (/vision|reality/i.test(name)) return 4;
-        return 5;
-      };
-      // Lower is higher in the list: streaming > booted > last-opened > rest.
-      const stateRank = (x: typeof devices[number]) =>
-        x.helper ? 0 : x.state === "Booted" ? 1 : x.device === preferredUdid ? 2 : 3;
-      // Newest runtime first, so "iPhone 17 Pro (27.0)" sorts above its 26.x twins.
-      const runtimeRank = (runtime: string): number => {
-        const m = runtime.match(/-(\d+)-(\d+)/);
-        const major = m ? Number(m[1]) : 0;
-        const minor = m ? Number(m[2]) : 0;
-        return -(major * 1000 + minor);
-      };
-      devices.sort((a, b) =>
-        stateRank(a) - stateRank(b) ||
-        familyRank(a.name) - familyRank(b.name) ||
-        a.name.localeCompare(b.name) ||
-        runtimeRank(a.runtime) - runtimeRank(b.runtime),
-      );
       res.writeHead(200, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       });
-      res.end(JSON.stringify({ devices }));
+      // `total` lets the client show "X of Y" and know when to stop paging;
+      // older clients that read only `devices` are unaffected.
+      res.end(JSON.stringify({ devices, total, offset: limit == null ? 0 : offset, limit: limit ?? total }));
       return;
     }
 

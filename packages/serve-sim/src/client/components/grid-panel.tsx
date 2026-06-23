@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PanelLeft, Search, X } from "lucide-react";
 import { Panel, PanelHeader } from "../Panel";
 import { useGridMemory } from "../hooks/use-grid-memory";
@@ -21,6 +21,10 @@ export function GridPanel({
   width,
   side = "right",
   devices,
+  total = 0,
+  hasMore = false,
+  onLoadMore,
+  onLoadAll,
   selectedUdid,
   onSelect,
   starting,
@@ -32,6 +36,14 @@ export function GridPanel({
   width: number;
   side?: "left" | "right";
   devices: GridDevice[] | null;
+  /** Total devices available on the server (the list may be paginated). */
+  total?: number;
+  /** True when more devices remain beyond the loaded page. */
+  hasMore?: boolean;
+  /** Grow the loaded window by one page (called as the list nears its end). */
+  onLoadMore?: () => void;
+  /** Load every device — used while searching so results aren't truncated. */
+  onLoadAll?: () => void;
   selectedUdid: string | null;
   onSelect: (udid: string) => void;
   starting: Record<string, boolean>;
@@ -54,6 +66,23 @@ export function GridPanel({
         runtimeLabel(d.runtime).toLowerCase().includes(q),
     );
   }, [devices, query]);
+
+  // Client-side search only sees loaded devices, so pull the full catalog the
+  // moment a query is typed — otherwise a match on a not-yet-paged device would
+  // be invisible. One request (the server caps the limit), then filtering is local.
+  useEffect(() => {
+    if (query.trim() && hasMore) onLoadAll?.();
+  }, [query, hasMore, onLoadAll]);
+
+  // Infinite scroll: grow the window as the list nears its end. Skipped while
+  // searching (the full catalog is already loaded via onLoadAll).
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const onScroll = () => {
+    if (query.trim() || !hasMore || !onLoadMore) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 240) onLoadMore();
+  };
 
   return (
     <Panel open={open} width={width} side={side} style={{ backgroundColor: PANEL_BACKGROUND }}>
@@ -96,7 +125,11 @@ export function GridPanel({
       </div>
 
       <div className="relative flex-1 min-h-0">
-        <div className="h-full min-h-0 overflow-y-auto px-4 py-2 [scrollbar-width:thin]">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="h-full min-h-0 overflow-y-auto px-4 py-2 [scrollbar-width:thin]"
+        >
           {filtered === null ? (
             <DeviceListSkeleton />
           ) : filtered.length === 0 ? (
@@ -121,6 +154,11 @@ export function GridPanel({
                   />
                 ))}
               </div>
+              {!query && hasMore && (
+                <div className="px-2 py-2 text-[11px] text-white/35 text-center">
+                  {devices ? `${devices.length} of ${total}` : null}
+                </div>
+              )}
             </>
           )}
         </div>

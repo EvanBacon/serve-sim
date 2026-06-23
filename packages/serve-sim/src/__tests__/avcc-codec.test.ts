@@ -116,6 +116,56 @@ describe("AvccDemuxer", () => {
     expect(chunks).toHaveLength(1);
     expect(chunks[0]!.type).toBe("keyframe");
   });
+
+  test("reassembles a large keyframe delivered in tiny pieces", () => {
+    // An IDR fragments into many small tunnel reads — the case that froze the
+    // tab under the old per-chunk full-buffer rebuild.
+    const payload = Array.from({ length: 120_000 }, (_, i) => i & 0xff);
+    const f = frame(AVCC_TAG_KEYFRAME, payload);
+    const d = new AvccDemuxer();
+    let chunks: ReturnType<AvccDemuxer["push"]> = [];
+    for (let off = 0; off < f.length; off += 64) {
+      chunks = chunks.concat(d.push(f.subarray(off, Math.min(off + 64, f.length))));
+    }
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]!.type).toBe("keyframe");
+    expect(chunks[0]!.payload.length).toBe(payload.length);
+    expect(Array.from(chunks[0]!.payload.subarray(0, 4))).toEqual([0, 1, 2, 3]);
+  });
+
+  // Regression guard for the tunnel freeze: accumulation must stay near-linear
+  // as the same payload is split into finer pieces. The old demuxer rebuilt the
+  // whole buffer per push (O(bytes²) per frame), so fine chunking blew up
+  // wall-clock by 50–100×; the growable buffer keeps it bounded.
+  test("accumulation cost stays near-linear as chunking gets finer", () => {
+    // 30 frames of ~64KB each — a stream of IDR-sized chunks.
+    const stream = concat(
+      ...Array.from({ length: 30 }, (_, f) =>
+        frame(AVCC_TAG_KEYFRAME, Array.from({ length: 64 * 1024 }, (_, i) => (f + i) & 0xff)),
+      ),
+    );
+    const run = (piece: number) => {
+      const d = new AvccDemuxer();
+      let n = 0;
+      for (let off = 0; off < stream.length; off += piece) {
+        n += d.push(stream.subarray(off, Math.min(off + piece, stream.length))).length;
+      }
+      return n;
+    };
+    const time = (piece: number) => {
+      run(piece); // warm
+      let best = Infinity;
+      for (let r = 0; r < 3; r++) {
+        const t0 = performance.now();
+        run(piece);
+        best = Math.min(best, performance.now() - t0);
+      }
+      return best;
+    };
+    const coarse = time(64 * 1024); // ~1 piece / frame (localhost-like)
+    const fine = time(256); // ~256 pieces / frame (tunnel-like)
+    expect(fine).toBeLessThan(coarse * 15 + 50);
+  });
 });
 
 describe("avcCodecString", () => {
