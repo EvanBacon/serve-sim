@@ -145,6 +145,7 @@ function App() {
     refresh: refreshGrid,
     loadMore: loadMoreGrid,
     loadAll: loadAllGrid,
+    resetPage: resetGridPage,
     hasMore: gridHasMore,
   } = useGridDevices(gridApiEndpoint, true, hasPending);
   // Re-subscribe the stream SSE the instant the selected device gains (or loses)
@@ -355,6 +356,7 @@ function App() {
         hasMore={gridHasMore}
         onLoadMore={loadMoreGrid}
         onLoadAll={loadAllGrid}
+        onResetPage={resetGridPage}
         selectedUdid={effectiveUdid}
         onSelect={selectDevice}
         starting={starting}

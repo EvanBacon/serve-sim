@@ -25,6 +25,7 @@ export function GridPanel({
   hasMore = false,
   onLoadMore,
   onLoadAll,
+  onResetPage,
   selectedUdid,
   onSelect,
   starting,
@@ -44,6 +45,8 @@ export function GridPanel({
   onLoadMore?: () => void;
   /** Load every device — used while searching so results aren't truncated. */
   onLoadAll?: () => void;
+  /** Return to the paged window when search is cleared. */
+  onResetPage?: () => void;
   selectedUdid: string | null;
   onSelect: (udid: string) => void;
   starting: Record<string, boolean>;
@@ -69,10 +72,16 @@ export function GridPanel({
 
   // Client-side search only sees loaded devices, so pull the full catalog the
   // moment a query is typed — otherwise a match on a not-yet-paged device would
-  // be invisible. One request (the server caps the limit), then filtering is local.
+  // be invisible. One request (the server caps the limit), then filtering is
+  // local. When search is cleared, return to the paged window so the poll stops
+  // refetching the whole catalog every interval.
+  const wasSearchingRef = useRef(false);
   useEffect(() => {
-    if (query.trim() && hasMore) onLoadAll?.();
-  }, [query, hasMore, onLoadAll]);
+    const searching = !!query.trim();
+    if (searching && hasMore) onLoadAll?.();
+    else if (!searching && wasSearchingRef.current) onResetPage?.();
+    wasSearchingRef.current = searching;
+  }, [query, hasMore, onLoadAll, onResetPage]);
 
   // Infinite scroll: grow the window as the list nears its end. Skipped while
   // searching (the full catalog is already loaded via onLoadAll).

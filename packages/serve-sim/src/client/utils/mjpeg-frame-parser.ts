@@ -76,16 +76,28 @@ export function createMjpegFrameParser(
     return m ? Number(m[1]) : null;
   };
 
-  // Fallback for header-less streams: extract one JPEG by FFD8..FFD9.
+  // Fallback for header-less streams: extract one JPEG by FFD8..FFD9. The EOI
+  // (FFD9) search resumes from `markerScanFrom` rather than rescanning the whole
+  // buffered payload on every push — without it, a header-less frame split
+  // across many tunnel reads would be O(bytes²) per frame (the same trap the
+  // accumulation buffer avoids). Absolute index into `buffer`; shifted on
+  // compaction, reset once a frame completes.
+  let markerScanFrom = 0;
   const scanJpeg = (from: number): { s: number; e: number } | null => {
     let s = -1;
     for (let i = from; i < len - 1; i++) {
       if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) { s = i; break; }
     }
     if (s === -1) return null;
-    for (let i = s + 2; i < len - 1; i++) {
-      if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) return { s, e: i + 2 };
+    for (let i = Math.max(s + 2, markerScanFrom); i < len - 1; i++) {
+      if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) {
+        markerScanFrom = 0;
+        return { s, e: i + 2 };
+      }
     }
+    // No EOI yet — resume from the tail (catches an FF/D9 split across reads)
+    // instead of rescanning from the SOI next push.
+    markerScanFrom = Math.max(s + 2, len - 1);
     return null;
   };
 
@@ -115,6 +127,8 @@ export function createMjpegFrameParser(
     if (start > 0) {
       if (start < len) buffer.copyWithin(0, start, len);
       len -= start;
+      // The marker cursor is an absolute index; shift it with the buffer.
+      markerScanFrom = markerScanFrom > start ? markerScanFrom - start : 0;
       start = 0;
     }
   };

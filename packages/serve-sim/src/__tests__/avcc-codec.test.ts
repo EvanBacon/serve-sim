@@ -8,6 +8,10 @@ import {
   AVCC_TAG_SEED,
 } from "../client/avcc-codec.js";
 
+// Wall-clock perf assertion — opt-in via RUN_PERF_TESTS so noisy CI runners
+// can't flake it. The fragmentation *correctness* tests run everywhere.
+const perfTest = process.env.RUN_PERF_TESTS ? test : test.skip;
+
 /** Build one wire chunk: [len:u32-be][tag][payload]. len = payload + 1. */
 function frame(tag: number, payload: number[]): Uint8Array {
   const length = payload.length + 1;
@@ -137,7 +141,7 @@ describe("AvccDemuxer", () => {
   // as the same payload is split into finer pieces. The old demuxer rebuilt the
   // whole buffer per push (O(bytes²) per frame), so fine chunking blew up
   // wall-clock by 50–100×; the growable buffer keeps it bounded.
-  test("accumulation cost stays near-linear as chunking gets finer", () => {
+  perfTest("accumulation cost stays near-linear as chunking gets finer", () => {
     // 30 frames of ~64KB each — a stream of IDR-sized chunks.
     const stream = concat(
       ...Array.from({ length: 30 }, (_, f) =>

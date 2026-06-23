@@ -1303,9 +1303,18 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         if (/vision|reality/i.test(name)) return 4;
         return 5;
       };
-      // Lower is higher in the list: streaming > booted > last-opened > rest.
-      const stateRank = (d: (typeof sims)[number]) =>
-        helperByUdid.has(d.udid) ? 0 : d.state === "Booted" ? 1 : d.udid === preferredUdid ? 2 : 3;
+      // Lower is higher in the list: streaming > selected > booted > last-opened
+      // > rest. The active `?device=` selection is ranked near the top so it's
+      // always inside the first page — otherwise a paginated client that selected
+      // a shut-down device deep in the catalog would get no chrome/placeholder
+      // for the view it's actually showing.
+      const stateRank = (d: (typeof sims)[number]) => {
+        if (helperByUdid.has(d.udid)) return 0;
+        if (selectedDevice && d.udid === selectedDevice) return 1;
+        if (d.state === "Booted") return 2;
+        if (d.udid === preferredUdid) return 3;
+        return 4;
+      };
       // Newest runtime first, so "iPhone 17 Pro (27.0)" sorts above its 26.x twins.
       const runtimeRank = (runtime: string): number => {
         const m = runtime.match(/-(\d+)-(\d+)/);

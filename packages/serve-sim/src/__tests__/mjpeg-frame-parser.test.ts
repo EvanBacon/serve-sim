@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { createMjpegFrameParser } from "../client/utils/mjpeg-frame-parser";
 
+// Wall-clock perf assertions are sensitive to noisy-neighbour scheduling, GC,
+// and thermal throttling on shared CI runners, so they're opt-in via
+// RUN_PERF_TESTS. The correctness tests (which also exercise the same heavily
+// fragmented paths) run everywhere and are what gate normal CI.
+const perfTest = process.env.RUN_PERF_TESTS ? test : test.skip;
+
 // Build a synthetic MJPEG byte stream of `n` frames, each a distinct JPEG
 // (FFD8 … FFD9) wrapped in the helper's multipart part header. Returns the
 // stream bytes plus the exact frame payloads so tests can assert byte-equality.
@@ -74,6 +80,20 @@ describe("createMjpegFrameParser", () => {
     }
   });
 
+  test("header-less: large frames reassemble byte-perfect under fine chunking", () => {
+    // Exercises the resumed FFD9 scan cursor — a header-less frame split into
+    // 1-byte reads must still extract intact (and not rescan from the SOI each
+    // push). 1-byte chunking is the worst case for the EOI search.
+    const { stream, frames } = buildStream(3, 32 * 1024, /* withHeaders */ false);
+    for (const piece of [1, 7, 64]) {
+      const got = collect(stream, piece);
+      expect(got.length).toBe(frames.length);
+      for (let i = 0; i < frames.length; i++) {
+        expect(bytesEqual(got[i]!, frames[i]!)).toBe(true);
+      }
+    }
+  });
+
   test("emits a frame only once fully buffered", () => {
     const { stream, frames } = buildStream(1, 8192);
     const got: Uint8Array[] = [];
@@ -91,12 +111,12 @@ describe("createMjpegFrameParser", () => {
   // number of chunks. Splitting a frame into N× more pieces must not blow up
   // the work superlinearly. We compare wall-clock between coarse and fine
   // chunking of the same payload; the amortised-O(1) append keeps the ratio
-  // bounded. (O(n²) accumulation pushed this ratio into the hundreds.)
-  test("accumulation cost stays near-linear as chunking gets finer", () => {
-    const { stream } = buildStream(20, 256 * 1024); // native-resolution frames
+  // bounded. (O(n²) accumulation pushed this ratio into the hundreds.) Opt-in
+  // (RUN_PERF_TESTS) — see `perfTest` note above.
+  const nearLinear = (withHeaders: boolean) => () => {
+    const { stream } = buildStream(20, 256 * 1024, withHeaders); // native-res frames
     const time = (piece: number) => {
-      // Warm, then take the best of a few runs to damp GC noise.
-      collect(stream, piece);
+      collect(stream, piece); // warm
       let best = Infinity;
       for (let r = 0; r < 3; r++) {
         const t0 = performance.now();
@@ -110,5 +130,9 @@ describe("createMjpegFrameParser", () => {
     // Linear accumulation: ~constant. The O(bytes²) regression made `fine`
     // 50–100× `coarse`; a generous 15× ceiling catches it without flaking.
     expect(fine).toBeLessThan(coarse * 15 + 50);
-  });
+  };
+  // Cover both the Content-Length header path and the header-less FFD9-scan
+  // path — the latter is where the resumed marker cursor matters.
+  perfTest("accumulation cost stays near-linear (header path)", nearLinear(true));
+  perfTest("accumulation cost stays near-linear (header-less scan path)", nearLinear(false));
 });

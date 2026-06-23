@@ -50,6 +50,9 @@ export function useGridDevices(
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
   const loadMore = useCallback(() => setLimit((l) => l + pageSize), [pageSize]);
   const loadAll = useCallback(() => setLimit(LOAD_ALL_LIMIT), []);
+  // Return to the paged window — e.g. when search is cleared — so the poll stops
+  // pulling the whole catalog every interval after a one-off `loadAll`.
+  const resetPage = useCallback(() => setLimit(pageSize), [pageSize]);
   const hasMore = total > (devices?.length ?? 0);
-  return { devices, total, refresh, loadMore, loadAll, hasMore };
+  return { devices, total, refresh, loadMore, loadAll, resetPage, hasMore };
 }
