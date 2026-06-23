@@ -15,7 +15,12 @@ concurrency:
 jobs:
   sim-test:
     runs-on: macos-26
-    timeout-minutes: 15
+    # 25 (not 15) leaves headroom for the one e2e retry below: the sim-backed
+    # tests can wedge the shared simulator (a malformed-HID frame leaving a
+    # stuck finger, a mid-stream native crash), which cascades connection
+    # errors into every later sim test. One reboot-and-retry clears a transient
+    # wedge; a real regression still fails both attempts.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -76,7 +81,22 @@ jobs:
           echo "udid=$UDID" >> $GITHUB_OUTPUT
 
       - name: serve-sim tests
-        run: bun test packages/serve-sim/src/__tests__/
+        env:
+          UDID: ${{ steps.boot-sim.outputs.udid }}
+        run: |
+          run_tests() { bun test packages/serve-sim/src/__tests__/; }
+          if run_tests; then exit 0; fi
+          # The sim-backed e2e tests share one simulator; a wedge from one test
+          # (stuck finger, native crash) shows up as hook timeouts / ECONNRESET /
+          # ConnectionRefused in unrelated later tests. Reboot for a clean slate
+          # and retry once — a genuine failure reproduces, a transient wedge clears.
+          echo "::warning title=sim e2e retry::test run failed; rebooting $UDID and retrying once"
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          sleep 3
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          open -ga Simulator || true
+          run_tests
 
       - name: Shutdown simulator
         if: always() && steps.boot-sim.outputs.udid != ''
