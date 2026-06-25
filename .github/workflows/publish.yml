@@ -113,7 +113,23 @@ jobs:
 
       - name: serve-sim tests (idle floor regression)
         if: steps.changes.outputs.sim == 'true'
-        run: bun test packages/serve-sim/src/__tests__/
+        env:
+          UDID: ${{ steps.boot-sim.outputs.udid }}
+        run: |
+          # Mirror sim-test.yml: the sim-backed e2e tests share one simulator,
+          # so a wedge from one test (stuck finger, native crash) cascades into
+          # ConnectionRefused / "server not alive" failures in unrelated later
+          # tests. Reboot for a clean slate and retry once — a transient wedge
+          # clears, a genuine regression reproduces on the second run.
+          run_tests() { bun test packages/serve-sim/src/__tests__/; }
+          if run_tests; then exit 0; fi
+          echo "::warning title=sim e2e retry::test run failed; rebooting $UDID and retrying once"
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          sleep 3
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          open -ga Simulator || true
+          run_tests
 
       - name: Shutdown simulator
         if: always() && steps.boot-sim.outputs.udid != ''
