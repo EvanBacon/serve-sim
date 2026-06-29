@@ -12,7 +12,7 @@ import type { Socket } from "net";
 // importing the dependency keeps the proxy working regardless of runtime.
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
-import { getDeviceSession, type HidSocket } from "./device-session";
+import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
 import { axFrontmostAsync } from "./native";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import { debugMw } from "./debug";
@@ -135,6 +135,30 @@ function isUserFacingBundle(bundleId: string): boolean {
 
 function isSimulatorUdid(value: string): boolean {
   return /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(value);
+}
+
+/** What to do with a persisted device state when reaping during a grid poll. */
+type StaleStateAction = "keep" | "recycle-self" | "recycle-helper";
+
+/**
+ * Decide how to reap a state record whose backing simulator may have been shut
+ * down. A booted device (or a non-simulator/unknown `booted` set) is kept.
+ *
+ * The critical distinction is `recycle-self` vs `recycle-helper`: in in-process
+ * mode `inProcessServeSimState` records the *server's own* pid, so SIGTERMing it
+ * (as we do for a separate stale helper) would kill the whole server — and
+ * index.ts converts SIGTERM into `process.exit`. When the dead device is ours,
+ * we stop just that device's capture session instead of signalling the pid.
+ */
+function classifyStaleState(
+  state: { pid: number; device: string },
+  booted: Set<string> | null,
+  selfPid: number,
+): StaleStateAction {
+  if (booted && isSimulatorUdid(state.device) && !booted.has(state.device)) {
+    return state.pid === selfPid ? "recycle-self" : "recycle-helper";
+  }
+  return "keep";
 }
 
 export function parseForegroundAppLogMessage(message: string): { bundleId: string; pid: number } | null {
@@ -270,13 +294,26 @@ export function readServeSimStates(): ServeSimState[] {
       // would accept connections yet never produce frames, leaving the
       // preview stuck on "Connecting...". Recycle the stale state so the
       // caller can spawn a fresh helper bound to whatever is booted.
-      if (booted && isSimulatorUdid(state.device) && !booted.has(state.device)) {
-        debugMw(
-          "recycling stale helper pid=%d (device %s no longer booted)",
-          state.pid,
-          state.device,
-        );
-        try { process.kill(state.pid, "SIGTERM"); } catch {}
+      const action = classifyStaleState(state, booted, process.pid);
+      if (action !== "keep") {
+        if (action === "recycle-self") {
+          // This device is streamed in-process by *us* (the close button just
+          // shut its sim down). SIGTERMing state.pid would kill the whole
+          // server; instead stop just this device's capture session.
+          debugMw(
+            "closing in-process session for shut-down device %s (own pid %d)",
+            state.device,
+            state.pid,
+          );
+          closeDeviceSession(state.device);
+        } else {
+          debugMw(
+            "recycling stale helper pid=%d (device %s no longer booted)",
+            state.pid,
+            state.device,
+          );
+          try { process.kill(state.pid, "SIGTERM"); } catch {}
+        }
         try { unlinkSync(path); } catch {}
         continue;
       }
@@ -1378,6 +1415,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
           return;
         }
+        // Stop our own in-process capture for this device first (no-op if it
+        // isn't streamed here). This frees the native session immediately
+        // rather than waiting for the next poll's reaper to notice.
+        closeDeviceSession(udid);
         // Drop the snapshot so the next /grid/api call re-queries simctl
         // and prunes any helper bound to this now-shutdown device.
         bootedSnapshot = { at: 0, booted: null };

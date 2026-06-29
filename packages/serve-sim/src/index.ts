@@ -116,6 +116,15 @@ function readStateFile(file: string): ServerState | null {
     // recycle here so --detach / --list always return a working stream.
     const booted = getBootedUdids();
     if (booted && !booted.has(state.device)) {
+      if (state.pid === process.pid) {
+        // The state belongs to *this* process (an in-process/preview server
+        // recorded its own pid via inProcessServeSimState). Never SIGTERM
+        // ourselves — that would take the whole server down. Just drop the
+        // stale file; the live server reaps its own sessions on grid polls.
+        debugState("dropping own stale state for non-booted device %s", state.device);
+        try { unlinkSync(file); } catch {}
+        return null;
+      }
       debugState(
         "helper pid %d bound to non-booted device %s — killing stale helper",
         state.pid,
