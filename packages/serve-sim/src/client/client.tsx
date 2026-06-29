@@ -137,8 +137,6 @@ function App() {
   // Skip the H.264 path for them so the stream paints over MJPEG immediately
   // instead of stalling on the 4s AVCC-fallback window.
   const [uiStarted, setUiStarted] = useState<Set<string>>(() => new Set());
-  const hasPending =
-    Object.values(starting).some(Boolean) || Object.values(shuttingDown).some(Boolean);
   const {
     devices: gridDevices,
     total: gridTotal,
@@ -147,7 +145,7 @@ function App() {
     loadAll: loadAllGrid,
     resetPage: resetGridPage,
     hasMore: gridHasMore,
-  } = useGridDevices(gridApiEndpoint, true, hasPending);
+  } = useGridDevices(gridApiEndpoint, true);
   // Re-subscribe the stream SSE the instant the selected device gains (or loses)
   // a helper, so its config lands as soon as it boots rather than waiting on the
   // next filesystem-watch tick — the stream appears sooner after boot.

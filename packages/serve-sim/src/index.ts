@@ -9,7 +9,7 @@ import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, 
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
-import { findBootedDevice, resolveDevice } from "./device";
+import { findBootedDevice, resolveDevice, listDevicesByRuntime, listBootedUdids, eachDevice } from "./device";
 import { permissions } from "./permissions";
 import { uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
@@ -57,43 +57,6 @@ function readState(udid?: string): ServerState | null {
   return null;
 }
 
-/**
- * Snapshot simctl's boot state once per `readStateFile` batch. A full
- * `simctl list devices -j` is ~50ms; doing it per-state multiplied the cost
- * by the number of running helpers. We cache for 1 second so a flurry of
- * readStateFile() calls (e.g. readAllStates loop) shares one lookup.
- */
-let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
-function getBootedUdids(): Set<string> | null {
-  const now = Date.now();
-  if (bootedSnapshot.booted && now - bootedSnapshot.at < 1000) {
-    return bootedSnapshot.booted;
-  }
-  try {
-    const output = execSync("xcrun simctl list devices booted -j", {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 3_000,
-    });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; state: string }>>;
-    };
-    const booted = new Set<string>();
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.state === "Booted") booted.add(device.udid);
-      }
-    }
-    bootedSnapshot = { at: now, booted };
-    return booted;
-  } catch {
-    // simctl lookup failed (Xcode offline, etc.) — we can't prove the device
-    // is shutdown, so don't treat as stale. Returns null so caller skips the
-    // booted check for this invocation.
-    return null;
-  }
-}
-
 function readStateFile(file: string): ServerState | null {
   try {
     if (!existsSync(file)) {
@@ -114,7 +77,7 @@ function readStateFile(file: string): ServerState | null {
     // When that happens the helper keeps accepting /stream.mjpeg connections
     // but never emits frames, so clients hang on "Connecting...". Detect and
     // recycle here so --detach / --list always return a working stream.
-    const booted = getBootedUdids();
+    const booted = listBootedUdids();
     if (booted && !booted.has(state.device)) {
       debugState(
         "helper pid %d bound to non-booted device %s — killing stale helper",
@@ -170,56 +133,34 @@ function clearState(udid?: string) {
  * no booted simulator. Prefers an available iPhone on the newest iOS runtime.
  */
 function pickDefaultDevice(): { udid: string; name: string } | null {
-  try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string; isAvailable?: boolean }>>;
-    };
-    const iosRuntimes = Object.keys(data.devices)
-      .filter((k) => /SimRuntime\.iOS-/i.test(k))
-      .sort((a, b) => {
-        const va = (a.match(/iOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
-        const vb = (b.match(/iOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
-        return (vb[0] ?? 0) - (va[0] ?? 0) || (vb[1] ?? 0) - (va[1] ?? 0);
-      });
-    for (const runtime of iosRuntimes) {
-      const devices = data.devices[runtime] ?? [];
-      const iphone = devices.find(
-        (d) => d.isAvailable !== false && /^iPhone\b/i.test(d.name),
-      );
-      if (iphone) return { udid: iphone.udid, name: iphone.name };
-    }
-  } catch {}
+  const devices = listDevicesByRuntime();
+  const iosRuntimes = Object.keys(devices)
+    .filter((k) => /SimRuntime\.iOS-/i.test(k))
+    .sort((a, b) => {
+      const va = (a.match(/iOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
+      const vb = (b.match(/iOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
+      return (vb[0] ?? 0) - (va[0] ?? 0) || (vb[1] ?? 0) - (va[1] ?? 0);
+    });
+  for (const runtime of iosRuntimes) {
+    const iphone = (devices[runtime] ?? []).find(
+      (d) => d.isAvailable !== false && /^iPhone\b/i.test(d.name),
+    );
+    if (iphone) return { udid: iphone.udid, name: iphone.name };
+  }
   return null;
 }
 
 function getDeviceName(udid: string): string | null {
-  try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
-    };
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.udid === udid) return device.name;
-      }
-    }
-  } catch {}
+  for (const [, device] of eachDevice()) {
+    if (device.udid === udid) return device.name;
+  }
   return null;
 }
 
 function isDeviceBooted(udid: string): boolean {
-  try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; state: string }>>;
-    };
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.udid === udid) return device.state === "Booted";
-      }
-    }
-  } catch {}
+  for (const [, device] of eachDevice()) {
+    if (device.udid === udid) return device.state === "Booted";
+  }
   return false;
 }
 

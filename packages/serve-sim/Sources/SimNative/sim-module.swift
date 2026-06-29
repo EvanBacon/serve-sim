@@ -154,6 +154,62 @@ private func u32(_ v: Int) -> UInt32 {
     }
 }
 
+// MARK: - Device list / watch
+
+// `[[String: ...]]` isn't directly NodeValueConvertible (Array only conforms
+// when its element is `any NodeValueConvertible`), so each device object is
+// produced as `any NodeValueConvertible` and the methods return an array of those.
+private func deviceList(_ devices: [SimDeviceInfo]) -> [any NodeValueConvertible] {
+    devices.map { d in
+        [
+            "udid": d.udid,
+            "name": d.name,
+            "state": d.state,
+            "isAvailable": d.isAvailable,
+            "runtimeIdentifier": d.runtimeIdentifier,
+            "deviceTypeIdentifier": d.deviceTypeIdentifier,
+        ] as [String: any NodePropertyConvertible]
+    }
+}
+
+/// Reactive view of the CoreSimulator device set. Construction subscribes to
+/// the process-global `SimDeviceMonitor` and fires `onChange` (no args) on the
+/// JS thread whenever devices are added/removed or change state. `list()`
+/// returns the current snapshot synchronously. The subscription is dropped when
+/// the JS handle is garbage-collected (or via `stop()`).
+@NodeClass @NodeActor final class SimWatch {
+    private let nodeQueue: NodeAsyncQueue
+    private var token: Int?
+
+    @NodeConstructor init(_ onChange: NodeFunction) throws {
+        // unref'd by NodeAsyncQueue's init so the subscription alone won't keep
+        // the event loop alive. Coalesced changes are cheap; a small bound is
+        // plenty and drops are harmless (the next event reflects latest state).
+        let queue = try NodeAsyncQueue(label: "simWatch", maxQueueSize: 8)
+        self.nodeQueue = queue
+        SimDeviceMonitor.shared.start()
+        // Capture only the locals (not self): the observer fires on the
+        // monitor's native queue and marshals onto the JS thread via `queue`.
+        token = SimDeviceMonitor.shared.addObserver {
+            try? queue.run { _ = try? onChange.call([]) }
+        }
+    }
+
+    @NodeMethod func list() -> [any NodeValueConvertible] {
+        deviceList(SimDeviceMonitor.shared.currentDevices())
+    }
+
+    @NodeMethod func stop() {
+        if let token { SimDeviceMonitor.shared.removeObserver(token) }
+        token = nil
+    }
+
+    deinit {
+        if let token { SimDeviceMonitor.shared.removeObserver(token) }
+        try? nodeQueue.close()
+    }
+}
+
 // MARK: - Accessibility
 
 /// Run a blocking accessibility query off the JS event loop (on a background
@@ -175,6 +231,17 @@ private func axQuery(
 #NodeModule(exports: [
     "SimHID": SimHID.deferredConstructor,
     "SimCapture": SimCapture.deferredConstructor,
+    "SimWatch": SimWatch.deferredConstructor,
+    // listDevices(): the current device snapshot, synchronously, from the
+    // reactive CoreSimulator subscriber (lazy-started on first call). Replaces
+    // spawning `xcrun simctl list devices -j`.
+    "listDevices": try NodeFunction { () throws -> [any NodeValueConvertible] in
+        SimDeviceMonitor.shared.start()
+        // Throw (rather than return []) when the subscription failed, so the TS
+        // caller falls back to `simctl` instead of treating it as "no devices".
+        guard SimDeviceMonitor.shared.isReady else { throw SimMonitorError.unavailable }
+        return deviceList(SimDeviceMonitor.shared.currentDevices())
+    },
     // axDescribe(udid): Promise<string> — axe-shaped accessibility JSON.
     "axDescribe": try NodeFunction { (udid: String) async throws -> String in
         try await axQuery(udid) { udid in

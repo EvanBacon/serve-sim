@@ -40,11 +40,33 @@ interface SimCaptureHandle {
   stop(): void;
 }
 
+interface SimWatchHandle {
+  list(): NativeSimDevice[];
+  stop(): void;
+}
+
 interface NativeAddon {
   SimHID: new (udid: string) => SimHIDHandle;
   SimCapture: new (udid: string, onFrame: RawFrameCallback) => SimCaptureHandle;
+  SimWatch: new (onChange: () => void) => SimWatchHandle;
+  listDevices(): NativeSimDevice[];
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
+}
+
+/**
+ * One simulator as reported by the in-process reactive CoreSimulator subscriber.
+ * Mirrors a `simctl list devices -j` device entry plus its grouping runtime.
+ */
+export interface NativeSimDevice {
+  udid: string;
+  name: string;
+  /** "Creating" | "Shutdown" | "Booting" | "Booted" | "Shutting Down". */
+  state: string;
+  isAvailable: boolean;
+  /** e.g. "com.apple.CoreSimulator.SimRuntime.iOS-26-5". */
+  runtimeIdentifier: string;
+  deviceTypeIdentifier: string;
 }
 
 // (codec, data, width, height, flags) — codec 0=MJPEG 1=AVCC; flags bit0=desc bit1=keyframe.
@@ -237,4 +259,31 @@ export function axDescribeAsync(udid: string): Promise<string> {
 /** Async frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */
 export function axFrontmostAsync(udid: string): Promise<string> {
   return load().axFrontmost(udid);
+}
+
+/**
+ * Current simulator device snapshot from the in-process reactive CoreSimulator
+ * subscriber. The first call lazily subscribes to the daemon and does one scan;
+ * subsequent calls read a snapshot kept live by XPC push notifications — no
+ * `simctl` spawn. Throws if the native addon is unavailable (callers fall back
+ * to `xcrun simctl list`).
+ */
+export function listDevicesNative(): NativeSimDevice[] {
+  return load().listDevices();
+}
+
+/**
+ * Subscribe to device-set changes (add/remove/boot/shutdown). `onChange` fires
+ * — debounced to actual changes — whenever the set differs. Returns an
+ * unsubscribe function. Keep the returned handle reachable for the lifetime of
+ * the subscription.
+ */
+export function watchDevices(onChange: () => void): () => void {
+  const handle = new (load().SimWatch)(onChange);
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    handle.stop();
+  };
 }
