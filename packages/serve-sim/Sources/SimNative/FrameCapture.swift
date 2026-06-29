@@ -106,7 +106,17 @@ final class FrameCapture {
             }
         }
 
-        captureFrame()
+        // Always run the initial capture on captureQueue, never on the caller
+        // thread. The screen callbacks registered above already dispatch
+        // captureFrame() onto captureQueue, so a direct call here races them:
+        // two captureFrame()/handleFrame() runs execute concurrently at startup
+        // and corrupt the encoder state (notably the VideoEncoder.onEncodedFrame
+        // swap in CaptureEngine.handleFrame), which macOS 26's hardened
+        // allocator detects as heap corruption and aborts (SIGTRAP). Serializing
+        // on captureQueue makes every captureFrame() mutually exclusive.
+        // Observable symptom of the bug: "JPEG encoder ready" logged twice at
+        // startup; with this fix it logs once.
+        captureQueue.async { [weak self] in self?.captureFrame() }
     }
 
     private func findFramebufferDescriptors(io: NSObject) throws -> [NSObject] {

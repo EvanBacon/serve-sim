@@ -7,6 +7,11 @@ import UniformTypeIdentifiers
 /// Encodes CVPixelBuffer frames as JPEG data for MJPEG streaming.
 final class VideoEncoder {
     private var onEncodedFrame: ((Data) -> Void)?
+    // Guards onEncodedFrame: setup()/stop() run on the capture queue (a
+    // resolution change swaps the closure), while encode() reads it on the
+    // encode queue. Without this lock the swap races the read and double-frees
+    // the old closure's context — heap corruption under macOS 26's allocator.
+    private let cbLock = NSLock()
     private let quality: CGFloat
 
     init(quality: CGFloat = 0.7) {
@@ -15,7 +20,9 @@ final class VideoEncoder {
 
     func setup(width: Int32, height: Int32, fps: Int,
                onEncodedFrame: @escaping (Data) -> Void) {
+        cbLock.lock()
         self.onEncodedFrame = onEncodedFrame
+        cbLock.unlock()
         print("[encoder] JPEG encoder ready at \(width)x\(height) (quality: \(quality))")
     }
 
@@ -44,10 +51,15 @@ final class VideoEncoder {
         CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return }
 
-        onEncodedFrame?(data as Data)
+        cbLock.lock()
+        let callback = onEncodedFrame
+        cbLock.unlock()
+        callback?(data as Data)
     }
 
     func stop() {
+        cbLock.lock()
         onEncodedFrame = nil
+        cbLock.unlock()
     }
 }
