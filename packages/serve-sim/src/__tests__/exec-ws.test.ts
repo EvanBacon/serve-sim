@@ -1,5 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { simMiddleware } from "../middleware";
+import type { IncomingMessage, ServerResponse } from "http";
+import type { Duplex } from "stream";
+import { WebSocket as WsClient } from "ws";
+import { createExecUpgradeHandler } from "../exec-ws";
+import {
+  previewConfigForState,
+  rewriteStateForRequestHost,
+  simMiddleware,
+  type ServeSimState,
+} from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
 
 // The control channel is the ONLY transport the preview page uses for execs,
@@ -11,7 +20,16 @@ import { servePreview, type PreviewServer } from "../runtime";
 // is built on `ws` (Bun substitutes its native implementation).
 
 const PORT = 3461;
+const HOST_FORWARD_PORT = 3462;
 const TOKEN = "exec-ws-test-token";
+const PREVIEW_STATE: ServeSimState = {
+  pid: process.pid,
+  port: 3100,
+  device: "DEVICE-A",
+  url: "http://127.0.0.1:3100",
+  streamUrl: "http://127.0.0.1:3100/stream.mjpeg",
+  wsUrl: "ws://127.0.0.1:3100/ws",
+};
 
 let server: PreviewServer;
 
@@ -32,6 +50,60 @@ interface Reply {
   error?: string;
   sub?: number;
   end?: boolean;
+  data?: string;
+}
+
+function connectWithHeaders(
+  url: string,
+  token: string,
+  headers: Record<string, string>,
+): Promise<{
+  next: () => Promise<Reply>;
+  send: (body: Record<string, unknown>) => void;
+  close: () => void;
+  closed: Promise<void>;
+}> {
+  return new Promise((resolve, reject) => {
+    const ws = new WsClient(url, { headers });
+    const queue: Reply[] = [];
+    const waiters: Array<(r: Reply) => void> = [];
+    let closeResolve: () => void;
+    const closed = new Promise<void>((r) => {
+      closeResolve = r;
+    });
+    const timer = setTimeout(() => reject(new Error("connect timeout")), 5000);
+
+    ws.on("open", () => {
+      clearTimeout(timer);
+      ws.send(JSON.stringify({ token }));
+      resolve({
+        next: () =>
+          new Promise<Reply>((r, rej) => {
+            const queued = queue.shift();
+            if (queued) return r(queued);
+            const bail = setTimeout(() => rej(new Error("reply timeout")), 5000);
+            waiters.push((reply) => {
+              clearTimeout(bail);
+              r(reply);
+            });
+          }),
+        send: (body) => ws.send(JSON.stringify(body)),
+        close: () => ws.close(),
+        closed,
+      });
+    });
+    ws.on("message", (data) => {
+      const reply = JSON.parse(data.toString()) as Reply;
+      const waiter = waiters.shift();
+      if (waiter) waiter(reply);
+      else queue.push(reply);
+    });
+    ws.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    ws.on("close", () => closeResolve());
+  });
 }
 
 function connect(token: string): Promise<{
@@ -130,5 +202,92 @@ describe("exec-ws control channel", () => {
     expect(typeof (reply as { data?: string }).data).toBe("string");
     channel.send({ unsub: 8 });
     channel.close();
+  });
+
+  test("sse loopback requests preserve the upgrade host for preview config rewriting", async () => {
+    const middleware = Object.assign(
+      (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.url?.split("?")[0] === "/api/events") {
+          const remoteState = rewriteStateForRequestHost(PREVIEW_STATE, req.headers.host);
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+          });
+          res.end(
+            `data: ${JSON.stringify(
+              previewConfigForState(remoteState, "/", "/bin/serve-sim", TOKEN),
+            )}\n\n`,
+          );
+          return;
+        }
+        next();
+      },
+      {
+        handleUpgrade: createExecUpgradeHandler({
+          path: "/exec-ws",
+          execToken: TOKEN,
+          ssePrefixes: ["/api/events"],
+        }) as (req: IncomingMessage, socket: Duplex, head: Buffer) => boolean,
+      },
+    );
+
+    const hostForwardServer = await servePreview({
+      port: HOST_FORWARD_PORT,
+      middleware,
+      host: "127.0.0.1",
+    });
+
+    try {
+      const lanHost = `minipro24.lan:${HOST_FORWARD_PORT}`;
+      const lanChannel = await connectWithHeaders(
+        `ws://127.0.0.1:${HOST_FORWARD_PORT}/exec-ws`,
+        TOKEN,
+        {
+          Host: lanHost,
+          Origin: `http://${lanHost}`,
+        },
+      );
+      await lanChannel.next(); // ready
+      lanChannel.send({ sub: 9, path: "/api/events" });
+      const lanReply = await lanChannel.next();
+      const lanConfig = JSON.parse(lanReply.data!.replace(/^data: /, "").trim());
+      expect(lanConfig.streamUrl).toBe("http://minipro24.lan:3100/stream.mjpeg");
+      expect(lanConfig.wsUrl).toBe("ws://minipro24.lan:3100/ws");
+      lanChannel.close();
+
+      const commaHostChannel = await connectWithHeaders(
+        `ws://127.0.0.1:${HOST_FORWARD_PORT}/exec-ws`,
+        TOKEN,
+        {
+          Host: `${lanHost}, 127.0.0.1:${HOST_FORWARD_PORT}`,
+        },
+      );
+      await commaHostChannel.next(); // ready
+      commaHostChannel.send({ sub: 10, path: "/api/events" });
+      const commaHostReply = await commaHostChannel.next();
+      const commaHostConfig = JSON.parse(commaHostReply.data!.replace(/^data: /, "").trim());
+      expect(commaHostConfig.streamUrl).toBe("http://minipro24.lan:3100/stream.mjpeg");
+      expect(commaHostConfig.wsUrl).toBe("ws://minipro24.lan:3100/ws");
+      commaHostChannel.close();
+
+      const loopbackHost = `127.0.0.1:${HOST_FORWARD_PORT}`;
+      const loopbackChannel = await connectWithHeaders(
+        `ws://127.0.0.1:${HOST_FORWARD_PORT}/exec-ws`,
+        TOKEN,
+        {
+          Host: loopbackHost,
+          Origin: `http://${loopbackHost}`,
+        },
+      );
+      await loopbackChannel.next(); // ready
+      loopbackChannel.send({ sub: 11, path: "/api/events" });
+      const loopbackReply = await loopbackChannel.next();
+      const loopbackConfig = JSON.parse(loopbackReply.data!.replace(/^data: /, "").trim());
+      expect(loopbackConfig.streamUrl).toBe("http://127.0.0.1:3100/stream.mjpeg");
+      expect(loopbackConfig.wsUrl).toBe("ws://127.0.0.1:3100/ws");
+      loopbackChannel.close();
+    } finally {
+      hostForwardServer.stop(true);
+    }
   });
 });

@@ -42,6 +42,11 @@ function tokensMatch(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
+function normalizeHostHeader(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw?.split(",")[0]?.trim() || undefined;
+}
+
 interface ExecMessage {
   token?: string;
   id?: number;
@@ -68,6 +73,7 @@ function wireExecSocket(
   ws: WebSocket,
   serverPort: number | undefined,
   opts: ExecChannelOptions,
+  forwardHost: string | undefined,
 ): void {
   let authed = false;
   const subscriptions = new Map<number, { destroy: () => void }>();
@@ -103,7 +109,10 @@ function wireExecSocket(
         host: "127.0.0.1",
         port: serverPort,
         path,
-        headers: { accept: "text/event-stream" },
+        headers: {
+          accept: "text/event-stream",
+          ...(forwardHost ? { host: forwardHost } : {}),
+        },
       },
       (res) => {
         res.on("data", (chunk: Buffer) => send({ sub, data: chunk.toString("utf-8") }));
@@ -198,10 +207,11 @@ export function createExecUpgradeHandler(opts: ExecChannelOptions) {
 
     // Same-origin policy mirrors POST /exec: browsers always send Origin on
     // WebSocket upgrades, and a cross-origin page's Origin won't match Host.
+    const forwardHost = normalizeHostHeader(req.headers.host);
     const origin = req.headers.origin;
     if (origin) {
       try {
-        if (new URL(origin).host !== req.headers.host) {
+        if (new URL(origin).host !== forwardHost) {
           socket.destroy();
           return true;
         }
@@ -215,12 +225,12 @@ export function createExecUpgradeHandler(opts: ExecChannelOptions) {
     // fall back to the Host header (Bun's upgrade socket may not expose it).
     let serverPort = (socket as Socket).localPort;
     if (!serverPort) {
-      const hostPort = Number((req.headers.host ?? "").split(":")[1]);
+      const hostPort = Number((forwardHost ?? "").split(":")[1]);
       if (Number.isFinite(hostPort) && hostPort > 0) serverPort = hostPort;
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      wireExecSocket(ws, serverPort, opts);
+      wireExecSocket(ws, serverPort, opts, forwardHost);
     });
     return true;
   };
