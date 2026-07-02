@@ -194,7 +194,7 @@ describe("exec-ws control channel", () => {
     channel.send({ sub: 9, path: "/api/event-log/events?device=DEVICE-A" });
     let reply = await channel.next();
     let data = /^data: (.*)$/m.exec(reply.data ?? "")?.[1];
-    if (!data) {
+    for (let attempts = 0; !data && attempts < 5; attempts++) {
       reply = await channel.next();
       data = /^data: (.*)$/m.exec(reply.data ?? "")?.[1];
     }

@@ -129,8 +129,12 @@ function eventLogSinceId(rawUrl: string): number | undefined {
 }
 
 function recordCommandEvent(command: string, result: { exitCode?: number }): void {
-  const event = eventLogEventForCommand(command, result);
-  if (event) recordEventLogEvent(event);
+  try {
+    const event = eventLogEventForCommand(command, result);
+    if (event) recordEventLogEvent(event);
+  } catch {
+    // Event-log recording is diagnostic; it must never break the exec path.
+  }
 }
 
 // Known bundle IDs that are always React Native shells (used as a fallback
@@ -1254,15 +1258,19 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const value = typeof p.value === "string" ? normalizeUiValue(p.option, p.value) : null;
     if (value === null) throw new Error(`invalid value for ${p.option}: ${p.value}`);
     await setUiOption(p.device, p.option, value);
-    recordEventLogEvent({
-      device: p.device,
-      source: "ui",
-      kind: "ui-setting",
-      action: p.option,
-      status: "ok",
-      summary: `UI ${p.option} ${value}`,
-      details: { option: p.option, value },
-    });
+    try {
+      recordEventLogEvent({
+        device: p.device,
+        source: "ui",
+        kind: "ui-setting",
+        action: p.option,
+        status: "ok",
+        summary: `UI ${p.option} ${value}`,
+        details: { option: p.option, value },
+      });
+    } catch {
+      // Event-log recording is diagnostic; it must not fail the UI request.
+    }
     return { ok: true };
   };
 

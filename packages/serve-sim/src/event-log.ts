@@ -186,7 +186,7 @@ export function eventLogEventForHidMessage(
         source: "hid",
         kind: "touch",
         action: type,
-        summary: `Touch ${type} ${formatPoint(x, y)}`,
+        summary: `Touch ${type} ${formatEventLogPoint(x, y)}`,
         details: withScreen({ ...details, x, y }, screen),
       };
     }
@@ -220,13 +220,23 @@ export function eventLogEventForHidMessage(
       const usage = numberValue(details.usage);
       if (!type || usage == null) return null;
       const key = keyLabelForUsage(usage);
+      const printable = isPrintableKeyUsage(usage);
+      const eventDetails = { ...details };
+      if (printable) {
+        delete eventDetails.usage;
+        eventDetails.key = "character";
+        eventDetails.redacted = true;
+      } else {
+        eventDetails.usage = usage;
+        eventDetails.key = key;
+      }
       return {
         device,
         source: "hid",
         kind: "key",
         action: type,
-        summary: `Key ${type} ${key}`,
-        details: { ...details, usage, key },
+        summary: printable ? `Key ${type} character` : `Key ${type} ${key}`,
+        details: eventDetails,
       };
     }
     case 0x07: {
@@ -399,7 +409,7 @@ export function eventLogEventForCommand(
         kind: "tap",
         action: "tap",
         status,
-        summary: `Tap ${formatPoint(Number(x), Number(y))}`,
+        summary: `Tap ${formatEventLogPoint(Number(x), Number(y))}`,
         details: commandDetail,
       };
     }
@@ -524,6 +534,15 @@ function keyLabelForUsage(usage: number): string {
   return KEY_LABEL_BY_USAGE[usage] ?? `usage ${usage}`;
 }
 
+function isPrintableKeyUsage(usage: number): boolean {
+  return (
+    (usage >= 0x04 && usage <= 0x27) ||
+    (usage >= 0x2c && usage <= 0x38) ||
+    (usage >= 0x54 && usage <= 0x57) ||
+    (usage >= 0x59 && usage <= 0x63)
+  );
+}
+
 function withScreen(
   details: Record<string, unknown>,
   screen: { width: number; height: number } | undefined,
@@ -532,21 +551,21 @@ function withScreen(
   return { ...details, screen };
 }
 
-function formatPoint(x: number, y: number): string {
+export function formatEventLogPoint(x: number, y: number): string {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return "";
-  return `${formatNumber(x)},${formatNumber(y)}`;
+  return `${formatEventLogNumber(x)},${formatEventLogNumber(y)}`;
 }
 
 function formatDelta(dx: number, dy: number): string {
   return `${formatSigned(dx)},${formatSigned(dy)}`;
 }
 
-function formatNumber(value: number): string {
+function formatEventLogNumber(value: number): string {
   return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function formatSigned(value: number): string {
-  const formatted = formatNumber(value);
+  const formatted = formatEventLogNumber(value);
   return value > 0 ? `+${formatted}` : formatted;
 }
 

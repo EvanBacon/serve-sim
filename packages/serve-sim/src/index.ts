@@ -205,6 +205,11 @@ function pickDefaultDevice(): { udid: string; name: string } | null {
 }
 
 function getDeviceName(udid: string): string | null {
+  return readDeviceNamesByUdid().get(udid) ?? null;
+}
+
+function readDeviceNamesByUdid(): Map<string, string> {
+  const names = new Map<string, string>();
   try {
     const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
     const data = JSON.parse(output) as {
@@ -212,11 +217,11 @@ function getDeviceName(udid: string): string | null {
     };
     for (const runtime of Object.values(data.devices)) {
       for (const device of runtime) {
-        if (device.udid === udid) return device.name;
+        names.set(device.udid, device.name);
       }
     }
   } catch {}
-  return null;
+  return names;
 }
 
 function isDeviceBooted(udid: string): boolean {
@@ -680,8 +685,9 @@ function parseEventLogLimit(value: string | undefined): number | undefined {
 function deviceLabelsForEvents(events: EventLogEntry[]): Map<string, string> {
   const devices = [...new Set(events.map((event) => event.device).filter((device): device is string => !!device))];
   const names = new Map<string, string>();
+  const deviceNames = readDeviceNamesByUdid();
   for (const device of devices) {
-    names.set(device, getDeviceName(device) ?? device.slice(0, 8));
+    names.set(device, deviceNames.get(device) ?? device.slice(0, 8));
   }
 
   const counts = new Map<string, number>();

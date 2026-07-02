@@ -180,7 +180,10 @@ function wireExecSocket(
       };
       try {
         opts.onCommandResult?.(command, result);
-      } catch {}
+      } catch {
+        // Command-result observers are diagnostic side-channels; a failure
+        // here must not break the exec response path.
+      }
       send(result);
     });
   });

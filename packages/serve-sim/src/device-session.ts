@@ -23,7 +23,7 @@ import {
   axFrontmostAsync,
   type MjpegFrame,
 } from "./native";
-import { eventLogEventForHidMessage, recordEventLogEvent, updateEventLogEvent } from "./event-log";
+import { eventLogEventForHidMessage, formatEventLogPoint, recordEventLogEvent, updateEventLogEvent } from "./event-log";
 
 /**
  * Minimal WebSocket surface the HID input channel needs. Satisfied by both the
@@ -63,15 +63,6 @@ type TouchGestureLog = {
   moveCount: number;
   edge?: number;
 };
-
-function formatEventLogPoint(x: number, y: number): string {
-  return `${formatEventLogNumber(x)},${formatEventLogNumber(y)}`;
-}
-
-function formatEventLogNumber(value: number): string {
-  if (!Number.isFinite(value)) return "";
-  return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
-}
 
 function touchGestureSummary(gesture: TouchGestureLog): string {
   return `Drag ${formatEventLogPoint(gesture.startX, gesture.startY)} -> ${formatEventLogPoint(gesture.lastX, gesture.lastY)}`;

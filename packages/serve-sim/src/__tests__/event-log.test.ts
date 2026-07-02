@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach } from "bun:test";
 import {
   clearEventLogForTests,
+  EVENT_LOG_MAX_ENTRIES,
   eventLogEventForCommand,
   eventLogEventForHidMessage,
   readEventLog,
@@ -71,6 +72,24 @@ describe("event log store", () => {
     expect(readEventLog({ limit: 2 }).map((event) => event.id)).toEqual([4, 5]);
   });
 
+  test("keeps only the newest entries when the store reaches its cap", () => {
+    for (let i = 0; i < EVENT_LOG_MAX_ENTRIES + 3; i++) {
+      recordEventLogEvent({
+        source: "exec",
+        kind: "button",
+        summary: `Event ${i}`,
+      });
+    }
+
+    const events = readEventLog();
+    expect(events).toHaveLength(EVENT_LOG_MAX_ENTRIES);
+    expect(events[0]).toMatchObject({ id: 4, summary: "Event 3" });
+    expect(events.at(-1)).toMatchObject({
+      id: EVENT_LOG_MAX_ENTRIES + 3,
+      summary: `Event ${EVENT_LOG_MAX_ENTRIES + 2}`,
+    });
+  });
+
   test("notifies subscribers as entries are recorded", () => {
     const seen: string[] = [];
     const unsubscribe = subscribeEventLog((event) => seen.push(event.summary));
@@ -138,17 +157,22 @@ describe("eventLogEventForHidMessage", () => {
     });
   });
 
-  test("maps key HID usages to readable labels", () => {
-    expect(
-      eventLogEventForHidMessage("UDID", 0x06, { type: "up", usage: 23 }),
-    ).toMatchObject({
-      device: "UDID",
-      source: "hid",
-      kind: "key",
-      action: "up",
-      summary: "Key up t",
-      details: { usage: 23, key: "t" },
-    });
+  test("redacts printable key HID usages", () => {
+    for (const usage of [23, 0x1e, 0x2d]) {
+      const event = eventLogEventForHidMessage("UDID", 0x06, { type: "up", usage });
+      expect(event).toMatchObject({
+        device: "UDID",
+        source: "hid",
+        kind: "key",
+        action: "up",
+        summary: "Key up character",
+        details: { key: "character", redacted: true },
+      });
+      expect("usage" in event!.details!).toBe(false);
+    }
+  });
+
+  test("maps non-printable key HID usages to readable labels", () => {
     expect(
       eventLogEventForHidMessage("UDID", 0x06, { type: "down", usage: 0x28 }),
     ).toMatchObject({
