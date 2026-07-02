@@ -17,10 +17,10 @@ import { SettingSwitch } from "./setting-switch";
 // native options (appearance, contrast, text size) and the private-setter
 // ones (liquid glass, color filter, reduce motion, …) uniformly.
 
-// The slider spans the seven standard content-size categories (the
-// accessibility-extended range stays CLI-only); `extra-extra-extra-large` is
-// the maximum the control allows.
-export const TEXT_SIZE_CATEGORIES = [
+// The slider spans the seven standard content-size categories by default. When
+// Larger Accessibility Sizes is enabled it mirrors iOS Settings and extends
+// into the five accessibility categories supported by `simctl ui content_size`.
+export const STANDARD_TEXT_SIZE_CATEGORIES = [
   "extra-small",
   "small",
   "medium",
@@ -30,9 +30,26 @@ export const TEXT_SIZE_CATEGORIES = [
   "extra-extra-extra-large",
 ] as const;
 
+export const ACCESSIBILITY_TEXT_SIZE_CATEGORIES = [
+  "accessibility-medium",
+  "accessibility-large",
+  "accessibility-extra-large",
+  "accessibility-extra-extra-large",
+  "accessibility-extra-extra-extra-large",
+] as const;
+
+export const TEXT_SIZE_CATEGORIES = [
+  ...STANDARD_TEXT_SIZE_CATEGORIES,
+  ...ACCESSIBILITY_TEXT_SIZE_CATEGORIES,
+] as const;
+
+export const MAX_STANDARD_TEXT_SIZE_CATEGORY =
+  STANDARD_TEXT_SIZE_CATEGORIES[STANDARD_TEXT_SIZE_CATEGORIES.length - 1]!;
+
 const TEXT_SIZE_DEBOUNCE_MS = 250;
 
 type SettingsState = Record<string, string>;
+type TextSizeCategory = (typeof TEXT_SIZE_CATEGORIES)[number];
 
 // Stock values rendered (disabled) until the real state arrives, so the
 // section keeps its full height instead of swapping a "Loading…" line for
@@ -99,10 +116,12 @@ export function SettingRow({
 
 function TextSizeSlider({
   value,
+  categories,
   disabled,
   onChange,
 }: {
   value: number;
+  categories: readonly TextSizeCategory[];
   disabled: boolean;
   onChange: (index: number) => void;
 }) {
@@ -142,7 +161,7 @@ function TextSizeSlider({
     lastSent.current = null;
   }, [send]);
 
-  const max = TEXT_SIZE_CATEGORIES.length - 1;
+  const max = categories.length - 1;
   const shown = drag ?? value;
   const fill = `${(shown / max) * 100}%`;
   // Filled portion goes gray while disabled so the control doesn't read as
@@ -179,7 +198,7 @@ function TextSizeSlider({
         className={`h-[13px] w-full appearance-none rounded-full bg-transparent outline-none focus-visible:[outline:1.5px_solid_rgba(10,132,255,0.55)] focus-visible:outline-offset-4 ${disabled ? "cursor-default" : "cursor-pointer"} ${trackClasses} ${thumbClasses}`}
       />
       <span aria-hidden className="pointer-events-none mt-[3px] flex justify-between px-[5.5px]">
-        {TEXT_SIZE_CATEGORIES.map((category) => (
+        {categories.map((category) => (
           <span key={category} className="size-[2px] rounded-full bg-white/40" />
         ))}
       </span>
@@ -285,6 +304,32 @@ export function isIosRuntime(runtime: string | null): boolean {
   return parseRuntime(runtime).os.toLowerCase() === "ios";
 }
 
+export function isAccessibilityTextSize(value: string | undefined): boolean {
+  return value?.startsWith("accessibility") ?? false;
+}
+
+export function textSizeCategories(largerAccessibilitySizes: boolean): readonly TextSizeCategory[] {
+  return largerAccessibilitySizes ? TEXT_SIZE_CATEGORIES : STANDARD_TEXT_SIZE_CATEGORIES;
+}
+
+export function textSizeIndex(
+  value: string | undefined,
+  largerAccessibilitySizes: boolean,
+): number {
+  const categories = textSizeCategories(largerAccessibilitySizes);
+  const index = categories.indexOf(value as TextSizeCategory);
+  if (index >= 0) return index;
+  return isAccessibilityTextSize(value) ? STANDARD_TEXT_SIZE_CATEGORIES.length - 1 : 3;
+}
+
+export function textSizeAfterLargerAccessibilitySizesToggle(
+  value: string | undefined,
+  enabled: boolean,
+): string | null {
+  if (enabled || !isAccessibilityTextSize(value)) return null;
+  return MAX_STANDARD_TEXT_SIZE_CATEGORY;
+}
+
 export function SimulatorSettingsTool({
   udid,
   runtime,
@@ -296,6 +341,7 @@ export function SimulatorSettingsTool({
   const [state, setState] = useState<SettingsState | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [largerAccessibilitySizes, setLargerAccessibilitySizes] = useState(false);
   const supported = isIosRuntime(runtime);
 
   // Hydration can fail outright (server restarted under the tab, control
@@ -323,6 +369,7 @@ export function SimulatorSettingsTool({
 
   useEffect(() => {
     setState(null);
+    setLargerAccessibilitySizes(false);
     // The in-sim helper can't run on non-iOS runtimes; skip the round-trip
     // (it would spawn an iOS binary inside e.g. a watchOS sim and abort).
     if (!supported) return;
@@ -352,6 +399,10 @@ export function SimulatorSettingsTool({
     [udid, refresh],
   );
 
+  useEffect(() => {
+    if (isAccessibilityTextSize(state?.["text-size"])) setLargerAccessibilitySizes(true);
+  }, [state]);
+
   // Rapid slider movements queue latest-wins: one exec in flight at a time,
   // intermediate values dropped, so out-of-order completions can't leave the
   // simulator on a stale size.
@@ -370,22 +421,25 @@ export function SimulatorSettingsTool({
       while (queue.next !== null) {
         const next = queue.next;
         queue.next = null;
-        await applyRef.current("text-size", TEXT_SIZE_CATEGORIES[next]!);
+        await applyRef.current("text-size", textSizeCategories(largerAccessibilitySizes)[next]!);
       }
       queue.running = false;
     })();
-  }, []);
+  }, [largerAccessibilitySizes]);
 
   const ready = state !== null;
   const shown = state ?? DEFAULT_STATE;
-  const rawTextSizeIndex = TEXT_SIZE_CATEGORIES.indexOf(shown["text-size"] as never);
-  // CLI-set accessibility-range sizes exceed the slider; pin them to its max.
-  const textSizeIndex =
-    rawTextSizeIndex >= 0
-      ? rawTextSizeIndex
-      : shown["text-size"]?.startsWith("accessibility")
-        ? TEXT_SIZE_CATEGORIES.length - 1
-        : 3;
+  const activeTextSizeCategories = textSizeCategories(largerAccessibilitySizes);
+  const activeTextSizeIndex = textSizeIndex(shown["text-size"], largerAccessibilitySizes);
+
+  const setLargerTextSizes = useCallback(
+    (enabled: boolean) => {
+      setLargerAccessibilitySizes(enabled);
+      const fallback = textSizeAfterLargerAccessibilitySizesToggle(shown["text-size"], enabled);
+      if (fallback) void apply("text-size", fallback);
+    },
+    [apply, shown],
+  );
 
   return (
     <CollapsibleSection
@@ -454,9 +508,19 @@ export function SimulatorSettingsTool({
 
           <SettingRow icon={I.textSize} label="Text Size">
             <TextSizeSlider
-              value={textSizeIndex}
+              value={activeTextSizeIndex}
+              categories={activeTextSizeCategories}
               disabled={!ready}
               onChange={applyTextSize}
+            />
+          </SettingRow>
+
+          <SettingRow icon={I.textSize} label="Accessibility Larger Sizes">
+            <SettingSwitch
+              label="Accessibility Larger Sizes"
+              checked={largerAccessibilitySizes}
+              disabled={!ready || pending === "text-size"}
+              onChange={setLargerTextSizes}
             />
           </SettingRow>
 
