@@ -121,6 +121,35 @@ describe("event log store", () => {
     ]);
     expect(seen).toEqual(["Touch begin 0.1,0.2", "Tap 0.1,0.2"]);
   });
+
+  test("can update entries without notifying subscribers", () => {
+    const seen: string[] = [];
+    const unsubscribe = subscribeEventLog((event) => seen.push(event.summary));
+    const entry = recordEventLogEvent({
+      source: "hid",
+      kind: "drag",
+      action: "drag",
+      summary: "Drag 0.1,0.2 -> 0.3,0.4",
+    });
+
+    updateEventLogEvent(
+      entry.id,
+      {
+        summary: "Drag 0.1,0.2 -> 0.5,0.6",
+      },
+      { notify: false },
+    );
+    unsubscribe();
+
+    expect(readEventLog()).toMatchObject([
+      {
+        id: entry.id,
+        summary: "Drag 0.1,0.2 -> 0.5,0.6",
+        msg: "Drag 0.1,0.2 -> 0.5,0.6",
+      },
+    ]);
+    expect(seen).toEqual(["Drag 0.1,0.2 -> 0.3,0.4"]);
+  });
 });
 
 describe("eventLogEventForHidMessage", () => {

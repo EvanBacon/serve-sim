@@ -125,6 +125,7 @@ export function recordEventLogEvent(draft: EventLogDraft): EventLogEntry {
 export function updateEventLogEvent(
   id: number,
   patch: Partial<Omit<EventLogEntry, "id">>,
+  options: { notify?: boolean } = {},
 ): EventLogEntry | null {
   const index = entries.findIndex((entry) => entry.id === id);
   if (index < 0) return null;
@@ -135,7 +136,7 @@ export function updateEventLogEvent(
     ...(patch.summary != null && patch.msg == null ? { msg: patch.summary } : {}),
   };
   entries[index] = entry;
-  notifyEventLogSubscribers(entry);
+  if (options.notify !== false) notifyEventLogSubscribers(entry);
   return entry;
 }
 

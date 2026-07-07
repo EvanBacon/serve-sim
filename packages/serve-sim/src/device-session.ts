@@ -417,12 +417,17 @@ export class DeviceSession {
           });
           gesture.eventId = entry.id;
         } else {
-          updateEventLogEvent(gesture.eventId, {
-            kind: "drag",
-            action: "drag",
-            summary: touchGestureSummary(gesture),
-            details: this.touchGestureDetails(gesture, "drag", "move"),
-          });
+          // Keep the stored drag current without streaming every touchmove to the browser.
+          updateEventLogEvent(
+            gesture.eventId,
+            {
+              kind: "drag",
+              action: "drag",
+              summary: touchGestureSummary(gesture),
+              details: this.touchGestureDetails(gesture, "drag", "move"),
+            },
+            { notify: false },
+          );
         }
       }
       return;
