@@ -320,32 +320,32 @@ export function eventLogEventForCommand(
   if (isUploadPlumbing(tokens)) return null;
 
   const status = statusFromExitCode(result?.exitCode);
-  const commandDetail = { command: compactCommand(command), ...(status ? { exitCode: result?.exitCode } : {}) };
+  const commandDetail = commandResultDetails(result);
   const simctl = simctlCommand(tokens);
   if (simctl) {
     const { verb, args } = simctl;
     if (verb === "install" && args.length >= 2) {
-      const [device, path] = args;
+      const [device] = args;
       return {
         device,
         source: "exec",
         kind: "app",
         action: "install",
         status,
-        summary: `Install app ${basename(path)}`,
-        details: { ...commandDetail, path },
+        summary: "Install app",
+        details: commandDetail,
       };
     }
     if (verb === "addmedia" && args.length >= 2) {
-      const [device, path] = args;
+      const [device] = args;
       return {
         device,
         source: "exec",
         kind: "media",
         action: "addmedia",
         status,
-        summary: `Add media ${basename(path)}`,
-        details: { ...commandDetail, path },
+        summary: "Add media",
+        details: commandDetail,
       };
     }
     if (verb === "launch" && args.length >= 2) {
@@ -462,7 +462,7 @@ export function eventLogEventForCommand(
       };
     }
     if (verb === "camera") {
-      const action = cameraAction(args);
+      const action = cameraEventAction(args);
       if (action === "status" || action === "list-webcams") return null;
       return {
         device,
@@ -575,6 +575,10 @@ function statusFromExitCode(exitCode: number | undefined): EventLogStatus | unde
   return exitCode === 0 ? "ok" : "error";
 }
 
+function commandResultDetails(result: { exitCode?: number } | undefined): Record<string, unknown> {
+  return statusFromExitCode(result?.exitCode) ? { exitCode: result?.exitCode } : {};
+}
+
 function tokenizeCommand(command: string): string[] {
   const tokens: string[] = [];
   let current = "";
@@ -662,12 +666,8 @@ function cameraAction(args: string[]): string | undefined {
   return firstPositional(args);
 }
 
-function basename(path: string | undefined): string {
-  if (!path) return "";
-  return path.split("/").filter(Boolean).pop() ?? path;
-}
-
-function compactCommand(command: string): string {
-  const normalized = command.replace(/\s+/g, " ").trim();
-  return normalized.length <= 240 ? normalized : `${normalized.slice(0, 237)}...`;
+function cameraEventAction(args: string[]): string | undefined {
+  const action = cameraAction(args);
+  if (action === "status" || action === "list-webcams" || action === "stop-webcam") return action;
+  return "start";
 }

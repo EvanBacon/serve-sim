@@ -222,8 +222,27 @@ describe("eventLogEventForCommand", () => {
       kind: "app",
       action: "install",
       status: "ok",
-      summary: "Install app MyApp.ipa",
+      summary: "Install app",
     });
+  });
+
+  test("does not persist raw exec commands, host paths, or unknown execs", () => {
+    const event = eventLogEventForCommand(
+      "xcrun simctl install DEVICE-A /Users/me/Secrets/MyApp.ipa --token should-not-log",
+      { exitCode: 0 },
+    );
+
+    expect(event).toMatchObject({
+      summary: "Install app",
+      details: { exitCode: 0 },
+    });
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain("/Users/me");
+    expect(serialized).not.toContain("MyApp.ipa");
+    expect(serialized).not.toContain("should-not-log");
+    expect(serialized).not.toContain("command");
+    expect(serialized).not.toContain("path");
+    expect(eventLogEventForCommand("curl https://example.com?token=should-not-log")).toBeNull();
   });
 
   test("classifies toolbar home and screenshot commands", () => {
