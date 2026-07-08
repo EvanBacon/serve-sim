@@ -1058,7 +1058,7 @@ function AppWithConfig({
               {currentApp?.isReactNative && (
                 <SimulatorToolbar.Button
                   aria-label="Reload React Native bundle"
-                  title="Reload (Cmd+R)"
+                  title="Reload (R)"
                   onClick={() => void sendReactNativeReload()}
                 >
                   <ReloadIcon />
