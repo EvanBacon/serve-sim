@@ -714,17 +714,14 @@ function AppWithConfig({
     return () => { if (timer) clearTimeout(timer); es.close(); };
   }, [config.appStateEndpoint]);
 
-  // Cmd+R to reload the RN/Expo bundle.
+  // R to reload the RN/Expo bundle.
+  // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
+  // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
   const sendReactNativeReload = useCallback(async () => {
-    const META = 0xe3;
     const R = 0x15;
-    sendKey("down", META);
-    await new Promise((r) => setTimeout(r, 30));
     sendKey("down", R);
     await new Promise((r) => setTimeout(r, 30));
     sendKey("up", R);
-    await new Promise((r) => setTimeout(r, 30));
-    sendKey("up", META);
   }, [sendKey]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
