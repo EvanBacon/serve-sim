@@ -20,6 +20,7 @@ import {
 } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs, type KeyEvent } from "./text-to-keys";
 import { PASTEBOARD_TEXT_LIMIT_BYTES, PASTE_KEY_EVENTS } from "./pasteboard";
+import { parseGestureSteps, stepPayload, DEFAULT_STEP_DELAY_MS, type GestureStep } from "./gesture-steps";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, isInDeviceSet, resolveDevice } from "./device";
@@ -1245,18 +1246,23 @@ async function axDump(deviceArg?: string) {
 async function gesture(jsonStr: string, deviceArg?: string, raw?: boolean) {
   const state = await resolveInputTarget(deviceArg);
 
-  let touch: { type: string; x: number; y: number; edge?: number };
+  let steps: GestureStep[];
   try {
-    touch = JSON.parse(jsonStr);
-  } catch {
-    console.error("Invalid JSON:", jsonStr);
+    steps = parseGestureSteps(jsonStr);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 
   const orientation = await touchInputOrientation(state, raw);
-  const rawTouch = displayTouchToRaw(touch, orientation);
-
-  await sendAckedInput(state, "gesture", [{ tag: 0x03, payload: rawTouch }]);
+  // All steps ride ONE socket: a begin→move×N→end sequence split across CLI
+  // invocations (one socket each) registers as a long-press. A step's
+  // `delayMs` is the wait after it, i.e. before the next frame.
+  await sendAckedInput(state, "gesture", steps.map((step, i) => ({
+    tag: 0x03,
+    payload: displayTouchToRaw(stepPayload(step) as { type: string; x: number; y: number; edge?: number }, orientation),
+    delayMs: i === 0 ? 0 : steps[i - 1]!.delayMs ?? DEFAULT_STEP_DELAY_MS,
+  })));
 }
 
 async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean) {
@@ -2712,8 +2718,11 @@ const rawOpt = [
 
 program
   .command("gesture")
-  .description("Send a touch gesture")
-  .argument("<json>", 'Gesture JSON, e.g. \'{"type":"begin","x":0.5,"y":0.5}\'')
+  .description("Send a touch gesture — one event, or an array of steps replayed on one socket (drag/swipe/scroll)")
+  .argument(
+    "<json>",
+    'Touch JSON: \'{"type":"begin","x":0.5,"y":0.5}\' or a sequence \'[{"type":"begin","x":0.5,"y":0.8},{"type":"move","x":0.5,"y":0.4},{"type":"end","x":0.5,"y":0.4}]\' (per-step optional "delayMs", default 16)',
+  )
   .option(...deviceOpt)
   .option(...rawOpt)
   .action((json: string, opts) => gesture(json, opts.device, opts.raw));
