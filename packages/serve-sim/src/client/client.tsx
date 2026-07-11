@@ -93,6 +93,7 @@ function previewConfigKey(config: PreviewConfig | null): string {
 }
 
 function App() {
+  const initialState = window.__SIM_PREVIEW__?.initialState;
   const [config, setConfig] = useState<PreviewConfig | null>(() =>
     proxyPreviewConfigForBrowser(streamConfigFrom(window.__SIM_PREVIEW__), window.location)
   );
@@ -106,10 +107,11 @@ function App() {
     return new URLSearchParams(window.location.search).get("device");
   });
   const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
-  const [devtoolsOpen, setDevtoolsOpen] = useState(false);
+  const [devtoolsOpen, setDevtoolsOpen] = useState(() => initialState?.panes?.includes("devtools") ?? false);
   // Open the sidebar by default when the viewport has room for it beside the
   // simulator; narrow windows keep it collapsed so the device isn't squeezed.
   const [gridOpen, setGridOpen] = useState(() => {
+    if (initialState?.panes) return initialState.panes.includes("devices");
     if (typeof window === "undefined") return false;
     return window.innerWidth >= DEVICE_SIDEBAR_WIDTH + 520;
   });
@@ -412,6 +414,7 @@ function AppWithConfig({
   streaming,
   setStreaming,
 }: AppWithConfigProps) {
+  const initialState = config.initialState;
   useEffect(() => {
     document.title = deviceName ? `Simulator - ${deviceName}` : "Simulator Preview";
   }, [deviceName]);
@@ -669,6 +672,7 @@ function AppWithConfig({
   // the simulator (typical device frame ≈ 420px plus page/panel gutters);
   // smaller windows keep it closed so the device isn't squeezed on load.
   const [panelOpen, setPanelOpen] = useState(() => {
+    if (initialState?.panes) return initialState.panes.includes("tools");
     if (typeof window === "undefined") return false;
     const stored = Number(window.localStorage.getItem("serve-sim:tools-panel-width"));
     const panelWidth = Number.isFinite(stored) && stored > 0 ? stored : PANEL_WIDTH;
@@ -835,6 +839,7 @@ function AppWithConfig({
     viewportWidth,
     viewportHeight,
     aspectRatio: containerAspectRatioValue,
+    initialFit: initialState?.fit === true,
     onStart: () => setSimFocused(false),
   });
 

@@ -73,6 +73,20 @@ describe("previewConfigForState", () => {
       previewConfigForState(states[0]!, "/preview", "/bin/serve-sim", "token-xyz", "mjpeg").codec,
     ).toBe("mjpeg");
   });
+
+  test("includes configured preview startup state", () => {
+    expect(
+      previewConfigForState(
+        states[0]!,
+        "/preview",
+        "/bin/serve-sim",
+        "token-xyz",
+        undefined,
+        false,
+        { panes: ["devices", "tools"], fit: true },
+      ).initialState,
+    ).toEqual({ panes: ["devices", "tools"], fit: true });
+  });
 });
 
 describe("rewriteStateForRequestHost", () => {

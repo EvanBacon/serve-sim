@@ -31,6 +31,11 @@ declare global {
        * future values like `"hevc"`/`"av1"`.
        */
       codec?: string;
+      /** UI choices applied once when this preview page loads. */
+      initialState?: {
+        panes?: Array<"devices" | "tools" | "devtools">;
+        fit?: boolean;
+      };
       /**
        * Set when the server routes helper stream/control + DevTools sockets
        * through its same-origin `/helper` and `/devtools` proxies. The browser

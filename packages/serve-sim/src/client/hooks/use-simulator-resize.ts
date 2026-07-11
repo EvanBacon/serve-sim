@@ -41,12 +41,15 @@ export function useSimulatorResize({
   viewportWidth,
   viewportHeight,
   aspectRatio,
+  initialFit = false,
   onStart,
 }: {
   defaultWidth: number;
   viewportWidth: number;
   viewportHeight: number;
   aspectRatio: number;
+  /** Ignore saved sizing and start at the largest frame that fits the viewport. */
+  initialFit?: boolean;
   onStart: () => void;
 }) {
   const reducedMotion = usePrefersReducedMotion();
@@ -62,6 +65,9 @@ export function useSimulatorResize({
 
   const readRestoredWidth = useCallback(() => {
     if (typeof window === "undefined") return defaultWidth;
+    if (initialFit) {
+      return getSimulatorFrameMaxWidth(defaultWidth, viewportWidth, viewportHeight, aspectRatio);
+    }
     // A non-finite scale (storage threw / empty / NaN) falls back to defaultWidth
     // inside restoredSimulatorFrameWidth, so both paths share one call.
     let scale = NaN;
@@ -76,7 +82,7 @@ export function useSimulatorResize({
       aspectRatio,
       scale,
     );
-  }, [aspectRatio, defaultWidth, viewportHeight, viewportWidth]);
+  }, [aspectRatio, defaultWidth, initialFit, viewportHeight, viewportWidth]);
   const initialWidth = useMemo(() => readRestoredWidth(), [readRestoredWidth]);
   const [frameWidth, setFrameWidth] = useState<number | null>(initialWidth);
   const lastWidthRef = useRef<number | null>(initialWidth);

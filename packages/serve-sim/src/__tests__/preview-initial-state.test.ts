@@ -1,0 +1,17 @@
+import { describe, expect, test } from "bun:test";
+import { parsePreviewPanes } from "../preview-initial-state";
+
+describe("parsePreviewPanes", () => {
+  test("normalizes, de-duplicates, and preserves supported panes", () => {
+    expect(parsePreviewPanes(" tools,DEVTOOLS,tools ")).toEqual(["tools", "devtools"]);
+  });
+
+  test("allows none as the exclusive empty layout", () => {
+    expect(parsePreviewPanes("none")).toEqual([]);
+  });
+
+  test("rejects unknown and ambiguous pane lists", () => {
+    expect(() => parsePreviewPanes("tools,inspector")).toThrow("Unknown pane: inspector");
+    expect(() => parsePreviewPanes("none,tools")).toThrow("Expected 'none'");
+  });
+});
