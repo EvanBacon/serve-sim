@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { StreamConfig } from "serve-sim-client/simulator";
+import type { StreamConfig } from "serve-sim-client-szdziedzic/simulator";
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.

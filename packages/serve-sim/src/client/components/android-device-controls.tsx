@@ -1,4 +1,4 @@
-import { SimulatorToolbar } from "serve-sim-client/simulator";
+import { SimulatorToolbar } from "serve-sim-client-szdziedzic/simulator";
 import type { ReactElement } from "react";
 
 type AndroidButton =

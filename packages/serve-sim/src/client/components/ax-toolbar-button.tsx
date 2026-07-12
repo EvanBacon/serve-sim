@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { SimulatorToolbar } from "serve-sim-client/simulator";
+import { SimulatorToolbar } from "serve-sim-client-szdziedzic/simulator";
 import { useAxSnapshotContext } from "../hooks/use-ax-snapshot";
 
 export function AxToolbarButton({

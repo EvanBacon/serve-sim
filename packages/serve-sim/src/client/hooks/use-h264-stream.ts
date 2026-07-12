@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { StreamConfig } from "serve-sim-client/simulator";
+import type { StreamConfig } from "serve-sim-client-szdziedzic/simulator";
 import { H264AnnexBAccessUnitParser } from "../utils/h264-annex-b";
 
 type VideoFrameSubscriber = (frame: any) => void;

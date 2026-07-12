@@ -678,17 +678,18 @@ function buildMemoryReport(): MemoryReport {
  * Returns the resolved command + args ready for spawn.
  */
 function resolveServeSimCommand(): { command: string; baseArgs: string[] } | null {
-  // 1. Compiled standalone binary: argv[0] is the serve-sim binary itself.
-  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
+  // 1. Compiled standalone binary: argv[0] is the serve-sim-szdziedzic binary itself.
+  if (process.argv[0] && /(^|\/)serve-sim-szdziedzic$/.test(process.argv[0])) {
     return { command: process.argv[0], baseArgs: [] };
   }
-  // 2. Running the JS bundle directly: `node /path/to/serve-sim.js`.
+  // 2. Running the JS bundle directly: `node /path/to/serve-sim.js`. The
+  // bundle file name stays `serve-sim.js` even after the package rename.
   if (process.argv[1] && /(^|\/)serve-sim\.js$/.test(process.argv[1])) {
     return { command: process.argv[0]!, baseArgs: [process.argv[1]!] };
   }
-  // 3. Global install: serve-sim is on PATH.
+  // 3. Global install: serve-sim-szdziedzic on PATH.
   try {
-    const path = execSync("command -v serve-sim", {
+    const path = execSync("command -v serve-sim-szdziedzic", {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 1_500,
@@ -972,7 +973,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({
             ok: false,
-            error: "serve-sim CLI not found in PATH. Install it (npm i -g serve-sim) and retry.",
+            error: "serve-sim CLI not found in PATH. Install it (npm i -g serve-sim-szdziedzic) and retry.",
           }));
           return;
         }

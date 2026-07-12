@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SimulatorToolbar } from "serve-sim-client/simulator";
+import { SimulatorToolbar } from "serve-sim-client-szdziedzic/simulator";
 import { AndroidDeviceControls } from "../client/components/android-device-controls";
 
 describe("AndroidDeviceControls", () => {

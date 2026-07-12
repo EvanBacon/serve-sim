@@ -66,6 +66,15 @@ Options:
   -d, --detach        Spawn helper and exit (daemon mode)
   -q, --quiet         JSON-only output
       --no-preview    Skip the web UI; stream in foreground only
+      --stream-fps <fps>
+                      Max stream FPS (1-60, default: 60)
+      --stream-quality <value>
+                      JPEG quality (0.1-1.0, default: 0.7)
+      --stream-max-dimension <px>
+                      Downscale longest stream edge to px (default: native)
+      --tunnel        Open Cloudflare quick tunnel(s)
+      --tunnel-protocol <auto|quic|http2>
+                      cloudflared edge protocol (default: auto)
       --list [device] List running streams
       --kill [device] Kill running stream(s)
 
@@ -87,6 +96,8 @@ Camera options (used with `serve-sim camera <bundle-id>`):
 serve-sim                              # auto-detect booted sim, open preview
 serve-sim "iPhone 16 Pro"              # target a specific device
 serve-sim --detach                     # start a background helper, return JSON
+serve-sim --tunnel --tunnel-protocol quic --stream-max-dimension 1280 --stream-quality 0.55
+                                       # lower tunnel bandwidth while keeping 60 fps
 serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
 

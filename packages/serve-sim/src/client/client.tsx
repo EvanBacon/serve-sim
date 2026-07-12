@@ -18,7 +18,7 @@ import {
   type DeviceType,
   type SimulatorOrientation,
   type StreamConfig,
-} from "serve-sim-client/simulator";
+} from "serve-sim-client-szdziedzic/simulator";
 
 import { ReloadIcon } from "./icons";
 import { AndroidDeviceControls } from "./components/android-device-controls";

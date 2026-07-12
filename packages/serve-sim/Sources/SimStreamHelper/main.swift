@@ -20,27 +20,47 @@ guard args.count >= 2 else {
 
 let deviceUDID = args[1]
 var port: UInt16 = 3100
+var jpegQuality: CGFloat = 0.7
+var maxFps: Int = 60
+var maxDimension: Int = 0
 
 // Parse optional --port flag
 if let portIdx = args.firstIndex(of: "--port"), portIdx + 1 < args.count,
    let p = UInt16(args[portIdx + 1]) {
     port = p
 }
+if let qualityIdx = args.firstIndex(of: "--quality"), qualityIdx + 1 < args.count,
+   let q = Double(args[qualityIdx + 1]) {
+    jpegQuality = CGFloat(min(1.0, max(0.1, q)))
+}
+if let fpsIdx = args.firstIndex(of: "--max-fps"), fpsIdx + 1 < args.count,
+   let fps = Int(args[fpsIdx + 1]) {
+    maxFps = min(60, max(1, fps))
+}
+if let dimIdx = args.firstIndex(of: "--max-dimension"), dimIdx + 1 < args.count,
+   let dim = Int(args[dimIdx + 1]) {
+    maxDimension = max(0, dim)
+}
 
 print("[main] Starting serve-sim-bin")
 print("[main] Device UDID: \(deviceUDID)")
 print("[main] Port: \(port)")
+print("[main] Stream: maxFps=\(maxFps), quality=\(String(format: "%.2f", Double(jpegQuality))), maxDimension=\(maxDimension == 0 ? "native" : String(maxDimension))")
 
 let httpServer = HTTPServer(deviceUDID: deviceUDID, port: port)
 let frameCapture = FrameCapture()
-let videoEncoder = VideoEncoder(quality: 0.7)
+let videoEncoder = VideoEncoder(quality: jpegQuality, maxDimension: maxDimension)
 let hidInjector = HIDInjector()
 let encodeQueue = DispatchQueue(label: "encode", qos: .userInteractive)
 
 var screenWidth = 0
 var screenHeight = 0
+var streamWidth = 0
+var streamHeight = 0
 var encoderReady = false
 var encoding = false // backpressure flag
+var lastEncodeDispatchMs: UInt64 = 0
+let minFrameIntervalMs: UInt64 = maxFps >= 60 ? 0 : UInt64(max(1, 1000 / maxFps))
 
 // Setup HID injector
 do {
@@ -105,20 +125,31 @@ let frameHandler: (CVPixelBuffer, CMTime) -> Void = { pixelBuffer, timestamp in
         videoEncoder.setup(
             width: Int32(w),
             height: Int32(h),
-            fps: 60,
+            fps: maxFps,
             onEncodedFrame: { jpegData in
                 httpServer.clientManager.broadcastFrame(jpegData: jpegData)
             }
         )
         encoderReady = true
+        streamWidth = videoEncoder.outputWidth
+        streamHeight = videoEncoder.outputHeight
 
         // Update client manager config
-        httpServer.clientManager.setScreenSize(width: w, height: h)
+        httpServer.clientManager.setScreenSize(width: streamWidth, height: streamHeight)
     }
 
     if encoderReady {
         // Backpressure: skip frame if encoder is still working on the previous one
         guard !encoding else { return }
+
+        if minFrameIntervalMs > 0 {
+            let nowMs = DispatchTime.now().uptimeNanoseconds / 1_000_000
+            if lastEncodeDispatchMs > 0 && (nowMs &- lastEncodeDispatchMs) < minFrameIntervalMs {
+                return
+            }
+            lastEncodeDispatchMs = nowMs
+        }
+
         encoding = true
         encodeQueue.async {
             videoEncoder.encode(pixelBuffer: pixelBuffer)

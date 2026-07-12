@@ -1,16 +1,32 @@
 {
-  "name": "serve-sim-client",
+  "name": "serve-sim-client-szdziedzic",
   "description": "Client library for serve-sim — iOS Simulator streaming and gateway protocol.",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "author": {
-    "name": "Evan Bacon",
-    "email": "baconbrix@gmail.com",
-    "url": "https://evanbacon.dev"
+    "name": "Szymon Dziedzic",
+    "email": "sz.dziedz@gmail.com",
+    "url": "https://github.com/szdziedzic"
   },
+  "contributors": [
+    {
+      "name": "Evan Bacon",
+      "email": "baconbrix@gmail.com",
+      "url": "https://evanbacon.dev"
+    }
+  ],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/szdziedzic/serve-sim.git",
+    "directory": "packages/serve-sim-client"
+  },
+  "homepage": "https://github.com/szdziedzic/serve-sim#readme",
+  "bugs": {
+    "url": "https://github.com/szdziedzic/serve-sim/issues"
+  },
   "exports": {
     ".": {
       "import": "./src/index.ts",

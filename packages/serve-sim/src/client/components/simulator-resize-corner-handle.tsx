@@ -24,7 +24,7 @@ import {
   simulatorResizeCornerArc,
   type DeviceType,
   type StreamConfig,
-} from "serve-sim-client/simulator";
+} from "serve-sim-client-szdziedzic/simulator";
 import { useSimulatorResize } from "../hooks/use-simulator-resize";
 import { usePrefersMoreContrast } from "../hooks/use-prefers-more-contrast";
 import { usePrefersReducedMotion } from "../hooks/use-prefers-reduced-motion";
