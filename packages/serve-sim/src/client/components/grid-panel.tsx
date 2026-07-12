@@ -1,157 +1,245 @@
-import { useCallback, useEffect, useState } from "react";
-import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "../Panel";
-import { useGridDevices } from "../hooks/use-grid-devices";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { PanelLeft, Search, X } from "lucide-react";
+import { Panel, PanelHeader } from "../Panel";
 import { useGridMemory } from "../hooks/use-grid-memory";
-import { type GridDevice, gridPreviewHref } from "../utils/grid";
+import { type GridDevice, type MemoryReport, runtimeLabel } from "../utils/grid";
+import { simEndpoint } from "../utils/sim-endpoint";
 import { GridCapacityBanner } from "./grid-capacity-banner";
-import { GridTile } from "./grid-tile";
+import { DeviceRow } from "./device-row";
+import { PANEL_BACKGROUND, PANEL_BACKGROUND_TRANSPARENT } from "./panel-colors";
+import { ServeSimBrandLink } from "./serve-sim-brand-link";
 
+const DEVICE_SKELETON_ROWS = 12;
+
+// The device sidebar: the merged picker + grid. A search field, a scrollable
+// list of horizontal device rows (Xcode-style), and a capacity footer. Device
+// data and start/shutdown actions are owned by App so selecting a row can swap
+// the main stream instantly — this component is presentational.
 export function GridPanel({
   open,
   onClose,
-  currentUdid,
   width,
+  side = "right",
+  devices,
+  total = 0,
+  hasMore = false,
+  onLoadMore,
+  onLoadAll,
+  onResetPage,
+  selectedUdid,
+  onSelect,
+  starting,
+  shuttingDown,
+  onShutdown,
 }: {
   open: boolean;
   onClose: () => void;
-  currentUdid: string;
   width: number;
+  side?: "left" | "right";
+  devices: GridDevice[] | null;
+  /** Total devices available on the server (the list may be paginated). */
+  total?: number;
+  /** True when more devices remain beyond the loaded page. */
+  hasMore?: boolean;
+  /** Grow the loaded window by one page (called as the list nears its end). */
+  onLoadMore?: () => void;
+  /** Load every device — used while searching so results aren't truncated. */
+  onLoadAll?: () => void;
+  /** Return to the paged window when search is cleared. */
+  onResetPage?: () => void;
+  selectedUdid: string | null;
+  onSelect: (udid: string) => void;
+  starting: Record<string, boolean>;
+  shuttingDown: Record<string, boolean>;
+  onShutdown: (udid: string) => void;
 }) {
-  const config = window.__SIM_PREVIEW__;
-  const apiEndpoint = config?.gridApiEndpoint;
-  const startEndpoint = config?.gridStartEndpoint;
-  const shutdownEndpoint = config?.gridShutdownEndpoint;
-  const memoryEndpoint = config?.gridMemoryEndpoint;
-  const previewEndpoint = config?.previewEndpoint ?? "/";
-
-  const [pending, setPending] = useState<Record<string, boolean>>({});
-  const [shuttingDown, setShuttingDown] = useState<Record<string, boolean>>({});
-  const [errors, setErrors] = useState<Record<string, string | null>>({});
-  const hasPending =
-    Object.values(pending).some(Boolean) || Object.values(shuttingDown).some(Boolean);
-  const { devices, refresh } = useGridDevices(apiEndpoint, open, hasPending);
+  const config = typeof window === "undefined" ? undefined : window.__SIM_PREVIEW__;
+  const memoryEndpoint =
+    config?.gridMemoryEndpoint ??
+    (typeof window === "undefined" ? undefined : simEndpoint("grid/api/memory"));
   const memory = useGridMemory(memoryEndpoint, open);
 
-  const waitForHelper = useCallback(
-    async (udid: string, timeoutMs = 20_000): Promise<GridDevice | null> => {
-      if (!apiEndpoint) return null;
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        try {
-          const res = await fetch(apiEndpoint, { cache: "no-store" });
-          const json = await res.json();
-          const found = (json.devices ?? []).find(
-            (d: GridDevice) => d.device === udid && d.helper,
-          );
-          if (found) return found;
-        } catch {}
-        await new Promise((r) => setTimeout(r, 400));
-      }
-      return null;
-    },
-    [apiEndpoint],
-  );
-
-  const start = useCallback(
-    async (device: GridDevice) => {
-      if (!startEndpoint) return;
-      const udid = device.device;
-      setPending((p) => ({ ...p, [udid]: true }));
-      setErrors((e) => ({ ...e, [udid]: null }));
-      try {
-        const res = await fetch(startEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid, platform: device.platform ?? "ios" }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok || !json.ok) {
-          setErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
-          return;
-        }
-        const startedDevice = json.device ?? udid;
-        const ready = await waitForHelper(startedDevice);
-        if (ready) {
-          window.location.assign(gridPreviewHref(previewEndpoint, startedDevice));
-          return;
-        }
-        setErrors((e) => ({ ...e, [udid]: "Helper did not register in time" }));
-      } catch (err: any) {
-        setErrors((e) => ({ ...e, [udid]: err?.message ?? "Request failed" }));
-      } finally {
-        setPending((p) => ({ ...p, [udid]: false }));
-        refresh();
-      }
-    },
-    [startEndpoint, refresh, waitForHelper, previewEndpoint],
-  );
-
-  // If the currently-focused device's helper disappears from the API, hop to
-  // another live helper.
-  useEffect(() => {
-    if (!devices || !currentUdid) return;
-    const current = devices.find((d) => d.device === currentUdid);
-    if (current?.helper) return;
-    const next = devices.find((d) => d.helper && d.device !== currentUdid);
-    window.location.assign(
-      next ? gridPreviewHref(previewEndpoint, next.device) : previewEndpoint,
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q || !devices) return devices;
+    return devices.filter(
+      (d) =>
+        d.name.toLowerCase().includes(q) ||
+        runtimeLabel(d.runtime).toLowerCase().includes(q),
     );
-  }, [devices, currentUdid, previewEndpoint]);
+  }, [devices, query]);
 
-  const shutdown = useCallback(
-    async (device: GridDevice) => {
-      if (!shutdownEndpoint) return;
-      const udid = device.device;
-      setShuttingDown((s) => ({ ...s, [udid]: true }));
-      setErrors((e) => ({ ...e, [udid]: null }));
-      try {
-        const res = await fetch(shutdownEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid, platform: device.platform ?? "ios" }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok || !json.ok) {
-          setErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
-        }
-      } catch (err: any) {
-        setErrors((e) => ({ ...e, [udid]: err?.message ?? "Request failed" }));
-      } finally {
-        setShuttingDown((s) => ({ ...s, [udid]: false }));
-        refresh();
-      }
-    },
-    [shutdownEndpoint, refresh],
-  );
+  // Client-side search only sees loaded devices, so pull the full catalog the
+  // moment a query is typed — otherwise a match on a not-yet-paged device would
+  // be invisible. One request (the server caps the limit), then filtering is
+  // local. When search is cleared, return to the paged window so the poll stops
+  // refetching the whole catalog every interval.
+  const wasSearchingRef = useRef(false);
+  useEffect(() => {
+    const searching = !!query.trim();
+    if (searching && hasMore) onLoadAll?.();
+    else if (!searching && wasSearchingRef.current) onResetPage?.();
+    wasSearchingRef.current = searching;
+  }, [query, hasMore, onLoadAll, onResetPage]);
+
+  // Infinite scroll: grow the window as the list nears its end. Skipped while
+  // searching (the full catalog is already loaded via onLoadAll).
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const onScroll = () => {
+    if (query.trim() || !hasMore || !onLoadMore) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 240) onLoadMore();
+  };
 
   return (
-    <Panel open={open} width={width}>
-      <PanelHeader>
-        <PanelTitle>Devices</PanelTitle>
-        <div className="flex items-center gap-2">
-          <GridCapacityBanner report={memory} />
-          <PanelCloseButton onClick={onClose} />
-        </div>
+    <Panel open={open} width={width} side={side} style={{ backgroundColor: PANEL_BACKGROUND }}>
+      <PanelHeader
+        style={{ justifyContent: "flex-start", paddingLeft: 16, paddingTop: 16, gap: 4 }}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-md border-none bg-transparent text-[#8e8e93] [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          aria-label="Close devices sidebar"
+          aria-pressed
+          title="Devices"
+        >
+          <PanelLeft size={18} strokeWidth={1.75} />
+        </button>
+        <ServeSimBrandLink />
       </PanelHeader>
-      <div className="flex-1 min-h-0 overflow-y-auto p-3.5 grid auto-rows-[minmax(300px,auto)] gap-3 content-start grid-cols-[repeat(auto-fill,minmax(200px,1fr))]">
-        {devices === null ? null : devices.length === 0 ? (
-          <div className="col-span-full bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">No iOS simulators or Android emulators available.</div>
-        ) : (
-          devices.map((d) => (
-            <GridTile
-              key={d.device}
-              device={d}
-              active={d.device === currentUdid}
-              previewEndpoint={previewEndpoint}
-              starting={!!pending[d.device]}
-              shuttingDown={!!shuttingDown[d.device]}
-              error={errors[d.device] ?? null}
-              onStart={() => start(d)}
-              onShutdown={() => shutdown(d)}
-            />
-          ))
-        )}
+
+      <div className="px-4 pb-2 pt-0.5 shrink-0">
+        <label className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-white/6 focus-within:bg-white/10 [transition:background_0.12s]">
+          <Search size={14} strokeWidth={2} className="text-white/40 shrink-0" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search"
+            className="min-w-0 flex-1 bg-transparent border-none outline-none text-[13px] text-white/90 placeholder:text-white/40"
+          />
+          {query && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => setQuery("")}
+              className="shrink-0 grid place-items-center size-4 rounded-full bg-white/15 text-white/70 hover:bg-white/25"
+            >
+              <X size={9} strokeWidth={3} />
+            </button>
+          )}
+        </label>
       </div>
+
+      <div className="relative flex-1 min-h-0">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="h-full min-h-0 overflow-y-auto px-4 py-2 [scrollbar-width:thin]"
+        >
+          {filtered === null ? (
+            <DeviceListSkeleton />
+          ) : filtered.length === 0 ? (
+            <div className="px-2 py-6 text-white/40 text-[12px] text-center">
+              {query ? "No matching simulators." : "No iOS simulators available."}
+            </div>
+          ) : (
+            <>
+              <div className="pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+                Available
+              </div>
+              <div className="flex flex-col gap-0.5 pb-1">
+                {filtered.map((d) => (
+                  <DeviceRow
+                    key={d.device}
+                    device={d}
+                    active={d.device === selectedUdid}
+                    starting={!!starting[d.device]}
+                    shuttingDown={!!shuttingDown[d.device]}
+                    onSelect={() => onSelect(d.device)}
+                    onShutdown={() => onShutdown(d.device)}
+                  />
+                ))}
+              </div>
+              {!query && hasMore && (
+                <div className="px-2 py-2 text-[11px] text-white/35 text-center">
+                  {devices ? `${devices.length} of ${total}` : null}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <div
+          data-testid="device-list-top-fade"
+          className="absolute top-0 left-0 right-0 h-[16px] pointer-events-none"
+          style={{
+            background: `linear-gradient(to bottom, ${PANEL_BACKGROUND} 0%, ${PANEL_BACKGROUND_TRANSPARENT} 100%)`,
+          }}
+        />
+        <div
+          data-testid="device-list-bottom-fade"
+          className="absolute bottom-0 left-0 right-0 h-[16px] pointer-events-none"
+          style={{
+            background: `linear-gradient(to top, ${PANEL_BACKGROUND} 0%, ${PANEL_BACKGROUND_TRANSPARENT} 100%)`,
+          }}
+        />
+      </div>
+
+      <GridCapacityFooter report={memory} />
     </Panel>
+  );
+}
+
+export function DeviceListSkeleton() {
+  return (
+    <>
+      <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+        Available
+      </div>
+      <div
+        data-testid="device-list-skeleton"
+        className="flex flex-col gap-0.5 pb-1"
+        aria-label="Loading simulators"
+        aria-busy="true"
+      >
+        {Array.from({ length: DEVICE_SKELETON_ROWS }, (_, index) => (
+          <DeviceRowSkeleton key={index} index={index} />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function DeviceRowSkeleton({ index }: { index: number }) {
+  const nameWidth = ["w-[62%]", "w-[74%]", "w-[58%]", "w-[70%]"][index % 4]!;
+  const statusWidth = ["w-[42%]", "w-[36%]", "w-[48%]", "w-[32%]"][index % 4]!;
+  const versionWidth = ["w-7", "w-6", "w-8"][index % 3]!;
+
+  return (
+    <div
+      data-testid="device-row-skeleton"
+      className="flex items-center gap-2.5 px-2 py-1.5 rounded-lg select-none"
+      aria-hidden="true"
+    >
+      <div className="relative shrink-0 grid place-items-center size-9 rounded-[9px] overflow-hidden bg-white/6">
+        <span className="size-4 rounded-[4px] bg-white/[0.12]" />
+      </div>
+      <div className="min-w-0 flex-1 flex flex-col gap-1.5">
+        <span className={`h-3 rounded-full bg-white/[0.12] ${nameWidth}`} />
+        <span className={`h-2.5 rounded-full bg-white/[0.08] ${statusWidth}`} />
+      </div>
+      <span className={`shrink-0 h-2.5 rounded-full bg-white/[0.08] ${versionWidth}`} />
+    </div>
+  );
+}
+
+export function GridCapacityFooter({ report }: { report: MemoryReport | null }) {
+  if (!report || report.totalBytes <= 0) return null;
+  return (
+    <div className="shrink-0 min-w-0 overflow-hidden px-3 py-2 flex justify-center">
+      <GridCapacityBanner report={report} />
+    </div>
   );
 }

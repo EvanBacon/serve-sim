@@ -12,7 +12,7 @@
  * their PATH can still run `npx serve-sim` / mount the Connect middleware.
  * Runtime server and timing behavior is implemented with Node stdlib APIs.
  *
- * The preview HTML (bundled client.tsx + Preact + serve-sim-client, base64
+ * The preview HTML (bundled client.tsx + Preact, base64
  * encoded) is injected into every artifact that could need to serve the UI
  * via the __PREVIEW_HTML_B64__ build-time define.
  */
@@ -106,20 +106,30 @@ ${faviconTag}
 const htmlB64 = Buffer.from(html).toString("base64");
 console.log(`preview html      ${kb(html.length)}  (base64 ${kb(htmlB64.length)})`);
 
+const pkgVersion = JSON.parse(
+  readFileSync(resolve(root, "package.json"), "utf-8"),
+).version as string;
+
 const PREVIEW_DEFINE = {
   __PREVIEW_HTML_B64__: JSON.stringify(htmlB64),
+  __SERVE_SIM_VERSION__: JSON.stringify(pkgVersion),
 };
 
 // ─── 3. Middleware ESM (serve-sim/middleware) ─────────────────────────────
 
+// `ws` stays external in the node-target bundles: under Node it resolves to
+// the installed package (a real dependency), and under Bun the module
+// specifier is substituted with Bun's native implementation — inlining the
+// Node implementation would break WebSocket upgrades on Bun.
 const mwResult = await Bun.build({
   entrypoints: [resolve(root, "src/middleware.ts")],
   target: "node",
   format: "esm",
   minify: true,
   outdir: distDir,
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"],
   define: PREVIEW_DEFINE,
+  sourcemap: "linked",
 });
 if (!mwResult.success) {
   console.error("Middleware build failed:");
@@ -144,8 +154,9 @@ const binJsResult = await Bun.build({
   minify: true,
   outdir: distDir,
   naming: "serve-sim.js",
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"],
   define: PREVIEW_DEFINE,
+  sourcemap: "linked",
 });
 if (!binJsResult.success) {
   console.error("Bin JS build failed:");
@@ -169,6 +180,11 @@ const compile = spawnSync(
     resolve(root, "src/index.ts"),
     "--outfile", resolve(distDir, "serve-sim"),
     "--define", `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
+    "--define", `__SERVE_SIM_VERSION__=${JSON.stringify(pkgVersion)}`,
+    // `ws` must stay a runtime-resolved specifier so Bun substitutes its
+    // native implementation — bundling the Node implementation breaks
+    // upgrades (raw handshake writes never flush under Bun's node:http).
+    "--external", "ws",
   ],
   { stdio: "inherit" },
 );
@@ -206,5 +222,39 @@ if (helperBuild.status !== 0) {
   process.exit(helperBuild.status ?? 1);
 }
 console.log("dist/simcam/serve-sim-camera-helper");
+
+// ─── 7. sim-ax-settings in-sim CLI (simulator-wide UI settings) ──────────
+
+const axSettingsBuild = spawnSync(
+  "bash",
+  [
+    resolve(root, "Sources/SimAXSettings/build.sh"),
+    resolve(distDir, "simax"),
+  ],
+  { stdio: "inherit" },
+);
+if (axSettingsBuild.status !== 0) {
+  console.error("SimAXSettings build failed.");
+  process.exit(axSettingsBuild.status ?? 1);
+}
+console.log("dist/simax/serve-sim-ax-settings");
+
+// ─── 8. serve-sim-native.node — in-process N-API addon ───────────────────
+// Replaces the spawned serve-sim-bin helper. arm64 (Apple Silicon); loaded by
+// path from both the node bundle (createRequire) and the bun-compiled executable.
+
+const nativeBuild = spawnSync(
+  "bash",
+  [
+    resolve(root, "Sources/SimNative/build.sh"),
+    resolve(distDir, "native"),
+  ],
+  { stdio: "inherit" },
+);
+if (nativeBuild.status !== 0) {
+  console.error("SimNative addon build failed.");
+  process.exit(nativeBuild.status ?? 1);
+}
+console.log("dist/native/serve-sim-native.node");
 
 console.log("Done.");

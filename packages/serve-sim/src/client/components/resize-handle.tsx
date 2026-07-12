@@ -9,18 +9,24 @@ export function ResizeHandle({
   visible,
   onPointerDown,
   ariaLabel,
+  side = "right",
 }: {
   panelWidth: number;
   visible: boolean;
   onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
   ariaLabel: string;
+  side?: "left" | "right";
 }) {
   const [hover, setHover] = useState(false);
   const [active, setActive] = useState(false);
   const hot = hover || active;
-  // Panel sits at right:12 with the given width — its left border is at
-  // right:(12 + panelWidth - 1). Centering the 16px hit target there:
-  const handleRight = 12 + panelWidth - 9;
+
+  // A right-edge panel sits at right:12 — its draggable (left) border is at
+  // right:(12 + panelWidth - 1). The flush left sidebar sits at left:0, so its
+  // draggable right border is at left:(panelWidth - 1). Center the 16px hit
+  // target on whichever border is interior.
+  const handleOffset = (side === "left" ? 0 : 12) + panelWidth - 9;
+  const edgeClass = side === "left" ? "top-0 bottom-0" : "top-3 bottom-3";
   return (
     <div
       role="separator"
@@ -35,8 +41,8 @@ export function ResizeHandle({
       onPointerCancel={() => setActive(false)}
       onPointerEnter={() => setHover(true)}
       onPointerLeave={() => setHover(false)}
-      className={`fixed top-3 bottom-3 w-4 z-36 cursor-col-resize touch-none transition-opacity duration-200 ${visible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
-      style={{ right: handleRight }}
+      className={`fixed ${edgeClass} w-4 z-36 cursor-col-resize touch-none transition-opacity duration-200 ${visible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`}
+      style={side === "left" ? { left: handleOffset } : { right: handleOffset }}
     >
       {/* Subtle hairline accent that brightens the panel's existing border
           while the edge is hot. Tapers at top/bottom. */}

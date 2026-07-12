@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { Chevron, PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
+import { FlipHorizontal2, Images, X } from "lucide-react";
+import { PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
+import { CollapsibleSection } from "./collapsible-section";
 
 export type CamSource = "placeholder" | "image" | "video" | "webcam";
 type CamMirror = "on" | "off";
@@ -693,26 +695,25 @@ export function CameraTool({
         : "placeholder";
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
-        aria-expanded={open}
+    <CollapsibleSection
+      open={open}
+      onOpenChange={setOpen}
+      bodyClassName="pt-2.5"
+      summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
+      summary={
+        <>
+          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Camera</span>
+          <CameraStatusPill state={pillState} />
+        </>
+      }
+    >
+      <div
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+        className="flex flex-col gap-2.5"
       >
-        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Camera</span>
-        <CameraStatusPill state={pillState} />
-        <Chevron open={open} />
-      </button>
-
-      {open && (
-        <div
-          onDragEnter={onDragEnter}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          className="flex flex-col gap-2.5"
-        >
           <p className="m-0 text-[10px] leading-[1.5] text-white/45">
             Replaces the simulator's camera feed by injecting a dylib at app launch
             and streaming frames into shared memory. Pick media or a webcam,
@@ -764,10 +765,7 @@ export function CameraTool({
                 aria-label="Clear source"
                 title="Clear → placeholder"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
+                <X size={14} strokeWidth={2} />
               </button>
             )}
           </div>
@@ -778,7 +776,7 @@ export function CameraTool({
             <div className="relative" data-camera-source-menu>
               <button
                 onClick={() => setSourceMenuOpen((o) => !o)}
-                className="lem-ghost h-full min-h-[36px] w-10 flex items-center justify-center bg-transparent border border-white/12 text-white/85 rounded-[7px] cursor-pointer p-0"
+                className="h-full min-h-[36px] w-10 flex items-center justify-center bg-transparent border border-white/12 text-white/85 rounded-[7px] cursor-pointer p-0 hover:bg-white/[0.06] hover:border-white/20 hover:text-white"
                 aria-haspopup="menu"
                 aria-expanded={sourceMenuOpen}
                 title={
@@ -788,12 +786,7 @@ export function CameraTool({
                 }
                 aria-label="Choose camera source"
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16" />
-                  <path d="M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2" />
-                  <circle cx="13" cy="7" r="1" fill="currentColor" />
-                  <rect x="8" y="2" width="14" height="14" rx="2" />
-                </svg>
+                <Images size={20} strokeWidth={2} />
               </button>
 
               {sourceMenuOpen && (
@@ -851,8 +844,8 @@ export function CameraTool({
               className={[
                 "flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer disabled:opacity-50 min-h-[36px]",
                 primary.kind === "stop"
-                  ? "lem-primary lem-primary-on bg-white/[0.16] text-white"
-                  : "lem-primary bg-success-emerald text-[#062018]",
+                  ? "bg-white/[0.16] text-white enabled:hover:bg-white/[0.22]"
+                  : "bg-success-emerald text-[#062018] enabled:hover:brightness-[1.08]",
               ].join(" ")}
               title={
                 primary.kind === "stop" ? "Stop the camera helper and terminate injected apps" :
@@ -871,10 +864,10 @@ export function CameraTool({
               type="button"
               onClick={toggleMirror}
               disabled={mirrorDisabled}
-              className={`flex items-center justify-center w-10 min-h-[36px] border rounded-[7px] font-[inherit] disabled:opacity-50 disabled:cursor-not-allowed ${
+              className={`flex items-center justify-center w-10 min-h-[36px] border rounded-[7px] font-[inherit] disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.97] ${
                 mirror === "on"
-                  ? "lem-speed lem-speed-on bg-white border-white text-[#0a0a0c] cursor-pointer"
-                  : "lem-speed bg-white/[0.04] border-white/8 text-white/85 cursor-pointer"
+                  ? "bg-white border-white text-[#0a0a0c] cursor-pointer enabled:hover:bg-white/[0.88] enabled:hover:border-white/[0.88] enabled:hover:text-[#0a0a0c]"
+                  : "bg-white/[0.04] border-white/8 text-white/85 cursor-pointer enabled:hover:bg-white/[0.09] enabled:hover:border-[rgba(255,255,255,0.18)] enabled:hover:text-white"
               }`}
               aria-label={`Mirror: ${mirror} — tap to toggle`}
               title={
@@ -884,21 +877,13 @@ export function CameraTool({
               }
               aria-pressed={mirror === "on"}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill={mirror === "on" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m3 7 5 5-5 5V7" />
-                <path d="m21 7-5 5 5 5V7" />
-                <path d="M12 20v2" />
-                <path d="M12 14v2" />
-                <path d="M12 8v2" />
-                <path d="M12 2v2" />
-              </svg>
+              <FlipHorizontal2 size={20} strokeWidth={2} fill={mirror === "on" ? "currentColor" : "none"} />
             </button>
           </div>
 
           {warning && <CameraInlineBanner kind="warning" message={warning} />}
           {error && <CameraInlineBanner kind="error" message={error} />}
         </div>
-      )}
-    </div>
+    </CollapsibleSection>
   );
 }

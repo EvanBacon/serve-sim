@@ -1,34 +1,27 @@
 {
-  "name": "serve-sim-szdziedzic",
+  "name": "serve-sim",
   "version": "0.1.34",
   "type": "module",
   "author": {
-    "name": "Szymon Dziedzic",
-    "email": "sz.dziedz@gmail.com",
-    "url": "https://github.com/szdziedzic"
+    "name": "Evan Bacon",
+    "email": "baconbrix@gmail.com",
+    "url": "https://evanbacon.dev"
   },
-  "contributors": [
-    {
-      "name": "Evan Bacon",
-      "email": "baconbrix@gmail.com",
-      "url": "https://evanbacon.dev"
-    }
-  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/szdziedzic/serve-sim.git",
+    "url": "git+https://github.com/EvanBacon/serve-sim.git",
     "directory": "packages/serve-sim"
   },
-  "homepage": "https://github.com/szdziedzic/serve-sim#readme",
+  "homepage": "https://github.com/EvanBacon/serve-sim#readme",
   "bugs": {
-    "url": "https://github.com/szdziedzic/serve-sim/issues"
+    "url": "https://github.com/EvanBacon/serve-sim/issues"
   },
   "bin": {
-    "serve-sim-szdziedzic": "dist/serve-sim.js"
+    "serve-sim": "dist/serve-sim.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "files": [
     "dist/serve-sim.js",
@@ -36,18 +29,25 @@
     "dist/middleware.cjs",
     "dist/simcam/libSimCameraInjector.dylib",
     "dist/simcam/serve-sim-camera-helper",
+    "dist/simax/serve-sim-ax-settings",
     "src/ax-shared.ts",
     "src/ax.ts",
     "src/middleware.ts",
+    "src/native.ts",
     "src/state.ts",
-    "bin/serve-sim-bin",
     "Sources/SimCameraInjector/SimCameraInjector.m",
     "Sources/SimCameraInjector/SimCam*.h",
     "Sources/SimCameraInjector/SimCam*.m",
     "Sources/SimCameraInjector/include/SimCamShared.h",
     "Sources/SimCameraInjector/build.sh",
     "Sources/SimCameraHelper/main.m",
-    "Sources/SimCameraHelper/build.sh"
+    "Sources/SimCameraHelper/build.sh",
+    "Sources/SimAXSettings/sim-ax-settings.m",
+    "Sources/SimAXSettings/build.sh",
+    "dist/native/serve-sim-native.node",
+    "Package.swift",
+    "Sources/SimNative/*.swift",
+    "Sources/SimNative/build.sh"
   ],
   "exports": {
     "./middleware": {
@@ -62,7 +62,6 @@
   },
   "scripts": {
     "build": "bun run build.ts",
-    "build:swift": "./build.sh",
     "dev": "bun run dev.ts"
   },
   "devDependencies": {
@@ -70,17 +69,21 @@
     "@types/debug": "^4.1.13",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "debug": "^4.4.3",
+    "@types/ws": "^8.18.1",
     "bun-plugin-tailwind": "^0.1.2",
     "commander": "^14.0.1",
+    "debug": "^4.4.3",
+    "lucide-react": "^1.20.0",
+    "node-swift": "1.5.1",
     "preact": "^10.29.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "serve-sim-client-szdziedzic": "workspace:*",
     "tailwindcss": "^4.1.7",
     "typescript": "^5.7.0"
   },
   "dependencies": {
-    "inspect-webkit": "^0.0.5"
+    "inspect-webkit": "^0.0.5",
+    "sonner": "^2.0.7",
+    "ws": "^8.21.0"
   }
 }

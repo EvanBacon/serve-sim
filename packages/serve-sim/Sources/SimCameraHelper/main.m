@@ -29,6 +29,7 @@
 #import <CoreImage/CoreImage.h>
 #import <Accelerate/Accelerate.h>
 #import <ImageIO/ImageIO.h>
+#import <IOSurface/IOSurface.h>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -44,7 +45,9 @@
 #pragma mark - Globals (shm + writer)
 
 static SimCamShmHeader *gHeader = NULL;
-static uint8_t *gPixels = NULL;
+static SimCamSurfaceTable *gSurfaceTable = NULL;
+static IOSurfaceRef gSurfaces[SIMCAM_SURFACE_RING];
+static uint32_t gWriteIndex = 0;            // last ring slot rendered into
 static uint32_t gWidth = SIMCAM_DEFAULT_WIDTH;
 static uint32_t gHeight = SIMCAM_DEFAULT_HEIGHT;
 static const char *gShmName = NULL;
@@ -65,15 +68,48 @@ static uint8_t ParseMirrorCode(NSString *mode);
 static NSString *MirrorName(uint8_t code);
 
 // Publish a fully-prepared BGRA frame (gWidth x gHeight, packed at gWidth*4
-// bytes per row) to the shm region. Writers MUST go through this so seq/ts
-// stay coherent for the dylib's tear-detection check.
+// bytes per row) into the next free ring surface. Writers MUST go through this
+// so latestIndex/frameSeq stay coherent for the dylib's tear-detection check.
 static void PublishFrame(const uint8_t *bgra) {
-    if (!gHeader || !gPixels || !bgra) return;
-    memcpy(gPixels, bgra, (size_t)gWidth * gHeight * 4);
+    if (!gHeader || !gSurfaceTable || !bgra) return;
+    uint32_t count = gSurfaceTable->surfaceCount;
+    if (count == 0) return;
+
+    // Render into a surface the reader isn't holding and isn't the one it last
+    // published, so an in-flight frame is never overwritten mid-read.
+    uint32_t latest = gSurfaceTable->latestIndex;
+    uint32_t idx = gWriteIndex;
+    BOOL found = NO;
+    for (uint32_t tries = 0; tries < count; tries++) {
+        idx = (idx + 1) % count;
+        if (idx == latest) continue;
+        if (!IOSurfaceIsInUse(gSurfaces[idx])) {
+            found = YES;
+            break;
+        }
+    }
+    if (!found) return;
+    gWriteIndex = idx;
+
+    IOSurfaceRef surface = gSurfaces[idx];
+    IOSurfaceLock(surface, 0, NULL);
+    uint8_t *dst = (uint8_t *)IOSurfaceGetBaseAddress(surface);
+    size_t dstStride = IOSurfaceGetBytesPerRow(surface);
+    size_t srcStride = (size_t)gWidth * 4;
+    if (dstStride == srcStride) {
+        memcpy(dst, bgra, srcStride * gHeight);
+    } else {
+        for (uint32_t y = 0; y < gHeight; y++) {
+            memcpy(dst + (size_t)y * dstStride, bgra + (size_t)y * srcStride, srcStride);
+        }
+    }
+    IOSurfaceUnlock(surface, 0, NULL);
+
+    gSurfaceTable->latestIndex = idx;
     gHeader->timestampNs = MachAbsToNs(mach_absolute_time());
     atomic_thread_fence(memory_order_release);
     uint64_t next = atomic_fetch_add(&gFrameSeq, 1) + 1;
-    gHeader->frameSeq = next;
+    atomic_store_explicit(&gHeader->frameSeq, next, memory_order_release);
 }
 
 #pragma mark - Source pipeline (start / stop / switch)
@@ -754,7 +790,41 @@ static void ListDevices(void) {
     }
 }
 
-static int OpenShm(const char *name, size_t size) {
+// Allocate the IOSurface ring and record their global IDs in the table.
+static BOOL CreateSurfaces(void) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    NSDictionary *props = @{
+        (id)kIOSurfaceWidth: @(gWidth),
+        (id)kIOSurfaceHeight: @(gHeight),
+        (id)kIOSurfaceBytesPerElement: @4,
+        (id)kIOSurfacePixelFormat: @((uint32_t)kCVPixelFormatType_32BGRA),
+        // Global so the simulator process can resolve the surface by ID.
+        (id)kIOSurfaceIsGlobal: @YES,
+    };
+#pragma clang diagnostic pop
+    for (uint32_t i = 0; i < SIMCAM_SURFACE_RING; i++) {
+        IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+        if (!s) {
+            fprintf(stderr, "[serve-sim-camera] IOSurfaceCreate failed at %u\n", i);
+            return NO;
+        }
+        gSurfaces[i] = s;
+        gSurfaceTable->ids[i] = IOSurfaceGetID(s);
+    }
+    gSurfaceTable->surfaceCount = SIMCAM_SURFACE_RING;
+    gSurfaceTable->latestIndex = 0;
+    return YES;
+}
+
+static void ReleaseSurfaces(void) {
+    for (uint32_t i = 0; i < SIMCAM_SURFACE_RING; i++) {
+        if (gSurfaces[i]) { CFRelease(gSurfaces[i]); gSurfaces[i] = NULL; }
+    }
+}
+
+static int OpenShm(const char *name) {
+    size_t size = (size_t)SimCamControlSize();
     shm_unlink(name);
     int fd = shm_open(name, O_CREAT | O_RDWR, 0644);
     if (fd < 0) { perror("shm_open"); return -1; }
@@ -762,14 +832,15 @@ static int OpenShm(const char *name, size_t size) {
     void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) { perror("mmap"); close(fd); return -1; }
     gHeader = (SimCamShmHeader *)map;
-    gPixels = (uint8_t *)map + sizeof(SimCamShmHeader);
-    memset(gHeader, 0, sizeof(*gHeader));
+    gSurfaceTable = (SimCamSurfaceTable *)((uint8_t *)map + sizeof(SimCamShmHeader));
+    memset(map, 0, size);
+    if (!CreateSurfaces()) { close(fd); return -1; }
     gHeader->magic = SIMCAM_SHM_MAGIC;
-    gHeader->version = 1;
+    gHeader->version = 2;
     gHeader->width = gWidth;
     gHeader->height = gHeight;
     gHeader->pixelFormat = SIMCAM_PIXEL_BGRA;
-    gHeader->bytesPerRow = gWidth * 4;
+    gHeader->bytesPerRow = (uint32_t)IOSurfaceGetBytesPerRow(gSurfaces[0]);
     gHeader->pixelByteSize = (uint64_t)gWidth * gHeight * 4;
     gHeader->mirrorMode = SIMCAM_MIRROR_UNSET; // dylib falls back to env
     return fd;
@@ -824,10 +895,9 @@ int main(int argc, const char *argv[]) {
             // (no-op marker; --device implies webcam below if user intended it)
         }
 
-        size_t shmSize = (size_t)SimCamShmSizeFor(gWidth, gHeight);
-        if (OpenShm(gShmName, shmSize) < 0) return 1;
-        fprintf(stderr, "[serve-sim-camera] shm \"%s\" %zu bytes (%ux%u BGRA)\n",
-                gShmName, shmSize, gWidth, gHeight);
+        if (OpenShm(gShmName) < 0) return 1;
+        fprintf(stderr, "[serve-sim-camera] shm \"%s\" + %u IOSurfaces (%ux%u BGRA)\n",
+                gShmName, SIMCAM_SURFACE_RING, gWidth, gHeight);
 
         gSourceQueue = dispatch_queue_create("simcam.helper.source", DISPATCH_QUEUE_SERIAL);
 
@@ -863,6 +933,8 @@ int main(int argc, const char *argv[]) {
         if (gControlListenFd >= 0) { close(gControlListenFd); if (socketPath) unlink(socketPath); }
         StopPlaceholderSource();
         StopWebcamSource();
+        StopVideoSource();
+        ReleaseSurfaces();
         if (gShmName) shm_unlink(gShmName);
         fprintf(stderr, "[serve-sim-camera] stopped\n");
         return 0;

@@ -23,12 +23,6 @@
         "dev.ts",
         "scripts/build-trails.ts"
       ]
-    },
-    "packages/serve-sim-client": {
-      "ignoreDependencies": [
-        "react-dom",
-        "@types/react-dom"
-      ]
     }
   }
 }

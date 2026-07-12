@@ -108,6 +108,20 @@ function locationAuth(bundleId: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+// `simctl privacy` writes locationd's clients.plist asynchronously, so on a cold
+// CI sim the value can lag the `grant`/`revoke` CLI call returning. Poll the
+// readback until it reaches the expected Authorization rather than asserting on
+// the first (possibly stale) read.
+async function locationAuthEventually(bundleId: string, expected: number): Promise<number | null> {
+  let last: number | null = null;
+  for (let i = 0; i < 40; i++) {
+    last = locationAuth(bundleId);
+    if (last === expected) return last;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return last;
+}
+
 // Each case shells the built CLI a few times, and a cold `simctl privacy`
 // call (location) can take several seconds on a fresh CI sim — comfortably
 // past bun's 5s default. The beforeAll reset-all also cascades through every
@@ -170,14 +184,14 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
     expect(bulletinXml()).not.toContain(FAKE_BUNDLE);
   }, T);
 
-  test("grant location --value always writes Authorization=4", () => {
+  test("grant location --value always writes Authorization=4", async () => {
     cli("grant", "location", REAL_APP, "--value", "always");
-    expect(locationAuth(REAL_APP)).toBe(4);
+    expect(await locationAuthEventually(REAL_APP, 4)).toBe(4);
   }, T);
 
-  test("revoke location downgrades Authorization to never (1)", () => {
+  test("revoke location downgrades Authorization to never (1)", async () => {
     cli("revoke", "location", REAL_APP);
-    expect(locationAuth(REAL_APP)).toBe(1);
+    expect(await locationAuthEventually(REAL_APP, 1)).toBe(1);
     cli("reset", "location", REAL_APP);
   }, T);
 
@@ -189,10 +203,12 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
     expect(bulletinXml()).not.toContain(FAKE_BUNDLE);
   }, T);
 
-  test("list reports state under the CLI's own permission names", () => {
+  test("list reports state under the CLI's own permission names", async () => {
     cli("grant", "camera", FAKE_BUNDLE);
     cli("grant", "notifications", FAKE_BUNDLE);
     cli("grant", "location", REAL_APP, "--value", "always");
+    // Wait for locationd to persist the grant before reading it back via `list`.
+    expect(await locationAuthEventually(REAL_APP, 4)).toBe(4);
     const fake = JSON.parse(cli("list", FAKE_BUNDLE));
     expect(fake.tcc.camera).toBe(2);
     expect(fake.notifications.allowsNotifications).toBe(true);

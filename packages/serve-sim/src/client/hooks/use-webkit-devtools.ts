@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import type { WebKitDevtoolsResponse, WebKitDevtoolsTarget } from "../utils/devtools";
+import {
+  proxyWebKitDevtoolsTargetForBrowser,
+  type WebKitDevtoolsResponse,
+  type WebKitDevtoolsTarget,
+} from "../utils/devtools";
 
 export function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
   const [targets, setTargets] = useState<WebKitDevtoolsTarget[]>([]);
@@ -14,7 +18,13 @@ export function useWebKitDevtools(endpoint: string | undefined, enabled: boolean
       const res = await fetch(endpoint, { cache: "no-store" });
       const json = (await res.json()) as WebKitDevtoolsResponse;
       if (!res.ok || json.error) throw new Error(json.error || "Failed to list WebKit targets");
-      setTargets(json.targets ?? []);
+      const location = typeof window === "undefined" ? null : window.location;
+      const rawTargets = json.targets ?? [];
+      setTargets(
+        location
+          ? rawTargets.map((target) => proxyWebKitDevtoolsTargetForBrowser(target, location))
+          : rawTargets,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start WebKit DevTools");
     } finally {

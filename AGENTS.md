@@ -1,14 +1,31 @@
 - Test-driven development where possible.
 - Prefer kebab-case for all TS/JS files.
 - Avoid low-opacity for icons.
+- Only support maintained Node.js LTS releases (currently Node 20+). Don't add
+  workarounds for end-of-life Node versions; rely on `ws` (a dependency) rather
+  than a global `WebSocket` so the middleware works across supported runtimes.
+
+## Native build notes
+
+- Build native changes with `bun run packages/serve-sim/build.ts`. This rebuilds
+  the bundled JS, compiled CLI, camera dylib/helper, AX settings helper, and the
+  N-API addon at `packages/serve-sim/dist/native/serve-sim-native.node`.
+- After changing Swift/ObjC++ native code, restart any running `serve-sim`
+  process. The `.node` addon is loaded once per process, so rebuilding alone
+  does not update an already-running server.
+- When validating local native changes, run the rebuilt local CLI
+  (`node packages/serve-sim/dist/serve-sim.js ...` or the compiled binary in
+  `packages/serve-sim/dist/`) rather than `npx serve-sim` or a globally
+  installed binary.
 
 ## E2E testing with agent-browser
+
+If you are codex, run in the in-app Codex browser instead of using agent-browser. Only use agent-browser when developing from TUIs like Claude Code.
 
 The serve-sim web UI streams the iOS Simulator and forwards clicks, so end-to-end
 behavior can be driven from a browser with the `agent-browser` CLI:
 
-1. Build: `bun run packages/serve-sim/build.ts` (rebuilds the dylib + helper into
-   `packages/serve-sim/dist/simcam/`).
+1. Build: `bun run packages/serve-sim/build.ts`.
 2. Boot a simulator and start the server: `node packages/serve-sim/dist/serve-sim.js --port 3399`.
 3. Drive the UI: `agent-browser open http://localhost:3399`, then `snapshot`,
    `click @eN`, `upload input[type=file] <path>`, `screenshot <path>`, etc.
@@ -28,6 +45,12 @@ through `serve-sim` subcommands against a running server:
   that need explicit `begin`/`move`/`end` events.
 - `serve-sim button [home|lock|…] [-d udid]` — hardware button.
 - `serve-sim camera …` — inject the dylib, hot-swap source, toggle mirror.
+- `serve-sim ui <option> [value] [-d udid]` — simulator-wide UI options
+  (appearance, liquid-glass, color-filter, text-size, reduce-motion,
+  increase-contrast, show-borders, reduce-transparency, voiceover); `ui status
+--json` dumps all. Verify sets via `simctl ui <udid> <option>` readback or
+  `simctl spawn <udid> defaults read` on com.apple.Accessibility /
+  com.apple.mediaaccessibility / com.apple.UIKit.
 - `xcrun simctl openurl booted <url>` — deep-link into apps (faster than
   tapping through Expo Go's recent-projects list).
 

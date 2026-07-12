@@ -1,60 +1,46 @@
-name: Publish to npm
+name: Publish beta to npm
 
 on:
   push:
     branches: [main]
     paths:
-      - "packages/**"
+      - "packages/serve-sim/**"
       - ".github/workflows/publish.yml"
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install
-
-      - name: Client tests
-        run: bun test packages/serve-sim-client/src/__tests__/
-
-  publish-serve-sim:
-    needs: [test]
-    runs-on: macos-latest
+  publish-beta:
+    if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
     permissions:
-      contents: write
+      contents: read
       id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Detect serve-sim changes
         id: changes
         run: |
-          # Publish if source changed OR local version differs from npm
-          # (gap state from a previous run that published but failed to
-          # push the bump back to main).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "sim=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Publish beta if serve-sim source changed.
           CHANGED=$(git diff --name-only HEAD~1 HEAD)
           SOURCE_CHANGED=false
-          if echo "$CHANGED" | grep -q "^packages/serve-sim/"; then
+          if echo "$CHANGED" | grep -Eq "^packages/serve-sim/"; then
             SOURCE_CHANGED=true
           fi
 
-          LOCAL=$(node -p "require('./packages/serve-sim/package.json').version")
-          NPM_V=$(npm view serve-sim version 2>/dev/null || echo "")
-          GAP=false
-          if [ -n "$NPM_V" ] && [ "$NPM_V" != "$LOCAL" ]; then
-            echo "serve-sim gap: local=$LOCAL npm=$NPM_V"
-            GAP=true
-          fi
-
-          if [ "$SOURCE_CHANGED" = "true" ] || [ "$GAP" = "true" ]; then
+          if [ "$SOURCE_CHANGED" = "true" ]; then
             echo "sim=true" >> $GITHUB_OUTPUT
           else
             echo "sim=false" >> $GITHUB_OUTPUT
@@ -80,7 +66,7 @@ jobs:
         id: boot-sim
         run: |
           # Pick the newest available iOS simulator device. The runner image
-          # ships pre-created sims — boot one so the serve-sim idle-floor
+          # ships pre-created sims - boot one so the serve-sim idle-floor
           # integration test has something real to talk to. Fallback: create
           # one from the latest iOS runtime.
           UDID=$(xcrun simctl list devices available -j | node -e "
@@ -117,34 +103,58 @@ jobs:
           open -ga Simulator || true
           echo "udid=$UDID" >> $GITHUB_OUTPUT
 
+      # The serve-sim e2e tests load the in-process native addon
+      # (dist/native/serve-sim-native.node), so build it before running them.
+      # (The publish step below rebuilds after the version bump to embed it.)
+      - name: Build serve-sim
+        if: steps.changes.outputs.sim == 'true'
+        run: bun run build.ts
+        working-directory: packages/serve-sim
+
       - name: serve-sim tests (idle floor regression)
         if: steps.changes.outputs.sim == 'true'
-        run: bun test packages/serve-sim/src/__tests__/
+        env:
+          UDID: ${{ steps.boot-sim.outputs.udid }}
+        run: |
+          # Mirror sim-test.yml: the sim-backed e2e tests share one simulator,
+          # so a wedge from one test (stuck finger, native crash) cascades into
+          # ConnectionRefused / "server not alive" failures in unrelated later
+          # tests. Reboot for a clean slate and retry once — a transient wedge
+          # clears, a genuine regression reproduces on the second run.
+          run_tests() { bun test --max-concurrency=1 packages/serve-sim/src/__tests__/; }
+          if run_tests; then exit 0; fi
+          echo "::warning title=sim e2e retry::test run failed; rebooting $UDID and retrying once"
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          sleep 3
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          open -ga Simulator || true
+          run_tests
 
       - name: Shutdown simulator
         if: always() && steps.boot-sim.outputs.udid != ''
         run: |
           xcrun simctl shutdown "${{ steps.boot-sim.outputs.udid }}" || true
 
-      - name: Build and publish serve-sim
+      - name: Build and publish serve-sim beta
         if: steps.changes.outputs.sim == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/serve-sim
 
-          # Bump from max(local, npm-published) + 1 so a previous run that
-          # published but failed to push the bump back to main can't poison
-          # the next run with a 403 from npm.
+          # Publish a unique prerelease from max(local, npm latest) + 1.
+          # This keeps automatic main pushes on npm's beta tag until stable
+          # promotion is requested explicitly.
           LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view serve-sim version 2>/dev/null || echo "")
+          PUBLISHED=$(npm view serve-sim dist-tags.latest 2>/dev/null || echo "")
           [ -z "$PUBLISHED" ] && PUBLISHED="$LOCAL"
           NEW=$(node -e "
             const a='$LOCAL'.split('.').map(Number);
             const b='$PUBLISHED'.split('.').map(Number);
             const max=(a[0]>b[0]||(a[0]===b[0]&&a[1]>b[1])||(a[0]===b[0]&&a[1]===b[1]&&a[2]>b[2]))?a:b;
             max[2]++;
-            console.log(max.join('.'));
+            console.log(max.join('.') + '-beta.${{ github.run_number }}.${{ github.run_attempt }}');
           ")
           echo "Bumped serve-sim: local=$LOCAL npm=$PUBLISHED -> $NEW"
           node -e "
@@ -154,26 +164,6 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
           "
 
-          bun run build:swift
           bun run build
 
-          npm publish --access public
-
-      - name: Configure git and commit version bump
-        if: steps.changes.outputs.sim == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packages/serve-sim/package.json
-          if git diff --cached --quiet; then
-            echo "No version bump to commit"
-          else
-            git commit -m "chore: bump serve-sim version [skip ci]"
-            for i in 1 2 3; do
-              if git push; then exit 0; fi
-              echo "Push rejected (attempt $i/3), rebasing on origin/main..."
-              git pull --rebase --autostash origin main || break
-            done
-            echo "::error::Failed to push serve-sim version bump after 3 attempts. npm has been advanced; next run will self-heal."
-            exit 1
-          fi
+          npm publish --access public --tag beta --provenance

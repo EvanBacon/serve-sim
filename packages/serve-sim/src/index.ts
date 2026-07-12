@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
-import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
-import { homedir, networkInterfaces } from "os";
+import { networkInterfaces } from "os";
 import { join, resolve } from "path";
-import { STATE_DIR, stateFileForDevice, listStateFiles } from "./state";
+import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, type ServeSimDeviceState } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
+import { killPortHolder } from "./ports";
 import { findBootedDevice, resolveDevice, tryResolveDevice } from "./device";
 import {
   adb,
@@ -21,97 +22,39 @@ import {
   type AndroidTarget,
 } from "./android-device";
 import { permissions } from "./permissions";
+import { uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
-import { startCloudflareTunnel, type Tunnel, type TunnelProtocol } from "./tunnel";
+import type { EventLogEntry } from "./event-log";
+import { formatEventLogLine } from "./event-log-format";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
 const __dirname = dirnameOf(import.meta.url);
 
-// Tunnels owned by this process. Killed on exit.
-const liveTunnels = new Set<Tunnel>();
-function trackTunnel(t: Tunnel): Tunnel {
-  liveTunnels.add(t);
-  return t;
-}
-function shutdownTunnels(): void {
-  for (const t of liveTunnels) {
-    try { t.stop(); } catch {}
+// Stamped in at build time (see build.ts), mirroring __PREVIEW_HTML_B64__. In
+// the un-bundled dev run the define is absent, so fall back to reading the
+// package.json that sits next to the source / dist bin.
+declare const __SERVE_SIM_VERSION__: string | undefined;
+function resolveVersion(): string {
+  if (typeof __SERVE_SIM_VERSION__ === "string") return __SERVE_SIM_VERSION__;
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
   }
-  liveTunnels.clear();
-}
-process.on("exit", shutdownTunnels);
-
-interface HelperUrls {
-  url: string;
-  streamUrl: string;
-  wsUrl: string;
-}
-
-interface StreamOptions {
-  maxFps: number;
-  quality: number;
-  maxDimension: number;
-}
-
-const DEFAULT_STREAM_OPTIONS: StreamOptions = {
-  maxFps: 60,
-  quality: 0.7,
-  maxDimension: 0,
-};
-
-function buildHelperArgs(udid: string, port: number, stream: StreamOptions): string[] {
-  const args = [
-    udid,
-    "--port", String(port),
-    "--max-fps", String(stream.maxFps),
-    "--quality", String(stream.quality),
-  ];
-  if (stream.maxDimension > 0) {
-    args.push("--max-dimension", String(stream.maxDimension));
-  }
-  return args;
-}
-
-/**
- * URLs the preview UI uses to reach this helper. Defaults to
- * `http://127.0.0.1:<port>`. When `publicUrl` is set (e.g. a tunnel base
- * like `https://abc.trycloudflare.com`), it replaces the loopback origin.
- */
-function buildHelperUrls(port: number, publicUrl?: string): HelperUrls {
-  if (publicUrl) {
-    const base = publicUrl.replace(/\/+$/, "");
-    const wsBase = base.replace(/^http(s?):/i, (_m, s) => `ws${s}:`);
-    return {
-      url: base,
-      streamUrl: `${base}/stream.mjpeg`,
-      wsUrl: `${wsBase}/ws`,
-    };
-  }
-  return {
-    url: `http://127.0.0.1:${port}`,
-    streamUrl: `http://127.0.0.1:${port}/stream.mjpeg`,
-    wsUrl: `ws://127.0.0.1:${port}/ws`,
-  };
 }
 
 // Embed the Swift helper so `bun build --compile` produces a self-contained
 // `serve-sim` binary. In dev / the un-compiled ESM bin the returned path is a
 // real file on disk; inside a compiled binary it points at bun's virtual FS
 // and we extract the bytes to a cached location on first use.
-import swiftHelperEmbeddedPath from "../bin/serve-sim-bin" with { type: "file" };
 
-interface ServerState {
-  pid: number;
-  port: number;
-  device: string;
+type ServerState = ServeSimDeviceState & {
   platform?: "ios" | "android";
   name?: string;
   runtime?: string;
-  url: string;
-  streamUrl: string;
-  wsUrl: string;
-}
+};
 
 type Platform = "ios" | "android";
 
@@ -193,17 +136,43 @@ function readStateFile(file: string): ServerState | null {
       unlinkSync(file);
       return null;
     }
-    // The helper is alive, but the simulator it was bound to may have been
-    // shut down (Simulator.app quit, machine slept, `simctl shutdown`, etc.).
-    // When that happens the helper keeps accepting /stream.mjpeg connections
-    // but never emits frames, so clients hang on "Connecting...". Detect and
-    // recycle here so --detach / --list always return a working stream.
+    // The helper is alive, but the device it was bound to may have been shut
+    // down. When that happens the helper keeps accepting /stream.mjpeg
+    // connections but never emits frames, so clients hang on "Connecting...".
+    // Detect and recycle here so --detach / --list always return a working stream.
     const platform = state.platform ?? "ios";
-    const booted = platform === "ios" ? getBootedUdids() : null;
-    const androidGone = platform === "android" && androidDeviceBootStatus(state.device) === "not_booted";
-    if ((booted && !booted.has(state.device)) || androidGone) {
+    if (platform === "ios") {
+      const booted = getBootedUdids();
+      if (booted && !booted.has(state.device)) {
+        if (state.pid === process.pid) {
+          // The state belongs to *this* process (an in-process/preview server
+          // recorded its own pid via inProcessServeSimState). Never SIGTERM
+          // ourselves — that would take the whole server down. Just drop the
+          // stale file; the live server reaps its own sessions on grid polls.
+          debugState("dropping own stale state for non-booted device %s", state.device);
+          try { unlinkSync(file); } catch {}
+          return null;
+        }
+        debugState(
+          "helper pid %d bound to non-booted device %s — killing stale helper",
+          state.pid,
+          state.device,
+        );
+        console.error(
+          `[serve-sim] Helper pid ${state.pid} is bound to device ${state.device} which is no longer booted — killing stale helper.`,
+        );
+        try { process.kill(state.pid, "SIGTERM"); } catch {}
+        try { unlinkSync(file); } catch {}
+        return null;
+      }
+    } else if (platform === "android" && androidDeviceBootStatus(state.device) === "not_booted") {
+      if (state.pid === process.pid) {
+        debugState("dropping own stale state for non-booted android device %s", state.device);
+        try { unlinkSync(file); } catch {}
+        return null;
+      }
       debugState(
-        "helper pid %d bound to non-booted device %s — killing stale helper",
+        "helper pid %d bound to non-booted android device %s — killing stale helper",
         state.pid,
         state.device,
       );
@@ -235,6 +204,20 @@ function stateMatchesPlatform(state: ServerState, platform: Platform | "auto"): 
   return platform === "auto" || (state.platform ?? "ios") === platform;
 }
 
+function resolveStateDeviceArg(deviceArg?: string): string | undefined {
+  if (!deviceArg) return undefined;
+  const direct = readState(deviceArg);
+  if (direct) return direct.device;
+  const ios = tryResolveDevice(deviceArg);
+  if (ios) return ios;
+  const android = resolveRunningAndroidDevice(deviceArg);
+  return android?.device ?? deviceArg;
+}
+
+function readStateForDeviceArg(deviceArg?: string): ServerState | null {
+  return readState(resolveStateDeviceArg(deviceArg));
+}
+
 function writeState(state: ServerState) {
   ensureStateDir();
   writeFileSync(stateFileForDevice(state.device), JSON.stringify(state, null, 2));
@@ -251,72 +234,6 @@ function clearState(udid?: string) {
       try { unlinkSync(file); } catch {}
     }
   }
-}
-
-function resolveStateDeviceArg(deviceArg?: string): string | undefined {
-  if (!deviceArg) return undefined;
-  const direct = readState(deviceArg);
-  if (direct) return direct.device;
-  const ios = tryResolveDevice(deviceArg);
-  if (ios) return ios;
-  const android = resolveRunningAndroidDevice(deviceArg);
-  return android?.device ?? deviceArg;
-}
-
-function readStateForDeviceArg(deviceArg?: string): ServerState | null {
-  return readState(resolveStateDeviceArg(deviceArg));
-}
-
-function findHelperBinary(): string {
-  const isEmbedded = swiftHelperEmbeddedPath.startsWith("/$bunfs/");
-
-  // Dev / npm-installed: path bun gave us is a real file on disk.
-  if (!isEmbedded && existsSync(swiftHelperEmbeddedPath)) {
-    return swiftHelperEmbeddedPath;
-  }
-  if (!isEmbedded) {
-    const rel = resolve(__dirname, "../bin/serve-sim-bin");
-    if (existsSync(rel)) return rel;
-    throw new Error(
-      `serve-sim-bin not found. Run 'bun run build:swift' first.\nChecked: ${swiftHelperEmbeddedPath}, ${rel}`,
-    );
-  }
-
-  // Compiled `bun --compile` binary: extract embedded bytes to a cache dir
-  // keyed by content hash so updates replace the previous extraction.
-  const bytes = readFileSync(swiftHelperEmbeddedPath);
-  const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-  const cacheDir = resolve(homedir(), "Library/Caches/serve-sim");
-  mkdirSync(cacheDir, { recursive: true });
-  const extracted = resolve(cacheDir, `serve-sim-bin-${hash}`);
-  if (!existsSync(extracted)) {
-    writeFileSync(extracted, bytes);
-    chmodSync(extracted, 0o755);
-    // Re-apply ad-hoc signature so the macOS kernel will exec it.
-    try { execSync(`codesign -s - -f ${JSON.stringify(extracted)}`, { stdio: "ignore" }); } catch {}
-  }
-  return extracted;
-}
-
-/**
- * Env to spawn the Swift helper with. The helper links SimulatorKit/CoreSimulator
- * via `@rpath`, but the rpath baked in at build time points at whatever Xcode
- * lived on the build machine (e.g. `/Applications/Xcode_16.4.app/...`). On any
- * machine with Xcode installed at a different path that lookup fails with
- * `dyld: Library not loaded: @rpath/SimulatorKit.framework`. Inject the user's
- * actual Xcode PrivateFrameworks dir so dyld can resolve it regardless.
- */
-function helperSpawnEnv(): NodeJS.ProcessEnv {
-  let dev: string | null = null;
-  try {
-    dev = execSync("xcode-select -p", { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {}
-  if (!dev) return process.env;
-  const fw = `${dev}/Library/PrivateFrameworks`;
-  return {
-    ...process.env,
-    DYLD_FRAMEWORK_PATH: process.env.DYLD_FRAMEWORK_PATH ? `${fw}:${process.env.DYLD_FRAMEWORK_PATH}` : fw,
-  };
 }
 
 // ─── Device helpers ───
@@ -357,21 +274,6 @@ function platformFromOptions(opts: { platform?: string; android?: boolean }): Pl
   process.exit(1);
 }
 
-function getDeviceName(udid: string): string | null {
-  try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
-    };
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.udid === udid) return device.name;
-      }
-    }
-  } catch {}
-  return null;
-}
-
 function getTargetName(target: StreamTarget): string | null {
   if (target.name) return target.name;
   if (target.platform === "android") {
@@ -379,466 +281,6 @@ function getTargetName(target: StreamTarget): string | null {
   }
   return getDeviceName(target.device);
 }
-
-function isDeviceBooted(udid: string): boolean {
-  try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
-    const data = JSON.parse(output) as {
-      devices: Record<string, Array<{ udid: string; state: string }>>;
-    };
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.udid === udid) return device.state === "Booted";
-      }
-    }
-  } catch {}
-  return false;
-}
-
-function isProcessAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-/** Kill a process and wait for it to actually exit. */
-function stopProcess(pid: number): void {
-  try { process.kill(pid, "SIGTERM"); } catch { return; }
-  const deadline = Date.now() + 500;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-      sleepSync(25);
-    } catch {
-      return;
-    }
-  }
-  try { process.kill(pid, "SIGKILL"); } catch {}
-  const deadline2 = Date.now() + 500;
-  while (Date.now() < deadline2) {
-    try { process.kill(pid, 0); sleepSync(25); } catch { return; }
-  }
-}
-
-/** Return PIDs currently holding a TCP port (excluding ourselves). */
-function getPortHolders(port: number): number[] {
-  try {
-    const output = execSync(`lsof -ti tcp:${port}`, { encoding: "utf-8", stdio: "pipe" }).trim();
-    if (!output) return [];
-    const myPid = process.pid;
-    return output
-      .split("\n")
-      .map((s) => parseInt(s, 10))
-      .filter((pid) => Number.isFinite(pid) && pid !== myPid);
-  } catch {
-    return [];
-  }
-}
-
-/** Kill whatever process is holding a given port. Logs the PIDs being killed. */
-function killPortHolder(port: number): void {
-  const pids = getPortHolders(port);
-  if (pids.length === 0) return;
-  console.log(`\x1b[90mPort ${port} busy, killing holder pid(s): ${pids.join(", ")}\x1b[0m`);
-  for (const pid of pids) {
-    try { process.kill(pid, "SIGKILL"); } catch {}
-  }
-  sleepSync(100);
-}
-
-function bootDevice(udid: string): void {
-  if (!isDeviceBooted(udid)) {
-    try {
-      execSync(`xcrun simctl boot ${udid}`, { encoding: "utf-8", stdio: "pipe" });
-    } catch (err: any) {
-      const msg = (err.stderr ?? err.message ?? "").toLowerCase();
-      if (!msg.includes("booted") && !msg.includes("current state")) {
-        throw new Error(`Failed to boot device ${udid}: ${err.stderr || err.message}`);
-      }
-    }
-  }
-  // Ensure Simulator.app is running so the display/framebuffer pipeline is
-  // wired up. `-g` = don't bring to foreground; safe to call even if already
-  // running. A short timeout keeps us from hanging on headless macOS hosts
-  // (e.g. GitHub Actions runners) where `open` can block indefinitely waiting
-  // for a window server that never arrives — in that environment the test
-  // harness is expected to have already driven the sim via simctl.
-  try {
-    execSync("open -ga Simulator", {
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 3_000,
-    });
-  } catch {}
-}
-
-function getLocalNetworkIP(): string | null {
-  const interfaces = networkInterfaces();
-  for (const ifaces of Object.values(interfaces)) {
-    for (const iface of ifaces ?? []) {
-      if (iface.family === "IPv4" && !iface.internal) return iface.address;
-    }
-  }
-  return null;
-}
-
-async function findAvailablePort(start: number): Promise<number> {
-  const usedPorts = new Set(readAllStates().map((s) => s.port));
-  for (let port = start; port < start + 100; port++) {
-    if (usedPorts.has(port)) continue;
-    if (await isPortFree(port)) return port;
-  }
-  throw new Error(`No available port found in range ${start}-${start + 99}`);
-}
-
-async function ensureBooted(udid: string): Promise<void> {
-  bootDevice(udid);
-  // `simctl bootstatus -b` blocks until the device's services are actually ready
-  // (not just flipped to "Booted"). Much more reliable than polling `simctl list`.
-  try {
-    execSync(`xcrun simctl bootstatus ${udid} -b`, {
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 60_000,
-    });
-  } catch (err: any) {
-    if (!isDeviceBooted(udid)) {
-      console.error(`Device ${udid} failed to reach booted state: ${err.stderr || err.message}`);
-      process.exit(1);
-    }
-  }
-}
-
-// ─── Helper spawn ───
-
-interface SpawnHelperOptions {
-  helperPath: string;
-  udid: string;
-  port: number;
-  host: string;
-  logFile: string;
-  stream: StreamOptions;
-}
-
-function resolveSelfCommand(): { command: string; baseArgs: string[] } {
-  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
-    return { command: process.argv[0], baseArgs: [] };
-  }
-  if (process.argv[1]) {
-    return { command: process.argv[0]!, baseArgs: [process.argv[1]!] };
-  }
-  return { command: process.execPath, baseArgs: [] };
-}
-
-/** Wait for the helper to become ready (health check + optional capture start). */
-async function waitForHelperReady(
-  pid: number,
-  url: string,
-  logFile: string,
-  isAlive: () => boolean,
-  opts: { waitForCapture?: boolean } = {},
-): Promise<{ ready: boolean; log: string }> {
-  let ready = false;
-  const startedAt = Date.now();
-  debugHelper("waitForHelperReady pid=%d url=%s", pid, url);
-
-  // Poll /health
-  for (let i = 0; i < 30; i++) {
-    if (!isAlive()) {
-      debugHelper("helper pid=%d died during /health polling (attempt %d)", pid, i);
-      break;
-    }
-    try {
-      const res = await fetch(`${url}/health`);
-      if (res.ok) {
-        ready = true;
-        debugHelper("helper pid=%d /health ok after %dms", pid, Date.now() - startedAt);
-        break;
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 100));
-  }
-
-  if (!ready) {
-    debugHelper("helper pid=%d /health never responded (%dms)", pid, Date.now() - startedAt);
-  }
-
-  if (ready && opts.waitForCapture !== false) {
-    // Wait for capture to start or process to exit
-    const captureStartedAt = Date.now();
-    const captureDeadline = captureStartedAt + 8_000;
-    let captureSawStart = false;
-    while (Date.now() < captureDeadline) {
-      await new Promise((r) => setTimeout(r, 200));
-      if (!isAlive()) {
-        debugHelper("helper pid=%d died while awaiting Capture started", pid);
-        ready = false;
-        break;
-      }
-      try {
-        const log = readFileSync(logFile, "utf-8");
-        if (log.includes("Capture started")) {
-          captureSawStart = true;
-          debugHelper(
-            "helper pid=%d saw 'Capture started' after %dms",
-            pid,
-            Date.now() - captureStartedAt,
-          );
-          break;
-        }
-      } catch {}
-    }
-    if (ready && !captureSawStart) {
-      debugHelper(
-        "helper pid=%d ready but never logged 'Capture started' within %dms — stream may not produce frames",
-        pid,
-        Date.now() - captureStartedAt,
-      );
-    }
-  }
-
-  let log = "";
-  try { log = readFileSync(logFile, "utf-8").trim(); } catch {}
-  return { ready, log };
-}
-
-/** Spawn the helper detached (for --detach mode). Returns after readiness check. */
-async function spawnHelperDetached(opts: SpawnHelperOptions): Promise<{
-  ready: boolean;
-  pid: number;
-  exited: boolean;
-  log: string;
-}> {
-  const { helperPath, udid, port, host, logFile, stream } = opts;
-  const url = `http://${host}:${port}`;
-
-  ensureStateDir();
-  const logFd = openSync(logFile, "w");
-  const child = nodeSpawn(helperPath, buildHelperArgs(udid, port, stream), {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: helperSpawnEnv(),
-  });
-  child.unref();
-  closeSync(logFd);
-
-  const childPid = child.pid!;
-  let childExited = false;
-  child.once("exit", () => { childExited = true; });
-
-  const { ready, log } = await waitForHelperReady(
-    childPid,
-    url,
-    logFile,
-    () => !childExited && isProcessAlive(childPid),
-  );
-
-  return { ready, pid: childPid, exited: childExited || !isProcessAlive(childPid), log };
-}
-
-/** Spawn the helper attached (for foreground follow mode). Returns the child process. */
-async function spawnHelperAttached(opts: SpawnHelperOptions): Promise<{
-  ready: boolean;
-  child: ChildProcess;
-  log: string;
-}> {
-  const { helperPath, udid, port, host, logFile, stream } = opts;
-  const url = `http://${host}:${port}`;
-
-  ensureStateDir();
-  const logFd = openSync(logFile, "w");
-  const child = nodeSpawn(helperPath, buildHelperArgs(udid, port, stream), {
-    detached: false,
-    stdio: ["ignore", logFd, logFd],
-    env: helperSpawnEnv(),
-  });
-  closeSync(logFd);
-
-  const childPid = child.pid!;
-  let childExited = false;
-  child.once("exit", () => { childExited = true; });
-
-  const { ready, log } = await waitForHelperReady(
-    childPid,
-    url,
-    logFile,
-    () => !childExited && isProcessAlive(childPid),
-  );
-
-  return { ready, child, log };
-}
-
-/** Boot + spawn helper with retry logic. Returns pid on success, exits on failure. */
-async function startHelper(
-  udid: string,
-  port: number,
-  opts: { detach: boolean; tunnel?: boolean; stream?: StreamOptions; tunnelProtocol?: TunnelProtocol },
-): Promise<{ pid: number; child?: ChildProcess; tunnel?: Tunnel }> {
-  debugHelper("startHelper udid=%s port=%d detach=%s", udid, port, opts.detach);
-  await ensureBooted(udid);
-
-  const host = "127.0.0.1";
-  const helperPath = findHelperBinary();
-  const logFile = join(STATE_DIR, `server-${udid}.log`);
-  debugHelper("helper binary=%s logFile=%s", helperPath, logFile);
-  const stream = opts.stream ?? DEFAULT_STREAM_OPTIONS;
-  const spawnOpts: SpawnHelperOptions = { helperPath, udid, port, host, logFile, stream };
-
-  let lastLog = "";
-  const MAX_ATTEMPTS = 2;
-
-  const finalize = async (
-    pid: number,
-    child?: ChildProcess,
-  ): Promise<{ pid: number; child?: ChildProcess; tunnel?: Tunnel }> => {
-    let tunnel: Tunnel | undefined;
-    if (opts.tunnel) {
-      try {
-        tunnel = trackTunnel(await startCloudflareTunnel(port, { protocol: opts.tunnelProtocol }));
-      } catch (err) {
-        try { process.kill(pid, "SIGTERM"); } catch {}
-        console.error(`Tunnel failed: ${(err as Error).message}`);
-        process.exit(1);
-      }
-    }
-    const state: ServerState = {
-      pid,
-      port,
-      device: udid,
-      platform: "ios",
-      ...buildHelperUrls(port, tunnel?.url),
-    };
-    writeState(state);
-    return { pid, child, tunnel };
-  };
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    debugHelper("spawn attempt %d/%d", attempt, MAX_ATTEMPTS);
-    killPortHolder(port);
-
-    if (opts.detach) {
-      const result = await spawnHelperDetached(spawnOpts);
-      debugHelper(
-        "spawnHelperDetached result ready=%s pid=%d exited=%s",
-        result.ready,
-        result.pid,
-        result.exited,
-      );
-      if (result.ready) return finalize(result.pid);
-      stopProcess(result.pid);
-      lastLog = result.log;
-    } else {
-      const result = await spawnHelperAttached(spawnOpts);
-      debugHelper(
-        "spawnHelperAttached result ready=%s pid=%d",
-        result.ready,
-        result.child.pid,
-      );
-      if (result.ready) return finalize(result.child.pid!, result.child);
-      stopProcess(result.child.pid!);
-      lastLog = result.log;
-    }
-
-    if (attempt < MAX_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }
-
-  const reason = lastLog ? `Helper failed:\n${lastLog}` : "Helper process failed to start";
-  console.error(reason);
-  process.exit(1);
-}
-
-async function startAndroidHelper(
-  target: StreamTarget,
-  port: number,
-  opts: { detach: boolean },
-): Promise<{ pid: number; child?: ChildProcess; target: StreamTarget }> {
-  debugHelper("startAndroidHelper target=%s port=%d detach=%s", target.device, port, opts.detach);
-  const host = "127.0.0.1";
-  ensureStateDir();
-  const bootLogFile = join(STATE_DIR, `android-boot-${target.device.replace(/[^A-Za-z0-9_.-]/g, "_")}.log`);
-  const booted = await ensureAndroidBooted(
-    target.android ?? {
-      platform: "android",
-      device: target.device,
-      name: target.name ?? target.device,
-      runtime: target.runtime ?? "Android",
-      state: "Shutdown",
-      avdName: target.device,
-      isEmulator: true,
-    },
-    bootLogFile,
-  );
-  const serial = booted.device;
-  const logFile = join(STATE_DIR, `server-${serial}.log`);
-  const url = `http://${host}:${port}`;
-  const { command, baseArgs } = resolveSelfCommand();
-
-  const spawnOnce = async (): Promise<{ ready: boolean; pid: number; child?: ChildProcess; log: string }> => {
-    const logFd = openSync(logFile, "w");
-    const child = nodeSpawn(
-      command,
-      [...baseArgs, "android-helper", serial, "--port", String(port)],
-      {
-        detached: opts.detach,
-        stdio: ["ignore", logFd, logFd],
-      },
-    );
-    if (opts.detach) child.unref();
-    closeSync(logFd);
-    const childPid = child.pid!;
-    let childExited = false;
-    child.once("exit", () => { childExited = true; });
-    const { ready, log } = await waitForHelperReady(
-      childPid,
-      url,
-      logFile,
-      () => !childExited && isProcessAlive(childPid),
-      { waitForCapture: false },
-    );
-    return { ready, pid: childPid, child: opts.detach ? undefined : child, log };
-  };
-
-  let lastLog = "";
-  const MAX_ATTEMPTS = 2;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    killPortHolder(port);
-    const result = await spawnOnce();
-    if (result.ready) {
-      const state: ServerState = {
-        pid: result.pid,
-        port,
-        device: serial,
-        platform: "android",
-        name: booted.name,
-        runtime: booted.runtime,
-        url,
-        streamUrl: `${url}/stream.mjpeg`,
-        wsUrl: `ws://${host}:${port}/ws`,
-      };
-      writeState(state);
-      return {
-        pid: result.pid,
-        child: result.child,
-        target: {
-          platform: "android",
-          device: serial,
-          name: booted.name,
-          runtime: booted.runtime,
-          android: booted,
-        },
-      };
-    }
-    stopProcess(result.pid);
-    lastLog = result.log;
-    if (attempt < MAX_ATTEMPTS) await new Promise((r) => setTimeout(r, 500));
-  }
-
-  const reason = lastLog ? `Android helper failed:\n${lastLog}` : "Android helper process failed to start";
-  console.error(reason);
-  process.exit(1);
-}
-
-// ─── Commands ───
 
 function resolveExplicitTarget(deviceArg: string, platform: Platform | "auto"): StreamTarget {
   const androidPrefixed = deviceArg.startsWith("android:");
@@ -933,17 +375,371 @@ function defaultTargets(platform: Platform | "auto", quiet: boolean): StreamTarg
   process.exit(1);
 }
 
+function getDeviceName(udid: string): string | null {
+  return readDeviceNamesByUdid().get(udid) ?? null;
+}
+
+function readDeviceNamesByUdid(): Map<string, string> {
+  const names = new Map<string, string>();
+  try {
+    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const data = JSON.parse(output) as {
+      devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
+    };
+    for (const runtime of Object.values(data.devices)) {
+      for (const device of runtime) {
+        names.set(device.udid, device.name);
+      }
+    }
+  } catch {}
+  return names;
+}
+
+function isDeviceBooted(udid: string): boolean {
+  try {
+    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const data = JSON.parse(output) as {
+      devices: Record<string, Array<{ udid: string; state: string }>>;
+    };
+    for (const runtime of Object.values(data.devices)) {
+      for (const device of runtime) {
+        if (device.udid === udid) return device.state === "Booted";
+      }
+    }
+  } catch {}
+  return false;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** Kill a process and wait for it to actually exit. */
+function stopProcess(pid: number): void {
+  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+      sleepSync(25);
+    } catch {
+      return;
+    }
+  }
+  try { process.kill(pid, "SIGKILL"); } catch {}
+  const deadline2 = Date.now() + 500;
+  while (Date.now() < deadline2) {
+    try { process.kill(pid, 0); sleepSync(25); } catch { return; }
+  }
+}
+
+function bootDevice(udid: string): void {
+  if (!isDeviceBooted(udid)) {
+    try {
+      execSync(`xcrun simctl boot ${udid}`, { encoding: "utf-8", stdio: "pipe" });
+    } catch (err: any) {
+      const msg = (err.stderr ?? err.message ?? "").toLowerCase();
+      if (!msg.includes("booted") && !msg.includes("current state")) {
+        throw new Error(`Failed to boot device ${udid}: ${err.stderr || err.message}`);
+      }
+    }
+  }
+  // Ensure Simulator.app is running so the display/framebuffer pipeline is
+  // wired up. `-g` = don't bring to foreground; safe to call even if already
+  // running. A short timeout keeps us from hanging on headless macOS hosts
+  // (e.g. GitHub Actions runners) where `open` can block indefinitely waiting
+  // for a window server that never arrives — in that environment the test
+  // harness is expected to have already driven the sim via simctl.
+  try {
+    execSync("open -ga Simulator", {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 3_000,
+    });
+  } catch {}
+}
+
+function getLocalNetworkIP(): string | null {
+  const interfaces = networkInterfaces();
+  for (const ifaces of Object.values(interfaces)) {
+    for (const iface of ifaces ?? []) {
+      if (iface.family === "IPv4" && !iface.internal) return iface.address;
+    }
+  }
+  return null;
+}
+
+async function findAvailablePort(start: number): Promise<number> {
+  const usedPorts = new Set(readAllStates().map((s) => s.port));
+  for (let port = start; port < start + 100; port++) {
+    if (usedPorts.has(port)) continue;
+    if (await isPortFree(port)) return port;
+  }
+  throw new Error(`No available port found in range ${start}-${start + 99}`);
+}
+
+async function ensureBooted(udid: string): Promise<void> {
+  bootDevice(udid);
+  // `simctl bootstatus -b` blocks until the device's services are actually ready
+  // (not just flipped to "Booted"). Much more reliable than polling `simctl list`.
+  try {
+    execSync(`xcrun simctl bootstatus ${udid} -b`, {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 60_000,
+    });
+  } catch (err: any) {
+    if (!isDeviceBooted(udid)) {
+      console.error(`Device ${udid} failed to reach booted state: ${err.stderr || err.message}`);
+      process.exit(1);
+    }
+  }
+}
+
+// ─── Preview server lifecycle ───
+
+/** Resolve the command to re-exec this CLI (compiled binary or `node …js`). */
+function reExecArgs(extra: string[]): { command: string; args: string[] } {
+  // Compiled standalone binary: argv[0] is the serve-sim binary itself.
+  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
+    return { command: process.argv[0], args: extra };
+  }
+  // Running the JS bundle: `node /path/to/serve-sim.js`.
+  return { command: process.argv[0]!, args: [process.argv[1]!, ...extra] };
+}
+
+function resolveSelfCommand(): { command: string; baseArgs: string[] } {
+  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
+    return { command: process.argv[0], baseArgs: [] };
+  }
+  if (process.argv[1]) {
+    return { command: process.argv[0]!, baseArgs: [process.argv[1]!] };
+  }
+  return { command: process.execPath, baseArgs: [] };
+}
+
+/** Wait for a helper HTTP server to become ready. */
+async function waitForHelperReady(
+  pid: number,
+  url: string,
+  logFile: string,
+  isAlive: () => boolean,
+  opts: { waitForCapture?: boolean } = {},
+): Promise<{ ready: boolean; log: string }> {
+  let ready = false;
+  const startedAt = Date.now();
+  debugHelper("waitForHelperReady pid=%d url=%s", pid, url);
+
+  for (let i = 0; i < 30; i++) {
+    if (!isAlive()) {
+      debugHelper("helper pid=%d died during /health polling (attempt %d)", pid, i);
+      break;
+    }
+    try {
+      const res = await fetch(`${url}/health`);
+      if (res.ok) {
+        ready = true;
+        debugHelper("helper pid=%d /health ok after %dms", pid, Date.now() - startedAt);
+        break;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  if (!ready) {
+    debugHelper("helper pid=%d /health never responded (%dms)", pid, Date.now() - startedAt);
+  }
+
+  if (ready && opts.waitForCapture !== false) {
+    const captureStartedAt = Date.now();
+    const captureDeadline = captureStartedAt + 8_000;
+    let captureSawStart = false;
+    while (Date.now() < captureDeadline) {
+      await new Promise((r) => setTimeout(r, 200));
+      if (!isAlive()) {
+        debugHelper("helper pid=%d died while awaiting Capture started", pid);
+        ready = false;
+        break;
+      }
+      try {
+        const log = readFileSync(logFile, "utf-8");
+        if (log.includes("Capture started")) {
+          captureSawStart = true;
+          debugHelper(
+            "helper pid=%d saw 'Capture started' after %dms",
+            pid,
+            Date.now() - captureStartedAt,
+          );
+          break;
+        }
+      } catch {}
+    }
+    if (ready && !captureSawStart) {
+      debugHelper(
+        "helper pid=%d ready but never logged 'Capture started' within %dms",
+        pid,
+        Date.now() - captureStartedAt,
+      );
+    }
+  }
+
+  let log = "";
+  try { log = readFileSync(logFile, "utf-8").trim(); } catch {}
+  return { ready, log };
+}
+
+/** Poll for the state file a re-exec'd preview server writes once it's serving. */
+async function waitForStateFile(udid: string, timeoutMs = 150_000): Promise<ServerState | null> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const state = readState(udid);
+    if (state) return state;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return null;
+}
+
+/**
+ * Start a preview server that streams `udid` in-process — it re-execs this CLI
+ * in `serve` mode rather than spawning the old Swift helper. Detached + unref'd
+ * for daemon mode (`--detach`); attached otherwise so the caller can monitor it.
+ */
+async function startHelper(
+  udid: string,
+  port: number,
+  opts: { detach: boolean },
+): Promise<{ pid: number; child?: ChildProcess }> {
+  debugHelper("startHelper udid=%s port=%d detach=%s", udid, port, opts.detach);
+
+  const host = "127.0.0.1";
+  ensureStateDir();
+  clearState(udid); // don't read a stale state file from a previous run
+  killPortHolder(port);
+
+  const logFile = join(STATE_DIR, `server-${udid}.log`);
+  const logFd = openSync(logFile, "w");
+  const { command, args } = reExecArgs([udid, "--port", String(port), "--host", host]);
+  const child = nodeSpawn(command, args, {
+    detached: opts.detach,
+    stdio: ["ignore", logFd, logFd],
+  });
+  closeSync(logFd);
+  if (opts.detach) child.unref();
+
+  // The child boots the sim then writes its state once it's bound + serving.
+  const state = await waitForStateFile(udid);
+  if (!state) {
+    if (child.pid) stopProcess(child.pid);
+    let log = "";
+    try { log = readFileSync(logFile, "utf-8").trim(); } catch {}
+    console.error(log ? `Preview server failed:\n${log}` : "Preview server failed to start");
+    process.exit(1);
+  }
+  return opts.detach ? { pid: state.pid } : { pid: state.pid, child };
+}
+
+async function startAndroidHelper(
+  target: StreamTarget,
+  port: number,
+  opts: { detach: boolean },
+): Promise<{ pid: number; child?: ChildProcess; target: StreamTarget }> {
+  debugHelper("startAndroidHelper target=%s port=%d detach=%s", target.device, port, opts.detach);
+  const host = "127.0.0.1";
+  ensureStateDir();
+  clearState(target.device);
+  const bootLogFile = join(STATE_DIR, `android-boot-${target.device.replace(/[^A-Za-z0-9_.-]/g, "_")}.log`);
+  const booted = await ensureAndroidBooted(
+    target.android ?? {
+      platform: "android",
+      device: target.device,
+      name: target.name ?? target.device,
+      runtime: target.runtime ?? "Android",
+      state: "Shutdown",
+      avdName: target.device,
+      isEmulator: true,
+    },
+    bootLogFile,
+  );
+  const serial = booted.device;
+  const logFile = join(STATE_DIR, `server-${serial}.log`);
+  const url = `http://${host}:${port}`;
+  const { command, baseArgs } = resolveSelfCommand();
+
+  const spawnOnce = async (): Promise<{ ready: boolean; pid: number; child?: ChildProcess; log: string }> => {
+    const logFd = openSync(logFile, "w");
+    const child = nodeSpawn(
+      command,
+      [...baseArgs, "android-helper", serial, "--port", String(port)],
+      {
+        detached: opts.detach,
+        stdio: ["ignore", logFd, logFd],
+      },
+    );
+    if (opts.detach) child.unref();
+    closeSync(logFd);
+    const childPid = child.pid!;
+    let childExited = false;
+    child.once("exit", () => { childExited = true; });
+    const { ready, log } = await waitForHelperReady(
+      childPid,
+      url,
+      logFile,
+      () => !childExited && isProcessAlive(childPid),
+      { waitForCapture: false },
+    );
+    return { ready, pid: childPid, child: opts.detach ? undefined : child, log };
+  };
+
+  let lastLog = "";
+  const MAX_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    killPortHolder(port);
+    const result = await spawnOnce();
+    if (result.ready) {
+      const state: ServerState = {
+        pid: result.pid,
+        port,
+        device: serial,
+        platform: "android",
+        name: booted.name,
+        runtime: booted.runtime,
+        url,
+        streamUrl: `${url}/stream.mjpeg`,
+        wsUrl: `ws://${host}:${port}/ws`,
+      };
+      writeState(state);
+      return {
+        pid: result.pid,
+        child: result.child,
+        target: {
+          platform: "android",
+          device: serial,
+          name: booted.name,
+          runtime: booted.runtime,
+          android: booted,
+        },
+      };
+    }
+    stopProcess(result.pid);
+    lastLog = result.log;
+    if (attempt < MAX_ATTEMPTS) await new Promise((r) => setTimeout(r, 500));
+  }
+
+  const reason = lastLog ? `Android helper failed:\n${lastLog}` : "Android helper process failed to start";
+  console.error(reason);
+  process.exit(1);
+}
+
+// ─── Commands ───
+
 /** Foreground follow mode (default). Stays attached, cleans up on Ctrl+C. */
 async function follow(
   devices: string[],
   startPort: number,
   quiet: boolean,
-  platform: Platform | "auto",
-  useTunnel?: boolean,
-  stream: StreamOptions = DEFAULT_STREAM_OPTIONS,
-  tunnelProtocol?: TunnelProtocol,
+  platform: Platform | "auto" = "auto",
 ) {
-  debugCli("follow devices=%o startPort=%d", devices, startPort);
+  debugCli("follow devices=%o startPort=%d platform=%s", devices, startPort, platform);
   const targets = devices.length > 0
     ? devices.map((device) => resolveExplicitTarget(device, platform))
     : defaultTargets(platform, quiet);
@@ -953,7 +749,6 @@ async function follow(
   let port = startPort;
 
   for (const target of targets) {
-    // Return existing server if already running
     const existing = readState(target.device);
     if (existing) {
       if (!quiet) {
@@ -968,40 +763,27 @@ async function follow(
     }
 
     port = await findAvailablePort(port);
-    let pid: number;
     let child: ChildProcess | undefined;
-    let tunnel: Tunnel | undefined;
     let activeTarget = target;
 
     if (target.platform === "android") {
       const started = await startAndroidHelper(target, port, { detach: false });
-      pid = started.pid;
       child = started.child;
       activeTarget = started.target;
     } else {
-      const started = await startHelper(target.device, port, {
-        detach: false,
-        tunnel: useTunnel,
-        stream,
-        tunnelProtocol,
-      });
-      pid = started.pid;
+      const started = await startHelper(target.device, port, { detach: false });
       child = started.child;
-      tunnel = started.tunnel;
     }
 
     if (child) {
       children.set(activeTarget.device, child);
     }
 
-    const state: ServerState = readState(activeTarget.device) ?? {
-      pid,
-      port,
-      device: activeTarget.device,
+    const state = readState(activeTarget.device) ?? {
+      ...inProcessServeSimState(activeTarget.device, port, "/", "127.0.0.1"),
       platform: activeTarget.platform,
       name: activeTarget.name,
       runtime: activeTarget.runtime,
-      ...buildHelperUrls(port, tunnel?.url),
     };
     states.push(state);
 
@@ -1016,21 +798,7 @@ async function follow(
     port++;
   }
 
-  // Machine-readable JSON to stdout
-  if (states.length === 1) {
-    const s = states[0]!;
-    console.log(JSON.stringify({
-      url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
-      platform: s.platform ?? "ios", name: s.name, runtime: s.runtime,
-    }));
-  } else {
-    console.log(JSON.stringify({
-      devices: states.map((s) => ({
-        url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl, port: s.port, device: s.device,
-        platform: s.platform ?? "ios", name: s.name, runtime: s.runtime,
-      })),
-    }));
-  }
+  printStatesJSON(states);
 
   // If no new children were spawned (all already running), exit
   if (children.size === 0) return;
@@ -1084,9 +852,8 @@ async function detach(
   devices: string[],
   startPort: number,
   platform: Platform | "auto" = "auto",
-  stream: StreamOptions = DEFAULT_STREAM_OPTIONS,
 ): Promise<ServerState[]> {
-  debugCli("detach devices=%o startPort=%d", devices, startPort);
+  debugCli("detach devices=%o startPort=%d platform=%s", devices, startPort, platform);
   const targets = devices.length > 0
     ? devices.map((device) => resolveExplicitTarget(device, platform))
     : defaultTargets(platform, true);
@@ -1105,12 +872,18 @@ async function detach(
     if (target.platform === "android") {
       await startAndroidHelper(target, port, { detach: true });
     } else {
-      await startHelper(target.device, port, { detach: true, stream });
+      await startHelper(target.device, port, { detach: true });
     }
 
     const state = readState(target.device);
     if (state) {
       states.push(state);
+    } else if (target.platform === "ios") {
+      states.push({
+        ...inProcessServeSimState(target.device, port, "/", "127.0.0.1"),
+        platform: "ios",
+        name: target.name,
+      });
     }
 
     port++;
@@ -1205,6 +978,78 @@ function killStreams(deviceArg?: string) {
   }
 }
 
+async function eventLog(
+  deviceArg?: string,
+  opts: { json?: boolean; limit?: string } = {},
+) {
+  const udid = deviceArg ? resolveDevice(deviceArg) : undefined;
+  const state = readState(udid);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim` first.");
+    process.exit(1);
+  }
+
+  const url = new URL("/api/event-log", state.url);
+  if (udid) url.searchParams.set("device", state.device);
+  const limit = parseEventLogLimit(opts.limit);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+
+  let payload: { events: EventLogEntry[] };
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    payload = await res.json() as { events: EventLogEntry[] };
+  } catch (err) {
+    console.error(`Failed to read event log: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  if (payload.events.length === 0) {
+    console.log("No events.");
+    return;
+  }
+  const deviceLabels = deviceLabelsForEvents(payload.events);
+  for (const entry of payload.events) {
+    console.log(formatEventLogLine(entry, {
+      deviceLabel: entry.device ? deviceLabels.get(entry.device) : null,
+    }));
+  }
+}
+
+function parseEventLogLimit(value: string | undefined): number | undefined {
+  if (value == null) return undefined;
+  const limit = Number(value);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    console.error("event-log --limit must be a positive number");
+    process.exit(1);
+  }
+  return Math.floor(limit);
+}
+
+function deviceLabelsForEvents(events: EventLogEntry[]): Map<string, string> {
+  const devices = [...new Set(events.map((event) => event.device).filter((device): device is string => !!device))];
+  const names = new Map<string, string>();
+  const deviceNames = readDeviceNamesByUdid();
+  for (const device of devices) {
+    names.set(device, deviceNames.get(device) ?? device.slice(0, 8));
+  }
+
+  const counts = new Map<string, number>();
+  for (const name of names.values()) {
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+
+  const labels = new Map<string, string>();
+  for (const [device, name] of names) {
+    labels.set(device, counts.get(name)! > 1 ? `${name} (${device.slice(0, 8)})` : name);
+  }
+  return labels;
+}
+
 async function gesture(jsonStr: string, deviceArg?: string) {
   const state = readStateForDeviceArg(deviceArg);
   if (!state) {
@@ -1292,8 +1137,8 @@ async function typeText(
     console.error("       serve-sim type --stdin [-d udid]");
     console.error("       serve-sim type --file <path> [-d udid]");
     console.error("");
-    console.error("iOS typing supports US-keyboard ASCII characters (A-Z, a-z, 0-9,");
-    console.error("space, newline, tab, and standard punctuation). Android uses adb input text.");
+    console.error("Only US-keyboard ASCII characters are supported (A-Z, a-z, 0-9,");
+    console.error("space, newline, tab, and standard punctuation).");
     process.exit(1);
   }
 
@@ -1311,6 +1156,18 @@ async function typeText(
     text = positional.join(" ");
   }
 
+  let events;
+  try {
+    events = textToKeyEvents(text);
+  } catch (err) {
+    if (err instanceof UnsupportedCharacterError) {
+      console.error(err.message);
+      console.error("Supported: A-Z, a-z, 0-9, space, newline, tab, and standard punctuation.");
+      process.exit(1);
+    }
+    throw err;
+  }
+
   const state = readStateForDeviceArg(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
@@ -1320,18 +1177,6 @@ async function typeText(
   if ((state.platform ?? "ios") === "android") {
     adb(["-s", state.device, "shell", "input", "text", androidInputTextArg(text)], { timeout: 15_000 });
     return;
-  }
-
-  let events;
-  try {
-    events = textToKeyEvents(text);
-  } catch (err) {
-    if (err instanceof UnsupportedCharacterError) {
-      console.error(err.message);
-      console.error("Supported on iOS: A-Z, a-z, 0-9, space, newline, tab, and standard punctuation.");
-      process.exit(1);
-    }
-    throw err;
   }
 
   await sendKeyEventsToWs(state.wsUrl, events);
@@ -1377,6 +1222,19 @@ async function rotate(orientation: string, deviceArg?: string) {
   });
 }
 
+// HID (page, usage) codes for hardware buttons not backed by a named idb event
+// source, mirroring DeviceKit chrome.json's per-input `usagePage`/`usage`. The
+// helper injects these through IndigoHIDMessageForHIDArbitrary.
+const HID_BUTTON_CODES: Record<string, { page: number; usage: number }> = {
+  power: { page: 12, usage: 48 },
+  "volume-up": { page: 12, usage: 233 },
+  "volume-down": { page: 12, usage: 234 },
+  action: { page: 11, usage: 45 },
+  "side-button": { page: 12, usage: 149 },
+  "digital-crown": { page: 12, usage: 64 },
+  "left-side-button": { page: 65281, usage: 512 },
+};
+
 async function button(buttonName = "home", deviceArg?: string) {
   const state = readStateForDeviceArg(deviceArg);
   if (!state) {
@@ -1384,12 +1242,15 @@ async function button(buttonName = "home", deviceArg?: string) {
     process.exit(1);
   }
 
+  const hid = HID_BUTTON_CODES[buttonName];
+  const payload = hid ? { button: buttonName, ...hid } : { button: buttonName };
+
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify({ button: buttonName }));
+      const json = new TextEncoder().encode(JSON.stringify(payload));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x04;
       msg.set(json, 1);
@@ -2141,58 +2002,77 @@ Examples:
 
 // ─── Serve preview ───
 
+/** Resolve which simulators to stream, without spawning anything. */
+function resolveTargetDevices(devices: string[]): string[] {
+  if (devices.length > 0) return devices.map(resolveDevice);
+  const existing = readAllStates();
+  if (existing.length > 0) return [existing[0]!.device];
+  const booted = findBootedDevice();
+  if (booted) return [booted];
+  const fallback = pickDefaultDevice();
+  if (!fallback) {
+    console.error("No device specified and no available iOS simulator found.");
+    process.exit(1);
+  }
+  return [fallback.udid];
+}
+
 async function serve(
   servePort: number,
   devices: string[],
   portExplicit: boolean,
   host: string,
-  platform: Platform | "auto",
-  useTunnel?: boolean,
-  stream: StreamOptions = DEFAULT_STREAM_OPTIONS,
-  tunnelProtocol?: TunnelProtocol,
+  codec: string | undefined,
+  platform: Platform | "auto" = "auto",
 ) {
   let targetDevice: string | undefined;
-  const ownedHelpers: { udid: string; child: ChildProcess; tunnelUrl?: string }[] = [];
+  let iosTargetDevices: string[] = [];
+  let androidMode = false;
 
-  if (useTunnel) {
-    const targets = devices.length > 0
-      ? devices.map((device) => resolveExplicitTarget(device, platform))
-      : defaultTargets(platform, false);
-    const iosTargets = targets.filter((t) => t.platform === "ios");
-    if (iosTargets.length === 0) {
-      console.error("--tunnel is only supported for iOS simulators right now.");
-      process.exit(1);
-    }
-
-    let helperPort = 3100;
-    for (const target of iosTargets) {
-      helperPort = await findAvailablePort(helperPort);
-      const { child, tunnel } = await startHelper(target.device, helperPort, {
-        detach: false,
-        tunnel: true,
-        stream,
-        tunnelProtocol,
-      });
-      if (child) ownedHelpers.push({ udid: target.device, child, tunnelUrl: tunnel?.url });
-      helperPort++;
-    }
-    targetDevice = iosTargets[0]?.device;
+  if (platform === "android") {
+    androidMode = true;
+  } else if (platform === "ios") {
+    androidMode = false;
   } else if (devices.length > 0) {
-    const states = await detach(devices, 3100, platform, stream);
-    targetDevice = states[0]?.device;
+    androidMode = resolveExplicitTarget(devices[0]!, platform).platform === "android";
+  } else if (findBootedDevice()) {
+    androidMode = false;
+  } else if (findBootedAndroidDevice()) {
+    androidMode = true;
   } else {
-    const existing = readAllStates().find((state) => stateMatchesPlatform(state, platform));
-    if (existing) {
-      targetDevice = existing.device;
-    } else {
-      console.log(platform === "android" ? "Starting Android stream..." : "Starting simulator stream...");
-      const states = await detach(devices, 3100, platform, stream);
+    const iosFallback = pickDefaultDevice();
+    androidMode = !iosFallback && !!pickDefaultAndroidTarget();
+  }
+
+  if (androidMode) {
+    if (devices.length > 0) {
+      const states = await detach(devices, 3100, platform);
       targetDevice = states[0]?.device;
+    } else {
+      const existing = readAllStates().find((state) => stateMatchesPlatform(state, platform));
+      if (existing) {
+        targetDevice = existing.device;
+      } else {
+        console.log("Starting Android stream...");
+        const states = await detach(devices, 3100, platform);
+        targetDevice = states[0]?.device;
+      }
     }
+  } else {
+    iosTargetDevices = devices.length > 0
+      ? devices.map((device) => resolveExplicitTarget(device, platform === "auto" ? "auto" : "ios").device)
+      : resolveTargetDevices(devices);
+    if (devices.length === 0 && readAllStates().length === 0) {
+      console.log("Starting simulator stream...");
+    }
+    for (const udid of iosTargetDevices) await ensureBooted(udid);
+    targetDevice = iosTargetDevices[0];
   }
 
   const { simMiddleware } = await import("./middleware");
-  const middleware = simMiddleware({ basePath: "/", device: targetDevice });
+  // Standalone serve-sim owns its HTTP server and wires WebSocket upgrades, so
+  // it can route helper/DevTools sockets through the single preview port.
+  const middleware = simMiddleware({ basePath: "/", device: targetDevice, codec, proxyHelpers: true });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
   const maxScan = portExplicit ? 1 : 50;
@@ -2224,17 +2104,18 @@ async function serve(
     process.exit(1);
   }
 
-  let previewTunnel: Tunnel | undefined;
-  if (useTunnel) {
-    try {
-      previewTunnel = trackTunnel(await startCloudflareTunnel(boundPort, { protocol: tunnelProtocol }));
-    } catch (err) {
-      console.error(`Failed to start preview tunnel: ${(err as Error).message}`);
-      for (const h of ownedHelpers) {
-        if (h.child.pid) try { process.kill(h.child.pid, "SIGTERM"); } catch {}
-      }
-      process.exit(1);
+  if (!androidMode) {
+    // Record in-process state so the preview/grid enumerate these devices and the
+    // CLI input subcommands can reach the same-origin /helper ws.
+    for (const udid of iosTargetDevices) {
+      writeState({ ...inProcessServeSimState(udid, boundPort, "/", host), platform: "ios" });
     }
+    const clearAll = () => {
+      for (const udid of iosTargetDevices) {
+        try { clearState(udid); } catch {}
+      }
+    };
+    process.on("exit", clearAll);
   }
 
   const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
@@ -2248,20 +2129,11 @@ async function serve(
   } else {
     console.log("  - Network: \x1b[2muse --host 0.0.0.0 to expose on the LAN\x1b[0m");
   }
-  if (previewTunnel) console.log(`  - Tunnel:  ${previewTunnel.url}`);
-  for (const h of ownedHelpers) {
-    if (h.tunnelUrl) console.log(`  - Stream:  ${h.tunnelUrl}`);
-  }
   console.log("");
 
-  const cleanup = (code: number) => {
-    for (const h of ownedHelpers) {
-      if (h.child.pid) try { process.kill(h.child.pid, "SIGTERM"); } catch {}
-    }
-    process.exit(code);
-  };
-  process.on("SIGINT", () => cleanup(0));
-  process.on("SIGTERM", () => cleanup(0));
+  // Exit cleanly on Ctrl+C
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
   await new Promise(() => {});
 }
 
@@ -2276,10 +2148,11 @@ const program = new Command();
 program
   .name("serve-sim")
   .description("Stream iOS Simulator or Android Emulator to the browser")
+  .version(resolveVersion(), "-v, --version", "Output the serve-sim version")
   .helpOption("-h, --help", "Show this help")
   // The default command: start the preview server (or stream / list / kill).
   .argument("[devices...]", "Device(s) to target (UDID, serial, or name; default: booted)")
-  .option("-p, --port <port>", "Starting port (preview default: 3200, stream default: 3100)", (v) => parseInt(v, 10))
+  .option("-p, --port <port>", "Starting port (preview default: 3200; helper default: 3100)", (v) => parseInt(v, 10))
   .option(
     "--host <addr>",
     "Interface to bind the preview server to. Use 0.0.0.0 to expose on the " +
@@ -2292,14 +2165,19 @@ program
   .option("--android", "Shortcut for --platform android")
   .option("-q, --quiet", "Suppress human-readable output, JSON only")
   .option("--no-preview", "Skip the web preview server; stream in foreground only")
-  .option("--stream-fps <fps>", "Max stream FPS (1-60, default: 60)", (v) => parseInt(v, 10))
-  .option("--stream-quality <value>", "JPEG quality (0.1-1.0, default: 0.7)", Number)
-  .option("--stream-max-dimension <px>", "Downscale longest stream edge to px (default: native)", (v) => parseInt(v, 10))
   .option(
-    "--tunnel",
-    "Open a Cloudflare quick tunnel for each port (preview + every helper). Requires cloudflared on PATH.",
+    "--codec <codec>",
+    "Stream codec for the preview UI: 'auto' (H.264 when the browser can decode " +
+      "it) or 'mjpeg' (force software JPEG — e.g. on VMs without H.264 encode).",
+    (value) => {
+      const v = value.toLowerCase();
+      const allowed = ["auto", "h264", "mjpeg"];
+      if (!allowed.includes(v)) {
+        throw new InvalidArgumentError(`Unsupported codec '${value}'. Supported: ${allowed.join(", ")}.`);
+      }
+      return v;
+    },
   )
-  .option("--tunnel-protocol <auto|quic|http2>", "cloudflared edge protocol (default: auto)")
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2308,40 +2186,17 @@ program
 Examples:
   serve-sim                              Open simulator preview at localhost:3200
   serve-sim -p 8080                      Preview on a custom port
+  serve-sim --codec mjpeg                Force MJPEG (e.g. on VMs without H.264 encode)
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --android                    Stream a booted Android emulator/device
   serve-sim --android Pixel_8_API_35     Boot and stream a specific Android AVD
-  serve-sim --tunnel                     Host the preview + stream over Cloudflare tunnels
-  serve-sim --tunnel --tunnel-protocol quic --stream-max-dimension 1280 --stream-quality 0.55
   serve-sim --detach                     Start streaming in background (daemon)
   serve-sim --list                       Show all running streams
   serve-sim --kill                       Stop all streams`,
   )
   .action(async (devices: string[], opts) => {
     const platform = platformFromOptions(opts);
-    const stream: StreamOptions = {
-      maxFps: opts.streamFps ?? DEFAULT_STREAM_OPTIONS.maxFps,
-      quality: opts.streamQuality ?? DEFAULT_STREAM_OPTIONS.quality,
-      maxDimension: opts.streamMaxDimension ?? DEFAULT_STREAM_OPTIONS.maxDimension,
-    };
-    if (opts.streamFps != null && (!Number.isFinite(stream.maxFps) || stream.maxFps < 1 || stream.maxFps > 60)) {
-      console.error("--stream-fps must be an integer from 1 to 60.");
-      process.exit(1);
-    }
-    if (opts.streamQuality != null && (!Number.isFinite(stream.quality) || stream.quality < 0.1 || stream.quality > 1)) {
-      console.error("--stream-quality must be a number from 0.1 to 1.0.");
-      process.exit(1);
-    }
-    if (opts.streamMaxDimension != null && (!Number.isFinite(stream.maxDimension) || stream.maxDimension < 0)) {
-      console.error("--stream-max-dimension must be a non-negative integer.");
-      process.exit(1);
-    }
-    const tunnelProtocol = opts.tunnelProtocol as TunnelProtocol | undefined;
-    if (tunnelProtocol && tunnelProtocol !== "auto" && tunnelProtocol !== "quic" && tunnelProtocol !== "http2") {
-      console.error("--tunnel-protocol must be one of: auto, quic, http2.");
-      process.exit(1);
-    }
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -2350,27 +2205,14 @@ Examples:
       killStreams(typeof opts.kill === "string" ? opts.kill : undefined);
       return;
     }
-    if (opts.tunnel && opts.detach) {
-      console.error("--tunnel cannot be combined with --detach yet (the tunnel needs a parent process to clean it up).");
-      process.exit(1);
-    }
     const startPort: number | undefined = opts.port;
     if (opts.detach) {
-      const states = await detach(devices, startPort ?? 3100, platform, stream);
+      const states = await detach(devices, startPort ?? 3100, platform);
       printStatesJSON(states);
     } else if (opts.preview === false) {
-      await follow(devices, startPort ?? 3100, !!opts.quiet, platform, opts.tunnel, stream, tunnelProtocol);
+      await follow(devices, startPort ?? 3100, !!opts.quiet, platform);
     } else {
-      await serve(
-        startPort ?? 3200,
-        devices,
-        startPort !== undefined,
-        opts.host,
-        platform,
-        opts.tunnel,
-        stream,
-        tunnelProtocol,
-      );
+      await serve(startPort ?? 3200, devices, startPort !== undefined, opts.host, opts.codec, platform);
     }
   });
 
@@ -2437,19 +2279,12 @@ program
   .action((opts) => memoryWarning(opts.device));
 
 program
-  .command("android-helper", { hidden: true })
-  .description("Internal Android stream helper")
-  .argument("<serial>")
-  .option("--port <port>", "Port to listen on", (v: string) => parseInt(v, 10), 3100)
-  .allowUnknownOption(true)
-  .action(async (serial: string, opts: { port: number }) => {
-    const { runAndroidHelper } = await import("./android-helper");
-    const portFlagIndex = process.argv.lastIndexOf("--port");
-    const port = portFlagIndex >= 0 && process.argv[portFlagIndex + 1]
-      ? parseInt(process.argv[portFlagIndex + 1]!, 10)
-      : opts.port;
-    await runAndroidHelper({ serial, port });
-  });
+  .command("event-log")
+  .description("Show recent simulator events")
+  .option(...deviceOpt)
+  .option("-j, --json", "Print JSON")
+  .option("-n, --limit <count>", "Maximum number of events")
+  .action((opts) => eventLog(opts.device, { json: opts.json, limit: opts.limit }));
 
 // `camera` and `permissions` keep their own dedicated argument parsers (the
 // camera verb has nested sub-verbs and source flags; permissions has a
@@ -2470,5 +2305,28 @@ program
   .helpOption(false)
   .argument("[args...]")
   .action((args: string[]) => permissions(args));
+
+program
+  .command("ui")
+  .description("Get or set simulator-wide UI options (see `ui --help`)")
+  .allowUnknownOption(true)
+  .helpOption(false)
+  .argument("[args...]")
+  .action((args: string[]) => uiSettings(args));
+
+program
+  .command("android-helper", { hidden: true })
+  .description("Internal Android stream helper")
+  .argument("<serial>")
+  .option("--port <port>", "Port to listen on", (v: string) => parseInt(v, 10), 3100)
+  .allowUnknownOption(true)
+  .action(async (serial: string, opts: { port: number }) => {
+    const { runAndroidHelper } = await import("./android-helper");
+    const portFlagIndex = process.argv.lastIndexOf("--port");
+    const port = portFlagIndex >= 0 && process.argv[portFlagIndex + 1]
+      ? parseInt(process.argv[portFlagIndex + 1]!, 10)
+      : opts.port;
+    await runAndroidHelper({ serial, port });
+  });
 
 await program.parseAsync(process.argv);

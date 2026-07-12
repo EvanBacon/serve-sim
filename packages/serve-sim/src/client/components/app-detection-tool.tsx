@@ -1,17 +1,75 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { AppWindow, ArrowUpRight } from "lucide-react";
 import { type AppDetails, fetchAppDetails } from "../utils/app-icon";
 import { execOnHost, shellEscape } from "../utils/exec";
-import { Chevron } from "../icons";
-import { PlatformBadge, platformLabel, type DevicePlatform } from "./platform-badge";
+import { CollapsibleSection } from "./collapsible-section";
+
+export function isSystemBundleId(bundleId: string): boolean {
+  return bundleId.startsWith("com.apple.");
+}
+
+export function fallbackAppDisplayName(bundleId: string): string {
+  if (bundleId === "com.apple.springboard") return "SpringBoard";
+  return bundleId;
+}
+
+export function AppIconFallback({ bundleId }: { bundleId: string }) {
+  const system = isSystemBundleId(bundleId);
+
+  return (
+    <div
+      data-testid={system ? "system-app-icon" : "app-icon-fallback"}
+      className={`w-10 h-10 rounded-[8px] shrink-0 border grid place-items-center ${
+        system
+          ? "border-[#3b5f99] bg-[linear-gradient(145deg,#253a5f,#162132)] text-[#c8d7ff]"
+          : "border-white/10 bg-white/[0.06] text-white/80"
+      }`}
+      aria-label={system ? "System app" : "App icon unavailable"}
+      title={system ? "System app" : "App icon unavailable"}
+    >
+      {system ? (
+        <svg
+          role="img"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+          className="size-[19px]"
+          fill="currentColor"
+        >
+          <title>Apple</title>
+          <path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701" />
+        </svg>
+      ) : (
+        <AppWindow size={19} strokeWidth={1.9} />
+      )}
+    </div>
+  );
+}
+
+export function AppIcon({
+  bundleId,
+  iconDataUrl,
+}: {
+  bundleId: string;
+  iconDataUrl?: string | null;
+}) {
+  if (iconDataUrl) {
+    return (
+      <img
+        src={iconDataUrl}
+        className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
+        alt=""
+      />
+    );
+  }
+  return <AppIconFallback bundleId={bundleId} />;
+}
 
 export function AppDetectionTool({
   udid,
   currentApp,
-  platform = "ios",
 }: {
   udid: string;
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
-  platform?: DevicePlatform;
 }) {
   const [details, setDetails] = useState<AppDetails | null>(null);
   const [open, setOpen] = useState(false);
@@ -19,14 +77,12 @@ export function AppDetectionTool({
   useEffect(() => {
     if (!currentApp) { setDetails(null); return; }
     let cancelled = false;
-    const baseDetails: AppDetails = {
+    setDetails({
       bundleId: currentApp.bundleId,
       isReactNative: currentApp.isReactNative,
       pid: currentApp.pid,
-      loading: platform === "ios",
-    };
-    setDetails(baseDetails);
-    if (platform === "android") return () => { cancelled = true; };
+      loading: true,
+    });
     fetchAppDetails(execOnHost, udid, currentApp.bundleId).then((extra) => {
       if (cancelled) return;
       setDetails({
@@ -38,105 +94,96 @@ export function AppDetectionTool({
       });
     });
     return () => { cancelled = true; };
-  }, [udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative, platform]);
+  }, [udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
 
   if (!details) {
-    return (
-      <div className="bg-panel border border-dashed border-white/10 rounded-[10px] p-4 text-white/50 text-[12px] text-center">
-        Waiting for an app to come to the foreground…
-      </div>
-    );
+    return <AppDetectionSkeleton />;
   }
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="lem-toggle flex items-center gap-3 bg-transparent border-none text-white/90 py-2 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px]"
-        aria-expanded={open}
-      >
-        {details.iconDataUrl ? (
-          <img
-            src={details.iconDataUrl}
-            className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
-            alt=""
-          />
-        ) : platform === "android" ? (
-          <div className="w-10 h-10 rounded-[8px] shrink-0 border border-white/8 bg-[#052e24] text-[#bbf7d0] flex items-center justify-center text-[10px] font-mono">
-            APK
-          </div>
-        ) : (
-          <div className="w-10 h-10 rounded-[8px] shrink-0 border border-white/8 bg-white/[0.04]" />
-        )}
-        <div className="min-w-0 flex-1 leading-tight">
-          <div className="text-[13px] font-semibold text-white/90 truncate flex items-center gap-1.5">
-            <span className="truncate">{details.displayName ?? appTitle(details.bundleId, platform)}</span>
-            <PlatformBadge platform={platform} compact />
-            {details.loading && <span className="text-white/45 font-normal">...</span>}
-          </div>
-          <div className="text-[11px] text-white/55 font-mono truncate" title={details.bundleId}>
-            {details.bundleId}
-          </div>
-        </div>
-        <Chevron open={open} />
-      </button>
-
-      {open && (
+    <CollapsibleSection
+      open={open}
+      onOpenChange={setOpen}
+      summaryClassName="flex items-center gap-3 text-left"
+      summary={
         <>
-          {details.error && (
-            <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
-              {details.error}
-            </div>
-          )}
-
-          <dl className="m-0 flex flex-col gap-1.5">
-            <Row label="Platform" value={platformLabel(platform)} />
-            {platform === "android" ? (
-              <>
-                <Row label="Package" value={details.bundleId} mono />
-                <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
-                {details.isReactNative && <Row label="React Native" value="Yes" />}
-              </>
-            ) : (
-              <>
-                <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "..." : "—"} />
-                <Row label="Min iOS" value={details.minOS ?? (details.loading ? "..." : "—")} />
-                <Row label="Executable" value={details.executable ?? (details.loading ? "..." : "—")} />
-                <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
-                {details.isReactNative && <Row label="React Native" value="Yes" />}
-                <Row
-                  label="App path"
-                  value={details.appPath ?? (details.loading ? "..." : "—")}
-                  mono
-                  action={
-                    details.appPath
-                      ? {
-                          title: "Reveal in Finder",
-                          onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
-                          icon: (
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                              <line x1="7" y1="17" x2="17" y2="7" />
-                              <polyline points="10 7 17 7 17 14" />
-                            </svg>
-                          ),
-                        }
-                      : undefined
-                  }
-                />
-              </>
-            )}
-          </dl>
+          <AppIcon bundleId={details.bundleId} iconDataUrl={details.iconDataUrl} />
+          <AppSummaryLabel
+            bundleId={details.bundleId}
+            displayName={details.displayName}
+          />
         </>
+      }
+    >
+      {details.error && (
+        <div className="bg-danger/10 border border-danger/20 text-danger-soft text-[11px] px-2 py-1.5 rounded-md">
+          {details.error}
+        </div>
       )}
+
+      <dl className="m-0 flex flex-col gap-1.5">
+            <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "…" : "—"} />
+            <Row label="Min iOS" value={details.minOS ?? (details.loading ? "…" : "—")} />
+            <Row label="Executable" value={details.executable ?? (details.loading ? "…" : "—")} />
+            <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
+            {details.isReactNative && <Row label="React Native" value="Yes" />}
+            <Row
+              label="App path"
+              value={details.appPath ?? (details.loading ? "…" : "—")}
+              mono
+              action={
+                details.appPath
+                  ? {
+                      title: "Reveal in Finder",
+                      onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
+                      icon: (
+                        <ArrowUpRight size={11} strokeWidth={2.2} />
+                      ),
+                    }
+                  : undefined
+              }
+            />
+          </dl>
+    </CollapsibleSection>
+  );
+}
+
+export function AppDetectionSkeleton() {
+  return (
+    <div
+      data-testid="app-detection-skeleton"
+      className="bg-panel rounded-[10px] px-3 py-2"
+      aria-label="Waiting for foreground app"
+    >
+      <div className="flex items-center gap-3 text-left min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)]">
+        <span className="w-10 h-10 rounded-[8px] shrink-0 bg-white/[0.08]" />
+        <span className="min-w-0 flex-1 flex flex-col gap-2">
+          <span className="h-3.5 w-[46%] rounded-full bg-white/[0.12]" />
+          <span className="h-2.5 w-[68%] rounded-full bg-white/[0.08]" />
+        </span>
+        <span className="w-2.5 h-2.5 rounded-full bg-white/[0.08]" />
+      </div>
     </div>
   );
 }
 
-function appTitle(bundleId: string, platform: DevicePlatform): string {
-  if (platform === "ios") return bundleId;
-  const last = bundleId.split(".").filter(Boolean).at(-1);
-  return last || bundleId;
+export function AppSummaryLabel({
+  bundleId,
+  displayName,
+}: {
+  bundleId: string;
+  displayName?: string;
+}) {
+  return (
+    <div className="min-w-0 flex-1 leading-tight text-left">
+      <div className="text-[13px] font-semibold text-white/90 truncate">
+        {displayName ?? fallbackAppDisplayName(bundleId)}
+      </div>
+      <div className="text-[11px] text-white/55 font-mono truncate" title={bundleId}>
+        {bundleId}
+      </div>
+    </div>
+  );
 }
 
 function Row({

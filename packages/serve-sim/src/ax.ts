@@ -1,9 +1,9 @@
 import { AX_UNAVAILABLE_ERROR } from "./ax-shared";
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
+import { axDescribeAsync } from "./native";
 
 export type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
-const SNAPSHOT_TIMEOUT_MS = 3500;
 const MAX_ELEMENTS = 500;
 const POLL_INTERVAL_MS = 500;
 const MAX_POLL_INTERVAL_MS = 2000;
@@ -79,28 +79,22 @@ function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   };
 }
 
-async function snapshotFromHelper(port: number): Promise<AxSnapshot> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
+async function snapshotFromNative(udid: string): Promise<AxSnapshot> {
+  let raw: RawAxeNode[];
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/ax`, { signal: controller.signal });
-    if (res.status === 503) {
-      // Helper is up but the simulator can't satisfy accessibility right
-      // now (framework missing, SpringBoard restarting, etc). Surface as
-      // the standard "unavailable" error so the streamer backs off.
-      return {
-        screen: { width: 1, height: 1 },
-        elements: [],
-        errors: [AX_UNAVAILABLE_ERROR],
-      };
-    }
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} ${res.statusText}`);
-    }
-    return normalizeAxTree(await res.json() as RawAxeNode[]);
-  } finally {
-    clearTimeout(timer);
+    raw = JSON.parse(await axDescribeAsync(udid)) as RawAxeNode[];
+  } catch {
+    // The in-process AX bridge throws when the simulator can't satisfy
+    // accessibility right now (framework missing, SpringBoard restarting,
+    // etc). Surface as the standard "unavailable" error so the streamer backs
+    // off and recovers automatically.
+    return {
+      screen: { width: 1, height: 1 },
+      elements: [],
+      errors: [AX_UNAVAILABLE_ERROR],
+    };
   }
+  return normalizeAxTree(raw);
 }
 
 function isAxUnavailableSnapshot(snapshot: AxSnapshot | null) {
@@ -115,15 +109,15 @@ function isUsableAxSnapshot(snapshot: AxSnapshot) {
   );
 }
 
-async function collectAxSnapshot(port: number) {
+async function collectAxSnapshot(udid: string): Promise<AxSnapshot> {
   const errors: string[] = [];
 
   try {
-    const snapshot = await snapshotFromHelper(port);
+    const snapshot = await snapshotFromNative(udid);
     if (snapshot.errors?.length) return snapshot;
     if (!isUsableAxSnapshot(snapshot)) {
       throw new Error(
-        `helper returned ${snapshot.elements.length} elements in ${snapshot.screen.width}x${snapshot.screen.height} AX space`,
+        `native AX returned ${snapshot.elements.length} elements in ${snapshot.screen.width}x${snapshot.screen.height} AX space`,
       );
     }
     return {
@@ -131,18 +125,7 @@ async function collectAxSnapshot(port: number) {
       errors,
     };
   } catch (error) {
-    const err = error as Error & { cause?: { code?: string }; code?: string };
-    const code = err.cause?.code ?? err.code;
-    const message = err.message || String(error);
-    // Helper not yet up (or just restarted). Node sets cause.code; Bun/undici
-    // surface it as a free-text "Unable to connect" message. Either way,
-    // treat as unavailable so the SSE consumer renders a friendly state
-    // rather than churning per-poll error stacks.
-    const isConnectFailure =
-      code === "ECONNREFUSED" ||
-      code === "ECONNRESET" ||
-      /unable to connect|fetch failed|ECONNREFUSED/i.test(message);
-    errors.push(isConnectFailure ? AX_UNAVAILABLE_ERROR : message);
+    errors.push((error as Error).message || String(error));
   }
 
   return {
@@ -158,17 +141,15 @@ function sseMessage(payload: unknown) {
 
 interface AxStreamer {
   addClient(res: { write(chunk: string): void }): () => void;
-  setPort(port: number): void;
   dispose(): void;
 }
 
-function createAxStreamer({ port }: { port: number }): AxStreamer {
+function createAxStreamer({ udid }: { udid: string }): AxStreamer {
   const clients = new Set<{ write(chunk: string): void }>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let latestMessage: string | null = null;
   let pollIntervalMs = POLL_INTERVAL_MS;
   let polling = false;
-  let currentPort = port;
   let disposed = false;
 
   const schedule = () => {
@@ -185,7 +166,7 @@ function createAxStreamer({ port }: { port: number }): AxStreamer {
 
     polling = true;
     try {
-      const next = await collectAxSnapshot(currentPort);
+      const next = await collectAxSnapshot(udid);
       const nextMessage = sseMessage(next);
       if (nextMessage !== latestMessage) {
         for (const client of clients) client.write(nextMessage);
@@ -207,19 +188,6 @@ function createAxStreamer({ port }: { port: number }): AxStreamer {
   };
 
   return {
-    setPort(nextPort: number) {
-      if (disposed || nextPort === currentPort) return;
-      currentPort = nextPort;
-      latestMessage = null;
-      // Avoid sitting on the unavailable-backoff interval (15s) when the
-      // helper has just come up on a new port.
-      pollIntervalMs = POLL_INTERVAL_MS;
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      void poll();
-    },
     addClient(res) {
       if (disposed) return () => {};
       clients.add(res);
@@ -247,7 +215,7 @@ function createAxStreamer({ port }: { port: number }): AxStreamer {
 }
 
 export interface AxStreamerCache {
-  get(udid: string, port: number): AxStreamer;
+  get(udid: string): AxStreamer;
   prune(activeUdids: Iterable<string>): void;
   size(): number;
 }
@@ -257,18 +225,14 @@ export function createAxStreamerCache(): AxStreamerCache {
 
   return {
     /**
-     * Get (or create) a streamer for the given simulator. The port is
-     * the helper's HTTP port — if the helper restarts on a different
-     * port, pass the new value and the cached streamer will retarget.
+     * Get (or create) the accessibility-snapshot streamer for a simulator.
+     * Snapshots come from the in-process native AX bridge keyed by udid.
      */
-    get(udid: string, port: number) {
+    get(udid: string) {
       const existing = streamers.get(udid);
-      if (existing) {
-        existing.setPort(port);
-        return existing;
-      }
+      if (existing) return existing;
 
-      const streamer = createAxStreamer({ port });
+      const streamer = createAxStreamer({ udid });
       streamers.set(udid, streamer);
       return streamer;
     },

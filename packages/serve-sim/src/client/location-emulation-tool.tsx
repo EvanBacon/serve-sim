@@ -1,9 +1,11 @@
 // Location emulation panel + lightweight 3D trail viz.
 //
-// Drives the platform-specific location command on a fixed cadence while a
-// requestAnimationFrame loop advances the player position along a pre-densified
-// route. The route is rendered to a 2D canvas with a manual orbiting
-// orthographic camera.
+// Drives `xcrun simctl location <udid> set <lat>,<lng>` on a fixed cadence
+// while a requestAnimationFrame loop advances the player position along a
+// pre-densified route. The route is rendered to a 2D canvas with a manual
+// orbiting orthographic camera — same family as Any Distance's RouteScene
+// (extruded ribbon + ground plane shadow) but flat-shaded so we don't pull
+// in WebGL or a 3D library.
 
 import {
   memo,
@@ -36,31 +38,10 @@ import {
   StopGlyph,
   WalkGlyph,
 } from "./icons";
-import {
-  locationClearCommand,
-  locationSetCommand,
-  type LocationPlatform,
-} from "./utils/location-commands";
+import { CollapsibleSection } from "./components/collapsible-section";
+import { Select } from "./components/select";
 
 const TRAIL_MORPH_MS = 650;
-
-// Inline hover styles — inline `style` objects can't express :hover, so we
-// emit a small style sheet keyed off classnames the components apply.
-// TODO: Convert to Tailwind
-const HOVER_CSS = `
-.lem-toggle:hover { color: #fff; }
-.lem-toggle:hover .lem-chevron { color: rgba(255,255,255,0.85) !important; }
-.lem-select:hover { background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.16); }
-.lem-select:focus { outline: none; border-color: rgba(255,255,255,0.24); background: rgba(255,255,255,0.08); }
-.lem-primary:hover:not(:disabled) { filter: brightness(1.08); }
-.lem-primary-on:hover:not(:disabled) { background: rgba(255,255,255,0.22) !important; filter: none; }
-.lem-ghost:hover:not(:disabled) { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.2); color: #fff; }
-.lem-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
-.lem-seg:hover:not([aria-pressed="true"]) { color: rgba(255,255,255,0.9); background: rgba(255,255,255,0.05) !important; }
-.lem-speed:hover { background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.18); color: #fff; }
-.lem-speed-on:hover { background: rgba(255,255,255,0.88) !important; border-color: rgba(255,255,255,0.88) !important; color: #0a0a0c !important; }
-.lem-speed:active { transform: scale(0.97); }
-`;
 
 interface ExecResult { stdout: string; stderr: string; exitCode: number }
 type ExecFn = (cmd: string) => Promise<ExecResult>;
@@ -86,11 +67,9 @@ const INITIAL_PLAYBACK: PlaybackState = { status: "idle", arc: 0, elapsedMs: 0 }
 export function LocationEmulationTool({
   udid,
   exec,
-  platform = "ios",
 }: {
   udid: string;
   exec: ExecFn;
-  platform?: LocationPlatform;
 }) {
   const [open, setOpen] = useState(false);
   const [trailId, setTrailId] = useState<string>(DEFAULT_TRAILS[0]!.id);
@@ -219,12 +198,10 @@ export function LocationEmulationTool({
     return () => clearInterval(id);
   }, []);
 
-  // ── Host location bridge ────────────────────────────────────────────────
-  // Push the current lat/lng to the device on a fixed cadence whenever we're
-  // playing. Skipped while paused/idle so the device can hold its last
-  // position. On stop, iOS can clear the override; Android emulator location
-  // has no matching clear command, so we restore the session origin when we
-  // have one.
+  // ── simctl bridge ────────────────────────────────────────────────────────
+  // Push the current lat/lng to the simulator on a fixed cadence whenever
+  // we're playing. Skipped while paused/idle so the simulator can hold its
+  // last position. On stop we run `... clear`.
   useEffect(() => {
     if (playback.status !== "playing") return;
     let cancelled = false;
@@ -237,11 +214,11 @@ export function LocationEmulationTool({
       if (now - lastPushed < LOCATION_PUSH_INTERVAL_MS) return;
       lastPushed = now;
       const pt = pointAtDistance(trailRef.current, arcRef.current);
-      const cmd = locationSetCommand(platform, udid, pt);
+      const cmd = `xcrun simctl location ${udid} set ${pt.lat.toFixed(7)},${pt.lng.toFixed(7)}`;
       inflight = exec(cmd).then((res) => {
         if (cancelled) return;
         if (res.exitCode !== 0) {
-          setError(parseLocationError(res.stderr) || "Location update failed");
+          setError(parseSimctlError(res.stderr) || "simctl location set failed");
         } else {
           setError(null);
         }
@@ -256,7 +233,7 @@ export function LocationEmulationTool({
       cancelled = true;
       clearInterval(id);
     };
-  }, [playback.status, udid, exec, platform]);
+  }, [playback.status, udid, exec]);
 
   // ── Controls ─────────────────────────────────────────────────────────────
   const onPlayPause = useCallback(() => {
@@ -291,21 +268,13 @@ export function LocationEmulationTool({
     const origin = sessionOriginRef.current;
     sessionOriginRef.current = null;
     const cmd = origin
-      ? locationSetCommand(platform, udid, origin)
-      : locationClearCommand(platform, udid);
-    if (!cmd) {
-      setError(null);
-      return;
-    }
-    void exec(cmd)
-      .then((res) => {
-        if (res.exitCode !== 0) setError(parseLocationError(res.stderr) || null);
-        else setError(null);
-      })
-      .catch((err: unknown) => {
-        setError(parseLocationError(locationErrorText(err)) || null);
-      });
-  }, [exec, udid, platform]);
+      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
+      : `xcrun simctl location ${udid} clear`;
+    void exec(cmd).then((res) => {
+      if (res.exitCode !== 0) setError(parseSimctlError(res.stderr) || null);
+      else setError(null);
+    });
+  }, [exec, udid]);
 
   const onTrailChange = useCallback((id: string) => {
     setTrailId(id);
@@ -320,55 +289,55 @@ export function LocationEmulationTool({
     if (statusRef.current === "idle") return;
     const origin = sessionOriginRef.current;
     const cmd = origin
-      ? locationSetCommand(platform, udid, origin)
-      : locationClearCommand(platform, udid);
-    if (!cmd) return;
+      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
+      : `xcrun simctl location ${udid} clear`;
     void exec(cmd).catch(() => {});
-  }, [exec, udid, platform]);
+  }, [exec, udid]);
 
   // ── Render ───────────────────────────────────────────────────────────────
   const playing = playback.status === "playing";
-  const headerStatus = playing
+  const headerMetric = playing
     ? `${formatDistance(playback.arc)} · ${formatDuration(playback.elapsedMs)}`
-    : `${formatDistance(prepared.totalDistance)} total`;
+    : formatDistance(prepared.totalDistance);
 
   return (
-    <div className="bg-panel border border-white/8 rounded-[10px] flex flex-col gap-2.5 px-3 py-2">
-      <style>{HOVER_CSS}</style>
-      <button
-        type="button"
-        onClick={() => setOpen((v: boolean) => !v)}
-        className="lem-toggle grid [grid-template-columns:auto_1fr_auto] items-center gap-2 bg-transparent border-none text-white/90 py-2.5 px-1 -my-2 -mx-1 cursor-pointer w-[calc(100%+8px)] text-left min-h-[36px] leading-none"
-        aria-expanded={open}
-      >
-        <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
-        <span className="text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none">
-          <span
-            className="size-1.5 rounded-full [transition:background_0.2s,box-shadow_0.2s]"
-            style={{
-              background: playing ? "#4ade80" : prepared.totalDistance > 0 ? "rgba(255,255,255,0.3)" : "transparent",
-              boxShadow: playing ? "0 0 6px rgba(74,222,128,0.7)" : "none",
-            }}
-          />
-          {headerStatus}
-        </span>
-        <Chevron open={open} />
-      </button>
-
-      {open && (
+    <CollapsibleSection
+      open={open}
+      onOpenChange={setOpen}
+      summaryClassName="grid [grid-template-columns:auto_minmax(0,1fr)_auto] [container-type:inline-size] items-center gap-2 text-left"
+      summary={
         <>
+          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
+          {open ? (
+            <span
+              data-location-status
+              className="min-w-0 text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none whitespace-nowrap overflow-hidden text-ellipsis max-w-full"
+            >
+              <span
+                className="size-1.5 rounded-full shrink-0 [transition:background_0.2s,box-shadow_0.2s]"
+                style={{
+                  background: playing ? "#4ade80" : prepared.totalDistance > 0 ? "rgba(255,255,255,0.3)" : "transparent",
+                  boxShadow: playing ? "0 0 6px rgba(74,222,128,0.7)" : "none",
+                }}
+              />
+              <span className="min-w-0 overflow-hidden text-ellipsis">{headerMetric}</span>
+              {!playing && <span data-location-status-total className="shrink-0">total</span>}
+            </span>
+          ) : (
+            <span />
+          )}
+        </>
+      }
+    >
           <div className="flex flex-col gap-1">
             <div className="relative block">
-              <select
+              <Select
+                label="Trail"
                 value={trailId}
-                onChange={(e) => onTrailChange((e.target as HTMLSelectElement).value)}
-                className="lem-select appearance-none [-webkit-appearance:none] bg-white/[0.04] border border-white/8 rounded-md text-white/90 text-[12px] py-1.5 pr-[26px] pl-2 font-[inherit] cursor-pointer w-full [transition:background_0.12s,border-color_0.12s]"
-                aria-label="Trail"
-              >
-                {DEFAULT_TRAILS.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+                onChange={onTrailChange}
+                options={DEFAULT_TRAILS.map((t) => ({ value: t.id, label: t.name }))}
+                className="bg-white/[0.04] border border-white/8 rounded-md text-white/90 text-[12px] py-1.5 pr-[26px] pl-2 w-full [transition:background_0.12s,border-color_0.12s] hover:bg-white/[0.07] hover:border-[rgba(255,255,255,0.16)] focus:outline-none focus:bg-white/[0.08] focus:border-[rgba(255,255,255,0.24)]"
+              />
               <span className="absolute right-[9px] top-1/2 -translate-y-1/2 pointer-events-none flex items-center" aria-hidden="true">
                 <Chevron open={false} />
               </span>
@@ -391,7 +360,7 @@ export function LocationEmulationTool({
             <button
               type="button"
               onClick={onPlayPause}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer font-[inherit] ${playing ? "lem-primary lem-primary-on bg-white/[0.16] text-white" : "lem-primary bg-success-emerald text-[#062018]"}`}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer font-[inherit] ${playing ? "bg-white/[0.16] text-white enabled:hover:bg-white/[0.22]" : "bg-success-emerald text-[#062018] enabled:hover:brightness-[1.08]"}`}
               aria-pressed={playing}
               title={playing ? "Pause" : "Play"}
             >
@@ -401,9 +370,9 @@ export function LocationEmulationTool({
             <button
               type="button"
               onClick={onStop}
-              className="lem-ghost flex items-center justify-center gap-1.5 py-2 px-3 border border-white/12 rounded-[7px] text-[12px] font-medium bg-transparent text-white/85 cursor-pointer font-[inherit]"
+              className="flex items-center justify-center gap-1.5 py-2 px-3 border border-white/12 rounded-[7px] text-[12px] font-medium bg-transparent text-white/85 cursor-pointer font-[inherit] enabled:hover:bg-white/[0.06] enabled:hover:border-white/20 enabled:hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
               disabled={playback.status === "idle" && playback.arc === 0}
-              title={platform === "android" ? "Stop simulated location" : "Stop and clear simulated location"}
+              title="Stop and clear simulated location"
             >
               <StopGlyph />
               <span>Stop</span>
@@ -431,7 +400,7 @@ export function LocationEmulationTool({
                 const next = SPEED_MULTIPLIERS[(idx + 1) % SPEED_MULTIPLIERS.length]!;
                 setMultiplier(next);
               }}
-              className={`flex items-center justify-center gap-1 px-2.5 border rounded-[7px] cursor-pointer font-[inherit] text-[11px] font-semibold min-w-[56px] ${multiplier > 1 ? "lem-speed lem-speed-on bg-white border-white text-[#0a0a0c]" : "lem-speed bg-white/[0.04] border-white/8 text-white/85"}`}
+              className={`flex items-center justify-center gap-1 px-2.5 border rounded-[7px] cursor-pointer font-[inherit] text-[11px] font-semibold min-w-[56px] active:scale-[0.97] ${multiplier > 1 ? "bg-white border-white text-[#0a0a0c] hover:bg-white/[0.88] hover:border-white/[0.88] hover:text-[#0a0a0c]" : "bg-white/[0.04] border-white/8 text-white/85 hover:bg-white/[0.09] hover:border-[rgba(255,255,255,0.18)] hover:text-white"}`}
               aria-label={`Speed ${multiplier}× — tap to cycle`}
               title={`Speed ${multiplier}× — tap to cycle`}
             >
@@ -445,9 +414,7 @@ export function LocationEmulationTool({
               {error}
             </div>
           )}
-        </>
-      )}
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -486,7 +453,7 @@ function Segmented<T extends string>({
             key={o.value}
             type="button"
             onClick={() => onChange(o.value)}
-            className={`flex-1 flex items-center justify-center border-none rounded-[5px] py-[5px] px-2 text-[11px] font-medium cursor-pointer font-[inherit] [transition:background_0.12s,color_0.12s] min-h-[22px] ${active ? "lem-seg lem-seg-active bg-white/[0.12] text-white" : "lem-seg bg-transparent text-white/60"}`}
+            className={`flex-1 flex items-center justify-center border-none rounded-[5px] py-[5px] px-2 text-[11px] font-medium cursor-pointer font-[inherit] [transition:background_0.12s,color_0.12s] min-h-[22px] ${active ? "bg-white/[0.12] text-white" : "bg-transparent text-white/60 hover:bg-white/[0.05] hover:text-white/90"}`}
             aria-pressed={active}
             aria-label={o.icon ? o.label : undefined}
             title={o.icon ? o.label : undefined}
@@ -906,16 +873,11 @@ function formatElevation(meters: number): string {
   return `${meters.toFixed(0)} m`;
 }
 
-function parseLocationError(stderr: string): string {
+function parseSimctlError(stderr: string): string {
   const trimmed = stderr.trim();
   if (!trimmed) return "";
   // Strip the leading "An error was encountered processing the command" noise.
   const m = trimmed.match(/Reason:\s*(.+)$/m);
   if (m) return m[1]!;
   return trimmed.split("\n").slice(-1)[0] ?? trimmed;
-}
-
-function locationErrorText(err: unknown): string {
-  const value = err as { stderr?: unknown; message?: unknown };
-  return String(value?.stderr || value?.message || err || "");
 }

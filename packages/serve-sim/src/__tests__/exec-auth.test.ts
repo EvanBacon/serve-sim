@@ -7,7 +7,7 @@ async function withServer<T>(fn: (origin: string) => Promise<T>): Promise<T> {
   const TOKEN = "test-token-abc123";
   const handler = simMiddleware({ basePath: "/", execToken: TOKEN });
   const server = createServer((req, res) => {
-    handler(req, res, () => {
+    handler(req, res, async () => {
       if (!res.headersSent) res.statusCode = 404;
       res.end("Not found");
     });

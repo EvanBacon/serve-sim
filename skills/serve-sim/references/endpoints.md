@@ -66,7 +66,6 @@ This is a Node middleware that serves the preview UI and proxies state. It can b
 |---|---|---|
 | `GET` | `/.sim` | The preview HTML page (React UI showing the simulator stream). |
 | `GET` | `/.sim/api` | JSON state: `{device, pid, port, url, streamUrl, wsUrl}`. |
-| `GET` | `/.sim/logs` | SSE stream of simulator console logs (text/event-stream, NDJSON events). |
 | `GET` | `/.sim/ax` | SSE stream of accessibility tree snapshots. |
 | `POST` | `/.sim/exec` | Run a shell command on the host. **Requires a bearer token.** |
 | `POST` | `/.sim/appstate` | SSE-like stream of frontmost-app changes. |

@@ -12,6 +12,10 @@ const HELPER_PATH = join(
 const SIMCAM_MAGIC = 0x53434d31;
 const SIMCAM_PIXEL_BGRA = 0;
 const HEADER_BYTES = 64;
+const SURFACE_RING = 4;
+// SimCamSurfaceTable: surfaceCount + latestIndex + ids[SURFACE_RING].
+const TABLE_BYTES = 4 + 4 + SURFACE_RING * 4;
+const CONTROL_BYTES = HEADER_BYTES + TABLE_BYTES;
 const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 720;
 
@@ -27,7 +31,7 @@ const platformOk = process.platform === "darwin";
 const shouldRun = platformOk && helperReady();
 
 interface ShmHandle {
-  ptr: number;
+  ptr: unknown;
   buffer: ArrayBuffer;
   fd: number;
   size: number;
@@ -90,18 +94,19 @@ async function openExistingShm(name: string): Promise<ShmHandle | null> {
   const sys = await loadFfi();
   const fd = sys.shm_open(Buffer.from(`${name}\0`), 0, 0);
   if (fd < 0) return null;
-  const size = HEADER_BYTES;
+  const size = CONTROL_BYTES;
   const ptr = sys.mmap(null, BigInt(size), 1, 1, fd, 0n);
   if (!ptr) {
     sys.close(fd);
     return null;
   }
   const buffer = sys.toArrayBuffer(ptr, 0, size);
-  return { ptr: 0, buffer, fd, size };
+  return { ptr, buffer, fd, size };
 }
 
 async function closeShm(handle: ShmHandle): Promise<void> {
   const sys = await loadFfi();
+  sys.munmap(handle.ptr, BigInt(handle.size));
   sys.close(handle.fd);
 }
 
@@ -130,6 +135,53 @@ function readHeader(buffer: ArrayBuffer): {
     timestampNs: view.getBigUint64(40, true),
     mirrorMode: view.getUint8(48),
   };
+}
+
+function readSurfaceTable(buffer: ArrayBuffer): {
+  surfaceCount: number;
+  latestIndex: number;
+  ids: number[];
+} {
+  const view = new DataView(buffer);
+  const surfaceCount = view.getUint32(HEADER_BYTES, true);
+  const latestIndex = view.getUint32(HEADER_BYTES + 4, true);
+  const ids: number[] = [];
+  for (let i = 0; i < SURFACE_RING; i++) {
+    ids.push(view.getUint32(HEADER_BYTES + 8 + i * 4, true));
+  }
+  return { surfaceCount, latestIndex, ids };
+}
+
+let iosurface:
+  | undefined
+  | {
+      lookup: (id: number) => unknown;
+      width: (surface: unknown) => number;
+      height: (surface: unknown) => number;
+      release: (surface: unknown) => void;
+    };
+
+async function loadIOSurface(): Promise<NonNullable<typeof iosurface>> {
+  if (iosurface) return iosurface;
+  const { dlopen, FFIType } = await import("bun:ffi");
+  const io = dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", {
+    IOSurfaceLookup: { args: [FFIType.u32], returns: FFIType.ptr },
+    IOSurfaceGetWidth: { args: [FFIType.ptr], returns: FFIType.u64 },
+    IOSurfaceGetHeight: { args: [FFIType.ptr], returns: FFIType.u64 },
+  });
+  const cf = dlopen(
+    "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+    { CFRelease: { args: [FFIType.ptr], returns: FFIType.void } },
+  );
+  iosurface = {
+    lookup: (id) => io.symbols.IOSurfaceLookup(id) as unknown,
+    width: (s) => Number(io.symbols.IOSurfaceGetWidth(s as never) as bigint),
+    height: (s) => Number(io.symbols.IOSurfaceGetHeight(s as never) as bigint),
+    release: (s) => {
+      cf.symbols.CFRelease(s as never);
+    },
+  };
+  return iosurface;
 }
 
 function sendHelperCommand(socketPath: string, cmd: object, timeoutMs = 3000): Promise<any> {
@@ -230,7 +282,7 @@ describeIf("SimCameraHelper shm probe", () => {
       expect(header.width).toBe(DEFAULT_WIDTH);
       expect(header.height).toBe(DEFAULT_HEIGHT);
       expect(header.pixelFormat).toBe(SIMCAM_PIXEL_BGRA);
-      expect(header.bytesPerRow).toBe(DEFAULT_WIDTH * 4);
+      expect(header.bytesPerRow).toBeGreaterThanOrEqual(DEFAULT_WIDTH * 4);
       expect(header.pixelByteSize).toBe(BigInt(DEFAULT_WIDTH * DEFAULT_HEIGHT * 4));
     } finally {
       await closeShm(handle);
@@ -248,6 +300,54 @@ describeIf("SimCameraHelper shm probe", () => {
         2000,
       );
       expect(advanced).toBe(true);
+    } finally {
+      await closeShm(handle);
+    }
+  });
+
+  test("publishes an IOSurface ring resolvable by global id", async () => {
+    const handle = await openExistingShm(SHM_NAME);
+    expect(handle).not.toBeNull();
+    if (!handle) return;
+    try {
+      const table = readSurfaceTable(handle.buffer);
+      expect(table.surfaceCount).toBe(SURFACE_RING);
+      expect(table.latestIndex).toBeLessThan(table.surfaceCount);
+      const latestSurfaceId = table.ids[table.latestIndex];
+      if (latestSurfaceId === undefined) {
+        throw new Error(`missing IOSurface ID at index ${table.latestIndex}`);
+      }
+      // All ring slots carry a distinct, non-zero global surface id.
+      const unique = new Set(table.ids);
+      expect(unique.size).toBe(SURFACE_RING);
+      expect(table.ids.every((id) => id > 0)).toBe(true);
+
+      // The latest surface resolves cross-process and matches the header dims.
+      const io = await loadIOSurface();
+      const surface = io.lookup(latestSurfaceId);
+      expect(surface).toBeTruthy();
+      if (surface) {
+        expect(io.width(surface)).toBe(DEFAULT_WIDTH);
+        expect(io.height(surface)).toBe(DEFAULT_HEIGHT);
+        io.release(surface);
+      }
+    } finally {
+      await closeShm(handle);
+    }
+  });
+
+  test("latestIndex stays in range as frames advance", async () => {
+    const handle = await openExistingShm(SHM_NAME);
+    expect(handle).not.toBeNull();
+    if (!handle) return;
+    try {
+      const initialFrameSeq = readHeader(handle.buffer).frameSeq;
+      const moved = await waitFor(() => {
+        const header = readHeader(handle.buffer);
+        const t = readSurfaceTable(handle.buffer);
+        return header.frameSeq !== initialFrameSeq && t.latestIndex < t.surfaceCount;
+      }, 1000);
+      expect(moved).toBe(true);
     } finally {
       await closeShm(handle);
     }
@@ -282,7 +382,7 @@ describeIf("SimCameraHelper shm probe", () => {
       const header = readHeader(handle.buffer);
       expect(header.width).toBe(DEFAULT_WIDTH);
       expect(header.height).toBe(DEFAULT_HEIGHT);
-      expect(header.bytesPerRow).toBe(header.width * 4);
+      expect(header.bytesPerRow).toBeGreaterThanOrEqual(header.width * 4);
     } finally {
       await closeShm(handle);
     }
@@ -296,16 +396,25 @@ describeIf("SimCameraHelper shm probe", () => {
     try {
       await sendHelperCommand(SOCKET_PATH, { action: "shutdown" });
     } catch {}
-    await Promise.race([
+    const exitCode = await Promise.race([
       exited,
-      new Promise((r) => setTimeout(r, 3000)),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 3000)),
     ]);
+    expect(exitCode).not.toBe("timeout");
     helper = null;
 
     const sys = await loadFfi();
-    const fd = sys.shm_open(Buffer.from(`${SHM_NAME}\0`), 0, 0);
-    if (fd >= 0) {
+    // The helper shm_unlink()s during shutdown, but on a loaded CI runner that
+    // can land a beat after the process-exit event fires. Poll briefly so the
+    // assertion proves "eventually unlinked" rather than racing the cleanup.
+    let fd = -1;
+    for (let i = 0; i < 40; i++) {
+      fd = sys.shm_open(Buffer.from(`${SHM_NAME}\0`), 0, 0);
+      if (fd < 0) break;
       sys.close(fd);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (fd >= 0) {
       sys.shm_unlink(Buffer.from(`${SHM_NAME}\0`));
     }
     expect(fd).toBeLessThan(0);

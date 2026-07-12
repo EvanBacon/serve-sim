@@ -11,9 +11,10 @@ declare global {
       name?: string;
       runtime?: string;
       basePath: string;
-      logsEndpoint?: string;
       axEndpoint?: string;
       appStateEndpoint?: string;
+      eventLogEndpoint?: string;
+      eventLogEventsEndpoint?: string;
       devtoolsEndpoint?: string;
       gridApiEndpoint?: string;
       gridStartEndpoint?: string;
@@ -26,8 +27,38 @@ declare global {
       serveSimBin?: string;
       /** Bearer token required by the /exec shell-exec route. */
       execToken?: string;
+      /**
+       * Server-pinned stream codec. `"mjpeg"` forces the software JPEG path
+       * (for hosts whose hardware can't encode H.264); `"auto"`/undefined lets
+       * the client pick H.264 when the browser can decode it. Reserved for
+       * future values like `"hevc"`/`"av1"`.
+       */
+      codec?: string;
+      /**
+       * Set when the server routes helper stream/control + DevTools sockets
+       * through its same-origin `/helper` and `/devtools` proxies. The browser
+       * then re-anchors those URLs to its own origin; left unset, the config
+       * already carries the helper's direct URLs and is used as-is.
+       */
+      proxyHelpers?: boolean;
     };
   }
+}
+
+/**
+ * Narrow an injected `__SIM_PREVIEW__` to a usable stream config. The
+ * middleware injects a minimal `{basePath, execToken}` when no helper is
+ * attached (the empty state still needs the exec token); treating that as a
+ * stream config mounts the simulator view with `url: undefined`, which
+ * fetches `/undefined/stream.avcc` and trips the no-frames watchdog instead
+ * of showing the device picker.
+ */
+export function streamConfigFrom(
+  raw: Window["__SIM_PREVIEW__"] | null | undefined,
+): NonNullable<Window["__SIM_PREVIEW__"]> | null {
+  return raw && typeof raw.device === "string" && typeof raw.url === "string"
+    ? raw
+    : null;
 }
 
 export function simEndpoint(path: string): string {

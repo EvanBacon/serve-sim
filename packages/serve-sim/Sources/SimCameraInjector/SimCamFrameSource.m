@@ -6,6 +6,7 @@
 #import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -26,8 +27,8 @@ static size_t kFrameHeight = 720;
 static const double kFrameRate = 30.0;
 
 static SimCamShmHeader *gShmHeader = NULL;
-static const uint8_t *gShmPixels = NULL;
-static size_t gShmTotalSize = 0;
+static SimCamSurfaceTable *gSurfaceTable = NULL;
+static IOSurfaceRef gSurfaces[SIMCAM_SURFACE_RING];  // resolved from global IDs
 static uint64_t gLastSeenSeq = 0;
 
 #pragma mark - Last-frame cache
@@ -236,38 +237,37 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
     });
 }
 
-- (CVPixelBufferRef)newPixelBufferFromShm CF_RETURNS_RETAINED {
-    return [self newPixelBufferFromShmForceFresh:NO];
+- (CVPixelBufferRef)newPixelBufferFromSurface CF_RETURNS_RETAINED {
+    return [self newPixelBufferFromSurfaceForceFresh:NO];
 }
 
-- (CVPixelBufferRef)newPixelBufferFromShmForceFresh:(BOOL)force CF_RETURNS_RETAINED {
-    if (!gShmHeader || !gShmPixels) return NULL;
+// Wrap the latest shared IOSurface as a CVPixelBuffer — zero copy. Holding the
+// pixel buffer keeps the surface in use, so the host writer renders into a
+// different ring slot until we release it.
+- (CVPixelBufferRef)newPixelBufferFromSurfaceForceFresh:(BOOL)force CF_RETURNS_RETAINED {
+    if (!gShmHeader || !gSurfaceTable) return NULL;
     if (gShmHeader->magic != SIMCAM_SHM_MAGIC) return NULL;
-    uint64_t seqA = gShmHeader->frameSeq;
+    uint64_t seqA = atomic_load_explicit(&gShmHeader->frameSeq, memory_order_acquire);
     if (seqA == 0) return NULL;
     if (!force && seqA == gLastSeenSeq) return NULL;
-    uint32_t w = gShmHeader->width;
-    uint32_t h = gShmHeader->height;
-    uint32_t bpr = gShmHeader->bytesPerRow;
-    if (!w || !h || bpr < w * 4) return NULL;
-    if (sizeof(SimCamShmHeader) + (size_t)bpr * h > gShmTotalSize) return NULL;
+
+    uint32_t count = gSurfaceTable->surfaceCount;
+    if (count == 0 || count > SIMCAM_SURFACE_RING) return NULL;
+    uint32_t idx = gSurfaceTable->latestIndex;
+    if (idx >= count) return NULL;
+    IOSurfaceRef surface = gSurfaces[idx];
+    if (!surface) {
+        simcam_log(@"missing IOSurface at latest index %u/%u", idx, count);
+        return NULL;
+    }
 
     CVPixelBufferRef pb = NULL;
     NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey: @{} };
-    CVReturn r = CVPixelBufferCreate(kCFAllocatorDefault, w, h,
-        kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)attrs, &pb);
+    CVReturn r = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, surface,
+        (__bridge CFDictionaryRef)attrs, &pb);
     if (r != kCVReturnSuccess || !pb) return NULL;
-    CVPixelBufferLockBaseAddress(pb, 0);
-    uint8_t *dst = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
-    size_t dstBpr = CVPixelBufferGetBytesPerRow(pb);
-    size_t copyBpr = MIN((size_t)bpr, dstBpr);
-    for (uint32_t y = 0; y < h; y++) {
-        memcpy(dst + y * dstBpr, gShmPixels + y * bpr, copyBpr);
-    }
-    CVPixelBufferUnlockBaseAddress(pb, 0);
 
-    atomic_thread_fence(memory_order_acquire);
-    uint64_t seqB = gShmHeader->frameSeq;
+    uint64_t seqB = atomic_load_explicit(&gShmHeader->frameSeq, memory_order_acquire);
     if (!force && seqA != seqB) {
         CVPixelBufferRelease(pb);
         return NULL;
@@ -277,7 +277,7 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
 }
 
 - (CVPixelBufferRef)currentPixelBuffer CF_RETURNS_RETAINED {
-    CVPixelBufferRef pb = [self newPixelBufferFromShmForceFresh:YES];
+    CVPixelBufferRef pb = [self newPixelBufferFromSurfaceForceFresh:YES];
     if (!pb) pb = [self newPixelBufferFromImage];
     return pb;
 }
@@ -350,7 +350,7 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
 }
 
 - (CMSampleBufferRef)newSampleBufferAtTime:(CMTime)pts CF_RETURNS_RETAINED {
-    CVPixelBufferRef pb = [self newPixelBufferFromShm];
+    CVPixelBufferRef pb = [self newPixelBufferFromSurface];
     if (!pb) pb = [self newPixelBufferFromImage];
     if (pb) {
         SimCamCacheFrame(pb);
@@ -362,7 +362,7 @@ static CGImageRef SimCamAcquireCachedCGImage(void) CF_RETURNS_RETAINED {
         dispatch_once(&logOnce, ^{
             simcam_log(@"no-signal fallback: shm=%@ frameSeq=%llu cache=empty",
                 gShmHeader ? @"attached" : @"unattached",
-                (unsigned long long)(gShmHeader ? gShmHeader->frameSeq : 0));
+                (unsigned long long)(gShmHeader ? atomic_load_explicit(&gShmHeader->frameSeq, memory_order_acquire) : 0));
         });
         pb = [self newPixelBufferNoSignal];
     }
@@ -518,13 +518,14 @@ void SimCamFrameSourceOpenShmIfRequested(void) {
         simcam_log(@"shm_open(%s) failed: %s", shmName, strerror(errno));
         return;
     }
+    size_t size = (size_t)SimCamControlSize();
     struct stat st;
-    if (fstat(fd, &st) < 0 || st.st_size < (off_t)sizeof(SimCamShmHeader)) {
+    if (fstat(fd, &st) < 0 || (size_t)st.st_size < size) {
         simcam_log(@"shm fstat failed or too small");
         close(fd);
         return;
     }
-    void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    void *map = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
     if (map == MAP_FAILED) {
         simcam_log(@"shm mmap failed: %s", strerror(errno));
@@ -533,14 +534,44 @@ void SimCamFrameSourceOpenShmIfRequested(void) {
     SimCamShmHeader *hdr = (SimCamShmHeader *)map;
     if (hdr->magic != SIMCAM_SHM_MAGIC) {
         simcam_log(@"shm magic mismatch: 0x%x", hdr->magic);
-        munmap(map, (size_t)st.st_size);
+        munmap(map, size);
         return;
     }
+    SimCamSurfaceTable *table =
+        (SimCamSurfaceTable *)((uint8_t *)map + sizeof(SimCamShmHeader));
+    uint32_t count = table->surfaceCount;
+    if (count == 0 || count > SIMCAM_SURFACE_RING) {
+        simcam_log(@"shm surface table invalid (count=%u)", count);
+        munmap(map, size);
+        return;
+    }
+
+    // Resolve each global IOSurface ID to a local reference.
+    uint32_t resolved = 0;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    for (uint32_t i = 0; i < count; i++) {
+        IOSurfaceRef s = IOSurfaceLookup(table->ids[i]);
+        gSurfaces[i] = s;
+        if (s) resolved++;
+    }
+#pragma clang diagnostic pop
+    if (resolved != count) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (gSurfaces[i]) {
+                CFRelease(gSurfaces[i]);
+                gSurfaces[i] = NULL;
+            }
+        }
+        simcam_log(@"only %u/%u IOSurfaces resolved from shm \"%s\"", resolved, count, shmName);
+        munmap(map, size);
+        return;
+    }
+
     gShmHeader = hdr;
-    gShmPixels = (const uint8_t *)map + sizeof(SimCamShmHeader);
-    gShmTotalSize = (size_t)st.st_size;
+    gSurfaceTable = table;
     kFrameWidth = hdr->width;
     kFrameHeight = hdr->height;
-    simcam_log(@"shm \"%s\" attached (%ux%u, %llu bytes)",
-               shmName, hdr->width, hdr->height, (unsigned long long)st.st_size);
+    simcam_log(@"shm \"%s\" attached (%ux%u, %u/%u IOSurfaces resolved)",
+               shmName, hdr->width, hdr->height, resolved, count);
 }

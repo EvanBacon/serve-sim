@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import type { AxElement } from "../../ax-shared";
 import {
   useAxSelectionContext,
@@ -10,10 +10,10 @@ import {
   axNodeForElement,
   isAxeUnavailable,
 } from "../utils/ax";
+import { SettingSwitch } from "./setting-switch";
 
-const SECTION = "bg-panel border border-white/8 rounded-[10px]";
+const SECTION = "bg-panel rounded-[10px]";
 const SECTION_TITLE = "text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] m-0";
-const EMPTY_BLOCK = "bg-panel border border-dashed border-white/10 rounded-[10px] p-3 text-white/50 text-[12px] text-center";
 
 export function AxTreeTool({
   overlayEnabled,
@@ -31,25 +31,20 @@ export function AxTreeTool({
     <div className={`${SECTION} px-3 py-2`}>
       <div className="flex items-center justify-between gap-2">
         <span className={SECTION_TITLE}>AX Tree</span>
-        <button
-          type="button"
-          onClick={onToggleOverlay}
-          aria-pressed={overlayEnabled}
-          className="border border-white/12 rounded-[5px] bg-transparent text-white/70 cursor-pointer text-[10px] px-[7px] py-[3px]"
-        >
-          {overlayEnabled ? "Overlay on" : "Enable overlay"}
-        </button>
+        <SettingSwitch
+          label="Enable overlay"
+          checked={overlayEnabled}
+          onChange={onToggleOverlay}
+        />
       </div>
       {!overlayEnabled ? (
         null
       ) : axeUnavailable ? (
-        <div className={EMPTY_BLOCK}>
-          AX unavailable on this simulator.
-        </div>
+        <AxTreeStatus>AX unavailable on this simulator.</AxTreeStatus>
       ) : elements.length === 0 ? (
-        <div className={EMPTY_BLOCK}>
+        <AxTreeStatus spinner={!error}>
           {error ?? "Waiting for accessibility data…"}
-        </div>
+        </AxTreeStatus>
       ) : (
         <div
           className="flex flex-col gap-1 mt-2 py-2 max-h-[260px] overflow-y-auto [scrollbar-width:thin]"
@@ -69,6 +64,30 @@ export function AxTreeTool({
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function AxTreeStatus({
+  children,
+  spinner = false,
+}: {
+  children: ReactNode;
+  spinner?: boolean;
+}) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="mt-2 flex items-center justify-center gap-2 py-4 text-[12px] text-white/45"
+    >
+      {spinner ? (
+        <span
+          aria-hidden="true"
+          className="size-3.5 shrink-0 rounded-full border-2 border-white/20 border-t-white/60 animate-[grid-spin_0.8s_linear_infinite]"
+        />
+      ) : null}
+      <span>{children}</span>
     </div>
   );
 }

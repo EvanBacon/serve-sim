@@ -18,6 +18,40 @@ export interface WebKitDevtoolsResponse {
   error?: string;
 }
 
+type LocationLike = Pick<Location, "host" | "protocol">;
+
+export function proxyWebKitDevtoolsTargetForBrowser(
+  target: WebKitDevtoolsTarget,
+  location: LocationLike,
+): WebKitDevtoolsTarget {
+  let debuggerUrl: URL;
+  try {
+    debuggerUrl = new URL(target.webSocketDebuggerUrl);
+  } catch {
+    return target;
+  }
+
+  const wsPath = `${debuggerUrl.pathname}${debuggerUrl.search}`;
+  const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const wsParamName = location.protocol === "https:" ? "wss" : "ws";
+  const wsParamValue = `${location.host}${wsPath}`;
+  let devtoolsFrontendUrl = target.devtoolsFrontendUrl;
+
+  try {
+    const frontendUrl = new URL(target.devtoolsFrontendUrl, `${location.protocol}//${location.host}`);
+    frontendUrl.searchParams.delete("ws");
+    frontendUrl.searchParams.delete("wss");
+    frontendUrl.searchParams.set(wsParamName, wsParamValue);
+    devtoolsFrontendUrl = `${frontendUrl.pathname}${frontendUrl.search}${frontendUrl.hash}`;
+  } catch {}
+
+  return {
+    ...target,
+    webSocketDebuggerUrl: `${wsProtocol}//${location.host}${wsPath}`,
+    devtoolsFrontendUrl,
+  };
+}
+
 // Fire-and-forget highlight nudge — mirrors Safari's Develop menu hover. The
 // caller doesn't await so cursor latency stays at zero; failures are silent.
 export function postHighlightTarget(targetId: string, on: boolean) {

@@ -17,7 +17,7 @@ describe("GridCapacityBanner", () => {
       />,
     );
 
-    expect(html).toContain("1/3 iOS sims");
+    expect(html).toContain("1/3 sims");
     expect(html).not.toContain("1/3 devices");
   });
 });

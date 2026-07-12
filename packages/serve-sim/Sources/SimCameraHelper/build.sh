@@ -20,6 +20,7 @@ xcrun --sdk macosx clang \
     -framework CoreImage \
     -framework CoreText \
     -framework ImageIO \
+    -framework IOSurface \
     -framework Accelerate \
     -O2 \
     -o "$BIN" \

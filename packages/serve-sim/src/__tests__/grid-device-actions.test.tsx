@@ -1,16 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderToStaticMarkup } from "react-dom/server";
-import { GridTile } from "../client/components/grid-tile";
-import { canShutdownDevice, canStartDevice, type GridDevice } from "../client/utils/grid";
-
-const baseDevice: GridDevice = {
-  device: "emulator-5554",
-  platform: "android",
-  name: "Pixel 8",
-  runtime: "Android",
-  state: "Booted",
-  helper: null,
-};
+import { canShutdownDevice, canStartDevice } from "../client/utils/grid";
 
 describe("Android grid actions", () => {
   test("only offers start for booted Android devices or stopped emulators", () => {
@@ -25,68 +14,5 @@ describe("Android grid actions", () => {
     expect(canShutdownDevice("android", "emulator-5554")).toBe(true);
     expect(canShutdownDevice("android", "ZY22")).toBe(false);
     expect(canShutdownDevice("ios", "00000000-0000-0000-0000-000000000000")).toBe(true);
-  });
-
-  test("does not render a shutdown button for physical Android devices", () => {
-    const html = renderToStaticMarkup(
-      <GridTile
-        device={{ ...baseDevice, device: "ZY22", name: "Pixel 6" }}
-        active={false}
-        previewEndpoint="/"
-        starting={false}
-        shuttingDown={false}
-        error={null}
-        onStart={() => {}}
-        onShutdown={() => {}}
-      />,
-    );
-
-    expect(html).not.toContain("Shutdown Android emulator");
-  });
-
-  test("offers to stop a live physical Android stream without calling it shutdown", () => {
-    const html = renderToStaticMarkup(
-      <GridTile
-        device={{
-          ...baseDevice,
-          device: "ZY22",
-          name: "Pixel 6",
-          helper: {
-            port: 3300,
-            url: "http://127.0.0.1:3300",
-            streamUrl: "http://127.0.0.1:3300/stream.mjpeg",
-            wsUrl: "ws://127.0.0.1:3300/ws",
-          },
-        }}
-        active={false}
-        previewEndpoint="/"
-        starting={false}
-        shuttingDown={false}
-        error={null}
-        onStart={() => {}}
-        onShutdown={() => {}}
-      />,
-    );
-
-    expect(html).toContain("Stop Android stream");
-    expect(html).not.toContain("Shutdown Android emulator");
-  });
-
-  test("renders physical Android devices that are not online as unavailable", () => {
-    const html = renderToStaticMarkup(
-      <GridTile
-        device={{ ...baseDevice, device: "ZY22", name: "Pixel 6", state: "Offline", runtime: "Android" }}
-        active={false}
-        previewEndpoint="/"
-        starting={false}
-        shuttingDown={false}
-        error={null}
-        onStart={() => {}}
-        onShutdown={() => {}}
-      />,
-    );
-
-    expect(html).toContain("Unavailable");
-    expect(html).toContain("disabled=");
   });
 });

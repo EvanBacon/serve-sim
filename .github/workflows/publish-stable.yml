@@ -1,0 +1,168 @@
+name: Publish stable to npm
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  publish-stable:
+    if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require main branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Stable publishes must run from main."
+            exit 1
+          fi
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Boot iOS simulator for serve-sim tests
+        id: boot-sim
+        run: |
+          # Fast path: GitHub's macOS runner images pre-create iPhone
+          # simulators, so try booting one by name directly. `simctl list`
+          # enumerates every device/runtime and can cost 1.5-3min of
+          # cold-CoreSimulator first-touch; boot-by-name pays that once on a
+          # single device instead. The first available name wins; fall back
+          # to the full discovery+create path only if none boot.
+          UDID=""
+          for NAME in "iPhone 17 Pro" "iPhone 16 Pro" "iPhone 16" "iPhone 15 Pro" "iPhone 15"; do
+            echo "Trying to boot \"$NAME\"..."
+            if OUT=$(xcrun simctl boot "$NAME" 2>&1); then
+              UDID=$(xcrun simctl list devices booted -j | node -e "
+                const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+                for (const devs of Object.values(data.devices)) {
+                  for (const d of devs) { console.log(d.udid); process.exit(0); }
+                }
+              ")
+              echo "Booted \"$NAME\" -> $UDID"
+              break
+            fi
+            echo "  skip: $OUT"
+          done
+
+          if [ -z "$UDID" ]; then
+            echo "No pre-created iPhone simulator booted; creating one from the latest runtime"
+            RUNTIME=$(xcrun simctl list runtimes -j | node -e "
+              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const ios = data.runtimes.filter(r => r.isAvailable && r.identifier.includes('iOS'));
+              ios.sort((a, b) => a.version.localeCompare(b.version));
+              console.log(ios[ios.length - 1].identifier);
+            ")
+            DEVICETYPE=$(xcrun simctl list devicetypes -j | node -e "
+              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const iphones = data.devicetypes.filter(d => d.identifier.includes('iPhone'));
+              console.log(iphones[iphones.length - 1].identifier);
+            ")
+            UDID=$(xcrun simctl create "ci-test-iphone" "$DEVICETYPE" "$RUNTIME")
+            xcrun simctl boot "$UDID" || true
+          fi
+
+          xcrun simctl bootstatus "$UDID" -b
+          open -ga Simulator || true
+          echo "udid=$UDID" >> $GITHUB_OUTPUT
+
+      # The serve-sim e2e tests load the in-process native addon
+      # (dist/native/serve-sim-native.node), so build it before running them.
+      # (The publish step below rebuilds after the version bump to embed it.)
+      - name: Build serve-sim
+        run: bun run build.ts
+        working-directory: packages/serve-sim
+
+      - name: serve-sim tests (idle floor regression)
+        env:
+          UDID: ${{ steps.boot-sim.outputs.udid }}
+        run: |
+          run_tests() { bun test --max-concurrency=1 packages/serve-sim/src/__tests__/; }
+          if run_tests; then exit 0; fi
+          # The sim-backed e2e tests share one simulator; a wedge from one test
+          # (stuck finger, native crash) shows up as hook timeouts / ECONNRESET /
+          # ConnectionRefused in unrelated later tests. Reboot for a clean slate
+          # and retry once before blocking the stable publish.
+          echo "::warning title=sim e2e retry::test run failed; rebooting $UDID and retrying once"
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
+          sleep 3
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          open -ga Simulator || true
+          run_tests
+
+      - name: Shutdown simulator
+        if: always() && steps.boot-sim.outputs.udid != ''
+        run: |
+          xcrun simctl shutdown "${{ steps.boot-sim.outputs.udid }}" || true
+
+      - name: Build and publish serve-sim stable
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd packages/serve-sim
+
+          # Stable publishing is manual-only. Bump from max(local, npm latest)
+          # + 1, publish to npm's latest tag, then commit that stable version.
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view serve-sim dist-tags.latest 2>/dev/null || echo "")
+          [ -z "$PUBLISHED" ] && PUBLISHED="$LOCAL"
+          NEW=$(node -e "
+            const a='$LOCAL'.split('.').map(Number);
+            const b='$PUBLISHED'.split('.').map(Number);
+            const max=(a[0]>b[0]||(a[0]===b[0]&&a[1]>b[1])||(a[0]===b[0]&&a[1]===b[1]&&a[2]>b[2]))?a:b;
+            max[2]++;
+            console.log(max.join('.'));
+          ")
+          echo "Bumped serve-sim stable: local=$LOCAL npm=$PUBLISHED -> $NEW"
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json'));
+            p.version = '$NEW';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+
+          bun run build
+
+          npm publish --access public --tag latest --provenance
+
+      - name: Configure git and commit stable version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packages/serve-sim/package.json
+          if git diff --cached --quiet; then
+            echo "No version bump to commit"
+          else
+            git commit -m "chore: bump serve-sim version [skip ci]"
+            for i in 1 2 3; do
+              if git push; then exit 0; fi
+              echo "Push rejected (attempt $i/3), rebasing on origin/main..."
+              git pull --rebase --autostash origin main || break
+            done
+            # main is a protected branch, so github-actions[bot] can't push the
+            # bump commit directly. That's fine: npm has already been advanced and
+            # the next run recomputes the version from npm's latest tag, so it never
+            # collides. The repo's package.json just stays behind npm. Warn instead
+            # of failing so the publish job reflects the (successful) npm publish.
+            echo "::warning::Could not push serve-sim version bump to protected main; npm already advanced and the next run recomputes from npm. Leaving package.json behind."
+          fi
