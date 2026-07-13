@@ -62,10 +62,13 @@ export function useSimulatorResize({
   const tweenCancelRef = useRef<(() => void) | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleRef = useRef<HTMLDivElement | null>(null);
+  const initialFitRef = useRef(initialFit);
+  const initialFitConsumedRef = useRef(false);
 
   const readRestoredWidth = useCallback(() => {
     if (typeof window === "undefined") return defaultWidth;
-    if (initialFit) {
+    if (initialFitRef.current && !initialFitConsumedRef.current) {
+      initialFitConsumedRef.current = true;
       return getSimulatorFrameMaxWidth(defaultWidth, viewportWidth, viewportHeight, aspectRatio);
     }
     // A non-finite scale (storage threw / empty / NaN) falls back to defaultWidth
@@ -82,7 +85,7 @@ export function useSimulatorResize({
       aspectRatio,
       scale,
     );
-  }, [aspectRatio, defaultWidth, initialFit, viewportHeight, viewportWidth]);
+  }, [aspectRatio, defaultWidth, viewportHeight, viewportWidth]);
   const initialWidth = useMemo(() => readRestoredWidth(), [readRestoredWidth]);
   const [frameWidth, setFrameWidth] = useState<number | null>(initialWidth);
   const lastWidthRef = useRef<number | null>(initialWidth);

@@ -2,6 +2,7 @@ export const PREVIEW_PANES = ["devices", "tools", "devtools"] as const;
 
 export type PreviewPane = (typeof PREVIEW_PANES)[number];
 export type SimulatorTheme = "light" | "dark";
+export type PreviewRightPane = "tools" | "devtools";
 
 /** UI choices applied once when a preview page first loads. */
 export type PreviewInitialState = {
@@ -38,4 +39,13 @@ export function parseSimulatorTheme(value: string): SimulatorTheme {
   const theme = value.trim().toLowerCase();
   if (theme === "light" || theme === "dark") return theme;
   throw new Error("Expected simulator theme: light or dark.");
+}
+
+/** Select the right-side pane to open when a startup state names both. */
+export function selectInitialRightPane(
+  panes: readonly PreviewPane[] | undefined,
+): PreviewRightPane | null {
+  if (panes?.includes("devtools")) return "devtools";
+  if (panes?.includes("tools")) return "tools";
+  return null;
 }

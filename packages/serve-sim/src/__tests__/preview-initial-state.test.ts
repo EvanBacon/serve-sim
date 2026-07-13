@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { parsePreviewPanes, parseSimulatorTheme } from "../preview-initial-state";
+import {
+  parsePreviewPanes,
+  parseSimulatorTheme,
+  selectInitialRightPane,
+} from "../preview-initial-state";
 
 describe("parsePreviewPanes", () => {
   test("normalizes, de-duplicates, and preserves supported panes", () => {
@@ -24,5 +28,11 @@ describe("parseSimulatorTheme", () => {
 
   test("rejects unsupported themes", () => {
     expect(() => parseSimulatorTheme("system")).toThrow("Expected simulator theme");
+  });
+});
+
+describe("selectInitialRightPane", () => {
+  test("gives DevTools precedence when both right-side panes are requested", () => {
+    expect(selectInitialRightPane(["tools", "devtools"])).toBe("devtools");
   });
 });
