@@ -12,6 +12,7 @@ import type { Socket } from "net";
 // importing the dependency keeps the proxy working regardless of runtime.
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
+import { readCameraStatus } from "./camera-status";
 import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
 import {
   eventLogEventForCommand,
@@ -688,6 +689,45 @@ function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstre
   drainFrames();
 }
 
+/** Read camera-helper state without opening the simulator capture session. */
+async function handleCameraStatus(req: SimReq, res: SimRes, device: string): Promise<void> {
+  if (!isSimulatorUdid(device)) {
+    res.writeHead(400, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify({ error: "invalid_device" }));
+    return;
+  }
+  if (req.method !== "GET") {
+    res.writeHead(405, {
+      Allow: "GET",
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify({ error: "method_not_allowed" }));
+    return;
+  }
+  try {
+    const status = await readCameraStatus(device);
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify(status));
+  } catch (error) {
+    res.writeHead(500, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    res.end(JSON.stringify({
+      udid: device,
+      alive: false,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  }
+}
+
 /**
  * Serve a helper endpoint from an in-process DeviceSession (NativeCapture +
  * NativeHid). Returns false when no session can serve it (device not booted, or
@@ -695,13 +735,18 @@ function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstre
  */
 function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, upstreamPath: string): boolean {
   if (!device) return false;
+  const endpoint = upstreamPath.split("?")[0];
+  if (endpoint === "/camera/status") {
+    void handleCameraStatus(req, res, device);
+    return true;
+  }
   let session;
   try {
     session = getDeviceSession(device);
   } catch {
     return false; // not booted / capture unavailable → 404
   }
-  switch (upstreamPath.split("?")[0]) {
+  switch (endpoint) {
     case "/stream.mjpeg": session.handleMjpeg(req, res); return true;
     case "/stream.avcc": session.handleAvcc(req, res); return true;
     case "/config": session.handleConfig(req, res); return true;
@@ -828,6 +873,7 @@ export function previewConfigForState(
   eventLogEndpoint: string;
   eventLogEventsEndpoint: string;
   axEndpoint: string;
+  cameraStatusEndpoint: string;
   devtoolsEndpoint: string;
   serveSimBin: string;
   gridApiEndpoint: string;
@@ -847,6 +893,7 @@ export function previewConfigForState(
     eventLogEndpoint: endpoint(base, "/api/event-log", state.device),
     eventLogEventsEndpoint: endpoint(base, "/api/event-log/events", state.device),
     axEndpoint: endpoint(base, "/ax", state.device),
+    cameraStatusEndpoint: `${base === "/" ? "" : base}/helper/${encodeURIComponent(state.device)}/camera/status`,
     devtoolsEndpoint: endpoint(base, "/devtools", state.device),
     serveSimBin,
     gridApiEndpoint: gridApiBase,
