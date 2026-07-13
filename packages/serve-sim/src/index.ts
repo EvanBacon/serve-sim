@@ -11,11 +11,16 @@ import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, resolveDevice } from "./device";
 import { permissions } from "./permissions";
-import { uiSettings } from "./ui-settings";
+import { setUiOption, uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
-import { parsePreviewPanes, type PreviewInitialState } from "./preview-initial-state";
+import {
+  parsePreviewPanes,
+  parseSimulatorTheme,
+  type PreviewInitialState,
+  type SimulatorTheme,
+} from "./preview-initial-state";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -1672,6 +1677,7 @@ async function serve(
   host: string,
   codec: string | undefined,
   initialState: PreviewInitialState | undefined,
+  theme: SimulatorTheme | undefined,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -1680,6 +1686,9 @@ async function serve(
     console.log("Starting simulator stream...");
   }
   for (const udid of targetDevices) await ensureBooted(udid);
+  if (theme) {
+    for (const udid of targetDevices) await setUiOption(udid, "appearance", theme);
+  }
   const targetDevice = targetDevices[0];
 
   const { simMiddleware } = await import("./middleware");
@@ -1793,6 +1802,17 @@ program
   )
   .option("--fit", "Initially size the simulator to fit the preview viewport")
   .option(
+    "--theme <theme>",
+    "Set simulator appearance before opening the preview: light or dark",
+    (value) => {
+      try {
+        return parseSimulatorTheme(value);
+      } catch (error) {
+        throw new InvalidArgumentError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  )
+  .option(
     "--codec <codec>",
     "Stream codec for the preview UI: 'auto' (H.264 when the browser can decode " +
       "it) or 'mjpeg' (force software JPEG — e.g. on VMs without H.264 encode).",
@@ -1815,6 +1835,7 @@ Examples:
   serve-sim -p 8080                      Preview on a custom port
   serve-sim --codec mjpeg                Force MJPEG (e.g. on VMs without H.264 encode)
   serve-sim --panes devices,tools --fit  Open panes and fit the simulator to the viewport
+  serve-sim --theme dark                 Start the simulator in Dark Mode
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --detach                     Start streaming in background (daemon)
@@ -1842,7 +1863,15 @@ Examples:
           ...(opts.panes !== undefined ? { panes: opts.panes } : {}),
           ...(opts.fit ? { fit: true } : {}),
         } : undefined;
-      await serve(startPort ?? 3200, devices, startPort !== undefined, opts.host, opts.codec, initialState);
+      await serve(
+        startPort ?? 3200,
+        devices,
+        startPort !== undefined,
+        opts.host,
+        opts.codec,
+        initialState,
+        opts.theme,
+      );
     }
   });
 

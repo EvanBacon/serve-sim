@@ -1,6 +1,7 @@
 export const PREVIEW_PANES = ["devices", "tools", "devtools"] as const;
 
 export type PreviewPane = (typeof PREVIEW_PANES)[number];
+export type SimulatorTheme = "light" | "dark";
 
 /** UI choices applied once when a preview page first loads. */
 export type PreviewInitialState = {
@@ -30,4 +31,11 @@ export function parsePreviewPanes(value: string): PreviewPane[] {
   }
 
   return [...new Set(panes)] as PreviewPane[];
+}
+
+/** Parse the simulator appearance accepted by `serve-sim --theme`. */
+export function parseSimulatorTheme(value: string): SimulatorTheme {
+  const theme = value.trim().toLowerCase();
+  if (theme === "light" || theme === "dark") return theme;
+  throw new Error("Expected simulator theme: light or dark.");
 }
