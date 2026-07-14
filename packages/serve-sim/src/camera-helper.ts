@@ -3,8 +3,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { STATE_DIR } from "./state";
 
-const CAMERA_STATE_DIR = join(STATE_DIR, "simcam");
-const MAX_HELPER_REPLY_BYTES = 64 * 1024;
+export const CAMERA_STATE_DIR = join(STATE_DIR, "simcam");
 const HELPER_TIMEOUT_MS = 3000;
 
 interface InjectedBundlesState {
@@ -13,6 +12,7 @@ interface InjectedBundlesState {
 }
 
 export interface CameraHelperReply {
+  [key: string]: unknown;
   ok?: boolean;
   source?: string;
   arg?: string;
@@ -63,14 +63,7 @@ function parseCameraHelperReply(value: unknown): CameraHelperReply {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("invalid camera helper reply");
   }
-  const reply = value as Record<string, unknown>;
-  return {
-    ...(typeof reply.ok === "boolean" ? { ok: reply.ok } : {}),
-    ...(typeof reply.source === "string" ? { source: reply.source } : {}),
-    ...(typeof reply.arg === "string" ? { arg: reply.arg } : {}),
-    ...(typeof reply.mirror === "string" ? { mirror: reply.mirror } : {}),
-    ...(typeof reply.error === "string" ? { error: reply.error } : {}),
-  };
+  return value as CameraHelperReply;
 }
 
 export async function sendCameraHelperCommand(
@@ -80,7 +73,7 @@ export async function sendCameraHelperCommand(
   const socketPath = cameraHelperSocketFile(udid);
   if (!existsSync(socketPath)) throw new Error("camera helper socket not found");
   const net = await import("net");
-  return await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     socket.setEncoding("utf8");
     let buffer = "";
@@ -97,11 +90,6 @@ export async function sendCameraHelperCommand(
 
     socket.on("data", (chunk) => {
       buffer += chunk;
-      if (Buffer.byteLength(buffer) > MAX_HELPER_REPLY_BYTES) {
-        socket.destroy();
-        settle(new Error("camera helper reply is too large"));
-        return;
-      }
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       try {
@@ -112,10 +100,10 @@ export async function sendCameraHelperCommand(
       socket.end();
     });
     socket.on("error", settle);
-    socket.on("close", () => settle(new Error("camera helper socket closed")));
+    socket.on("close", () => settle(new Error("socket closed")));
     timeout = setTimeout(() => {
       socket.destroy();
-      settle(new Error("camera helper timed out"));
+      settle(new Error("helper timeout"));
     }, HELPER_TIMEOUT_MS);
     socket.write(JSON.stringify(command) + "\n");
   });

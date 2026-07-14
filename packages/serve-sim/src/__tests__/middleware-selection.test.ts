@@ -74,6 +74,12 @@ describe("previewConfigForState", () => {
       previewConfigForState(states[0]!, "/preview", "/bin/serve-sim", "token-xyz", "mjpeg").codec,
     ).toBe("mjpeg");
   });
+
+  test("builds the camera status endpoint correctly at the root mount", () => {
+    expect(
+      previewConfigForState(states[0]!, "", "/bin/serve-sim", "token-xyz").cameraStatusEndpoint,
+    ).toBe("/helper/DEVICE-A/camera/status");
+  });
 });
 
 describe("rewriteStateForRequestHost", () => {

@@ -16,6 +16,7 @@ import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
 import {
+  CAMERA_STATE_DIR as SIMCAM_STATE_DIR,
   cameraHelperBundlesFile as helperBundlesFile,
   cameraHelperPidFile as helperPidFile,
   cameraHelperSocketFile as helperSocketFile,
@@ -23,7 +24,7 @@ import {
   readCameraStatus,
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
-} from "./camera-status";
+} from "./camera-helper";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -1048,8 +1049,6 @@ function buildCameraHelper(): string {
   return out;
 }
 
-const SIMCAM_STATE_DIR = join(STATE_DIR, "simcam");
-
 function shmNameForUdid(udid: string): string {
   // POSIX shm names on macOS have a 31-char limit. Hash the UDID short.
   const short = createHash("sha1").update(udid).digest("hex").slice(0, 8);
@@ -1440,10 +1439,8 @@ Examples:
     return;
   }
 
-  // `serve-sim camera status [-d udid]` — JSON-only probe used by the
-  // preview UI (and humans) to see whether the helper is still alive after
-  // a page reload, so we don't have to "Inject + relaunch" the app just to
-  // re-establish UI state.
+  // `serve-sim camera status [-d udid]` — JSON probe for scripts and humans.
+  // The preview UI reads the same shared implementation through middleware.
   if (filtered[0] === "status") {
     const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
     if (!udid) {

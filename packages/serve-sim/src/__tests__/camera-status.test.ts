@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "crypto";
 import { mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { createServer as createHttpServer } from "http";
@@ -10,7 +10,7 @@ import {
   cameraHelperSocketFile,
   isCameraHelperAlive,
   readCameraStatus,
-} from "../camera-status";
+} from "../camera-helper";
 import { simMiddleware } from "../middleware";
 
 const udid = randomUUID().toUpperCase();
@@ -19,6 +19,10 @@ const stateFiles = [
   cameraHelperBundlesFile(udid),
   cameraHelperSocketFile(udid),
 ];
+
+beforeAll(() => {
+  mkdirSync(dirname(cameraHelperPidFile(udid)), { recursive: true });
+});
 
 afterAll(() => {
   for (const path of stateFiles) {
@@ -45,14 +49,13 @@ async function withMiddlewareServer<T>(fn: (origin: string) => Promise<T>): Prom
 
 describe("camera status", () => {
   test("treats a malformed pid file as a stopped helper", async () => {
-    mkdirSync(dirname(cameraHelperPidFile(udid)), { recursive: true });
     writeFileSync(cameraHelperPidFile(udid), "not-a-pid");
 
     expect(isCameraHelperAlive(udid)).toBe(false);
     expect(await readCameraStatus(udid)).toEqual({ udid, alive: false });
   });
 
-  test("decodes split UTF-8 replies and validates persisted bundle IDs", async () => {
+  test("decodes split UTF-8, validates bundles, and keeps helper extensions", async () => {
     const socketPath = cameraHelperSocketFile(udid);
     try { unlinkSync(socketPath); } catch {}
     const reply = Buffer.from(JSON.stringify({
@@ -63,6 +66,7 @@ describe("camera status", () => {
       udid: "wrong-device",
       helperPid: 0,
       bundleIds: ["wrong.bundle"],
+      frameCount: 12,
     }) + "\n");
     const split = reply.indexOf(Buffer.from("ż")) + 1;
     const server = createNetServer((socket) => {
@@ -90,6 +94,7 @@ describe("camera status", () => {
         ok: true,
         source: "video",
         arg: "/tmp/zażółć.mov",
+        frameCount: 12,
       });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));

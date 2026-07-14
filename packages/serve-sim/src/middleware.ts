@@ -12,7 +12,7 @@ import type { Socket } from "net";
 // importing the dependency keeps the proxy working regardless of runtime.
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
-import { readCameraStatus } from "./camera-status";
+import { readCameraStatus } from "./camera-helper";
 import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
 import {
   eventLogEventForCommand,
@@ -729,9 +729,10 @@ async function handleCameraStatus(req: SimReq, res: SimRes, device: string): Pro
 }
 
 /**
- * Serve a helper endpoint from an in-process DeviceSession (NativeCapture +
- * NativeHid). Returns false when no session can serve it (device not booted, or
- * an endpoint this path doesn't own) so the caller can respond 404.
+ * Serve a device-scoped helper endpoint in-process. Camera status reads the
+ * camera helper's persisted state; stream and input routes lazily create a
+ * DeviceSession. Returns false for paths this function doesn't own or when a
+ * session-backed route cannot open the requested simulator.
  */
 function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, upstreamPath: string): boolean {
   if (!device) return false;

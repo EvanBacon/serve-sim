@@ -22,7 +22,7 @@ describe("requestCameraStatus", () => {
   test("reads structured status directly from the configured endpoint", async () => {
     const request = async (input: string, init: RequestInit) => {
       expect(input).toBe("/helper/DEVICE-A/camera/status");
-      expect(init?.cache).toBe("no-store");
+      expect(init.cache).toBe("no-store");
       return new Response(JSON.stringify({ alive: true, helperPid: 42 }), {
         headers: { "Content-Type": "application/json" },
       });
