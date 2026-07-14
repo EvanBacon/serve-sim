@@ -13,6 +13,36 @@ export type CameraPillState = "ready" | "active" | "disconnected";
 
 export const CAMERA_POLL_INTERVAL_MS = 3000;
 
+interface CameraStatusResponse {
+  alive?: boolean;
+  source?: string;
+  arg?: string;
+  mirror?: string;
+  helperPid?: number;
+  bundleIds?: string[];
+}
+
+type CameraStatusRequest = (
+  endpoint: string,
+  init: RequestInit,
+) => Promise<Pick<Response, "ok" | "json">>;
+
+export async function requestCameraStatus(
+  endpoint: string,
+  request: CameraStatusRequest = fetch,
+): Promise<CameraStatusResponse | null> {
+  try {
+    const response = await request(endpoint, { cache: "no-store" });
+    if (!response.ok) return null;
+    const value = await response.json() as unknown;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as CameraStatusResponse
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export const CAMERA_LARGE_VIDEO_BYTES = 200 * 1024 * 1024;
 export const CAMERA_LARGE_VIDEO_WARNING =
   "Large video (>200 MB) — may stutter on shared memory";
@@ -239,21 +269,9 @@ export function CameraTool({
   }, []);
 
   const fetchCameraStatus = useCallback(async () => {
-    const res = await execOnHost(`${cliPrefix} camera status -d ${udid}`);
-    if (res.exitCode !== 0) return null;
-    try {
-      return JSON.parse(res.stdout.trim()) as {
-        alive?: boolean;
-        source?: string;
-        arg?: string;
-        mirror?: string;
-        helperPid?: number;
-        bundleIds?: string[];
-      };
-    } catch {
-      return null;
-    }
-  }, [cliPrefix, udid]);
+    const endpoint = window.__SIM_PREVIEW__?.cameraStatusEndpoint;
+    return endpoint ? requestCameraStatus(endpoint) : null;
+  }, []);
 
   const refreshWebcamsRef = useRef<() => Promise<void>>(async () => {});
   const bundleIdRef = useRef<string | null>(bundleId);

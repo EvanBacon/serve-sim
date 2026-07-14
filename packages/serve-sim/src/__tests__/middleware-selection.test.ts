@@ -51,6 +51,7 @@ describe("previewConfigForState", () => {
       eventLogEndpoint: "/preview/api/event-log?device=DEVICE-B",
       eventLogEventsEndpoint: "/preview/api/event-log/events?device=DEVICE-B",
       axEndpoint: "/preview/ax?device=DEVICE-B",
+      cameraStatusEndpoint: "/preview/helper/DEVICE-B/camera/status",
       devtoolsEndpoint: "/preview/devtools?device=DEVICE-B",
       serveSimBin: "/bin/serve-sim",
       gridApiEndpoint: "/preview/grid/api",
@@ -86,6 +87,12 @@ describe("previewConfigForState", () => {
         { panes: ["devices", "tools"], fit: true },
       ).initialState,
     ).toEqual({ panes: ["devices", "tools"], fit: true });
+  });
+
+  test("builds the camera status endpoint correctly at the root mount", () => {
+    expect(
+      previewConfigForState(states[0]!, "", "/bin/serve-sim", "token-xyz").cameraStatusEndpoint,
+    ).toBe("/helper/DEVICE-A/camera/status");
   });
 });
 

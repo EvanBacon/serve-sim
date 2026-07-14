@@ -14,8 +14,34 @@ import {
   isOversizedCameraVideo,
   nextCameraPillState,
   parseWebcamListOutput,
+  requestCameraStatus,
   selectCameraPrimaryKind,
 } from "../client/components/camera-tool";
+
+describe("requestCameraStatus", () => {
+  test("reads structured status directly from the configured endpoint", async () => {
+    const request = async (input: string, init: RequestInit) => {
+      expect(input).toBe("/helper/DEVICE-A/camera/status");
+      expect(init.cache).toBe("no-store");
+      return new Response(JSON.stringify({ alive: true, helperPid: 42 }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    expect(await requestCameraStatus("/helper/DEVICE-A/camera/status", request)).toEqual({
+      alive: true,
+      helperPid: 42,
+    });
+  });
+
+  test("returns null for failed or malformed responses", async () => {
+    const failedRequest = async () => new Response("no", { status: 503 });
+    const malformedRequest = async () => Response.json(["not", "an", "object"]);
+
+    expect(await requestCameraStatus("/status", failedRequest)).toBeNull();
+    expect(await requestCameraStatus("/status", malformedRequest)).toBeNull();
+  });
+});
 
 describe("nextCameraPillState", () => {
   test("ready stays ready on dead poll", () => {

@@ -21,6 +21,16 @@ import {
   type PreviewInitialState,
   type SimulatorTheme,
 } from "./preview-initial-state";
+import {
+  CAMERA_STATE_DIR as SIMCAM_STATE_DIR,
+  cameraHelperBundlesFile as helperBundlesFile,
+  cameraHelperPidFile as helperPidFile,
+  cameraHelperSocketFile as helperSocketFile,
+  isCameraHelperAlive as isHelperAlive,
+  readCameraStatus,
+  readInjectedCameraBundles as readInjectedBundles,
+  sendCameraHelperCommand as sendHelperCommand,
+} from "./camera-helper";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -1045,87 +1055,16 @@ function buildCameraHelper(): string {
   return out;
 }
 
-const SIMCAM_STATE_DIR = join(STATE_DIR, "simcam");
-
 function shmNameForUdid(udid: string): string {
   // POSIX shm names on macOS have a 31-char limit. Hash the UDID short.
   const short = createHash("sha1").update(udid).digest("hex").slice(0, 8);
   return `/serve-sim-cam-${short}`;
 }
 
-function helperPidFile(udid: string): string {
-  return join(SIMCAM_STATE_DIR, `${udid}.pid`);
-}
-
-function helperBundlesFile(udid: string): string {
-  return join(SIMCAM_STATE_DIR, `${udid}.bundles.json`);
-}
-
-interface InjectedBundlesState {
-  helperPid: number;
-  bundleIds: string[];
-}
-
-function helperSocketFile(udid: string): string {
-  // POSIX sun_path is 104 chars on macOS — keep this short.
-  const short = createHash("sha1").update(udid).digest("hex").slice(0, 12);
-  return `/tmp/serve-sim-cam-${short}.sock`;
-}
-
-interface HelperReply { ok?: boolean; source?: string; arg?: string; error?: string }
-
-async function sendHelperCommand(udid: string, cmd: object): Promise<HelperReply> {
-  const sockPath = helperSocketFile(udid);
-  if (!existsSync(sockPath)) throw new Error("camera helper socket not found");
-  const net = await import("net");
-  return await new Promise((resolve, reject) => {
-    const c = net.createConnection(sockPath);
-    let buf = "";
-    let settled = false;
-    c.on("data", (d) => {
-      buf += d.toString();
-      const nl = buf.indexOf("\n");
-      if (nl >= 0 && !settled) {
-        settled = true;
-        try { resolve(JSON.parse(buf.slice(0, nl))); } catch (e) { reject(e); }
-        c.end();
-      }
-    });
-    c.on("error", (e) => { if (!settled) { settled = true; reject(e); } });
-    c.on("close", () => { if (!settled) { settled = true; reject(new Error("socket closed")); } });
-    c.write(JSON.stringify(cmd) + "\n");
-    setTimeout(() => { if (!settled) { settled = true; c.destroy(); reject(new Error("helper timeout")); } }, 3000);
-  });
-}
-
-function isHelperAlive(udid: string): boolean {
-  const pf = helperPidFile(udid);
-  if (!existsSync(pf)) return false;
-  const pid = Number(readFileSync(pf, "utf-8").trim());
-  return Number.isFinite(pid) && isProcessAlive(pid) && existsSync(helperSocketFile(udid));
-}
-
-function readInjectedBundles(udid: string): string[] {
-  const path = helperBundlesFile(udid);
-  if (!existsSync(path)) return [];
-  let state: InjectedBundlesState;
-  try {
-    state = JSON.parse(readFileSync(path, "utf-8")) as InjectedBundlesState;
-  } catch {
-    return [];
-  }
-  let currentHelperPid: number | null = null;
-  try {
-    currentHelperPid = Number(readFileSync(helperPidFile(udid), "utf-8").trim()) || null;
-  } catch {}
-  if (currentHelperPid == null || state.helperPid !== currentHelperPid) return [];
-  return Array.isArray(state.bundleIds) ? state.bundleIds : [];
-}
-
 function recordInjectedBundle(udid: string, bundleId: string, helperPid: number): void {
   const existing = readInjectedBundles(udid);
   const bundleIds = existing.includes(bundleId) ? existing : [...existing, bundleId];
-  const next: InjectedBundlesState = { helperPid, bundleIds };
+  const next = { helperPid, bundleIds };
   if (!existsSync(SIMCAM_STATE_DIR)) mkdirSync(SIMCAM_STATE_DIR, { recursive: true });
   writeFileSync(helperBundlesFile(udid), JSON.stringify(next));
 }
@@ -1506,32 +1445,15 @@ Examples:
     return;
   }
 
-  // `serve-sim camera status [-d udid]` — JSON-only probe used by the
-  // preview UI (and humans) to see whether the helper is still alive after
-  // a page reload, so we don't have to "Inject + relaunch" the app just to
-  // re-establish UI state.
+  // `serve-sim camera status [-d udid]` — JSON probe for scripts and humans.
+  // The preview UI reads the same shared implementation through middleware.
   if (filtered[0] === "status") {
     const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
     if (!udid) {
       console.log(JSON.stringify({ alive: false, error: "no booted simulator" }));
       return;
     }
-    if (!isHelperAlive(udid)) {
-      console.log(JSON.stringify({ udid, alive: false }));
-      return;
-    }
-    let helperPid: number | null = null;
-    try { helperPid = Number(readFileSync(helperPidFile(udid), "utf-8").trim()) || null; } catch {}
-    const bundleIds = readInjectedBundles(udid);
-    try {
-      const reply = await sendHelperCommand(udid, { action: "status" });
-      console.log(JSON.stringify({ udid, alive: true, helperPid, bundleIds, ...reply }));
-    } catch (e: any) {
-      // pid file + socket exist but the helper didn't reply — surface
-      // alive:true so the UI can still skip "Inject + relaunch", and
-      // include the error for diagnosis.
-      console.log(JSON.stringify({ udid, alive: true, helperPid, bundleIds, error: e?.message ?? String(e) }));
-    }
+    console.log(JSON.stringify(await readCameraStatus(udid)));
     return;
   }
 

@@ -9,6 +9,7 @@ declare global {
       device: string;
       basePath: string;
       axEndpoint?: string;
+      cameraStatusEndpoint?: string;
       appStateEndpoint?: string;
       eventLogEndpoint?: string;
       eventLogEventsEndpoint?: string;
