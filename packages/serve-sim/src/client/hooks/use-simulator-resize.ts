@@ -65,10 +65,16 @@ export function useSimulatorResize({
   const initialFitRef = useRef(initialFit);
   const initialFitConsumedRef = useRef(false);
 
+  // Mark the startup override consumed only after the initial render commits.
+  // Mutating this ref while calculating initial state would make an abandoned
+  // concurrent render suppress the fit on the first visible render.
+  useEffect(() => {
+    initialFitConsumedRef.current = true;
+  }, []);
+
   const readRestoredWidth = useCallback(() => {
     if (typeof window === "undefined") return defaultWidth;
     if (initialFitRef.current && !initialFitConsumedRef.current) {
-      initialFitConsumedRef.current = true;
       return getSimulatorFrameMaxWidth(defaultWidth, viewportWidth, viewportHeight, aspectRatio);
     }
     // A non-finite scale (storage threw / empty / NaN) falls back to defaultWidth
