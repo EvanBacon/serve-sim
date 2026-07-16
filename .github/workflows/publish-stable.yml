@@ -29,6 +29,10 @@ jobs:
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
+        with:
+          # Pin via .bun-version: resolving "latest" hits GitHub's
+          # git/refs/tags API, which 503s during GitHub incidents.
+          bun-version-file: .bun-version
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

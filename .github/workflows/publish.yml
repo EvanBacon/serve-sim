@@ -49,6 +49,8 @@ jobs:
       - name: Setup bun
         if: steps.changes.outputs.sim == 'true'
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
 
       - name: Setup Node.js
         if: steps.changes.outputs.sim == 'true'
