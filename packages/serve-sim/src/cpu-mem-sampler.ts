@@ -115,6 +115,7 @@ export interface SampleDeps {
   frontmostApp?: (udid: string) => Promise<FrontmostApp | null>;
 }
 
+/** Run a host command with a bounded timeout and output buffer, resolving its stdout. */
 const runCommand = (file: string, args: string[]): Promise<string> =>
   execFileAsync(file, args, { timeout: 3000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout);
 
@@ -203,6 +204,7 @@ export class MetricsSampler {
   // Previous reading, to turn cumulative CPU time into a per-interval %.
   private prev: { t: number; bundleId: string | null; cpuSeconds: number } | null = null;
 
+  /** Build a sampler for one udid, resolving the interval, clock, and host core count. */
   constructor(opts: MetricsSamplerOptions) {
     this.intervalMs = opts.intervalMs ?? 1000;
     this.sample = opts.sample ?? sampleUserApp;
@@ -215,6 +217,7 @@ export class MetricsSampler {
     };
   }
 
+  /** Number of active subscribers. */
   get listenerCount(): number {
     return this.listeners.size;
   }
