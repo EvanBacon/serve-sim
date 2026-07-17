@@ -265,11 +265,19 @@ export class MetricsSampler {
   start(): void {
     if (this.timer) return;
     this.startedAt ??= this.now();
+    // Track this loop's own timer identity: a stop()+start() during an in-flight tick would make
+    // this.timer truthy again, so a bare `if (this.timer)` check would schedule a second, overlapping
+    // loop. Reschedule only while this.timer still points at the timer this loop last set.
+    let currentTimer: ReturnType<typeof setTimeout>;
     const loop = async (): Promise<void> => {
       await this.tickOnce().catch(() => {});
-      if (this.timer) this.timer = setTimeout(loop, this.intervalMs);
+      if (this.timer === currentTimer) {
+        currentTimer = setTimeout(loop, this.intervalMs);
+        this.timer = currentTimer;
+      }
     };
-    this.timer = setTimeout(loop, this.intervalMs);
+    currentTimer = setTimeout(loop, this.intervalMs);
+    this.timer = currentTimer;
   }
 
   /** Stop the poll loop. */

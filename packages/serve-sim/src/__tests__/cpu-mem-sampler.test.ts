@@ -302,6 +302,36 @@ describe("MetricsSampler", () => {
     await sampler.tickOnce();
     expect(received).toHaveLength(1);
   });
+
+  it("does not spawn overlapping poll loops on a stop/start during a tick", async () => {
+    const intervalMs = 30;
+    let ticks = 0;
+    let releaseFirstTick!: () => void;
+    const firstTickGate = new Promise<void>((resolve) => (releaseFirstTick = resolve));
+    const sample = async () => {
+      ticks++;
+      if (ticks === 1) await firstTickGate; // hold the first tick open across the stop/start
+      return null;
+    };
+    const sampler = new MetricsSampler({ udid: UDID, sample, intervalMs, hostCores: 8 });
+
+    sampler.start();
+    for (let waited = 0; ticks < 1 && waited < 500; waited += 5) {
+      await new Promise((r) => setTimeout(r, 5)); // wait until the first tick is in flight
+    }
+    expect(ticks).toBe(1);
+
+    // Restart while the tick is still awaiting; the superseded loop must not reschedule.
+    sampler.stop();
+    sampler.start();
+    releaseFirstTick();
+    await new Promise((r) => setTimeout(r, 5)); // flush the old loop's continuation
+    sampler.stop();
+
+    const ticksAtStop = ticks;
+    await new Promise((r) => setTimeout(r, intervalMs * 3)); // an orphaned loop would fire here
+    expect(ticks).toBe(ticksAtStop);
+  });
 });
 
 describe("createMetricsSamplerCache", () => {
