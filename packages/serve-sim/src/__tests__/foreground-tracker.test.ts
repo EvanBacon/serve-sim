@@ -63,6 +63,10 @@ describe("isUserFacingBundle", () => {
     expect(isUserFacingBundle("dev.expo.MyApp")).toBe(true);
     expect(isUserFacingBundle("com.apple.WidgetRenderer")).toBe(false);
     expect(isUserFacingBundle("dev.expo.MyApp.extension")).toBe(false);
+    // Generic names only match as whole components, so real apps that merely contain them stay in.
+    expect(isUserFacingBundle("com.example.CustomerService")).toBe(true);
+    expect(isUserFacingBundle("com.acme.InCallUITest")).toBe(true);
+    expect(isUserFacingBundle("com.apple.foo.Service")).toBe(false);
   });
 });
 
@@ -118,6 +122,19 @@ describe("createForegroundTrackerCache", () => {
     children[0]!.emit("exit");
     await tick();
     expect(children).toHaveLength(1); // no respawn once stopped
+  });
+
+  test("ref-counts duplicate callbacks independently", () => {
+    const { cache, children } = trackerWithFakeStream();
+    const callback = () => {};
+    const a = cache.subscribe("UDID", callback);
+    const b = cache.subscribe("UDID", callback); // same reference
+    expect(children).toHaveLength(1);
+
+    a.unsubscribe();
+    expect(children[0]!.killed).toBe(false); // b still active despite the shared callback
+    b.unsubscribe();
+    expect(children[0]!.killed).toBe(true);
   });
 
   test("shares one log stream per udid and stops it on last unsubscribe", () => {

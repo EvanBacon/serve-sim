@@ -2032,11 +2032,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       // SpringBoard's foreground feed is edge-triggered, so a fresh subscriber sees nothing until
       // the next app switch. The shared tracker seeds itself from the AX bridge on start, so replay
       // its current app (once known) before streaming changes.
-      let lastBundle = "";
+      let lastApp: ForegroundApp | null = null;
       let generation = 0;
       const emit = async (app: ForegroundApp) => {
-        if (app.bundleId === lastBundle || res.writableEnded) return;
-        lastBundle = app.bundleId;
+        // Dedup on bundleId and pid: the tracker emits same-bundle relaunches with a fresh pid, and
+        // clients need the live pid.
+        if (res.writableEnded || (app.bundleId === lastApp?.bundleId && app.pid === lastApp.pid)) return;
+        lastApp = app;
         // detectReactNative is awaited, so a later switch can resolve first; only write if no newer
         // emit has started, otherwise a slow lookup could overwrite the client with a stale app.
         const generationAtStart = ++generation;

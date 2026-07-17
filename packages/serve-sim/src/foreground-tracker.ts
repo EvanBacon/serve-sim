@@ -14,9 +14,11 @@ export interface ForegroundApp {
 }
 
 // SpringBoard logs these as "Foreground" but they aren't the visible user-facing app (widgets,
-// extensions, background services); tracking them would flicker the signal mid app-launch.
+// extensions, background services); tracking them would flicker the signal mid app-launch. Generic
+// names match as whole bundle components (delimited by `.`), so a real app like
+// com.example.CustomerService isn't caught by the "Service" substring.
 const NON_UI_BUNDLE_RE =
-  /(WidgetRenderer|ExtensionHost|\.extension(\.|$)|Service|PlaceholderApp|InCallService|CallUI|InCallUI|com\.apple\.Preferences\.Cellular|com\.apple\.purplebuddy|com\.apple\.chrono|com\.apple\.shuttle|com\.apple\.usernotificationsui)/i;
+  /(^|\.)(WidgetRenderer|ExtensionHost|Service|PlaceholderApp|InCallService|CallUI|InCallUI)(\.|$)|\.extension(\.|$)|com\.apple\.(Preferences\.Cellular|purplebuddy|chrono|shuttle|usernotificationsui)/i;
 
 export function isUserFacingBundle(bundleId: string): boolean {
   return !NON_UI_BUNDLE_RE.test(bundleId);
@@ -209,7 +211,9 @@ export function createForegroundTrackerCache(deps: ForegroundTrackerDeps = {}) {
         byUdid.set(udid, tracker);
         tracker.start();
       }
-      const listener = onChange ?? (() => {});
+      // Wrap so each subscription is a distinct registration even when callers reuse a callback,
+      // otherwise a Set would collapse them and one unsubscribe could stop a still-watched tracker.
+      const listener = (app: ForegroundApp) => onChange?.(app);
       tracker.add(listener);
       return {
         unsubscribe: () => {
