@@ -28,6 +28,9 @@ export function MetricsTool({
   // be a backgrounded user app's numbers, so surface that it isn't supported rather than showing a
   // stale graph. Only idle when the foreground signal (currentApp, from /appstate) positively
   // reports a system app, so a fresh load — signal not yet known — still shows the running app.
+  // Intentionally keyed off /appstate, not the sample's bundleId: that comes from axFrontmost, which
+  // only resolves when the Simulator window is macOS-focused, so it's null in the normal
+  // browser-driven case while the aggregate numbers stay valid — gating on it would idle constantly.
   const foregroundIsSystemApp =
     currentAppBundleId != null && currentAppBundleId.startsWith("com.apple.");
   const live = latest !== null && !errored && !stale && !foregroundIsSystemApp;
@@ -58,9 +61,11 @@ export function MetricsTool({
             : (
                 <span
                   data-metrics-warning
+                  role="status"
                   className="group relative justify-self-end inline-flex items-center"
                 >
-                  <TriangleAlert className="w-3.5 h-3.5 text-amber-400/80" />
+                  <TriangleAlert aria-hidden="true" className="w-3.5 h-3.5 text-amber-400/80" />
+                  <span className="sr-only">{idleReason}</span>
                   <span className="pointer-events-none absolute right-0 top-full z-10 mt-1 hidden w-max max-w-[220px] rounded-md bg-black/90 px-2 py-1 text-[11px] leading-snug text-white/90 shadow-lg group-hover:block">
                     {idleReason}
                   </span>
