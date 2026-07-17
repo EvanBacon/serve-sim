@@ -263,6 +263,22 @@ describe("MetricsSampler", () => {
     expect(await sampler.tickOnce()).toBeNull();
     expect(got).toHaveLength(0);
   });
+
+  it("keeps notifying later listeners when an earlier one throws", async () => {
+    const sampler = new MetricsSampler({
+      udid: UDID,
+      sample: async () => ({ bundleId: "dev.expo.A", cpuSeconds: 1, memBytes: 2 }),
+      now: fakeClock(),
+      hostCores: 8,
+    });
+    const received: MetricSample[] = [];
+    sampler.onSample(() => {
+      throw new Error("subscriber blew up");
+    });
+    sampler.onSample((s) => received.push(s));
+    await sampler.tickOnce();
+    expect(received).toHaveLength(1);
+  });
 });
 
 describe("createMetricsSamplerCache", () => {
@@ -284,8 +300,9 @@ describe("createMetricsSamplerCache", () => {
     b.unsubscribe();
 
     // A fresh subscribe after the last leaves builds a new sampler.
-    cache.subscribe(UDID, () => {});
+    const c = cache.subscribe(UDID, () => {});
     expect(built).toHaveLength(2);
+    c.unsubscribe();
   });
 
   it("fans one sample out to every subscriber", async () => {
@@ -295,10 +312,12 @@ describe("createMetricsSamplerCache", () => {
       return sampler;
     });
     const seen: number[] = [];
-    cache.subscribe(UDID, () => seen.push(1));
-    cache.subscribe(UDID, () => seen.push(2));
+    const a = cache.subscribe(UDID, () => seen.push(1));
+    const b = cache.subscribe(UDID, () => seen.push(2));
     await sampler.tickOnce();
     expect(seen.sort()).toEqual([1, 2]);
+    a.unsubscribe();
+    b.unsubscribe();
   });
 
   it("a stale double-unsubscribe does not evict a replacement sampler", () => {
@@ -317,8 +336,11 @@ describe("createMetricsSamplerCache", () => {
     first.unsubscribe(); // stale, replayed: must NOT evict #2
 
     // #2 is still the active sampler, so a new subscriber reuses it (no #3 built).
-    cache.subscribe(UDID, () => {});
+    const third = cache.subscribe(UDID, () => {});
     expect(built).toHaveLength(2);
+
+    second.unsubscribe();
+    third.unsubscribe();
     expect(second.meta.udid).toBe(UDID);
   });
 });

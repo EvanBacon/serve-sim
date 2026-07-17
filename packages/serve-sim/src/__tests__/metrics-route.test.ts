@@ -89,7 +89,7 @@ describe("handleMetricsRequest", () => {
 
   test("writes the meta frame before any sample", async () => {
     const { cache, created } = createTrackingCache();
-    const { req } = createFakeReq();
+    const { req, close } = createFakeReq();
     const { res, writes } = createFakeRes();
 
     handleMetricsRequest(req, res, inProcessServeSimState("UDID-1", 4000), cache);
@@ -103,6 +103,7 @@ describe("handleMetricsRequest", () => {
     await firstSampler(created).tickOnce();
     expect(sampleFrames(writes)).toHaveLength(1);
 
+    close();
     created.forEach((s) => s.stop());
   });
 
@@ -123,6 +124,8 @@ describe("handleMetricsRequest", () => {
     expect(sampleFrames(resA.writes)).toEqual(sampleFrames(resB.writes));
     expect(sampleFrames(resA.writes)).toHaveLength(1);
 
+    a.close();
+    b.close();
     created.forEach((s) => s.stop());
   });
 
@@ -143,9 +146,11 @@ describe("handleMetricsRequest", () => {
     expect(firstSampler(created).listenerCount).toBe(0);
 
     // With the shared sampler evicted, a fresh subscriber builds a new one.
-    handleMetricsRequest(createFakeReq().req, createFakeRes().res, state, cache);
+    const c = createFakeReq();
+    handleMetricsRequest(c.req, createFakeRes().res, state, cache);
     expect(created).toHaveLength(2);
 
+    c.close();
     created.forEach((s) => s.stop());
   });
 });
