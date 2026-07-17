@@ -12,8 +12,10 @@ const MAX_POINTS = 60;
 // goes quiet when no user app is foreground (or the app exits), so silence is expected, not rare.
 const STALE_AFTER_MS = 3_000;
 
-// The transport strips SSE `event:` lines, so meta and sample frames both
-// arrive as messages — discriminated by shape.
+/**
+ * The transport strips SSE `event:` lines, so meta and sample frames both
+ * arrive as messages, discriminated by shape.
+ */
 export function useMetricsStream(path: string): {
   meta: MetricsMeta | null;
   latest: MetricSample | null;

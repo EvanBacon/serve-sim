@@ -48,12 +48,12 @@ interface PsRow {
   appPath: string; // the `.app` bundle this process runs from (host app + its extensions share it)
 }
 
-// `ps` cputime is `[HH:]MM:SS.ss` cumulative CPU time; fold it down to seconds.
+/** `ps` cputime is `[HH:]MM:SS.ss` cumulative CPU time; fold it down to seconds. */
 function cputimeToSeconds(cputime: string): number {
   return cputime.split(":").reduce((acc, part) => acc * 60 + Number(part), 0);
 }
 
-// Processes running from the sim's Containers/Bundle path (the user apps), not the ~190 system daemons.
+/** Processes running from the sim's Containers/Bundle path (the user apps), not the ~190 system daemons. */
 function parseUserAppRows(output: string, udid: string): PsRow[] {
   const device = `/Devices/${udid}/`.toUpperCase();
   const rows: PsRow[] = [];
@@ -70,9 +70,11 @@ function parseUserAppRows(output: string, udid: string): PsRow[] {
   return rows;
 }
 
-// Aggregate the user app's processes. When the frontmost pid maps to a user app, narrow to just
-// that app's `.app` bundle (its host process + extensions). Otherwise sum every user app on the
-// sim (nothing user-facing is foreground). Null only when no user app is running at all.
+/**
+ * Aggregate the user app's processes. When the frontmost pid maps to a user app, narrow to just
+ * that app's `.app` bundle (its host process + extensions). Otherwise sum every user app on the
+ * sim (nothing user-facing is foreground). Null only when no user app is running at all.
+ */
 export function findUserAppProcesses(
   output: string,
   udid: string,
@@ -91,7 +93,7 @@ export function findUserAppProcesses(
   };
 }
 
-// Sum the per-process `phys_footprint: <n> B` lines (skips _peak and the Summary line).
+/** Sum the per-process `phys_footprint: <n> B` lines (skips _peak and the Summary line). */
 export function sumPhysFootprintBytes(output: string): number | null {
   let bytes = 0;
   let found = false;
@@ -116,6 +118,7 @@ export interface SampleDeps {
 const runCommand = (file: string, args: string[]): Promise<string> =>
   execFileAsync(file, args, { timeout: 3000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout);
 
+/** Resolve the sim's frontmost app (pid + bundleId) via the AX bridge; null when it can't be read. */
 async function frontmostAppOf(udid: string): Promise<FrontmostApp | null> {
   try {
     const { pid, bundleId } = JSON.parse(await axFrontmostAsync(udid)) as {
@@ -129,10 +132,12 @@ async function frontmostAppOf(udid: string): Promise<FrontmostApp | null> {
   }
 }
 
-// CPU side: the app's processes + their %CPU, and which app they belong to. `ps` and the
-// frontmost probe don't depend on each other, so they run together. bundleId is the frontmost
-// app when it's a user app, else null (the numbers then cover every user app). Null only when
-// no user app is running.
+/**
+ * CPU side: the app's processes + their %CPU, and which app they belong to. `ps` and the
+ * frontmost probe don't depend on each other, so they run together. bundleId is the frontmost
+ * app when it's a user app, else null (the numbers then cover every user app). Null only when
+ * no user app is running.
+ */
 async function sampleForegroundApp(
   udid: string,
   deps: Required<SampleDeps>,
@@ -148,8 +153,10 @@ async function sampleForegroundApp(
   return { procs, bundleId };
 }
 
-// Memory side: phys_footprint of the app's processes. Depends on the pids the CPU
-// side found, so it can't start until those are known; RSS is the fallback.
+/**
+ * Memory side: phys_footprint of the app's processes. Depends on the pids the CPU
+ * side found, so it can't start until those are known; RSS is the fallback.
+ */
 async function sampleMemoryBytes(procs: AppProcesses, deps: Required<SampleDeps>): Promise<number> {
   try {
     const output = await deps.exec("footprint", ["--noCategories", "--format", "bytes", ...procs.pids.map(String)]);
@@ -160,6 +167,7 @@ async function sampleMemoryBytes(procs: AppProcesses, deps: Required<SampleDeps>
   }
 }
 
+/** One poll of the foreground user app: its cumulative CPU time, memory, and the bundleId they belong to. */
 export async function sampleUserApp(udid: string, deps: SampleDeps = {}): Promise<AppUsage | null> {
   const resolved: Required<SampleDeps> = {
     exec: deps.exec ?? runCommand,
@@ -182,7 +190,7 @@ export interface MetricsSamplerOptions {
   hostCores?: number;
 }
 
-// Polls the sim and fans samples out; reschedules only after each tick settles, so ticks never overlap.
+/** Polls the sim and fans samples out; reschedules only after each tick settles, so ticks never overlap. */
 export class MetricsSampler {
   readonly meta: MetricsMeta;
 
@@ -211,11 +219,13 @@ export class MetricsSampler {
     return this.listeners.size;
   }
 
+  /** Subscribe to samples; returns an unsubscribe function. */
   onSample(listener: (sample: MetricSample) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
+  /** Poll once, derive the interval %CPU, and fan the sample out to every listener. */
   async tickOnce(): Promise<MetricSample | null> {
     this.startedAt ??= this.now();
     // Timestamp the observation up front: sample() reads cumulative CPU via `ps` before the slower
@@ -240,9 +250,11 @@ export class MetricsSampler {
     return sample;
   }
 
-  // %CPU over the interval since the previous reading, from the delta in cumulative CPU time.
-  // Zero on the first tick or right after an app switch (no comparable baseline); a drop in
-  // cumulative time (a process exited) clamps to zero rather than going negative.
+  /**
+   * %CPU over the interval since the previous reading, from the delta in cumulative CPU time.
+   * Zero on the first tick or right after an app switch (no comparable baseline); a drop in
+   * cumulative time (a process exited) clamps to zero rather than going negative.
+   */
   private cpuPctSince(reading: AppUsage, t: number): number {
     const prev = this.prev;
     if (!prev || prev.bundleId !== reading.bundleId || t <= prev.t) return 0;
@@ -250,6 +262,7 @@ export class MetricsSampler {
     return pct > 0 ? +pct.toFixed(1) : 0;
   }
 
+  /** Begin the poll loop; a no-op if it is already running. */
   start(): void {
     if (this.timer) return;
     this.startedAt ??= this.now();
@@ -260,6 +273,7 @@ export class MetricsSampler {
     this.timer = setTimeout(loop, this.intervalMs);
   }
 
+  /** Stop the poll loop. */
   stop(): void {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -275,7 +289,7 @@ export interface MetricsSubscription {
 
 export type MetricsSamplerCache = ReturnType<typeof createMetricsSamplerCache>;
 
-// One shared sampler per udid (like the ax streamer cache); ref-counted by subscribers.
+/** One shared sampler per udid (like the ax streamer cache); ref-counted by subscribers. */
 export function createMetricsSamplerCache(
   makeSampler: (udid: string) => MetricsSampler = (udid) => new MetricsSampler({ udid }),
 ) {

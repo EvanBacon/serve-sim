@@ -8,7 +8,7 @@ import { CollapsibleSection } from "./collapsible-section";
 const SPARK_W = 96;
 const SPARK_H = 24;
 
-// Live CPU/memory readout for the sim's user app, with a sparkline for each.
+/** Live CPU/memory readout for the sim's user app, with a sparkline for each. */
 export function MetricsTool({
   udid,
   currentAppBundleId,
@@ -90,6 +90,7 @@ export function MetricsTool({
   );
 }
 
+/** One labeled metric: its current value with a sparkline of recent history. */
 function MetricRow({
   label,
   value,
@@ -117,6 +118,7 @@ function MetricRow({
   );
 }
 
+/** Minimal filled-area sparkline for a series of values. */
 function Sparkline({ values, className }: { values: number[]; className: string }) {
   const line = sparklinePath(values, SPARK_W, SPARK_H);
   // Close the line down to the baseline and back to fill the area under it.
