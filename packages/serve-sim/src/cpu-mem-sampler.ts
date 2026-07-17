@@ -1,14 +1,14 @@
 // CPU/mem of the user's app on a booted sim, measured host-side. %CPU is per-core (can exceed 100)
 // and computed from the delta in the app's cumulative CPU time between ticks, so it reflects usage
 // during the interval rather than ps's decaying ~1-minute average. Scopes to the foreground app via
-// axFrontmost, tagging each sample with its bundleId (null when nothing user-facing is foreground,
-// in which case the numbers cover every user app). Memory is phys_footprint, with an RSS fallback.
+// the foreground tracker, tagging each sample with its bundleId (null when nothing user-facing is
+// foreground, in which case the numbers cover every user app). Memory is phys_footprint, RSS fallback.
 
 import { execFile } from "node:child_process";
 import { cpus } from "node:os";
 import { promisify } from "node:util";
 
-import { axFrontmostAsync } from "./native";
+import { foregroundTracker, frontmostAppViaAx, type ForegroundApp } from "./foreground-tracker";
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +17,7 @@ export const METRICS_SCHEMA_VERSION = 1;
 // One poll's raw reading: cumulative CPU time (the sampler diffs it into a %) and current memory.
 export interface AppUsage {
   bundleId: string | null; // the foreground app these numbers belong to, or null for all user apps
+  processKey: string; // identity of the sampled pid set; the CPU baseline resets when it changes
   cpuSeconds: number;
   memBytes: number;
 }
@@ -53,19 +54,24 @@ function cputimeToSeconds(cputime: string): number {
   return cputime.split(":").reduce((acc, part) => acc * 60 + Number(part), 0);
 }
 
-/** Processes running from the sim's Containers/Bundle path (the user apps), not the ~190 system daemons. */
+/**
+ * Processes whose executable runs from the sim's Containers/Bundle path (the user apps), not the
+ * ~190 system daemons. Matches on `comm=` (the executable) rather than `args=`, so a host process
+ * that merely passes a sim bundle path as an argument isn't miscounted.
+ */
 function parseUserAppRows(output: string, udid: string): PsRow[] {
   const device = `/Devices/${udid}/`.toUpperCase();
   const rows: PsRow[] = [];
   for (const line of output.split("\n")) {
+    // pid, cputime, rss, then comm= (the executable path, which can contain spaces).
     const m = /^\s*(\d+)\s+([\d:.]+)\s+(\d+)\s+(.*)$/.exec(line);
     if (!m) continue;
-    const args = m[4]!;
-    const upper = args.toUpperCase();
+    const exe = m[4]!;
+    const upper = exe.toUpperCase();
     if (!upper.includes(device) || !upper.includes("/CONTAINERS/BUNDLE/APPLICATION/")) continue;
     // First `.app` in the exec path; extensions live under it (…/MyApp.app/PlugIns/X.appex/X).
-    const app = /^(.*?\.app)\//.exec(args);
-    rows.push({ pid: +m[1]!, cpuSeconds: cputimeToSeconds(m[2]!), rssKb: +m[3]!, appPath: app ? app[1]! : args });
+    const app = /^(.*?\.app)\//.exec(exe);
+    rows.push({ pid: +m[1]!, cpuSeconds: cputimeToSeconds(m[2]!), rssKb: +m[3]!, appPath: app ? app[1]! : exe });
   }
   return rows;
 }
@@ -104,33 +110,20 @@ export function sumPhysFootprintBytes(output: string): number | null {
   return found ? bytes : null;
 }
 
-export interface FrontmostApp {
-  pid: number;
-  bundleId: string;
-}
-
 // Injected so tests can drive sampleUserApp without spawning real processes.
 export interface SampleDeps {
   exec?: (file: string, args: string[]) => Promise<string>;
-  frontmostApp?: (udid: string) => Promise<FrontmostApp | null>;
+  frontmostApp?: (udid: string) => Promise<ForegroundApp | null>;
 }
 
 /** Run a host command with a bounded timeout and output buffer, resolving its stdout. */
 const runCommand = (file: string, args: string[]): Promise<string> =>
   execFileAsync(file, args, { timeout: 3000, maxBuffer: 8 * 1024 * 1024 }).then((r) => r.stdout);
 
-/** Resolve the sim's frontmost app (pid + bundleId) via the AX bridge; null when it can't be read. */
-async function frontmostAppOf(udid: string): Promise<FrontmostApp | null> {
-  try {
-    const { pid, bundleId } = JSON.parse(await axFrontmostAsync(udid)) as {
-      pid?: number;
-      bundleId?: string;
-    };
-    return pid != null && bundleId ? { pid, bundleId } : null;
-  } catch {
-    // AX bridge warming up or unreachable: skip this tick (caller returns null).
-    return null;
-  }
+/** The current foreground app: the tracker when it's warm, else the AX bridge; null when unknown. */
+function frontmostAppOf(udid: string): Promise<ForegroundApp | null> {
+  const tracked = foregroundTracker.peek(udid);
+  return tracked ? Promise.resolve(tracked) : frontmostAppViaAx(udid);
 }
 
 /**
@@ -144,7 +137,7 @@ async function sampleForegroundApp(
   deps: Required<SampleDeps>,
 ): Promise<{ procs: AppProcesses; bundleId: string | null } | null> {
   const [psOutput, frontmost] = await Promise.all([
-    deps.exec("ps", ["-axo", "pid=,cputime=,rss=,args="]).catch(() => null),
+    deps.exec("ps", ["-axo", "pid=,cputime=,rss=,comm="]).catch(() => null),
     deps.frontmostApp(udid),
   ]);
   if (psOutput == null) return null;
@@ -178,6 +171,7 @@ export async function sampleUserApp(udid: string, deps: SampleDeps = {}): Promis
   if (!foreground) return null;
   return {
     bundleId: foreground.bundleId,
+    processKey: [...foreground.procs.pids].sort((a, b) => a - b).join(","),
     cpuSeconds: foreground.procs.cpuSeconds,
     memBytes: await sampleMemoryBytes(foreground.procs, resolved),
   };
@@ -202,7 +196,7 @@ export class MetricsSampler {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private startedAt: number | null = null;
   // Previous reading, to turn cumulative CPU time into a per-interval %.
-  private prev: { t: number; bundleId: string | null; cpuSeconds: number } | null = null;
+  private prev: { t: number; bundleId: string | null; processKey: string; cpuSeconds: number } | null = null;
 
   /** Build a sampler for one udid, resolving the interval, clock, and host core count. */
   constructor(opts: MetricsSamplerOptions) {
@@ -239,7 +233,7 @@ export class MetricsSampler {
     if (!reading) return null;
 
     const cpuPct = this.cpuPctSince(reading, t);
-    this.prev = { t, bundleId: reading.bundleId, cpuSeconds: reading.cpuSeconds };
+    this.prev = { t, bundleId: reading.bundleId, processKey: reading.processKey, cpuSeconds: reading.cpuSeconds };
 
     const sample: MetricSample = { t, bundleId: reading.bundleId, cpuPct, memBytes: reading.memBytes };
     for (const listener of this.listeners) {
@@ -255,12 +249,14 @@ export class MetricsSampler {
 
   /**
    * %CPU over the interval since the previous reading, from the delta in cumulative CPU time.
-   * Zero on the first tick or right after an app switch (no comparable baseline); a drop in
-   * cumulative time (a process exited) clamps to zero rather than going negative.
+   * Zero on the first tick, an app switch, or a changed process set (no comparable baseline, since
+   * cumulative CPU is per-process); a drop in cumulative time (a process exited) clamps to zero.
    */
   private cpuPctSince(reading: AppUsage, t: number): number {
     const prev = this.prev;
-    if (!prev || prev.bundleId !== reading.bundleId || t <= prev.t) return 0;
+    if (!prev || prev.bundleId !== reading.bundleId || prev.processKey !== reading.processKey || t <= prev.t) {
+      return 0;
+    }
     const pct = ((reading.cpuSeconds - prev.cpuSeconds) / ((t - prev.t) / 1000)) * 100;
     return pct > 0 ? +pct.toFixed(1) : 0;
   }

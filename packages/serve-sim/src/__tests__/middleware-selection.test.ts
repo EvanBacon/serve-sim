@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   matchInstalledAppByDisplayName,
-  parseForegroundAppLogMessage,
   previewConfigForState,
   rewriteStateForRequestHost,
   selectServeSimState,
   type ServeSimState,
 } from "../middleware";
+import { parseForegroundAppLogMessage } from "../foreground-tracker";
 
 const states: ServeSimState[] = [
   {

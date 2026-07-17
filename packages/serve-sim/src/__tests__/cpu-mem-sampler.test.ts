@@ -11,9 +11,11 @@ import {
 
 const UDID = "ABCD1234-0000-0000-0000-0000000000EF";
 
-// `ps -axo pid= cputime= rss= args=` — the user app and its extension run from the sim's
-// Containers/Bundle/Application path; launchd_sim and a RuntimeRoot daemon do not,
-// and an unrelated host process is off-device. Only the first two count. cputime is cumulative.
+// `ps -axo pid= cputime= rss= comm=` — the executable path of each process. The user app and its
+// extension run from the sim's Containers/Bundle/Application path; launchd_sim and a RuntimeRoot
+// daemon do not, and an unrelated host process is off-device. Matching on comm= (not args=) means a
+// host tool that merely passes a sim bundle path as an argument never reports one here. Only the
+// first two count. cputime is cumulative.
 function psFixture(): string {
   return [
     `  101   0:00.10  15000 launchd_sim /x/Devices/${UDID}/data/var/run/launchd_bootstrap.plist`,
@@ -125,7 +127,7 @@ describe("sampleUserApp", () => {
     };
     const usage = await sampleUserApp(UDID, { exec, frontmostApp: frontmost(103, "dev.expo.MyApp") });
     // cumulative cpu seconds of MyApp (12) + its extension (3); the sampler turns this into a %
-    expect(usage).toEqual({ bundleId: "dev.expo.MyApp", cpuSeconds: 15, memBytes: 2_000_000 });
+    expect(usage).toEqual({ bundleId: "dev.expo.MyApp", processKey: "103,104", cpuSeconds: 15, memBytes: 2_000_000 });
     expect(seen.sort()).toEqual(["footprint", "ps"]);
   });
 
@@ -135,7 +137,7 @@ describe("sampleUserApp", () => {
       throw new Error("footprint exited non-zero");
     };
     const usage = await sampleUserApp(UDID, { exec, frontmostApp: frontmost(103) });
-    expect(usage).toEqual({ bundleId: "dev.expo.MyApp", cpuSeconds: 15, memBytes: (80000 + 20000) * 1024 });
+    expect(usage).toEqual({ bundleId: "dev.expo.MyApp", processKey: "103,104", cpuSeconds: 15, memBytes: (80000 + 20000) * 1024 });
   });
 
   it("tags bundleId null and covers all user apps when nothing user-facing is foreground", async () => {
@@ -144,12 +146,14 @@ describe("sampleUserApp", () => {
     // AX unavailable -> no frontmost app: sum all user apps (103 + 104 + 106), bundleId null
     expect(await sampleUserApp(UDID, { exec, frontmostApp: async () => null })).toEqual({
       bundleId: null,
+      processKey: "103,104,106",
       cpuSeconds: 17,
       memBytes: 3_000_000,
     });
     // a system app is frontmost (pid not among the user-app processes) -> same
     expect(await sampleUserApp(UDID, { exec, frontmostApp: frontmost(999999) })).toEqual({
       bundleId: null,
+      processKey: "103,104,106",
       cpuSeconds: 17,
       memBytes: 3_000_000,
     });
@@ -192,11 +196,11 @@ describe("MetricsSampler", () => {
     //   t1 no baseline -> 0; t2 +0.5s/1s -> 50; t3 drop (churn) -> clamped 0;
     //   t4 app switch (B) -> 0; t5 +0.6s/1s -> 60.
     const readings = [
-      { bundleId: "dev.expo.A", cpuSeconds: 10.0, memBytes: 100 },
-      { bundleId: "dev.expo.A", cpuSeconds: 10.5, memBytes: 400 },
-      { bundleId: "dev.expo.A", cpuSeconds: 10.4, memBytes: 250 },
-      { bundleId: "dev.expo.B", cpuSeconds: 99.0, memBytes: 260 },
-      { bundleId: "dev.expo.B", cpuSeconds: 99.6, memBytes: 270 },
+      { bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 10.0, memBytes: 100 },
+      { bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 10.5, memBytes: 400 },
+      { bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 10.4, memBytes: 250 },
+      { bundleId: "dev.expo.B", processKey: "2", cpuSeconds: 99.0, memBytes: 260 },
+      { bundleId: "dev.expo.B", processKey: "2", cpuSeconds: 99.6, memBytes: 270 },
     ];
     let i = 0;
     const sampler = new MetricsSampler({
@@ -220,12 +224,31 @@ describe("MetricsSampler", () => {
     sampler.stop();
   });
 
+  it("resets the cpu baseline when the process set changes within the same app", async () => {
+    // Same bundle, but the pid set changes (relaunch / extension swap) at t3. Cumulative CPU isn't
+    // comparable across process sets, so the delta must reset rather than report a false spike.
+    const readings = [
+      { bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 10, memBytes: 100 },
+      { bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 10.5, memBytes: 100 },
+      { bundleId: "dev.expo.A", processKey: "2", cpuSeconds: 99, memBytes: 100 },
+    ];
+    let i = 0;
+    const sampler = new MetricsSampler({ udid: UDID, sample: async () => readings[i++]!, now: fakeClock(), hostCores: 8 });
+    const got: MetricSample[] = [];
+    sampler.onSample((s) => got.push(s));
+
+    for (let n = 0; n < readings.length; n++) await sampler.tickOnce();
+
+    expect(got.map((s) => s.cpuPct)).toEqual([0, 50, 0]); // t3 resets despite the unchanged bundleId
+    sampler.stop();
+  });
+
   it("anchors the CPU delta to the observation time, not after the slow memory probe", async () => {
     let clockMs = 0;
     const now = () => clockMs;
     const readings = [
-      { bundleId: "dev.expo.A", cpuSeconds: 10, memBytes: 100 },
-      { bundleId: "dev.expo.A", cpuSeconds: 10.5, memBytes: 100 },
+      { bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 10, memBytes: 100 },
+      { bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 10.5, memBytes: 100 },
     ];
     let i = 0;
     let footprintMs = 0;
@@ -267,7 +290,7 @@ describe("MetricsSampler", () => {
   it("keeps notifying later listeners when an earlier one throws", async () => {
     const sampler = new MetricsSampler({
       udid: UDID,
-      sample: async () => ({ bundleId: "dev.expo.A", cpuSeconds: 1, memBytes: 2 }),
+      sample: async () => ({ bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 1, memBytes: 2 }),
       now: fakeClock(),
       hostCores: 8,
     });
@@ -308,7 +331,7 @@ describe("createMetricsSamplerCache", () => {
   it("fans one sample out to every subscriber", async () => {
     let sampler!: MetricsSampler;
     const cache = createMetricsSamplerCache((udid) => {
-      sampler = new MetricsSampler({ udid, sample: async () => ({ bundleId: "dev.expo.A", cpuSeconds: 5, memBytes: 9 }), now: (() => { let t = 0; return () => (t += 1000); })(), hostCores: 8 });
+      sampler = new MetricsSampler({ udid, sample: async () => ({ bundleId: "dev.expo.A", processKey: "1", cpuSeconds: 5, memBytes: 9 }), now: (() => { let t = 0; return () => (t += 1000); })(), hostCores: 8 });
       return sampler;
     });
     const seen: number[] = [];

@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, existsSync, unlinkSync, watch, type FSWatcher } from "fs";
-import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
+import { execSync, exec, execFile, type ExecException } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer as createNetServer } from "net";
@@ -13,6 +13,7 @@ import type { Socket } from "net";
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { createMetricsSamplerCache, type MetricsSamplerCache } from "./cpu-mem-sampler";
+import { foregroundTracker, type ForegroundApp, type ForegroundTrackerCache } from "./foreground-tracker";
 import { readCameraStatus } from "./camera-helper";
 import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
 import {
@@ -21,7 +22,6 @@ import {
   recordEventLogEvent,
   subscribeEventLog,
 } from "./event-log";
-import { axFrontmostAsync } from "./native";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import { debugMw } from "./debug";
 import {
@@ -112,10 +112,6 @@ export type ServeSimState = ServeSimDeviceState;
 const axStreamerCache = createAxStreamerCache();
 const metricsSamplerCache = createMetricsSamplerCache();
 
-// Hard cap on the SSE line-assembly buffer for child-process stdout.
-// A malformed log entry without a newline can't grow this beyond 1 MB;
-// the partial line is dropped rather than retained indefinitely.
-const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
 let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
 function eventLogLimit(rawUrl: string): number | undefined {
@@ -156,16 +152,6 @@ const RN_MARKERS = [
   "main.jsbundle",
 ];
 
-// Processes that SpringBoard logs as "Foreground" but are not the visible
-// user-facing app — widgets, extensions, background services. Emitting
-// these to the client causes the app indicator to flicker as the user
-// actually-foreground app switches mid-launch.
-const NON_UI_BUNDLE_RE = /(WidgetRenderer|ExtensionHost|\.extension(\.|$)|Service|PlaceholderApp|InCallService|CallUI|InCallUI|com\.apple\.Preferences\.Cellular|com\.apple\.purplebuddy|com\.apple\.chrono|com\.apple\.shuttle|com\.apple\.usernotificationsui)/i;
-
-function isUserFacingBundle(bundleId: string): boolean {
-  return !NON_UI_BUNDLE_RE.test(bundleId);
-}
-
 function isSimulatorUdid(value: string): boolean {
   return /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(value);
 }
@@ -192,13 +178,6 @@ function classifyStaleState(
     return state.pid === selfPid ? "recycle-self" : "recycle-helper";
   }
   return "keep";
-}
-
-export function parseForegroundAppLogMessage(message: string): { bundleId: string; pid: number } | null {
-  // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
-  const match = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/.exec(message);
-  if (!match) return null;
-  return { bundleId: match[1]!, pid: parseInt(match[2]!, 10) };
 }
 
 function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
@@ -1295,6 +1274,7 @@ export function handleMetricsRequest(
   res: SimRes,
   state: ServeSimState | null,
   samplerCache: MetricsSamplerCache = metricsSamplerCache,
+  tracker: ForegroundTrackerCache = foregroundTracker,
 ): void {
   if (!state) {
     res.writeHead(404);
@@ -1308,6 +1288,9 @@ export function handleMetricsRequest(
     "X-Accel-Buffering": "no",
   });
   res.write(":\n\n");
+  // Keep the foreground tail warm for this stream's lifetime so the sampler can scope to the
+  // current app even when no /appstate client is open.
+  const foreground = tracker.subscribe(state.device);
   const { meta, unsubscribe } = samplerCache.subscribe(state.device, (sample) => {
     if (!res.writableEnded) res.write("data: " + JSON.stringify(sample) + "\n\n");
   });
@@ -1319,6 +1302,7 @@ export function handleMetricsRequest(
   req.on("close", () => {
     clearInterval(heartbeat);
     unsubscribe();
+    foreground.unsubscribe();
   });
 }
 
@@ -2045,71 +2029,26 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       });
       res.write(":\n\n");
 
-      // Bootstrap: SpringBoard's log feed is edge-triggered, so a fresh
-      // subscriber would otherwise see nothing until the user re-foregrounds
-      // an app (the bug: tools couldn't reconnect after a page reload). Ask
-      // the helper's AX bridge for the current frontmost app via
-      // `proc_pidpath`+Info.plist resolution and emit it before tailing.
+      // SpringBoard's foreground feed is edge-triggered, so a fresh subscriber sees nothing until
+      // the next app switch. The shared tracker seeds itself from the AX bridge on start, so replay
+      // its current app (once known) before streaming changes.
       let lastBundle = "";
-      try {
-        const info = JSON.parse(await axFrontmostAsync(udid)) as { bundleId?: string; pid?: number };
-        if (!info.bundleId || !isUserFacingBundle(info.bundleId)) return;
-        if (res.writableEnded) return;
-        lastBundle = info.bundleId;
-        const isReactNative = await detectReactNative(udid, info.bundleId);
-        if (res.writableEnded) return;
-        res.write("data: " + JSON.stringify({ bundleId: info.bundleId, pid: info.pid, isReactNative }) + "\n\n");
-      } catch {
-        // AX bridge may be warming up — the log tail fills in once anything moves.
-      }
-
-      const child: ChildProcess = spawn("xcrun", [
-        "simctl", "spawn", udid, "log", "stream",
-        "--style", "ndjson",
-        "--level", "info",
-        "--predicate",
-        'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
-      ], { stdio: ["ignore", "pipe", "ignore"] });
-
-      let closed = false;
-      const emitApp = async (bundleId: string, pid?: number) => {
-        if (!isUserFacingBundle(bundleId)) return;
-        if (bundleId === lastBundle) return;
-        lastBundle = bundleId;
-        const isReactNative = await detectReactNative(udid, bundleId);
-        if (!closed) {
-          res.write("data: " + JSON.stringify({ bundleId, pid, isReactNative }) + "\n\n");
+      let generation = 0;
+      const emit = async (app: ForegroundApp) => {
+        if (app.bundleId === lastBundle || res.writableEnded) return;
+        lastBundle = app.bundleId;
+        // detectReactNative is awaited, so a later switch can resolve first; only write if no newer
+        // emit has started, otherwise a slow lookup could overwrite the client with a stale app.
+        const generationAtStart = ++generation;
+        const isReactNative = await detectReactNative(udid, app.bundleId);
+        if (!res.writableEnded && generationAtStart === generation) {
+          res.write("data: " + JSON.stringify({ bundleId: app.bundleId, pid: app.pid, isReactNative }) + "\n\n");
         }
       };
-
-
-      let buf = "";
-      child.stdout!.on("data", (chunk: Buffer) => {
-        buf += chunk.toString();
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) !== -1) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let msg: string;
-          try { msg = JSON.parse(line).eventMessage ?? ""; } catch { continue; }
-          const event = parseForegroundAppLogMessage(msg);
-          if (!event) continue;
-          emitApp(event.bundleId, event.pid);
-        }
-        if (buf.length > SSE_LINE_BUFFER_LIMIT) buf = "";
-      });
-
-      child.on("error", () => {
-        closed = true;
-        try { res.end(); } catch {}
-      });
-      child.on("close", () => res.end());
-      req.on("close", () => {
-        closed = true;
-        child.stdout?.destroy();
-        child.kill();
-      });
+      const subscription = foregroundTracker.subscribe(udid, (app) => void emit(app));
+      const current = foregroundTracker.peek(udid);
+      if (current) void emit(current);
+      req.on("close", () => subscription.unsubscribe());
       return;
     }
 
