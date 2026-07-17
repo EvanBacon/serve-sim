@@ -202,7 +202,7 @@ export class MetricsSampler {
   constructor(opts: MetricsSamplerOptions) {
     this.intervalMs = opts.intervalMs ?? 1000;
     this.sample = opts.sample ?? sampleUserApp;
-    this.now = opts.now ?? Date.now;
+    this.now = opts.now ?? (() => performance.now()); // monotonic: immune to NTP clock jumps in the CPU delta
     this.meta = {
       schemaVersion: METRICS_SCHEMA_VERSION,
       udid: opts.udid,
