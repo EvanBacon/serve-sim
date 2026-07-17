@@ -229,7 +229,14 @@ export class MetricsSampler {
     this.prev = { t, bundleId: reading.bundleId, cpuSeconds: reading.cpuSeconds };
 
     const sample: MetricSample = { t, bundleId: reading.bundleId, cpuPct, memBytes: reading.memBytes };
-    for (const listener of this.listeners) listener(sample);
+    for (const listener of this.listeners) {
+      try {
+        listener(sample);
+      } catch {
+        // A failing subscriber (e.g. a write to an already-closed SSE response)
+        // must not starve the other viewers of this sample.
+      }
+    }
     return sample;
   }
 
