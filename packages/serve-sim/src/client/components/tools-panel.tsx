@@ -19,6 +19,7 @@ export function ToolsPanel({
   deviceRuntime,
   currentApp,
   eventLogEventsEndpoint,
+  metricsEndpoint,
   axOverlayEnabled,
   onToggleAxOverlay,
   codecPreference,
@@ -33,6 +34,7 @@ export function ToolsPanel({
   deviceRuntime: string | null;
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
   eventLogEventsEndpoint?: string;
+  metricsEndpoint?: string;
   axOverlayEnabled: boolean;
   onToggleAxOverlay: () => void;
   codecPreference: CodecPreference;
@@ -51,7 +53,7 @@ export function ToolsPanel({
       {open && (
         <div className="p-3.5 overflow-y-auto flex-1 flex flex-col gap-3">
           <AppDetectionTool udid={udid} currentApp={currentApp} />
-          <MetricsTool udid={udid} currentAppBundleId={currentApp?.bundleId ?? null} />
+          <MetricsTool udid={udid} currentAppBundleId={currentApp?.bundleId ?? null} metricsEndpoint={metricsEndpoint} />
           <EventLogTool udid={udid} eventsEndpoint={eventLogEventsEndpoint} />
           <SimulatorSettingsTool udid={udid} runtime={deviceRuntime} />
           <AxTreeTool
