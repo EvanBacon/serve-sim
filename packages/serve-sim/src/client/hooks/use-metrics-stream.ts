@@ -45,15 +45,16 @@ export function useMetricsStream(path: string): {
           lastSampleAt.current = Date.now();
           setStale(false);
           setHistory((prev) => {
-            const previous = prev.at(-1);
-            // Reset only on a real foreground app switch. Ignore flips to/from the
-            // sampler's null aggregate (a brief loss of the frontmost signal) so the
-            // series isn't wiped every time the app is opened or closed.
+            // Reset only on a real foreground app switch. Compare against the last
+            // *known* app, ignoring the sampler's intermediate null aggregate when it
+            // briefly loses the frontmost signal (e.g. app A -> home -> app B), so the
+            // series isn't wiped on every open/close but still resets between two apps.
+            const lastBundleId =
+              [...prev].reverse().find((s) => s.bundleId !== null)?.bundleId ?? null;
             const appSwitched =
-              previous != null &&
-              previous.bundleId !== null &&
+              lastBundleId !== null &&
               sample.bundleId !== null &&
-              previous.bundleId !== sample.bundleId;
+              lastBundleId !== sample.bundleId;
             return [...(appSwitched ? [] : prev), sample].slice(-MAX_POINTS);
           });
         }
