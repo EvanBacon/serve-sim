@@ -11,6 +11,7 @@ import { PANEL_BACKGROUND } from "./panel-colors";
 import { SimulatorSettingsTool } from "./simulator-settings-tool";
 import { StreamSettingsTool, type CodecPreference } from "./stream-settings-tool";
 
+/** The preview's collapsible tools panel: app detection, metrics, camera, permissions, and settings. */
 export function ToolsPanel({
   open,
   onClose,

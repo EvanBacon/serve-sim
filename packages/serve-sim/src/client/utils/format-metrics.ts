@@ -1,14 +1,18 @@
+/** Format a CPU percentage as a rounded whole-number string (e.g. "42%"). */
 export function formatCpu(cpuPct: number): string {
   return `${Math.round(cpuPct)}%`;
 }
 
+/** Format a byte count as MB, switching to GB past 1024 MB. */
 export function formatMem(memBytes: number): string {
   const mb = memBytes / (1024 * 1024);
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 }
 
-// Smooth sparkline path, auto-scaled to the window peak. Catmull-Rom spline with
-// control points clamped per segment so the curve never overshoots the data.
+/**
+ * Smooth sparkline path, auto-scaled to the window peak. Catmull-Rom spline with
+ * control points clamped per segment so the curve never overshoots the data.
+ */
 export function sparklinePath(values: number[], width: number, height: number): string {
   if (values.length < 2) return "";
   const max = Math.max(...values, 1);
