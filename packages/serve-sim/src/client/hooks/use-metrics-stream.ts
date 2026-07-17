@@ -8,9 +8,10 @@ export type { MetricSample, MetricsMeta };
 
 // ~1 minute of history at 1s cadence.
 const MAX_POINTS = 60;
-// The sampler emits ~1/s; treat the readout as stale after a few missed samples. The backend
-// goes quiet when no user app is foreground (or the app exits), so silence is expected, not rare.
-const STALE_AFTER_MS = 3_000;
+// The sampler emits ~1/s, but a single healthy tick can take up to ~7s (the poll interval plus the
+// ps and footprint timeouts), so only flag the readout stale well past that worst case. The backend
+// also goes quiet when no user app is foreground (or the app exits), so silence is expected, not rare.
+const STALE_AFTER_MS = 8_000;
 
 /**
  * The transport strips SSE `event:` lines, so meta and sample frames both
