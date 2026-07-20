@@ -24,16 +24,13 @@ export function MetricsTool({
   );
   const { meta, latest, history, errored, stale } = useMetricsStream(path);
   const [open, setOpen] = useState(true);
-  // We only measure user-installed apps. When a system app is in the foreground the readout would
-  // be a backgrounded user app's numbers, so surface that it isn't supported rather than showing a
-  // stale graph. Only idle when the foreground signal (currentApp, from /appstate) positively
-  // reports a system app, so a fresh load — signal not yet known — still shows the running app.
-  // Intentionally keyed off /appstate, not the sample's bundleId: that comes from axFrontmost, which
-  // only resolves when the Simulator window is macOS-focused, so it's null in the normal
-  // browser-driven case while the aggregate numbers stay valid — gating on it would idle constantly.
+  // Live only while the backend actually scoped to a user app: each sample carries that app's
+  // bundleId, and null when a system app is in front (those run outside the sampler's reach) or
+  // nothing is running. Keying on the sampler's own output keeps this from drifting from what it can
+  // measure; currentAppBundleId (from /appstate) only words the idle reason.
+  const live = latest !== null && latest.bundleId !== null && !errored && !stale;
   const foregroundIsSystemApp =
     currentAppBundleId != null && currentAppBundleId.startsWith("com.apple.");
-  const live = latest !== null && !errored && !stale && !foregroundIsSystemApp;
   // When there's nothing to show, a header glyph carries the reason on hover instead of a body line.
   const idleReason = errored
     ? "The metrics stream disconnected"
@@ -64,7 +61,7 @@ export function MetricsTool({
                   role="status"
                   className="group relative justify-self-end inline-flex items-center"
                 >
-                  <TriangleAlert aria-hidden="true" className="w-3.5 h-3.5 text-amber-400/80" />
+                  <TriangleAlert aria-hidden="true" className="w-3.5 h-3.5 text-amber-400" />
                   <span className="sr-only">{idleReason}</span>
                   <span className="pointer-events-none absolute right-0 top-full z-10 mt-1 hidden w-max max-w-[220px] rounded-md bg-black/90 px-2 py-1 text-[11px] leading-snug text-white/90 shadow-lg group-hover:block">
                     {idleReason}
