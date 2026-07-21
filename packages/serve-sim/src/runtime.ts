@@ -1,12 +1,27 @@
 /** Node runtime helpers for the bundled CLI. */
 import { fileURLToPath } from "url";
-import { dirname } from "path";
+import { basename, dirname } from "path";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "http";
 import type { Socket } from "net";
 import { createConnection, createServer as createNetServer, type Server as NetServer } from "net";
 
 export function dirnameOf(metaUrl: string): string {
   return dirname(fileURLToPath(metaUrl));
+}
+
+/** Resolve how the current CLI should re-exec under Node, Bun, or Bun compile. */
+export function reExecCommand(
+  extra: string[],
+  runtime: { execPath?: string; entrypoint?: string } = {},
+): { command: string; args: string[] } {
+  const execPath = runtime.execPath ?? process.execPath;
+  const entrypoint = runtime.entrypoint ?? process.argv[1];
+  const runtimeName = basename(execPath).toLowerCase();
+  const isScriptRuntime = /^(?:node(?:js)?\d*|bun)(?:\.exe)?$/.test(runtimeName);
+  return {
+    command: execPath,
+    args: isScriptRuntime && entrypoint ? [entrypoint, ...extra] : extra,
+  };
 }
 
 /** Block the current thread for `ms` milliseconds without busy-waiting. */

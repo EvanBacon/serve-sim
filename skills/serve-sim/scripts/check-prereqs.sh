@@ -5,6 +5,17 @@
 
 set -u
 
+TUNNEL_MODE=false
+if [[ "${1:-}" == "--tunnel" ]]; then
+  TUNNEL_MODE=true
+  shift
+fi
+
+if [[ "$#" -gt 0 ]]; then
+  echo "usage: $0 [--tunnel]" >&2
+  exit 2
+fi
+
 fail() {
   echo "serve-sim prereq check failed: $1" >&2
   exit 1
@@ -23,13 +34,18 @@ if ! xcrun --find simctl >/dev/null 2>&1; then
   fail "simctl not found via xcrun. Install Xcode command line tools."
 fi
 
-# Node 18+
+# Maintained Node.js LTS (20+)
 if ! command -v node >/dev/null 2>&1; then
-  fail "node not found. Install Node.js 18 or newer (https://nodejs.org)."
+  fail "node not found. Install Node.js 20 or newer (https://nodejs.org)."
 fi
 NODE_MAJOR="$(node -e 'console.log(process.versions.node.split(".")[0])')"
-if [[ "$NODE_MAJOR" -lt 18 ]]; then
-  fail "node $NODE_MAJOR detected. serve-sim requires Node.js 18+."
+if [[ "$NODE_MAJOR" -lt 20 ]]; then
+  fail "node $NODE_MAJOR detected. serve-sim requires Node.js 20+."
+fi
+
+# cloudflared is optional unless the caller intends to publish a Quick Tunnel.
+if [[ "$TUNNEL_MODE" == true ]] && ! command -v cloudflared >/dev/null 2>&1; then
+  fail "cloudflared not found. Install it with: brew install cloudflared"
 fi
 
 # macOS 14+ is optional (camera-only), so warn rather than fail

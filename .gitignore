@@ -9,3 +9,4 @@ dist/
 *.tsbuildinfo
 /packages/serve-sim/.xcode-build
 *.bun-build
+.playwright-mcp/
