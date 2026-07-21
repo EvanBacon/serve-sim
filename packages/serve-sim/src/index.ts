@@ -309,6 +309,7 @@ function stopProcess(pid: number, stillOwned?: () => boolean): void {
   }
 }
 
+/** Revalidate persisted tunnel ownership before signalling a recorded PID. */
 function quickTunnelStillOwned(expected: QuickTunnelState): boolean {
   const current = readQuickTunnelState();
   if (
@@ -386,6 +387,7 @@ async function ensureBooted(udid: string): Promise<void> {
 
 // ─── Preview server lifecycle ───
 
+/** Launch a detached tunnel owner and wait until its verified state is ready. */
 async function detachTunnelPreview(options: {
   devices: string[];
   port: number;

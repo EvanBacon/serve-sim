@@ -8,7 +8,10 @@ set -u
 TUNNEL_MODE=false
 if [[ "${1:-}" == "--tunnel" ]]; then
   TUNNEL_MODE=true
-elif [[ "$#" -gt 0 ]]; then
+  shift
+fi
+
+if [[ "$#" -gt 0 ]]; then
   echo "usage: $0 [--tunnel]" >&2
   exit 2
 fi

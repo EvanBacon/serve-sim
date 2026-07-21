@@ -64,10 +64,12 @@ export type TunnelAccessDecision =
 
 type TunnelRequest = Pick<IncomingMessage, "method" | "url" | "headers">;
 
+/** Return one normalized value from a Node request header. */
 function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+/** Compare access tokens without leaking a matching prefix through timing. */
 function tokensMatch(actual: string | null | undefined, expected: string): boolean {
   if (!actual) return false;
   const actualBytes = Buffer.from(actual);
@@ -75,6 +77,7 @@ function tokensMatch(actual: string | null | undefined, expected: string): boole
   return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
+/** Read a named value from a Cookie header without decoding unrelated cookies. */
 function cookieValue(header: string | undefined, name: string): string | null {
   if (!header) return null;
   for (const part of header.split(";")) {
@@ -87,10 +90,12 @@ function cookieValue(header: string | undefined, name: string): string | null {
   return null;
 }
 
+/** Read the protocol reported by the first forwarding hop. */
 function forwardedProtocol(headers: IncomingHttpHeaders): string | undefined {
   return firstHeader(headers["x-forwarded-proto"])?.split(",", 1)[0]?.trim().toLowerCase();
 }
 
+/** Identify direct loopback traffic that did not arrive through a proxy. */
 function isLoopbackRequest(request: TunnelRequest): boolean {
   if (forwardedProtocol(request.headers) !== undefined) return false;
   const host = firstHeader(request.headers.host);
@@ -104,6 +109,7 @@ function isLoopbackRequest(request: TunnelRequest): boolean {
   }
 }
 
+/** Require browser control requests to originate from their exact request host. */
 function requestOriginMatchesHost(request: TunnelRequest): boolean {
   const origin = firstHeader(request.headers.origin);
   if (!origin) return true;
@@ -119,10 +125,12 @@ function requestOriginMatchesHost(request: TunnelRequest): boolean {
   }
 }
 
+/** Create the per-owner 256-bit credential embedded in the private launch URL. */
 export function createTunnelAccessToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+/** Normalize the options that determine whether a detached tunnel can be reused. */
 export function createQuickTunnelLaunchConfig(input: {
   devices: string[];
   port: number;
@@ -143,6 +151,7 @@ export function createQuickTunnelLaunchConfig(input: {
   };
 }
 
+/** Validate launch metadata loaded from the persisted tunnel state file. */
 function validQuickTunnelLaunchConfig(value: unknown): value is QuickTunnelLaunchConfig {
   if (!value || typeof value !== "object") return false;
   const launch = value as Partial<QuickTunnelLaunchConfig>;
@@ -160,6 +169,7 @@ function validQuickTunnelLaunchConfig(value: unknown): value is QuickTunnelLaunc
     (launch.theme === null || typeof launch.theme === "string");
 }
 
+/** Check whether live tunnel state represents the exact requested launch. */
 export function quickTunnelLaunchMatches(
   state: Pick<QuickTunnelState, "launch">,
   requested: QuickTunnelLaunchConfig,
@@ -186,6 +196,7 @@ const SIMULATOR_BOOT_TIMEOUT_MS = 60_000;
 const QUICK_TUNNEL_READY_TIMEOUT_MS = 30_000;
 const DETACHED_STARTUP_GRACE_MS = 15_000;
 
+/** Budget sequential simulator boots, Quick Tunnel readiness, and launcher grace. */
 export function detachedTunnelStartupTimeoutMs(deviceCount: number): number {
   return Math.max(1, deviceCount) * SIMULATOR_BOOT_TIMEOUT_MS +
     QUICK_TUNNEL_READY_TIMEOUT_MS +
@@ -208,6 +219,7 @@ export function stopDetachedProcessGroup(
   }
 }
 
+/** Read and validate the persisted detached tunnel state. */
 export function readQuickTunnelState(): QuickTunnelState | null {
   try {
     const state = JSON.parse(readFileSync(QUICK_TUNNEL_STATE_FILE, "utf-8")) as QuickTunnelState;
@@ -234,6 +246,7 @@ export function readQuickTunnelState(): QuickTunnelState | null {
   }
 }
 
+/** Atomically persist owner-only detached tunnel state. */
 export function writeQuickTunnelState(state: QuickTunnelState): void {
   mkdirSync(STATE_DIR, { recursive: true });
   const tempFile = `${QUICK_TUNNEL_STATE_FILE}.${process.pid}.tmp`;
@@ -242,6 +255,7 @@ export function writeQuickTunnelState(state: QuickTunnelState): void {
   renameSync(tempFile, QUICK_TUNNEL_STATE_FILE);
 }
 
+/** Remove tunnel state, optionally only when it still belongs to an owner PID. */
 export function clearQuickTunnelState(ownerPid?: number): void {
   if (ownerPid !== undefined && readQuickTunnelState()?.ownerPid !== ownerPid) return;
   try { unlinkSync(QUICK_TUNNEL_STATE_FILE); } catch {}
@@ -319,6 +333,7 @@ export function authorizeTunnelRequest(
   return { type: "allow" };
 }
 
+/** Write a redirect or authorization error to an HTTP response. */
 function writeHttpDecision(res: ServerResponse, decision: Exclude<TunnelAccessDecision, { type: "allow" }>): void {
   const commonHeaders = {
     "Cache-Control": "no-store",
@@ -340,6 +355,7 @@ function writeHttpDecision(res: ServerResponse, decision: Exclude<TunnelAccessDe
   res.end(decision.body);
 }
 
+/** Reject an unauthorized WebSocket upgrade with a complete HTTP response. */
 function rejectUpgrade(socket: Socket, decision: Exclude<TunnelAccessDecision, { type: "allow" }>): void {
   const status = decision.type === "redirect" ? 401 : decision.status;
   const body = decision.type === "redirect"
@@ -384,10 +400,12 @@ export function protectTunnelMiddleware(
   return protectedMiddleware;
 }
 
+/** Extract the first Quick Tunnel hostname emitted by cloudflared. */
 export function extractQuickTunnelUrl(output: string): string | null {
   return output.match(QUICK_TUNNEL_URL_RE)?.[0] ?? null;
 }
 
+/** Locate an installed cloudflared executable on PATH. */
 export function findCloudflared(): string | null {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (!directory) continue;
@@ -397,6 +415,7 @@ export function findCloudflared(): string | null {
   return null;
 }
 
+/** Start cloudflared and resolve once it emits a usable Quick Tunnel URL. */
 export function startQuickTunnel(
   cloudflaredPath: string,
   originUrl: string,
