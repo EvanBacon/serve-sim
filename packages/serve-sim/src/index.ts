@@ -1,13 +1,24 @@
 #!/usr/bin/env node
-import { Command, InvalidArgumentError } from "commander";
+import { Command, InvalidArgumentError, Option } from "commander";
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
-import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  readSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { createHash } from "crypto";
 import { networkInterfaces } from "os";
 import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, type ServeSimDeviceState } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
-import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
+import { dirnameOf, sleepSync, isPortFree, reExecCommand, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, resolveDevice } from "./device";
 import { permissions } from "./permissions";
@@ -31,6 +42,22 @@ import {
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
+import {
+  QUICK_TUNNEL_LOG_FILE,
+  clearQuickTunnelState,
+  createQuickTunnelLaunchConfig,
+  createTunnelAccessToken,
+  detachedTunnelStartupTimeoutMs,
+  findCloudflared,
+  protectTunnelMiddleware,
+  quickTunnelLaunchMatches,
+  quickTunnelMatchesDeviceStates,
+  readQuickTunnelState,
+  startQuickTunnel,
+  stopDetachedProcessGroup,
+  writeQuickTunnelState,
+  type QuickTunnelState,
+} from "./quick-tunnel";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -260,7 +287,8 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /** Kill a process and wait for it to actually exit. */
-function stopProcess(pid: number): void {
+function stopProcess(pid: number, stillOwned?: () => boolean): void {
+  if (stillOwned && !stillOwned()) return;
   try { process.kill(pid, "SIGTERM"); } catch { return; }
   const deadline = Date.now() + 500;
   while (Date.now() < deadline) {
@@ -271,11 +299,26 @@ function stopProcess(pid: number): void {
       return;
     }
   }
+  // A persisted PID may have been replaced while we waited. Callers with an
+  // ownership record must revalidate it before escalation.
+  if (stillOwned && !stillOwned()) return;
   try { process.kill(pid, "SIGKILL"); } catch {}
   const deadline2 = Date.now() + 500;
   while (Date.now() < deadline2) {
     try { process.kill(pid, 0); sleepSync(25); } catch { return; }
   }
+}
+
+function quickTunnelStillOwned(expected: QuickTunnelState): boolean {
+  const current = readQuickTunnelState();
+  if (
+    !current ||
+    current.ownerPid !== expected.ownerPid ||
+    current.startedAt !== expected.startedAt
+  ) {
+    return false;
+  }
+  return quickTunnelMatchesDeviceStates(current, readAllStates());
 }
 
 function bootDevice(udid: string): void {
@@ -343,14 +386,128 @@ async function ensureBooted(udid: string): Promise<void> {
 
 // ─── Preview server lifecycle ───
 
-/** Resolve the command to re-exec this CLI (compiled binary or `node …js`). */
-function reExecArgs(extra: string[]): { command: string; args: string[] } {
-  // Compiled standalone binary: argv[0] is the serve-sim binary itself.
-  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
-    return { command: process.argv[0], args: extra };
+async function detachTunnelPreview(options: {
+  devices: string[];
+  port: number;
+  portExplicit: boolean;
+  codec?: string;
+  initialState?: PreviewInitialState;
+  theme?: SimulatorTheme;
+}): Promise<QuickTunnelState> {
+  const requestedDevices = resolveTargetDevices(options.devices);
+  const requestedLaunch = createQuickTunnelLaunchConfig({
+    devices: requestedDevices,
+    port: options.port,
+    portExplicit: options.portExplicit,
+    codec: options.codec,
+    panes: options.initialState?.panes,
+    fit: options.initialState?.fit,
+    theme: options.theme,
+  });
+  const existing = readQuickTunnelState();
+  if (
+    existing &&
+    isProcessAlive(existing.ownerPid) &&
+    quickTunnelMatchesDeviceStates(existing, readAllStates())
+  ) {
+    if (quickTunnelLaunchMatches(existing, requestedLaunch)) return existing;
+    throw new Error(
+      "A detached Quick Tunnel is already running with different devices or preview options. " +
+      "Stop it with `serve-sim --kill` before starting another.",
+    );
   }
-  // Running the JS bundle: `node /path/to/serve-sim.js`.
-  return { command: process.argv[0]!, args: [process.argv[1]!, ...extra] };
+  clearQuickTunnelState();
+  ensureStateDir();
+  writeFileSync(
+    QUICK_TUNNEL_LOG_FILE,
+    `[${new Date().toISOString()}] [serve-sim] launching detached public preview\n`,
+    { mode: 0o600 },
+  );
+  chmodSync(QUICK_TUNNEL_LOG_FILE, 0o600);
+
+  const childArgs = ["--tunnel", "--tunnel-child"];
+  if (options.portExplicit) childArgs.push("--port", String(options.port));
+  if (options.codec) childArgs.push("--codec", options.codec);
+  if (options.initialState?.panes) {
+    childArgs.push(
+      "--panes",
+      options.initialState.panes.length > 0 ? options.initialState.panes.join(",") : "none",
+    );
+  }
+  if (options.initialState?.fit) childArgs.push("--fit");
+  if (options.theme) childArgs.push("--theme", options.theme);
+  childArgs.push(...requestedDevices);
+
+  const { command, args } = reExecCommand(childArgs);
+  const logFd = openSync(QUICK_TUNNEL_LOG_FILE, "a", 0o600);
+  let childPid: number | undefined;
+  const signalHandlers = new Map<NodeJS.Signals, () => void>();
+  const removeSignalHandlers = () => {
+    for (const [signal, handler] of signalHandlers) {
+      process.removeListener(signal, handler);
+    }
+    signalHandlers.clear();
+  };
+  const exitCodes: Record<"SIGHUP" | "SIGINT" | "SIGTERM", number> = {
+    SIGHUP: 129,
+    SIGINT: 130,
+    SIGTERM: 143,
+  };
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) {
+    const handler = () => {
+      if (childPid) stopDetachedProcessGroup(childPid);
+      removeSignalHandlers();
+      process.exit(exitCodes[signal]);
+    };
+    signalHandlers.set(signal, handler);
+    process.once(signal, handler);
+  }
+
+  const child = nodeSpawn(command, args, {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+  closeSync(logFd);
+  child.unref();
+  if (!child.pid) {
+    removeSignalHandlers();
+    throw new Error("Failed to spawn detached public preview");
+  }
+  childPid = child.pid;
+
+  // Keep the host awake while a deliberately detached public preview exists.
+  // caffeinate exits automatically when the preview owner exits.
+  if (process.platform === "darwin" && existsSync("/usr/bin/caffeinate")) {
+    const caffeinate = nodeSpawn("/usr/bin/caffeinate", ["-i", "-w", String(child.pid)], {
+      detached: true,
+      stdio: "ignore",
+    });
+    caffeinate.unref();
+  }
+
+  try {
+    const deadline = Date.now() + detachedTunnelStartupTimeoutMs(requestedDevices.length);
+    while (Date.now() < deadline) {
+      const state = readQuickTunnelState();
+      if (
+        state?.ownerPid === child.pid &&
+        isProcessAlive(state.ownerPid) &&
+        quickTunnelMatchesDeviceStates(state, readAllStates()) &&
+        quickTunnelLaunchMatches(state, requestedLaunch)
+      ) {
+        return state;
+      }
+      if (!isProcessAlive(child.pid)) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  } finally {
+    removeSignalHandlers();
+  }
+
+  stopDetachedProcessGroup(child.pid);
+  let diagnostics = "";
+  try { diagnostics = readFileSync(QUICK_TUNNEL_LOG_FILE, "utf-8").slice(-16_000); } catch {}
+  throw new Error(`Detached public preview did not become ready.\n${diagnostics.trim()}`);
 }
 
 /** Poll for the state file a re-exec'd preview server writes once it's serving. */
@@ -383,7 +540,7 @@ async function startHelper(
 
   const logFile = join(STATE_DIR, `server-${udid}.log`);
   const logFd = openSync(logFile, "w");
-  const { command, args } = reExecArgs([udid, "--port", String(port), "--host", host]);
+  const { command, args } = reExecCommand([udid, "--port", String(port), "--host", host]);
   const child = nodeSpawn(command, args, {
     detached: opts.detach,
     stdio: ["ignore", logFd, logFd],
@@ -627,18 +784,42 @@ function killStreams(deviceArg?: string) {
       console.log(JSON.stringify({ disconnected: true, device: udid }));
       return;
     }
-    try { process.kill(state.pid, "SIGTERM"); } catch {}
+    const tunnel = readQuickTunnelState();
+    if (
+      tunnel &&
+      tunnel.ownerPid === state.pid &&
+      tunnel.port === state.port &&
+      tunnel.devices.includes(state.device) &&
+      quickTunnelStillOwned(tunnel)
+    ) {
+      stopProcess(tunnel.ownerPid, () => quickTunnelStillOwned(tunnel));
+      if (!isProcessAlive(tunnel.ownerPid)) clearQuickTunnelState(tunnel.ownerPid);
+    } else {
+      try { process.kill(state.pid, "SIGTERM"); } catch {}
+    }
     clearState(udid);
     console.log(JSON.stringify({ disconnected: true, device: state.device }));
   } else {
     const states = readAllStates();
+    const tunnel = readQuickTunnelState();
+    const tunnelOwned = !!tunnel && quickTunnelMatchesDeviceStates(tunnel, states);
+    if (tunnel && !tunnelOwned) clearQuickTunnelState();
     if (states.length === 0) {
       console.log(JSON.stringify({ disconnected: true, devices: [] }));
       return;
     }
     const devices: string[] = [];
+    const signaled = new Set<number>();
+    if (tunnel && tunnelOwned && quickTunnelStillOwned(tunnel)) {
+      stopProcess(tunnel.ownerPid, () => quickTunnelStillOwned(tunnel));
+      signaled.add(tunnel.ownerPid);
+      if (!isProcessAlive(tunnel.ownerPid)) clearQuickTunnelState(tunnel.ownerPid);
+    }
     for (const state of states) {
-      try { process.kill(state.pid, "SIGTERM"); } catch {}
+      if (!signaled.has(state.pid)) {
+        try { process.kill(state.pid, "SIGTERM"); } catch {}
+        signaled.add(state.pid);
+      }
       devices.push(state.device);
     }
     clearState();
@@ -1600,7 +1781,18 @@ async function serve(
   codec: string | undefined,
   initialState: PreviewInitialState | undefined,
   theme: SimulatorTheme | undefined,
+  tunnelMode = false,
+  detachedTunnelChild = false,
 ) {
+  const cloudflaredPath = tunnelMode ? findCloudflared() : null;
+  if (tunnelMode && !cloudflaredPath) {
+    console.error(
+      "Cloudflare public mode requires cloudflared. Install it with " +
+      "`brew install cloudflared`, then rerun serve-sim --tunnel.",
+    );
+    process.exit(1);
+  }
+
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
   const targetDevices = resolveTargetDevices(devices);
@@ -1612,27 +1804,52 @@ async function serve(
     for (const udid of targetDevices) await setUiOption(udid, "appearance", theme);
   }
   const targetDevice = targetDevices[0];
+  const tunnelLaunch = tunnelMode ? createQuickTunnelLaunchConfig({
+    devices: targetDevices,
+    port: servePort,
+    portExplicit,
+    codec,
+    panes: initialState?.panes,
+    fit: initialState?.fit,
+    theme,
+  }) : undefined;
 
   const { simMiddleware } = await import("./middleware");
   // Standalone serve-sim owns its HTTP server and wires WebSocket upgrades, so
   // it can route helper/DevTools sockets through the single preview port.
-  const middleware = simMiddleware({
+  const baseMiddleware = simMiddleware({
     basePath: "/",
     device: targetDevice,
     codec,
     initialState,
     proxyHelpers: true,
   });
+  const tunnelAccessToken = tunnelMode ? createTunnelAccessToken() : null;
+  const middleware = tunnelAccessToken
+    ? protectTunnelMiddleware(baseMiddleware, tunnelAccessToken)
+    : baseMiddleware;
+
+  if (tunnelMode) {
+    ensureStateDir();
+    const message = `[${new Date().toISOString()}] [serve-sim] launching previewPid=${process.pid}\n`;
+    if (detachedTunnelChild) {
+      appendFileSync(QUICK_TUNNEL_LOG_FILE, message);
+    } else {
+      writeFileSync(QUICK_TUNNEL_LOG_FILE, message, { mode: 0o600 });
+    }
+    chmodSync(QUICK_TUNNEL_LOG_FILE, 0o600);
+  }
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
   const maxScan = portExplicit ? 1 : 50;
   let boundPort = servePort;
   let lastErr: unknown;
   let bound = false;
+  let previewServer: Awaited<ReturnType<typeof bindPreviewServer>> | null = null;
   for (let i = 0; i < maxScan; i++) {
     const p = servePort + i;
     try {
-      await bindPreviewServer(p, middleware, host);
+      previewServer = await bindPreviewServer(p, middleware, host);
       boundPort = p;
       bound = true;
       break;
@@ -1659,29 +1876,120 @@ async function serve(
   for (const udid of targetDevices) {
     writeState(inProcessServeSimState(udid, boundPort, "/", host));
   }
-  const clearAll = () => {
+
+  let shuttingDown = false;
+  let cloudflaredChild: ChildProcess | null = null;
+  const logTunnelEvent = (message: string) => {
+    if (!tunnelMode) return;
+    try {
+      appendFileSync(
+        QUICK_TUNNEL_LOG_FILE,
+        `[${new Date().toISOString()}] [serve-sim] ${message}\n`,
+      );
+    } catch {}
+  };
+  const clearOwnedDeviceStates = () => {
     for (const udid of targetDevices) {
-      try { clearState(udid); } catch {}
+      try {
+        if (readState(udid)?.pid === process.pid) clearState(udid);
+      } catch {}
     }
   };
-  process.on("exit", clearAll);
+  const cleanup = (exitCode: number, reason: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logTunnelEvent(`shutdown reason=${reason} exitCode=${exitCode}`);
+    if (cloudflaredChild?.pid) cloudflaredChild.kill("SIGTERM");
+    previewServer?.stop(true);
+    clearOwnedDeviceStates();
+    if (tunnelMode) clearQuickTunnelState(process.pid);
+    process.exit(exitCode);
+  };
 
-  const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
-  const networkIP = getLocalNetworkIP();
-  console.log("");
-  console.log(`  - Local:   http://localhost:${boundPort}`);
-  if (exposedToLan && networkIP) {
-    console.log(`  - Network: http://${networkIP}:${boundPort}`);
-  } else if (networkIP) {
-    console.log(`  - Network: \x1b[2muse --host 0.0.0.0 to expose on http://${networkIP}:${boundPort}\x1b[0m`);
+  process.once("SIGINT", () => cleanup(0, "received SIGINT"));
+  process.once("SIGTERM", () => cleanup(0, "received SIGTERM"));
+  process.once("SIGHUP", () => cleanup(0, "received SIGHUP"));
+  process.on("exit", () => {
+    clearOwnedDeviceStates();
+    if (tunnelMode) clearQuickTunnelState(process.pid);
+    if (cloudflaredChild?.pid) {
+      try { cloudflaredChild.kill("SIGTERM"); } catch {}
+    }
+  });
+
+  if (tunnelMode) {
+    logTunnelEvent(`starting origin=http://127.0.0.1:${boundPort}`);
+    try {
+      const tunnel = await startQuickTunnel(
+        cloudflaredPath!,
+        `http://127.0.0.1:${boundPort}`,
+        QUICK_TUNNEL_LOG_FILE,
+        { onSpawn: (child) => { cloudflaredChild = child; } },
+      );
+      cloudflaredChild = tunnel.child;
+      if (!cloudflaredChild.pid || cloudflaredChild.exitCode !== null) {
+        throw new Error("cloudflared exited before the Quick Tunnel became ready");
+      }
+
+      const publicUrl = new URL(tunnel.url);
+      publicUrl.searchParams.set("token", tunnelAccessToken!);
+      const localUrl = new URL(`http://localhost:${boundPort}`);
+      localUrl.searchParams.set("token", tunnelAccessToken!);
+      const state: QuickTunnelState = {
+        ownerPid: process.pid,
+        cloudflaredPid: cloudflaredChild.pid,
+        port: boundPort,
+        publicUrl: publicUrl.toString(),
+        localUrl: localUrl.toString(),
+        logFile: QUICK_TUNNEL_LOG_FILE,
+        devices: targetDevices,
+        startedAt: new Date().toISOString(),
+        launch: tunnelLaunch,
+      };
+      writeQuickTunnelState(state);
+      logTunnelEvent(
+        `ready cloudflaredPid=${cloudflaredChild.pid} publicUrl=${tunnel.url}`,
+      );
+
+      cloudflaredChild.once("exit", (code, signal) => {
+        if (shuttingDown) return;
+        const reason = `cloudflared exited code=${code ?? "unknown"} signal=${signal ?? "none"}`;
+        console.error(`Cloudflare Quick Tunnel exited unexpectedly (${reason}).`);
+        cleanup(code === null || code === 0 ? 1 : code, reason);
+      });
+
+      if (!detachedTunnelChild) {
+        console.log("");
+        console.log(`  - Local:   ${localUrl}`);
+        console.log(`  - Public:  ${publicUrl}`);
+        console.log("");
+        console.log("  Anyone with the complete URL can control the simulator and run host commands.");
+        console.log("  Keep it private. Ctrl+C closes this temporary tunnel.");
+        console.log(`  Diagnostics: ${QUICK_TUNNEL_LOG_FILE}`);
+        console.log("");
+      }
+    } catch (error) {
+      logTunnelEvent(`startup failed error=${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        `Failed to start Cloudflare Quick Tunnel: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      cleanup(1, "tunnel startup failed");
+    }
   } else {
-    console.log("  - Network: \x1b[2muse --host 0.0.0.0 to expose on the LAN\x1b[0m");
+    const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
+    const networkIP = getLocalNetworkIP();
+    console.log("");
+    console.log(`  - Local:   http://localhost:${boundPort}`);
+    if (exposedToLan && networkIP) {
+      console.log(`  - Network: http://${networkIP}:${boundPort}`);
+    } else if (networkIP) {
+      console.log(`  - Network: \x1b[2muse --host 0.0.0.0 to expose on http://${networkIP}:${boundPort}\x1b[0m`);
+    } else {
+      console.log("  - Network: \x1b[2muse --host 0.0.0.0 to expose on the LAN\x1b[0m");
+    }
+    console.log("");
   }
-  console.log("");
 
-  // Exit cleanly on Ctrl+C
-  process.on("SIGINT", () => process.exit(0));
-  process.on("SIGTERM", () => process.exit(0));
   await new Promise(() => {});
 }
 
@@ -1708,7 +2016,15 @@ program
       "shell-exec route.",
     "127.0.0.1",
   )
-  .option("--detach", "Spawn helper and exit (daemon mode)")
+  .addOption(
+    new Option(
+      "--tunnel",
+      "Publish an access-token-protected Cloudflare Quick Tunnel",
+    ),
+  )
+  .addOption(new Option("--public").hideHelp().implies({ tunnel: true }))
+  .addOption(new Option("--tunnel-child").hideHelp())
+  .option("--detach", "Run the stream or public preview in background")
   .option("-q, --quiet", "Suppress human-readable output, JSON only")
   .option("--no-preview", "Skip the web preview server; stream in foreground only")
   .option(
@@ -1754,6 +2070,8 @@ program
     `
 Examples:
   serve-sim                              Open simulator preview at localhost:3200
+  serve-sim --tunnel                     Open a private temporary URL from anywhere
+  serve-sim --tunnel --detach            Keep a public preview running in background
   serve-sim -p 8080                      Preview on a custom port
   serve-sim --codec mjpeg                Force MJPEG (e.g. on VMs without H.264 encode)
   serve-sim --panes devices,tools --fit  Open panes and fit the simulator to the viewport
@@ -1765,6 +2083,17 @@ Examples:
   serve-sim --kill                       Stop all streams`,
   )
   .action(async (devices: string[], opts) => {
+    const tunnelMode = !!opts.tunnel || !!opts.tunnelChild;
+    if (tunnelMode && (opts.list !== undefined || opts.kill !== undefined || opts.preview === false)) {
+      console.error("--tunnel is only available with the preview server (not --no-preview, --list, or --kill).");
+      process.exitCode = 1;
+      return;
+    }
+    if (tunnelMode && opts.host !== "127.0.0.1") {
+      console.error("--tunnel always binds the preview to 127.0.0.1 and cannot be combined with --host.");
+      process.exitCode = 1;
+      return;
+    }
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -1774,17 +2103,32 @@ Examples:
       return;
     }
     const startPort: number | undefined = opts.port;
-    if (opts.detach) {
+    const initialState: PreviewInitialState | undefined =
+      opts.panes !== undefined || opts.fit ? {
+        ...(opts.panes !== undefined ? { panes: opts.panes } : {}),
+        ...(opts.fit ? { fit: true } : {}),
+      } : undefined;
+    if (tunnelMode && opts.detach && !opts.tunnelChild) {
+      try {
+        const state = await detachTunnelPreview({
+          devices,
+          port: startPort ?? 3200,
+          portExplicit: startPort !== undefined,
+          codec: opts.codec,
+          initialState,
+          theme: opts.theme,
+        });
+        console.log(JSON.stringify(state));
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      }
+    } else if (opts.detach) {
       const states = await detach(devices, startPort ?? 3100);
       printStatesJSON(states);
     } else if (opts.preview === false) {
       await follow(devices, startPort ?? 3100, !!opts.quiet);
     } else {
-      const initialState: PreviewInitialState | undefined =
-        opts.panes !== undefined || opts.fit ? {
-          ...(opts.panes !== undefined ? { panes: opts.panes } : {}),
-          ...(opts.fit ? { fit: true } : {}),
-        } : undefined;
       await serve(
         startPort ?? 3200,
         devices,
@@ -1793,6 +2137,8 @@ Examples:
         opts.codec,
         initialState,
         opts.theme,
+        tunnelMode,
+        !!opts.tunnelChild,
       );
     }
   });

@@ -1,6 +1,6 @@
 ---
 name: serve-sim
-description: Control and stream a running iOS, iPad, or Apple Watch Simulator with npx serve-sim. Use for simulator preview, taps, gestures, hardware buttons, rotation, camera injection, permissions, accessibility, and CoreAnimation debug.
+description: Control and stream a running iOS, iPad, or Apple Watch Simulator with npx serve-sim. Use for local or protected public previews, taps, gestures, hardware buttons, rotation, camera injection, permissions, accessibility, and CoreAnimation debug.
 license: Apache-2.0
 ---
 
@@ -33,10 +33,11 @@ Before any other action, verify the host satisfies these. If something is missin
 |---|---|---|
 | macOS host | `uname -s` returns `Darwin` | serve-sim only runs on macOS |
 | Xcode CLI tools | `xcrun --version` exits 0 | `simctl` is the underlying simulator driver |
-| Node.js ≥18 | `node --version` ≥18 | serve-sim is an npm package run via `npx` |
+| Node.js ≥20 | `node --version` ≥20 | serve-sim supports maintained Node.js LTS releases |
+| cloudflared (tunnels only) | `command -v cloudflared` exits 0 | Required only for `--tunnel` / `--public` |
 | macOS 14+ (optional) | `sw_vers -productVersion` ≥14 | Required ONLY for `camera` subcommand |
 
-A bundled helper script is available: `scripts/check-prereqs.sh`. Run it; if it exits non-zero, surface the message to the user.
+A bundled helper script is available: `scripts/check-prereqs.sh`. Run it; if it exits non-zero, surface the message to the user. Pass `--tunnel` when preparing a public preview so it also verifies `cloudflared`.
 
 A booted simulator is required for most subcommands. Check with `xcrun simctl list devices booted`. If none are booted, tell the user to open Xcode → Simulator or to run `xcrun simctl boot <UDID>`.
 
@@ -61,6 +62,7 @@ Key invariants the agent must respect:
 - **All coordinates are normalized 0..1**, with `(0, 0)` at top-left and `(1, 1)` at bottom-right of the display. Never pass pixel coordinates.
 - **One helper per device**. Multiple booted simulators are supported by passing several device names or by attaching to all.
 - **State lives in `$TMPDIR/serve-sim/server-{udid}.json`**. Use `serve-sim --list` to query it; do not read the JSON directly unless you know what you are doing.
+- **Detached tunnel state lives in `$TMPDIR/serve-sim/tunnel.json`**. Use the JSON returned by `--tunnel --detach -q`; do not scrape the state file for its private URL.
 - **The orientation set via `rotate` is remembered by the helper**, and subsequent gestures are rotated client-side. An agent that sends raw coords after a rotation does not need to compensate manually.
 
 ## Common operations
@@ -68,7 +70,9 @@ Key invariants the agent must respect:
 | Goal | Command | Notes |
 |---|---|---|
 | Start preview server | `npx serve-sim [device]` | Default preview at `http://localhost:3200`, stream at `:3100`. Foreground process. |
-| Start headless / daemon | `npx serve-sim --detach [device]` | Returns JSON with `pid`, `port`, `url`. Use for agent loops. |
+| Start headless / daemon | `npx serve-sim --detach [device]` | Returns JSON with `port`, `url`, and stream endpoints. Use for agent loops. |
+| Start protected public preview | `npx serve-sim --tunnel [device]` | Attached Cloudflare Quick Tunnel; prints a private tokenized URL. `--public` is an alias. |
+| Start public preview in background | `npx serve-sim --tunnel --detach -q [device]` | Returns JSON; give the user the complete `publicUrl`. See [references/tunnels.md](references/tunnels.md). |
 | Show stream in host's preview | `npx serve-sim --detach -q` → hand off `url` to host preview tool | See "Showing the stream in your agent's preview" section. |
 | List running streams | `npx serve-sim --list` | Add `-q` for JSON-only output. |
 | Stop all helpers | `npx serve-sim --kill` | Pass `[device]` to stop a specific one. |
@@ -110,6 +114,7 @@ By default, serve-sim prints human-readable status to stdout. For agent loops, p
 ```sh
 npx serve-sim --list -q          # JSON array of running streams
 npx serve-sim --detach -q        # JSON with pid/port/url after spawn
+npx serve-sim --tunnel --detach -q # JSON with publicUrl/localUrl after spawn
 npx serve-sim camera status -q   # JSON with {alive, source, mirror, ...}
 ```
 
@@ -141,6 +146,19 @@ The stream stays alive until `npx serve-sim --kill`. Multiple clients (the host'
 
 See [references/workflows.md](references/workflows.md) workflow "Show the simulator stream in the host's preview" for the full recipe.
 
+## Publishing the preview over the Internet
+
+When the user wants to connect from a remote PC or mobile device, use serve-sim's built-in protected Quick Tunnel instead of publishing the local URL yourself:
+
+```sh
+scripts/check-prereqs.sh --tunnel
+npx serve-sim --tunnel --detach -q
+```
+
+Parse and surface the complete `publicUrl`, including its `token` query parameter. Treat that URL as a credential: anyone who has it can view/control the simulator and use preview features that run host commands. Quick Tunnels do not provide an identity login or Cloudflare Access and are intended for temporary development/testing.
+
+If the user asks to keep it running, leave it detached and tell them that `npx serve-sim --kill` stops both the preview owner and its `cloudflared` child. Otherwise clean it up when the task finishes. Read [references/tunnels.md](references/tunnels.md) for prerequisites, browser handoff, security, lifecycle, and diagnostics.
+
 ## Workflows
 
 For complete end-to-end recipes (UI automation, camera testing, accessibility-driven taps, deep-link flows, preview handoff), see [references/workflows.md](references/workflows.md). The reference covers the patterns documented in serve-sim's own `AGENTS.md`.
@@ -154,14 +172,17 @@ npx serve-sim --kill            # stop all
 npx serve-sim --kill "iPhone 16 Pro"  # stop one
 ```
 
-Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
+Orphan helpers occupy ports 3200/3100 and prevent fresh starts. `--kill` also stops a detached Quick Tunnel and its owned `cloudflared` child. Prefer it over signalling persisted PIDs directly.
 
 ## Anti-patterns
 
 - **Do not pass pixel coordinates.** All coords are normalized `0..1`. If the user gives pixel values, divide by the screen dimensions reported by `GET /config`.
 - **Do not use `gesture` for plain taps.** Use `tap`. See "Critical gotcha" above.
 - **Do not assume `npx serve-sim` is already running.** Verify with `--list` or by checking `$TMPDIR/serve-sim/server-{udid}.json`. If absent, start it explicitly.
-- **Do not skip the prerequisites check** on the first invocation in a session. Wrong macOS version, missing Xcode CLI tools, or Node <18 produce confusing errors downstream.
+- **Do not skip the prerequisites check** on the first invocation in a session. Wrong macOS version, missing Xcode CLI tools, or Node <20 produce confusing errors downstream.
+- **Do not publish a tunnel URL without its token.** A new remote browser needs the complete `publicUrl` once to establish its access cookie.
+- **Do not treat a Quick Tunnel as identity authentication.** The complete URL is a credential; use a managed tunnel with Cloudflare Access when the user needs identity policies.
+- **Do not use `kill -9` for cleanup.** Use `serve-sim --kill` so the preview owner can terminate its `cloudflared` child and remove runtime state.
 - **Do not invent button names.** Only these six are valid: `home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`. See [references/buttons-rotation.md](references/buttons-rotation.md) for the source-of-truth list.
 - **Do not parse the non-quiet human output.** Use `-q` for JSON.
 - **Do not leave camera helpers running** across unrelated tasks. Stop them with `npx serve-sim camera --stop-webcam` when done.
@@ -175,4 +196,5 @@ Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
 - [references/permissions.md](references/permissions.md) — granting/revoking app privacy permissions, including push notifications.
 - [references/ca-debug.md](references/ca-debug.md) — the five CoreAnimation debug flags and when each one helps.
 - [references/endpoints.md](references/endpoints.md) — HTTP and WebSocket endpoints for agents that bypass the CLI.
+- [references/tunnels.md](references/tunnels.md) — protected Quick Tunnel setup, remote handoff, security, lifecycle, and diagnostics.
 - [references/workflows.md](references/workflows.md) — end-to-end recipes for UI automation, camera testing, deep-link flows.

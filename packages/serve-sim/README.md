@@ -40,6 +40,7 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and a [maintained 
 
 ```
 serve-sim [device...]                 Start preview server (default: localhost:3200)
+serve-sim --tunnel [device...]        Start a protected Cloudflare Quick Tunnel
 serve-sim --no-preview [device...]    Stream in foreground without a preview server
 serve-sim gesture '<json>' [-d udid]  Send a touch gesture
 serve-sim button [name] [-d udid]     Send a button press (default: home)
@@ -67,9 +68,11 @@ serve-sim camera --stop-webcam [-d udid]
 
 Options:
   -p, --port <port>   Starting port (preview default: 3200; helper default: 3100)
-  -d, --detach        Spawn helper and exit (daemon mode)
+  -d, --detach        Run the stream or public preview in background
   -q, --quiet         JSON-only output
       --no-preview    Skip the web UI; stream in foreground only
+      --tunnel        Publish an access-token-protected Cloudflare Quick Tunnel
+                      (alias: --public)
       --panes <panes> Initially open preview panes: devices, tools, devtools,
                       or none
       --fit           Initially size the simulator to fit the preview viewport
@@ -98,6 +101,8 @@ Camera options (used with `serve-sim camera <bundle-id>`):
 ```sh
 serve-sim                              # auto-detect booted sim, open preview
 serve-sim "iPhone 16 Pro"              # target a specific device
+serve-sim --tunnel                     # print a protected temporary public URL
+serve-sim --tunnel --detach            # keep the public preview in background
 serve-sim --detach                     # start a background helper, return JSON
 serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
@@ -129,6 +134,24 @@ serve-sim camera --stop-webcam
 ```
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
+
+### Public Quick Tunnels
+
+Use `--tunnel` (or its `--public` alias) to reach the full simulator preview from another computer or a mobile browser without exposing a LAN port or using a remote-desktop session:
+
+```sh
+brew install cloudflared
+serve-sim --tunnel
+# → Public: https://random-name.trycloudflare.com/?token=...
+```
+
+Open the complete printed URL on the remote device. Its URL token is exchanged for a secure, HTTP-only, host-only cookie on the browser's first request and then removed from the address bar. HTTP routes and WebSocket upgrades require that cookie, and browser control requests must come from the exact tunnel origin. The preview remains bound to `127.0.0.1`; only `cloudflared` can publish it.
+
+The complete URL is a credential. Anyone who has it can view and control the simulator and use preview features that run commands on the host. Keep it private and stop the tunnel when you are done. Quick Tunnels have no built-in identity login and are intended by Cloudflare for development and testing; use a managed Cloudflare Tunnel with Access when you need stable hostnames, user identity policies, or production guarantees.
+
+`cloudflared` must already be installed, but a Cloudflare account or login is not required. If the executable is missing, serve-sim exits before booting or exposing anything and prints the install command. A user-level Cloudflare configuration is bypassed because Cloudflare documents it as incompatible with Quick Tunnels.
+
+By default the tunnel is attached to serve-sim: `Ctrl+C` closes both processes. Add `--detach` to run it in the background; `serve-sim --kill` then stops the preview owner and its `cloudflared` child. Detached state and persistent diagnostics follow serve-sim's existing runtime-state convention under `$TMPDIR/serve-sim/` (`tunnel.json` and `tunnel.log`). The log records lifecycle and Cloudflare output but never the private access token.
 
 ### Camera
 

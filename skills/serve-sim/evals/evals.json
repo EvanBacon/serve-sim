@@ -31,7 +31,7 @@
       "name": "stream-and-pull-notification-center",
       "prompt": "Stream my simulator so I can share the URL remotely. Then drag down from the top edge to open Notification Center.",
       "expected_behavior": [
-        "Runs `npx serve-sim --detach -q` and surfaces the returned URL to the user.",
+        "Verifies `cloudflared` is installed, then runs `npx serve-sim --tunnel --detach -q` and surfaces the complete returned `publicUrl` to the user.",
         "Issues a gesture sequence (begin → move → end) with `edge: 2` (top), starting at low y (~0.02) and dragging down to y ~0.4.",
         "Each gesture call uses `npx serve-sim gesture '<json>'` with valid normalized coordinates.",
         "Does NOT use `tap` for this multi-step gesture."
@@ -73,6 +73,21 @@
         "If no such tool is available, explicitly tells the user that and instructs them to open the URL in their host's browser/preview pane.",
         "Does NOT try to install, build, or launch the app — assumes the simulator + app are already running per the prompt.",
         "Does NOT invent a host-specific tool name that doesn't exist in the current session."
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "protected-quick-tunnel",
+      "prompt": "My simulator is already open. Publish serve-sim so I can control it from my phone, give me the URL, and keep it running in the background until I say I am done.",
+      "expected_behavior": [
+        "Runs `scripts/check-prereqs.sh --tunnel` or otherwise verifies macOS, Node 20+, Xcode tools, a booted simulator, and `cloudflared` before starting.",
+        "Runs `npx serve-sim --tunnel --detach -q` (the `--public` alias is also accepted).",
+        "Parses the returned JSON and surfaces the complete `publicUrl`, including its `token` query parameter, plainly to the user.",
+        "Warns that the complete URL is a credential: anyone with it can view/control the simulator and invoke preview features that run host commands.",
+        "Does not claim that Quick Tunnels provide Cloudflare Access, identity login, a stable hostname, or production guarantees.",
+        "Leaves the tunnel running because the user explicitly requested that, and explains that `npx serve-sim --kill` stops both the detached preview owner and its `cloudflared` child.",
+        "Does not expose the token in diagnostics, issues, or unrelated output."
       ],
       "files": []
     }
