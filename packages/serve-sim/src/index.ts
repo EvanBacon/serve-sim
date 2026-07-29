@@ -43,6 +43,7 @@ import { setUiOption, uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
+import { fetchAxSnapshot } from "./ax-cli";
 import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
 import { MAX_BITRATE_ENV, applyMaxBitrateOption, parseMaxBitrateMbps } from "./max-bitrate";
 import { shareHost } from "./share-host";
@@ -1066,6 +1067,23 @@ function sendAckedInput(
       sendNext(0);
     };
   });
+}
+
+async function axDump(deviceArg?: string) {
+  const udid = deviceArg ? resolveDevice(deviceArg) : undefined;
+  const state = readState(udid);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim` first.");
+    process.exit(1);
+  }
+
+  try {
+    const snapshot = await fetchAxSnapshot(state.streamUrl);
+    console.log(JSON.stringify(snapshot));
+  } catch (err) {
+    console.error(`Failed to read accessibility tree: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }
 
 async function gesture(jsonStr: string, deviceArg?: string, raw?: boolean) {
@@ -2605,6 +2623,12 @@ program
   .option("-j, --json", "Print the full JSON bundle")
   .option("-o, --out <file>", "Write the JSON bundle to a file")
   .action((opts) => doctor(opts.device, { json: opts.json, out: opts.out }));
+
+program
+  .command("ax")
+  .description("Dump the current accessibility tree as JSON")
+  .option(...deviceOpt)
+  .action((opts) => axDump(opts.device));
 
 // `camera` and `permissions` keep their own dedicated argument parsers (the
 // camera verb has nested sub-verbs and source flags; permissions has a

@@ -121,6 +121,7 @@ serve-sim doctor [-d udid]            Collect redacted diagnostics for bug repor
 serve-sim record [-d udid]            Record the screen to an MP4 (native resolution,
                                       60 fps H.264); Ctrl+C stops. -o <file>,
                                       -t <duration>, --codec h264|hevc, --fps, --bitrate
+serve-sim ax [-d udid]                Dump the accessibility tree as JSON
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
