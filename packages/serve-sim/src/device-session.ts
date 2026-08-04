@@ -127,6 +127,18 @@ function waitForDrain(res: ServerResponse): Promise<void> {
   });
 }
 
+async function writeAndDrain(
+  res: ServerResponse,
+  write: () => boolean,
+): Promise<boolean> {
+  await waitForDrain(res);
+  if (res.writableEnded || res.destroyed) return false;
+
+  const accepted = write();
+  if (!accepted || res.writableNeedDrain) await waitForDrain(res);
+  return !res.writableEnded && !res.destroyed;
+}
+
 type CaptureTransport = Pick<
   NativeCapture,
   "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc"
@@ -167,6 +179,7 @@ export class DeviceSession {
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
   private readonly hidSockets = new Set<HidSocket>();
+  private readonly streamResponses = new Set<ServerResponse>();
   private touchGestureLog?: TouchGestureLog;
 
   constructor(public readonly udid: string, dependencies?: DeviceSessionDependencies) {
@@ -219,6 +232,10 @@ export class DeviceSession {
     for (const ws of this.hidSockets) {
       this.runCleanup("HID socket close", () => ws.close());
     }
+    for (const res of this.streamResponses) {
+      this.runCleanup("stream response close", () => { res.destroy(); });
+    }
+    this.streamResponses.clear();
     if (this.unsubscribeMjpeg) {
       this.runCleanup("shared MJPEG unsubscribe", this.unsubscribeMjpeg);
     }
@@ -251,10 +268,11 @@ export class DeviceSession {
   }
 
   /** Write a multipart JPEG part (header + shared frame + boundary) without copying the JPEG. */
-  private writeMjpegFrame(res: ServerResponse, jpeg: Uint8Array): void {
-    res.write(mjpegHeader(jpeg.length));
-    res.write(jpeg);
-    res.write(MJPEG_TRAILER);
+  private writeMjpegFrame(res: ServerResponse, jpeg: Uint8Array): boolean {
+    const headerAccepted = res.write(mjpegHeader(jpeg.length));
+    const frameAccepted = res.write(jpeg);
+    const trailerAccepted = res.write(MJPEG_TRAILER);
+    return headerAccepted && frameAccepted && trailerAccepted;
   }
 
   // ── HTTP handlers ────────────────────────────────────────────────────────
@@ -274,6 +292,7 @@ export class DeviceSession {
       Connection: "keep-alive",
       ...CORS,
     });
+    if (!this.trackStreamResponse(res)) return;
 
     // The native subscriber reuses its frame buffer after this callback
     // resolves. Keep the callback pending through HTTP backpressure so the
@@ -289,10 +308,9 @@ export class DeviceSession {
       if (writeInFlight || res.writableEnded || res.destroyed) return;
       writeInFlight = true;
       try {
-        await waitForDrain(res);
-        if (res.writableEnded || res.destroyed) return;
-        this.writeMjpegFrame(res, jpeg);
-        lastSentAt = Date.now();
+        if (await writeAndDrain(res, () => this.writeMjpegFrame(res, jpeg))) {
+          lastSentAt = Date.now();
+        }
       } catch (error) {
         if (!res.destroyed) {
           res.destroy(error instanceof Error ? error : new Error(String(error)));
@@ -337,6 +355,7 @@ export class DeviceSession {
       Connection: "keep-alive",
       ...CORS,
     });
+    if (!this.trackStreamResponse(res)) return;
 
     // Seed with the current screen; the per-client native AVCC subscription
     // starts with its own decoder config and keyframe.
@@ -344,8 +363,7 @@ export class DeviceSession {
     if (latestJpeg) res.write(avccSeed(latestJpeg));
 
     const unsubscribe = await this.capture.subscribeAvcc(async (frame) => {
-      await waitForDrain(res);
-      if (!res.writableEnded && !res.destroyed) res.write(frame.data);
+      await writeAndDrain(res, () => res.write(frame.data));
     });
     this.bindSubscription(res, unsubscribe);
   }
@@ -633,6 +651,7 @@ export class DeviceSession {
     const cleanup = () => {
       if (cleanedUp) return;
       cleanedUp = true;
+      this.streamResponses.delete(res);
       this.runCleanup("stream unsubscribe", unsubscribe);
     };
     if (res.writableEnded || res.destroyed) {
@@ -641,6 +660,23 @@ export class DeviceSession {
     }
     res.once("close", cleanup);
     res.once("error", cleanup);
+  }
+
+  private trackStreamResponse(res: ServerResponse): boolean {
+    if (this.isStopped() || res.writableEnded || res.destroyed) {
+      if (!res.writableEnded && !res.destroyed) res.destroy();
+      return false;
+    }
+
+    this.streamResponses.add(res);
+    const release = () => {
+      res.off("close", release);
+      res.off("error", release);
+      this.streamResponses.delete(res);
+    };
+    res.once("close", release);
+    res.once("error", release);
+    return true;
   }
 
   private runCleanup(operation: string, cleanup: Unsubscribe): void {

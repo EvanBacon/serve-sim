@@ -41,8 +41,9 @@ actor H264Encoder {
         if let session { VTCompressionSessionInvalidate(session) }
     }
 
-    /// Submit a frame. Returns immediately; `onEncoded` fires on VT's queue.
-    func encode(_ source: CVPixelBuffer, forceKeyframe: Bool = false) async throws -> Encoded {
+    /// Encode one frame. Real-time VideoToolbox sessions may deliberately drop
+    /// a frame under pressure; that is reported as `nil`, not as an error.
+    func encode(_ source: CVPixelBuffer, forceKeyframe: Bool = false) async throws -> Encoded? {
         let w = Int32(CVPixelBufferGetWidth(source))
         let h = Int32(CVPixelBufferGetHeight(source))
         if session == nil || w != width || h != height {
@@ -60,7 +61,7 @@ actor H264Encoder {
             ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as NSDictionary
             : nil
 
-        let buffer: CMSampleBuffer? = await withCheckedContinuation { continuation in
+        let result: (buffer: CMSampleBuffer?, status: OSStatus, flags: VTEncodeInfoFlags) = await withCheckedContinuation { continuation in
             let status = VTCompressionSessionEncodeFrame(
                 session,
                 imageBuffer: source,
@@ -68,18 +69,20 @@ actor H264Encoder {
                 duration: .invalid,
                 frameProperties: frameProps,
                 infoFlagsOut: nil
-            ) { @Sendable status, _, sampleBuffer in
-                guard status == noErr, let sb = sampleBuffer else {
-                    continuation.resume(returning: nil)
+            ) { @Sendable status, flags, sampleBuffer in
+                guard status == noErr, let sampleBuffer else {
+                    continuation.resume(returning: (nil, status, flags))
                     return
                 }
-                continuation.resume(returning: sb)
+                continuation.resume(returning: (sampleBuffer, status, flags))
             }
             if status != noErr {
-                continuation.resume(returning: nil)
+                continuation.resume(returning: (nil, status, []))
             }
         }
-        guard let buffer else { throw Errors.encodingFailed }
+        if result.status == noErr, result.flags.contains(.frameDropped) { return nil }
+        guard result.status == noErr else { throw Errors.encodingFailed(result.status) }
+        guard let buffer = result.buffer else { throw Errors.missingSampleBuffer }
         return try extract(from: buffer)
     }
 
@@ -219,7 +222,8 @@ actor H264Encoder {
 
     enum Errors: Error {
         case couldNotCreateSession
-        case encodingFailed
+        case encodingFailed(OSStatus)
+        case missingSampleBuffer
         case invalidSampleBuffer
     }
 }

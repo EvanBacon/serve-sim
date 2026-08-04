@@ -4,40 +4,60 @@ import XCTest
 final class DeviceHubKeyboardRoutingTests: XCTestCase {
     private let pid: Int32 = 42
 
+    func testKeyboardOptOutRequiresDocumentedValue() {
+        XCTAssertTrue(DeviceHubKeyboardConfiguration.isDisabled(environmentValue: "1"))
+        for value: String? in [nil, "", "0", "false", "true"] {
+            XCTAssertFalse(DeviceHubKeyboardConfiguration.isDisabled(environmentValue: value))
+        }
+    }
+
     func testRoutesOnlyVisibleTargetWindow() throws {
-        let target = window(number: 10, name: "iPhone 17 Pro")
+        let target = window(number: 10, name: "iPhone 17 Pro – iOS 27.0")
         let routed = try DeviceHubWindowRouter.route(
             windows: [target],
             processIdentifier: pid,
-            targetDeviceName: "iPhone 17 Pro"
+            targetWindowTitle: "iPhone 17 Pro – iOS 27.0"
         ).get()
 
         XCTAssertEqual(routed, target)
     }
 
-    func testRoutesFrontmostTargetAmongMultipleSimulatorWindows() throws {
-        let target = window(number: 10, name: "iPhone 17 Pro")
-        let other = window(number: 11, name: "iPad Air")
+    func testRoutesFocusedTargetAmongMultipleSimulatorWindows() throws {
+        let target = window(number: 10, name: "iPhone 17 Pro – iOS 27.0")
+        let other = window(number: 11, name: "iPad Air – iOS 27.0")
         let routed = try DeviceHubWindowRouter.route(
             windows: [target, other],
             processIdentifier: pid,
-            targetDeviceName: "iPhone 17 Pro"
+            targetWindowTitle: "iPhone 17 Pro – iOS 27.0"
         ).get()
 
         XCTAssertEqual(routed, target)
     }
 
-    func testRejectsTargetThatIsNotFrontmost() {
+    func testRejectsNonCanonicalAndLongerDeviceTitles() {
+        let result = DeviceHubWindowRouter.route(
+            windows: [
+                window(number: 10, name: "iPhone 17 Pro"),
+                window(number: 11, name: "iPhone 17 Pro Max – iOS 27.0"),
+            ],
+            processIdentifier: pid,
+            targetWindowTitle: "iPhone 17 Pro – iOS 27.0"
+        )
+
+        XCTAssertEqual(result.failure, .targetNotFound)
+    }
+
+    func testRejectsTargetThatDoesNotHaveDeviceHubFocus() {
         let result = DeviceHubWindowRouter.route(
             windows: [
                 window(number: 11, name: "iPad Air"),
-                window(number: 10, name: "iPhone 17 Pro"),
+                window(number: 10, name: "iPhone 17 Pro – iOS 27.0"),
             ],
             processIdentifier: pid,
-            targetDeviceName: "iPhone 17 Pro"
+            targetWindowTitle: "iPhone 17 Pro – iOS 27.0"
         )
 
-        XCTAssertEqual(result.failure, .targetNotFrontmost(frontmostName: "iPad Air"))
+        XCTAssertEqual(result.failure, .targetNotFocused(focusedName: "iPad Air"))
     }
 
     func testRejectsDuplicateDeviceNames() {
@@ -47,7 +67,7 @@ final class DeviceHubKeyboardRoutingTests: XCTestCase {
                 window(number: 11, name: "iPhone 17 Pro"),
             ],
             processIdentifier: pid,
-            targetDeviceName: "iPhone 17 Pro"
+            targetWindowTitle: "iPhone 17 Pro"
         )
 
         XCTAssertEqual(result.failure, .ambiguousTarget(count: 2))
@@ -65,7 +85,7 @@ final class DeviceHubKeyboardRoutingTests: XCTestCase {
                 ),
             ],
             processIdentifier: pid,
-            targetDeviceName: "iPhone 17 Pro"
+            targetWindowTitle: "iPhone 17 Pro – iOS 27.0"
         )
 
         XCTAssertEqual(result.failure, .noEligibleWindows)

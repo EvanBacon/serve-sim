@@ -1,5 +1,14 @@
 import Foundation
 
+/// Environment policy for the optional Xcode 27 Device Hub keyboard route.
+public enum DeviceHubKeyboardConfiguration {
+    /// Only the documented value `1` opts out. Values such as `0` and `false`
+    /// leave the route enabled.
+    public static func isDisabled(environmentValue: String?) -> Bool {
+        environmentValue == "1"
+    }
+}
+
 public struct DeviceHubWindow: Equatable, Sendable {
     public let processIdentifier: Int32
     public let windowNumber: UInt32
@@ -26,7 +35,7 @@ public enum DeviceHubWindowRoutingFailure: Error, Equatable, Sendable, CustomStr
     case noEligibleWindows
     case targetNotFound
     case ambiguousTarget(count: Int)
-    case targetNotFrontmost(frontmostName: String)
+    case targetNotFocused(focusedName: String)
 
     public var description: String {
         switch self {
@@ -36,20 +45,20 @@ public enum DeviceHubWindowRoutingFailure: Error, Equatable, Sendable, CustomStr
             return "the target simulator window is not visible"
         case .ambiguousTarget(let count):
             return "the target simulator name matches \(count) windows"
-        case .targetNotFrontmost(let frontmostName):
-            return "another Device Hub window is frontmost (\(frontmostName))"
+        case .targetNotFocused(let focusedName):
+            return "another Device Hub window has keyboard focus (\(focusedName))"
         }
     }
 }
 
-/// Chooses a Device Hub simulator window from CGWindowList's front-to-back
-/// ordering. A simulator name is not globally unique, so duplicate matches are
-/// deliberately rejected instead of risking keyboard input in the wrong guest.
+/// Chooses a Device Hub simulator window from a key-window-first snapshot. A
+/// simulator name is not globally unique, so duplicate matches are deliberately
+/// rejected instead of risking keyboard input in the wrong guest.
 public enum DeviceHubWindowRouter {
     public static func route(
         windows: [DeviceHubWindow],
         processIdentifier: Int32,
-        targetDeviceName: String
+        targetWindowTitle: String
     ) -> Result<DeviceHubWindow, DeviceHubWindowRoutingFailure> {
         let eligible = windows.filter {
             $0.processIdentifier == processIdentifier
@@ -57,13 +66,16 @@ public enum DeviceHubWindowRouter {
                 && $0.isOnScreen
                 && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        guard let frontmost = eligible.first else { return .failure(.noEligibleWindows) }
+        guard let focused = eligible.first else { return .failure(.noEligibleWindows) }
 
-        let matches = eligible.filter { $0.name == targetDeviceName }
+        // Device Hub's AX title is canonical (`<device> – <runtime>`). Match
+        // it exactly: simulator names are user-controlled and prefix matching
+        // could route input to a different device with a longer name.
+        let matches = eligible.filter { $0.name == targetWindowTitle }
         guard !matches.isEmpty else { return .failure(.targetNotFound) }
         guard matches.count == 1 else { return .failure(.ambiguousTarget(count: matches.count)) }
-        guard matches[0].windowNumber == frontmost.windowNumber else {
-            return .failure(.targetNotFrontmost(frontmostName: frontmost.name))
+        guard matches[0].windowNumber == focused.windowNumber else {
+            return .failure(.targetNotFocused(focusedName: focused.name))
         }
         return .success(matches[0])
     }

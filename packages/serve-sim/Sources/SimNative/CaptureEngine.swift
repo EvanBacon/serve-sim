@@ -48,7 +48,7 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
                     let encoded = try await encoder.encode(frame)
                     await onFrame(encoded)
                 } catch {
-                    print("error encoding frame: \(error)")
+                    print("error encoding \(E.self) frame: \(error)")
                     continue
                 }
             }
@@ -101,6 +101,8 @@ actor CaptureEngine {
         } catch {
             // Preserve retryability after an ordinary start failure, but never
             // overwrite a concurrent stop() that moved the actor to .stopped.
+            frameContinuation.finish()
+            await frameCapture.stop()
             if phase == .starting { phase = .unstarted }
             throw error
         }
@@ -163,7 +165,7 @@ actor CaptureEngine {
             let flagDescription: Int32 = 1 << 0
             let flagKeyframe: Int32 = 1 << 1
 
-            guard let self else { return }
+            guard let self, let encoded else { return }
             if let description = encoded.description {
                 await onFrame(
                     screenSize,
@@ -218,13 +220,13 @@ actor AVCCEncoder: FrameEncoder {
 
     init() {}
 
-    func encode(_ frame: Frame) async throws -> H264Encoder.Encoded {
+    func encode(_ frame: Frame) async throws -> H264Encoder.Encoded? {
         // TODO: cancel after timeout using TaskGroup
         let result = try await h264Encoder.encode(
             frame.pixelBuffer,
             forceKeyframe: forceKeyframe,
         )
-        forceKeyframe = false
+        if result != nil { forceKeyframe = false }
         return result
     }
 

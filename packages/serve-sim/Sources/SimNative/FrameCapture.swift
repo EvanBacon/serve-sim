@@ -43,6 +43,7 @@ actor FrameCapture {
     private var ioClient: NSObject?
     private var expectedScreenSize: FramebufferSurfaceSize?
     private var didLogRejectedPresentationSurface = false
+    private var didLogMissingExpectedSurface = false
 
     func start(deviceUDID: String, onFrame: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {
         self.onFrame = onFrame
@@ -179,6 +180,18 @@ actor FrameCapture {
                 )
                 didLogRejectedPresentationSurface = true
             }
+        } else if
+            !selection.matchedExpectedSize,
+            let expectedScreenSize,
+            !didLogMissingExpectedSurface
+        {
+            let selected = sizes[selection.index]
+            print(
+                "[capture] No framebuffer matches native screen "
+                + "\(expectedScreenSize.width)x\(expectedScreenSize.height); "
+                + "falling back to \(selected.width)x\(selected.height)"
+            )
+            didLogMissingExpectedSurface = true
         }
         return descriptors[selection.index]
     }
@@ -296,9 +309,16 @@ actor FrameCapture {
         callbackUUIDs.removeAll()
         descriptors.removeAll()
         lastSeeds.removeAll()
+        onFrame = nil
+        frameCount = 0
+        capturedWidth = 0
+        capturedHeight = 0
+        rewireTickCount = 0
+        lastCaptureTime = .now
         ioClient = nil
         expectedScreenSize = nil
         didLogRejectedPresentationSurface = false
+        didLogMissingExpectedSurface = false
     }
 
     // MARK: - Helpers
@@ -309,8 +329,11 @@ actor FrameCapture {
     }
 
     /// SimDeviceType.mainScreenSize is private but stable across the same
-    /// SimulatorKit versions already used by this file. It reports native pixel
-    /// dimensions (not points), which match the primary IOSurface exactly.
+    /// SimulatorKit versions already used by this file. Runtime validation on
+    /// Xcode 27 confirms that it reports native pixels, not logical points, and
+    /// matches the primary IOSurface exactly. The `@convention(c)` IMP type is
+    /// intentional: it preserves the platform CGSize return ABI (registers on
+    /// arm64 and the appropriate struct-return convention on x86_64).
     private static func nativeScreenSize(for device: NSObject) -> FramebufferSurfaceSize? {
         let deviceTypeSelector = NSSelectorFromString("deviceType")
         guard

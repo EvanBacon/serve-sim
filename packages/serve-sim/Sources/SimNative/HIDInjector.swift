@@ -142,9 +142,12 @@ actor HIDInjector {
         self.hidClient = clientObj
         self.sendSel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
         let deviceName = device.value(forKey: "name") as? String ?? deviceUDID
+        let runtimeName = (device.value(forKey: "runtime") as? NSObject)?
+            .value(forKey: "name") as? String
         self.deviceHubKeyboardBridge = DeviceHubKeyboardBridge.makeIfSupported(
             deviceUDID: deviceUDID,
-            deviceName: deviceName
+            deviceName: deviceName,
+            runtimeName: runtimeName
         )
         hidLog("[hid] SimDeviceLegacyHIDClient created")
         hidLog("[hid] IndigoHIDMessageForMouseNSEvent loaded (with edge gesture support)")

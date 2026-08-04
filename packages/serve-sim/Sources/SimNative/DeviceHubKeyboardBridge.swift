@@ -1,3 +1,4 @@
+import ApplicationServices
 import AppKit
 import CoreGraphics
 import Foundation
@@ -13,9 +14,11 @@ import SimNativeSupport
 ///
 /// CGEvent can target an application, not one of its windows. To avoid typing
 /// into a different simulator, the first key-down is accepted only when the
-/// target device name identifies one visible, frontmost Device Hub window. That
-/// route remains latched until every posted key is released, so one chord never
-/// splits between Device Hub and the legacy Indigo fallback.
+/// target device name identifies one visible, focused Device Hub window through
+/// Accessibility. Accessibility titles remain available when CGWindow titles
+/// are redacted without Screen Recording permission. The route remains latched
+/// until every posted key is released, so one chord never splits between Device
+/// Hub and the legacy Indigo fallback.
 final class DeviceHubKeyboardBridge {
     private static let bundleIdentifier = "com.apple.dt.Devices"
     private static let minimumXcodeMajorVersion = 27
@@ -27,6 +30,7 @@ final class DeviceHubKeyboardBridge {
     private let expectedBundleURL: URL
     private let deviceUDID: String
     private let deviceName: String
+    private let targetWindowTitle: String
 
     private var activeTarget: ActiveTarget?
     private var pressedUsages = Set<UInt32>()
@@ -35,16 +39,26 @@ final class DeviceHubKeyboardBridge {
     private init(
         expectedBundleURL: URL,
         deviceUDID: String,
-        deviceName: String
+        deviceName: String,
+        runtimeName: String
     ) {
         self.expectedBundleURL = expectedBundleURL.resolvingSymlinksInPath().standardizedFileURL
         self.deviceUDID = deviceUDID
         self.deviceName = deviceName
+        self.targetWindowTitle = "\(deviceName) – \(runtimeName)"
     }
 
-    static func makeIfSupported(deviceUDID: String, deviceName: String) -> DeviceHubKeyboardBridge? {
+    static func makeIfSupported(
+        deviceUDID: String,
+        deviceName: String,
+        runtimeName: String?
+    ) -> DeviceHubKeyboardBridge? {
         let environment = ProcessInfo.processInfo.environment
-        guard environment["SERVE_SIM_DISABLE_DEVICE_HUB_KEYBOARD"] == nil else { return nil }
+        guard !DeviceHubKeyboardConfiguration.isDisabled(
+            environmentValue: environment["SERVE_SIM_DISABLE_DEVICE_HUB_KEYBOARD"]
+        ) else {
+            return nil
+        }
 
         let developerURL = URL(fileURLWithPath: Xcode.developerDir(), isDirectory: true)
         let xcodeURL = developerURL
@@ -61,10 +75,12 @@ final class DeviceHubKeyboardBridge {
             .appendingPathComponent("DeviceHub.app", isDirectory: true)
         guard FileManager.default.fileExists(atPath: deviceHubURL.path) else { return nil }
 
+        guard let runtimeName, !runtimeName.isEmpty else { return nil }
         return DeviceHubKeyboardBridge(
             expectedBundleURL: deviceHubURL,
             deviceUDID: deviceUDID,
-            deviceName: deviceName
+            deviceName: deviceName,
+            runtimeName: runtimeName
         )
     }
 
@@ -147,9 +163,9 @@ final class DeviceHubKeyboardBridge {
 
         let processIdentifier = application.processIdentifier
         let route = DeviceHubWindowRouter.route(
-            windows: Self.visibleWindows(),
+            windows: Self.visibleWindows(processIdentifier: processIdentifier),
             processIdentifier: processIdentifier,
-            targetDeviceName: deviceName
+            targetWindowTitle: targetWindowTitle
         )
         switch route {
         case .success:
@@ -173,34 +189,64 @@ final class DeviceHubKeyboardBridge {
         runningDeviceHubs().contains { $0.processIdentifier == processIdentifier }
     }
 
-    /// CGWindowList is ordered front-to-back. Preserve that ordering for the
-    /// pure router and include all records so it can enforce PID/layer/visibility.
-    private static func visibleWindows() -> [DeviceHubWindow] {
-        guard let descriptions = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly],
-            kCGNullWindowID
-        ) as? [[String: Any]] else {
+    /// Return visible standard Device Hub windows with its key window first.
+    /// AX is already covered by the event-posting Accessibility permission and,
+    /// unlike CGWindowList, does not require Screen Recording to expose titles.
+    private static func visibleWindows(processIdentifier: pid_t) -> [DeviceHubWindow] {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        guard
+            let windows: [AXUIElement] = accessibilityValue(
+                kAXWindowsAttribute,
+                from: application
+            ),
+            let focusedWindow: AXUIElement = accessibilityValue(
+                kAXFocusedWindowAttribute,
+                from: application
+            ),
+            windows.contains(where: { CFEqual($0, focusedWindow) }),
+            isVisibleStandardWindow(focusedWindow) == true
+        else {
             return []
         }
 
-        return descriptions.compactMap { description in
+        let orderedWindows = [focusedWindow] + windows.filter { !CFEqual($0, focusedWindow) }
+        var snapshot = [DeviceHubWindow]()
+        for (index, window) in orderedWindows.enumerated() {
+            // A partial AX snapshot is unsafe: dropping an unreadable focused
+            // window would make a different window appear to own keyboard focus.
             guard
-                let ownerPID = description[kCGWindowOwnerPID as String] as? NSNumber,
-                let windowNumber = description[kCGWindowNumber as String] as? NSNumber
-            else {
-                return nil
-            }
-            let name = description[kCGWindowName as String] as? String ?? ""
-            let layer = (description[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-            let isOnScreen = (description[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? true
-            return DeviceHubWindow(
-                processIdentifier: ownerPID.int32Value,
-                windowNumber: windowNumber.uint32Value,
-                name: name,
-                layer: layer,
-                isOnScreen: isOnScreen
-            )
+                let isVisible = isVisibleStandardWindow(window),
+                let title: String = accessibilityValue(kAXTitleAttribute, from: window)
+            else { return [] }
+            guard isVisible else { continue }
+            snapshot.append(DeviceHubWindow(
+                processIdentifier: processIdentifier,
+                // The router only needs stable identity within this snapshot.
+                windowNumber: UInt32(index + 1),
+                name: title
+            ))
         }
+        return snapshot
+    }
+
+    private static func isVisibleStandardWindow(_ window: AXUIElement) -> Bool? {
+        guard
+            let role: String = accessibilityValue(kAXRoleAttribute, from: window),
+            let subrole: String = accessibilityValue(kAXSubroleAttribute, from: window),
+            let minimized: Bool = accessibilityValue(kAXMinimizedAttribute, from: window)
+        else { return nil }
+        return role == kAXWindowRole && subrole == kAXStandardWindowSubrole && !minimized
+    }
+
+    private static func accessibilityValue<T>(
+        _ attribute: String,
+        from element: AXUIElement
+    ) -> T? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
+            return nil
+        }
+        return value as? T
     }
 
     private func unavailable(_ reason: String) -> Bool {
