@@ -94,8 +94,23 @@ actor CaptureEngine {
             // drop old frames if there's backpressure
             bufferingPolicy: .bufferingNewest(1)
         )
-        try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
-            frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+        do {
+            try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
+                frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+            }
+        } catch {
+            // Preserve retryability after an ordinary start failure, but never
+            // overwrite a concurrent stop() that moved the actor to .stopped.
+            if phase == .starting { phase = .unstarted }
+            throw error
+        }
+        // Actor methods are reentrant across the await above. A simulator can
+        // be shut down while FrameCapture is starting; do not resurrect a
+        // session that stop() already marked stopped.
+        guard phase == .starting else {
+            frameContinuation.finish()
+            await frameCapture.stop()
+            throw CancellationError()
         }
         Task {
             for await frame in frames {

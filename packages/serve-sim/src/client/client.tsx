@@ -73,6 +73,10 @@ import { proxyPreviewConfigForBrowser } from "./utils/preview-config";
 import { selectInitialRightPane } from "../preview-initial-state";
 import { simEndpoint, streamConfigFrom } from "./utils/sim-endpoint";
 import {
+  bindSelectedConfigStream,
+  fetchSelectedStreamConfig,
+} from "./utils/selected-stream-config";
+import {
   SIMULATOR_RESIZE_DRAG_TRANSITION,
   SIMULATOR_RESIZE_LAYOUT_TRANSITION,
   SIMULATOR_RESIZE_PAGE_TRANSITION,
@@ -253,37 +257,69 @@ function App() {
     if (pick) setSelectedUdid(pick.device);
   }, [selectedUdid, config?.device, gridDevices]);
 
+  const applyConfig = useCallback((next: PreviewConfig | null) => {
+    setConfig((prev) => {
+      next = proxyPreviewConfigForBrowser(streamConfigFrom(next), window.location);
+      if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
+      if (next) {
+        window.__SIM_PREVIEW__ = next;
+      } else if (window.__SIM_PREVIEW__) {
+        // Keep the minimal injection: the empty state still routes through
+        // simEndpoint (basePath) and authenticates /exec (execToken).
+        const { basePath, execToken } = window.__SIM_PREVIEW__;
+        window.__SIM_PREVIEW__ = { basePath, execToken } as Window["__SIM_PREVIEW__"];
+      }
+      return next;
+    });
+  }, []);
+
   // Subscribe to the selected device's stream config. Re-runs on selection
   // change so switching devices swaps the stream without reloading the page.
   useEffect(() => {
     const eventsUrl = `${simEndpoint("api/events")}${selectedUdid ? `?device=${encodeURIComponent(selectedUdid)}` : ""}`;
 
-    const applyConfig = (next: PreviewConfig | null) => {
-      setConfig((prev) => {
-        next = proxyPreviewConfigForBrowser(streamConfigFrom(next), window.location);
-        if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
-        if (next) {
-          window.__SIM_PREVIEW__ = next;
-        } else if (window.__SIM_PREVIEW__) {
-          // Keep the minimal injection: the empty state still routes through
-          // simEndpoint (basePath) and authenticates /exec (execToken).
-          const { basePath, execToken } = window.__SIM_PREVIEW__;
-          window.__SIM_PREVIEW__ = { basePath, execToken } as Window["__SIM_PREVIEW__"];
-        }
-        return next;
-      });
-    };
-
     // Server pushes the serve-sim state only when it actually changes (helper
     // boot/shutdown or device selection), so there's no polling loop here.
     const es = openHostEventStream(eventsUrl);
-    es.onmessage = (event) => {
+    return bindSelectedConfigStream(es, selectedUdid, applyConfig);
+  }, [selectedUdid, selectedHasHelper, applyConfig]);
+
+  // A helper can become visible in the grid before a queued state-stream chunk
+  // reaches this selection. Recover directly from /api only while that mismatch
+  // exists; healthy streams never poll, and a missed transition self-heals
+  // without asking the user to reload.
+  useEffect(() => {
+    if (!selectedUdid || !selectedHasHelper || config?.device === selectedUdid) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryDelay = 750;
+    const recover = async () => {
       try {
-        applyConfig(streamConfigFrom(JSON.parse(event.data) as Window["__SIM_PREVIEW__"]));
-      } catch {}
+        const next = await fetchSelectedStreamConfig(simEndpoint("api"), selectedUdid, {
+          signal: controller.signal,
+        });
+        if (!cancelled && next) {
+          applyConfig(next);
+          return;
+        }
+      } catch {
+        // The next delayed retry handles transient boot/control-channel races.
+      }
+      if (!cancelled) {
+        retryTimer = setTimeout(recover, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 5_000);
+      }
     };
-    return () => es.close();
-  }, [selectedUdid, selectedHasHelper]);
+    void recover();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [selectedUdid, selectedHasHelper, config?.device, applyConfig]);
 
   // Selection drives the view: stream when the selected device's helper config
   // has arrived, otherwise a placeholder (connecting / boot-and-start).

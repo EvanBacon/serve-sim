@@ -32,6 +32,7 @@ import {
 import { createExecUpgradeHandler, type UiRequestHandler } from "./exec-ws";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
+import { simctlBootStatusArguments } from "./simctl";
 
 type SimReq = IncomingMessage;
 type SimRes = ServerResponse;
@@ -769,7 +770,10 @@ export async function startDeviceInProcess(udid: string, port: number, base: str
   // `simctl boot` errors when already booted — ignore and let bootstatus confirm.
   await new Promise<void>((resolve) => execFile("xcrun", ["simctl", "boot", udid], () => resolve()));
   const ready = await new Promise<boolean>((resolve) => {
-    execFile("xcrun", ["simctl", "bootstatus", udid, "-b"], { timeout: 180_000 }, (err) => resolve(!err));
+    // Boot was already requested above. Passing `-b` redundantly can remain
+    // blocked on Xcode 27 even after `simctl list` reports Booted, so only
+    // monitor the transition already in progress.
+    execFile("xcrun", simctlBootStatusArguments(udid), { timeout: 180_000 }, (err) => resolve(!err));
   });
   if (!ready) {
     // bootstatus can exit non-zero even when the device is actually ready;

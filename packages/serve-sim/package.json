@@ -35,6 +35,7 @@
     "src/camera-helper.ts",
     "src/middleware.ts",
     "src/native.ts",
+    "src/simctl.ts",
     "src/state.ts",
     "Sources/SimCameraInjector/SimCameraInjector.m",
     "Sources/SimCameraInjector/SimCam*.h",
@@ -48,6 +49,8 @@
     "dist/native/serve-sim-native.node",
     "Package.swift",
     "Sources/SimNative/*.swift",
+    "Sources/SimNativeSupport/*.swift",
+    "Tests/SimNativeSupportTests/*.swift",
     "Sources/SimNative/build.sh"
   ],
   "exports": {
