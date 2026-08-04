@@ -39,6 +39,7 @@ actor HIDInjector {
     private var hidClient: NSObject?
     private var sendSel: Selector?
     private var simDevice: NSObject?
+    private var deviceHubKeyboardBridge: DeviceHubKeyboardBridge?
 
     // IndigoHIDMessageForMouseNSEvent(CGPoint*, CGPoint*, IndigoHIDTarget, NSEventType, NSSize, IndigoHIDEdge)
     // arm64 ABI: pointer/int params → x0-x4, float params → d0-d1 (independent numbering).
@@ -140,6 +141,11 @@ actor HIDInjector {
 
         self.hidClient = clientObj
         self.sendSel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
+        let deviceName = device.value(forKey: "name") as? String ?? deviceUDID
+        self.deviceHubKeyboardBridge = DeviceHubKeyboardBridge.makeIfSupported(
+            deviceUDID: deviceUDID,
+            deviceName: deviceName
+        )
         hidLog("[hid] SimDeviceLegacyHIDClient created")
         hidLog("[hid] IndigoHIDMessageForMouseNSEvent loaded (with edge gesture support)")
     }
@@ -253,16 +259,21 @@ actor HIDInjector {
     ///   - type: "down" or "up"
     ///   - usage: HID usage code (e.g. 0x04 = 'A', 0x28 = Enter, 0xE1 = LeftShift)
     func sendKey(type: String, usage: UInt32) {
-        guard let keyboardFunc = keyboardFunc else {
-            print("[hid] Keyboard injection unavailable")
-            return
-        }
-
         let direction: UInt32
         switch type {
         case "down": direction = 1
         case "up":   direction = 2
         default: return
+        }
+
+        if deviceHubKeyboardBridge?.send(type: type, usage: usage) == true {
+            hidLog("[hid] Posted Device Hub key \(type) usage=0x\(String(usage, radix: 16))")
+            return
+        }
+
+        guard let keyboardFunc = keyboardFunc else {
+            print("[hid] Keyboard injection unavailable")
+            return
         }
 
         guard let msg = keyboardFunc(usage, direction) else {
