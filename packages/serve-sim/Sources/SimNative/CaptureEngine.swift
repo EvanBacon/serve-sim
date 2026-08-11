@@ -94,8 +94,22 @@ actor CaptureEngine {
             // drop old frames if there's backpressure
             bufferingPolicy: .bufferingNewest(1)
         )
-        try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
-            frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+        do {
+            try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
+                frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+            }
+        } catch {
+            frameContinuation.finish()
+            await frameCapture.stop()
+            if phase == .starting { phase = .unstarted }
+            throw error
+        }
+        // Actor methods are reentrant across the await above. A concurrent
+        // stop must win instead of letting a late start resurrect the session.
+        guard phase == .starting else {
+            frameContinuation.finish()
+            await frameCapture.stop()
+            throw CancellationError()
         }
         Task {
             for await frame in frames {
@@ -173,10 +187,10 @@ actor CaptureEngine {
         }
     }
 
-    func stop() {
+    func stop() async {
         if phase == .stopped { return }
         phase = .stopped
-        Task { [frameCapture] in await frameCapture.stop() }
+        await frameCapture.stop()
         consumers.removeAll()
     }
 }

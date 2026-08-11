@@ -345,7 +345,7 @@ export async function readServeSimStates(): Promise<ServeSimState[]> {
             state.device,
             state.pid,
           );
-          closeDeviceSession(state.device);
+          await closeDeviceSession(state.device);
         } else {
           debugMw(
             "recycling stale helper pid=%d (device %s no longer booted)",
@@ -1532,7 +1532,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       req.on("data", (chunk: Buffer | string) => {
         body += typeof chunk === "string" ? chunk : chunk.toString();
       });
-      req.on("end", () => {
+      req.on("end", async () => {
         let udid = "";
         try { udid = (JSON.parse(body) as ShutdownRequestBody).udid ?? ""; } catch {}
         if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
@@ -1543,7 +1543,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // Stop our own in-process capture for this device first (no-op if it
         // isn't streamed here). This frees the native session immediately
         // rather than waiting for the next poll's reaper to notice.
-        closeDeviceSession(udid);
+        await closeDeviceSession(udid);
         // Drop the snapshot so the next /grid/api call re-queries simctl
         // and prunes any helper bound to this now-shutdown device.
         bootedSnapshot = { at: 0, booted: null };
