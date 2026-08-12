@@ -220,6 +220,9 @@ export class DeviceSession {
     this.phase = "stopped";
     this.health.markStopped();
     for (const ws of this.hidSockets) ws.close();
+    for (const res of [...this.mjpegClients, ...this.avccClients]) {
+      res.destroy();
+    }
     this.mjpegClients.clear();
     this.avccClients.clear();
     this.hidSockets.clear();
@@ -293,12 +296,11 @@ export class DeviceSession {
       await waitForDrain(res);
       this.writeMjpegFrame(res, frame.data);
     });
-    if (res.writableEnded) {
-      await unsubscribe();
+    if (res.writableEnded || res.destroyed) {
+      await this.runStreamUnsubscribe(unsubscribe);
       return;
     }
-    res.on("close", unsubscribe);
-    res.on("error", unsubscribe);
+    this.releaseStreamSubscription(res, unsubscribe);
   }
 
   handleAvcc(_req: IncomingMessage, res: ServerResponse): void {
@@ -326,12 +328,11 @@ export class DeviceSession {
       await waitForDrain(res);
       res.write(frame.data);
     });
-    if (res.writableEnded) {
-      await unsubscribe();
+    if (res.writableEnded || res.destroyed) {
+      await this.runStreamUnsubscribe(unsubscribe);
       return;
     }
-    res.on("close", unsubscribe);
-    res.on("error", unsubscribe);
+    this.releaseStreamSubscription(res, unsubscribe);
   }
 
   handleConfig(_req: IncomingMessage, res: ServerResponse): void {
@@ -626,6 +627,30 @@ export class DeviceSession {
     };
     res.once("close", release);
     res.once("error", release);
+  }
+
+  private releaseStreamSubscription(res: ServerResponse, unsubscribe: Unsubscribe): void {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      res.off("close", release);
+      res.off("error", release);
+      void this.runStreamUnsubscribe(unsubscribe);
+    };
+    res.once("close", release);
+    res.once("error", release);
+  }
+
+  private async runStreamUnsubscribe(unsubscribe: Unsubscribe): Promise<void> {
+    try {
+      await unsubscribe();
+    } catch (error) {
+      console.error(
+        `[capture] stream unsubscribe failed for ${this.udid}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
   }
 
   private handleStreamFailure(res: ServerResponse, error: unknown): void {

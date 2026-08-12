@@ -106,4 +106,32 @@ describe("SessionHealth", () => {
     expect(stopped.snapshot({ mjpeg: 0, avcc: 0, hid: 0 }).status).toBe("stopped");
     expect(stopped.httpStatus()).toBe(503);
   });
+
+  test("restarts startup timing and clears stale frame state on retry", () => {
+    let now = 50_000;
+    const health = new SessionHealth("TEST-UDID", {
+      now: () => now,
+      startupTimeoutMs: 10_000,
+    });
+    health.markRunning();
+    now = 50_500;
+    health.recordFrame("mjpeg", { width: 100, height: 200 });
+    now = 51_000;
+    health.markFailed(new Error("capture failed"));
+
+    now = 70_000;
+    health.markStarting();
+    const retrying = health.snapshot({ mjpeg: 0, avcc: 0, hid: 0 });
+    expect(retrying.status).toBe("starting");
+    expect(retrying.startedAt).toBe("1970-01-01T00:01:10.000Z");
+    expect(retrying.frames).toMatchObject({
+      mjpeg: 1,
+      lastAt: null,
+      lastCodec: null,
+      staleForMs: null,
+    });
+
+    now = 80_001;
+    expect(health.snapshot({ mjpeg: 0, avcc: 0, hid: 0 }).status).toBe("stalled");
+  });
 });

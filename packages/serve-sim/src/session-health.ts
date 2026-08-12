@@ -70,7 +70,13 @@ export class SessionHealth {
 
   markStarting(): void {
     if (this.phase === "stopped") return;
-    if (this.startedAt === null) this.startedAt = this.now();
+    if (this.phase === "failed") {
+      this.startedAt = this.now();
+      this.lastFrameAt = null;
+      this.lastCodec = null;
+    } else if (this.startedAt === null) {
+      this.startedAt = this.now();
+    }
     this.phase = "starting";
     this.error = null;
   }

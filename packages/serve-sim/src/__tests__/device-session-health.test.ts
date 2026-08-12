@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createServer, type Server } from "http";
+import { createServer, get, type Server } from "http";
 import type { AddressInfo } from "net";
 import {
   DeviceSession,
@@ -122,6 +122,50 @@ describe("DeviceSession lifecycle health", () => {
 
     await expect(session.close()).resolves.toBeUndefined();
   });
+
+  test("closes stream clients and observes each async unsubscribe once", async () => {
+    let sharedFrame!: (frame: { data: Uint8Array; width: number; height: number }) => Promise<void>;
+    let mjpegSubscriptions = 0;
+    let mjpegClientUnsubscribes = 0;
+    let avccClientUnsubscribes = 0;
+    const session = new DeviceSession("TEST-UDID", dependencies({
+      subscribeMjpeg: async (callback) => {
+        mjpegSubscriptions++;
+        if (mjpegSubscriptions === 1) {
+          sharedFrame = callback;
+          return async () => {};
+        }
+        return async () => {
+          mjpegClientUnsubscribes++;
+          throw new Error("mjpeg unsubscribe failed");
+        };
+      },
+      subscribeAvcc: async () => async () => {
+        avccClientUnsubscribes++;
+        throw new Error("avcc unsubscribe failed");
+      },
+    }));
+    await session.start();
+    await sharedFrame({
+      data: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      width: 1_206,
+      height: 2_622,
+    });
+    const baseUrl = await serve(session);
+    const mjpeg = observeStream(`${baseUrl}/stream.mjpeg`);
+    const avcc = observeStream(`${baseUrl}/stream.avcc`);
+    await Promise.all([mjpeg.opened, avcc.opened]);
+
+    const health = await fetch(`${baseUrl}/health`);
+    expect(await health.json()).toMatchObject({
+      clients: { mjpeg: 1, avcc: 1, total: 2 },
+    });
+
+    await session.close();
+    expect(await resolvesWithin(Promise.all([mjpeg.closed, avcc.closed]), 1_000)).toBe(true);
+    expect(mjpegClientUnsubscribes).toBe(1);
+    expect(avccClientUnsubscribes).toBe(1);
+  });
 });
 
 function dependencies(
@@ -154,10 +198,33 @@ function dependencies(
 async function serve(session: DeviceSession): Promise<string> {
   const server = createServer((req, res) => {
     if (req.url === "/health") session.handleHealth(req, res);
+    else if (req.url === "/stream.avcc") session.handleAvcc(req, res);
     else session.handleMjpeg(req, res);
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return `http://127.0.0.1:${port}`;
+}
+
+function observeStream(url: string): { opened: Promise<void>; closed: Promise<void> } {
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
+  const opened = new Promise<void>((resolve, reject) => {
+    const request = get(url, (response) => {
+      response.on("error", () => {});
+      response.once("close", resolveClosed);
+      response.resume();
+      resolve();
+    });
+    request.once("error", reject);
+  });
+  return { opened, closed };
+}
+
+async function resolvesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return Promise.race([
+    promise.then(() => true),
+    Bun.sleep(timeoutMs).then(() => false),
+  ]);
 }
