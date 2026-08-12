@@ -33,9 +33,9 @@ interface SimHIDHandle {
 }
 
 interface SimCaptureHandle {
-  start(): void;
-  stop(): void;
-  subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void>;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void | Promise<void>>;
 }
 
 interface NativeAddon {
@@ -196,18 +196,18 @@ export class NativeCapture {
     this.handle = new (load().SimCapture)(udid);
   }
 
-  /** Begin capturing. Throws if the device isn't booted. */
-  start(): void {
-    this.handle.start();
+  /** Begin capturing. Rejects if the device isn't booted. */
+  start(): Promise<void> {
+    return this.handle.start();
   }
 
-  subscribeMjpeg(onFrame: (frame: MjpegFrame) => Promise<void>): Promise<() => void> {
+  subscribeMjpeg(onFrame: (frame: MjpegFrame) => Promise<void>): Promise<() => void | Promise<void>> {
     return this.handle.subscribe(CODEC_MJPEG, (data, width, height, _flags) => {
       return onFrame({ data, width, height });
     });
   }
 
-  subscribeAvcc(onFrame: (frame: AvccFrame) => Promise<void>): Promise<() => void> {
+  subscribeAvcc(onFrame: (frame: AvccFrame) => Promise<void>): Promise<() => void | Promise<void>> {
     return this.handle.subscribe(CODEC_AVCC, (data, width, height, flags) => {
       return onFrame({
         data,
@@ -220,8 +220,8 @@ export class NativeCapture {
   }
 
   /** Halt frame production. Full teardown happens when this object is GC'd. */
-  stop(): void {
-    this.handle.stop();
+  stop(): Promise<void> {
+    return this.handle.stop();
   }
 }
 
