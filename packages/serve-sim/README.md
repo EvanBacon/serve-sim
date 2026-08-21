@@ -36,6 +36,8 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and a [maintained 
 
 > **Note:** Apple Silicon (arm64) only. The bundled `serve-sim-bin` helper ships as an arm64 binary and does not run on Intel (x86_64) Macs.
 
+> **Xcode 27 keyboard input:** Device Hub must be running with the target simulator window visible and frontmost. macOS may also require the app that launched `serve-sim` (for example Terminal) to be enabled in **System Settings → Privacy & Security → Accessibility**. Xcode 26 and older keep using the legacy simulator HID path. Set `SERVE_SIM_DISABLE_DEVICE_HUB_KEYBOARD=1` to opt out of the Xcode 27 bridge.
+
 ## CLI
 
 ```

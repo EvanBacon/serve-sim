@@ -52,6 +52,10 @@ const AVCC_SEED_TAG = 0x04;
 const WS_MSG_CONFIG = 0x82;
 
 const MJPEG_TRAILER = Buffer.from("\r\n", "ascii");
+// Native capture is event-driven, so an unchanged screen can legitimately
+// produce no new JPEGs. Replay the already-encoded frame below the client's
+// 2s liveness window instead of re-encoding identical pixels in Swift.
+const MJPEG_IDLE_REPLAY_MS = 1_000;
 const TOUCH_TAP_MAX_DISTANCE = 0.004;
 
 type TouchGestureLog = {
@@ -123,11 +127,50 @@ function waitForDrain(res: ServerResponse): Promise<void> {
   });
 }
 
+async function writeAndDrain(
+  res: ServerResponse,
+  write: () => boolean,
+): Promise<boolean> {
+  await waitForDrain(res);
+  if (res.writableEnded || res.destroyed) return false;
+
+  const accepted = write();
+  if (!accepted || res.writableNeedDrain) await waitForDrain(res);
+  return !res.writableEnded && !res.destroyed;
+}
+
+type CaptureTransport = Pick<
+  NativeCapture,
+  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc"
+>;
+type HidTransport = Pick<
+  NativeHid,
+  | "touch"
+  | "multiTouch"
+  | "button"
+  | "buttonHid"
+  | "key"
+  | "scroll"
+  | "digitalCrown"
+  | "orientation"
+  | "memoryWarning"
+  | "softwareKeyboard"
+  | "caDebug"
+>;
+
+export interface DeviceSessionDependencies {
+  capture: CaptureTransport;
+  hid: HidTransport;
+}
+
+type Unsubscribe = () => void | Promise<void>;
+
 export class DeviceSession {
-  private readonly capture: NativeCapture;
-  private readonly hid: NativeHid;
-  private unsubscribeMjpeg?: () => void;
-  private phase: "unstarted" | "running" | "stopped" = "unstarted";
+  private readonly capture: CaptureTransport;
+  private readonly hid: HidTransport;
+  private unsubscribeMjpeg?: Unsubscribe;
+  private phase: "unstarted" | "starting" | "running" | "failed" | "stopped" = "unstarted";
+  private startPromise?: Promise<void>;
 
   private width = 0;
   private height = 0;
@@ -136,35 +179,68 @@ export class DeviceSession {
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
   private readonly hidSockets = new Set<HidSocket>();
+  private readonly streamResponses = new Set<ServerResponse>();
   private touchGestureLog?: TouchGestureLog;
 
-  constructor(public readonly udid: string) {
-    this.hid = new NativeHid(udid);
-    this.capture = new NativeCapture(udid);
+  constructor(public readonly udid: string, dependencies?: DeviceSessionDependencies) {
+    this.hid = dependencies?.hid ?? new NativeHid(udid);
+    this.capture = dependencies?.capture ?? new NativeCapture(udid);
   }
 
-  /** Begin capture. Throws if the device isn't booted. Idempotent. */
-  start(): void {
-    if (this.phase !== "unstarted") return;
-    this.capture.start();
-    void (async () => {
+  /** Begin capture and retain one shared MJPEG subscription. Idempotent. */
+  start(): Promise<void> {
+    if (this.phase === "stopped") {
+      return Promise.reject(new Error(`Device session ${this.udid} is closed`));
+    }
+    if (this.startPromise) return this.startPromise;
+
+    this.phase = "starting";
+    const startPromise = (async () => {
+      await this.capture.start();
+      if (this.isStopped()) throw new Error(`Device session ${this.udid} closed while starting`);
+
       const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
-      if (this.phase === "running") { // only if someone hasn't already stopped the capture
-        this.unsubscribeMjpeg = unsubscribe;
-      } else {
-        unsubscribe();
+      if (this.isStopped()) {
+        await unsubscribe();
+        throw new Error(`Device session ${this.udid} closed while starting`);
       }
-    })();
-    this.phase = "running";
+      this.unsubscribeMjpeg = unsubscribe;
+      this.phase = "running";
+    })().catch((error) => {
+      // Failed DeviceSession instances are evicted by the registry below. Keep
+      // this promise latched so concurrent endpoints all observe the same
+      // failure instead of racing a second start on an instance being closed.
+      if (this.phase === "starting") this.phase = "failed";
+      throw error;
+    });
+
+    // A session is started eagerly by the registry, before an HTTP stream has
+    // necessarily awaited it. Attach a rejection observer immediately so a
+    // shutdown race can never become a process-fatal unhandled rejection.
+    void startPromise.catch(() => {});
+    this.startPromise = startPromise;
+    return startPromise;
+  }
+
+  private isStopped(): boolean {
+    return this.phase === "stopped";
   }
 
   close(): void {
-    if (this.phase !== "running") return;
-    for (const ws of this.hidSockets) ws.close();
-    this.unsubscribeMjpeg?.();
-    this.hidSockets.clear();
-    this.capture.stop();
+    if (this.phase === "stopped") return;
     this.phase = "stopped";
+    for (const ws of this.hidSockets) {
+      this.runCleanup("HID socket close", () => ws.close());
+    }
+    for (const res of this.streamResponses) {
+      this.runCleanup("stream response close", () => { res.destroy(); });
+    }
+    this.streamResponses.clear();
+    if (this.unsubscribeMjpeg) {
+      this.runCleanup("shared MJPEG unsubscribe", this.unsubscribeMjpeg);
+    }
+    this.hidSockets.clear();
+    this.runCleanup("capture stop", () => this.capture.stop());
   }
 
   // ── Frame handling ───────────────────────────────────────────────────────
@@ -192,15 +268,23 @@ export class DeviceSession {
   }
 
   /** Write a multipart JPEG part (header + shared frame + boundary) without copying the JPEG. */
-  private writeMjpegFrame(res: ServerResponse, jpeg: Uint8Array): void {
-    res.write(mjpegHeader(jpeg.length));
-    res.write(jpeg);
-    res.write(MJPEG_TRAILER);
+  private writeMjpegFrame(res: ServerResponse, jpeg: Uint8Array): boolean {
+    const headerAccepted = res.write(mjpegHeader(jpeg.length));
+    const frameAccepted = res.write(jpeg);
+    const trailerAccepted = res.write(MJPEG_TRAILER);
+    return headerAccepted && frameAccepted && trailerAccepted;
   }
 
   // ── HTTP handlers ────────────────────────────────────────────────────────
 
   handleMjpeg(req: IncomingMessage, res: ServerResponse): void {
+    void this.serveMjpeg(req, res).catch((error) => this.handleStreamError(res, error));
+  }
+
+  private async serveMjpeg(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    await this.start();
+    if (res.writableEnded || res.destroyed) return;
+
     const raw = new URL(req.url ?? "", "http://x").searchParams.get("raw") === "1";
     res.writeHead(200, {
       "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame",
@@ -208,42 +292,80 @@ export class DeviceSession {
       Connection: "keep-alive",
       ...CORS,
     });
+    if (!this.trackStreamResponse(res)) return;
 
-    void (async () => {
-      const latestJpeg = this.latestJpeg();
-      if (latestJpeg) this.writeMjpegFrame(res, latestJpeg); // paint immediately
-      const unsubscribe = await this.capture.subscribeMjpeg(async (frame) => {
-        await waitForDrain(res);
-        this.writeMjpegFrame(res, frame.data);
-      });
-      if (res.writableEnded) unsubscribe();
-      res.on("close", unsubscribe);
-      res.on("error", unsubscribe);
-    })();
+    // The native subscriber reuses its frame buffer after this callback
+    // resolves. Keep the callback pending through HTTP backpressure so the
+    // bytes cannot be mutated before res.write consumes them. CaptureEngine's
+    // bufferingNewest(1) policy drops stale frames on the native side while a
+    // slow client drains, so this neither interleaves parts nor grows a queue.
+    let writeInFlight = false;
+    let lastSentAt = 0;
+    const writeFrame = async (jpeg: Uint8Array): Promise<void> => {
+      // This can only overlap when the idle replay timer wins the event-loop
+      // turn immediately before a native frame. Prefer the in-flight write and
+      // let the next native frame provide the freshest image.
+      if (writeInFlight || res.writableEnded || res.destroyed) return;
+      writeInFlight = true;
+      try {
+        if (await writeAndDrain(res, () => this.writeMjpegFrame(res, jpeg))) {
+          lastSentAt = Date.now();
+        }
+      } catch (error) {
+        if (!res.destroyed) {
+          res.destroy(error instanceof Error ? error : new Error(String(error)));
+        }
+      } finally {
+        writeInFlight = false;
+      }
+    };
+
+    const latestJpeg = this.latestJpeg();
+    // The shared cache is reused in place. Copy this one on-connect seed before
+    // awaiting backpressure; native subscriber frames below remain zero-copy.
+    if (latestJpeg) await writeFrame(Buffer.from(latestJpeg));
+    const unsubscribe = await this.capture.subscribeMjpeg(async (frame) => {
+      await writeFrame(frame.data);
+    });
+    const idleReplay = setInterval(() => {
+      if (res.writableEnded || res.destroyed) return;
+      if (Date.now() - lastSentAt < MJPEG_IDLE_REPLAY_MS) return;
+      const cached = this.latestJpeg();
+      // The shared cache is reused in place as fresh frames arrive. Copy only
+      // this low-frequency replay so it stays immutable across backpressure.
+      if (cached) void writeFrame(Buffer.from(cached));
+    }, MJPEG_IDLE_REPLAY_MS);
+    this.bindSubscription(res, async () => {
+      clearInterval(idleReplay);
+      await unsubscribe();
+    });
   }
 
   handleAvcc(_req: IncomingMessage, res: ServerResponse): void {
+    void this.serveAvcc(res).catch((error) => this.handleStreamError(res, error));
+  }
+
+  private async serveAvcc(res: ServerResponse): Promise<void> {
+    await this.start();
+    if (res.writableEnded || res.destroyed) return;
+
     res.writeHead(200, {
       "Content-Type": "application/octet-stream",
       "Cache-Control": "no-cache, no-store",
       Connection: "keep-alive",
       ...CORS,
     });
+    if (!this.trackStreamResponse(res)) return;
 
-    void (async () => {
-      // Seed with the current screen; the per-client native AVCC subscription
-      // starts with its own decoder config and keyframe.
-      const latestJpeg = this.latestJpeg();
-      if (latestJpeg) res.write(avccSeed(latestJpeg));
+    // Seed with the current screen; the per-client native AVCC subscription
+    // starts with its own decoder config and keyframe.
+    const latestJpeg = this.latestJpeg();
+    if (latestJpeg) res.write(avccSeed(latestJpeg));
 
-      const unsubscribe = await this.capture.subscribeAvcc(async (frame) => {
-        await waitForDrain(res);
-        res.write(frame.data);
-      });
-      if (res.writableEnded) unsubscribe();
-      res.on("close", unsubscribe);
-      res.on("error", unsubscribe);
-    })();
+    const unsubscribe = await this.capture.subscribeAvcc(async (frame) => {
+      await writeAndDrain(res, () => res.write(frame.data));
+    });
+    this.bindSubscription(res, unsubscribe);
   }
 
   handleConfig(_req: IncomingMessage, res: ServerResponse): void {
@@ -524,6 +646,66 @@ export class DeviceSession {
     for (const ws of this.hidSockets) ws.send(frame);
   }
 
+  private bindSubscription(res: ServerResponse, unsubscribe: Unsubscribe): void {
+    let cleanedUp = false;
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      this.streamResponses.delete(res);
+      this.runCleanup("stream unsubscribe", unsubscribe);
+    };
+    if (res.writableEnded || res.destroyed) {
+      cleanup();
+      return;
+    }
+    res.once("close", cleanup);
+    res.once("error", cleanup);
+  }
+
+  private trackStreamResponse(res: ServerResponse): boolean {
+    if (this.isStopped() || res.writableEnded || res.destroyed) {
+      if (!res.writableEnded && !res.destroyed) res.destroy();
+      return false;
+    }
+
+    this.streamResponses.add(res);
+    const release = () => {
+      res.off("close", release);
+      res.off("error", release);
+      this.streamResponses.delete(res);
+    };
+    res.once("close", release);
+    res.once("error", release);
+    return true;
+  }
+
+  private runCleanup(operation: string, cleanup: Unsubscribe): void {
+    try {
+      void Promise.resolve(cleanup()).catch((error) => this.logCleanupError(operation, error));
+    } catch (error) {
+      this.logCleanupError(operation, error);
+    }
+  }
+
+  private logCleanupError(operation: string, error: unknown): void {
+    console.error(
+      `[capture] ${operation} failed for ${this.udid}:`,
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  private handleStreamError(res: ServerResponse, error: unknown): void {
+    if (res.writableEnded || res.destroyed) return;
+    if (res.headersSent) {
+      res.destroy(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    this.sendJson(res, 503, {
+      error: "capture_unavailable",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   private sendJson(res: ServerResponse, status: number, body: unknown): void {
     this.sendJsonString(res, status, JSON.stringify(body));
   }
@@ -545,20 +727,25 @@ export class DeviceSession {
 const sessions = new Map<string, DeviceSession>();
 
 /**
- * Get (lazily creating + starting) the in-process session for `udid`. Throws if
- * the device isn't booted. The session lives until `closeDeviceSession`.
+ * Get (lazily creating + starting) the in-process session for `udid`. Capture
+ * failures are surfaced by stream endpoints and evict the session so the next
+ * request can retry. The session otherwise lives until `closeDeviceSession`.
  */
 export function getDeviceSession(udid: string): DeviceSession {
   let session = sessions.get(udid);
   if (!session) {
-    session = new DeviceSession(udid);
-    try {
-      session.start();
-    } catch (err) {
-      session.close();
-      throw err;
-    }
-    sessions.set(udid, session);
+    const created = new DeviceSession(udid);
+    session = created;
+    sessions.set(udid, created);
+    void created.start().catch(() => {
+      // A reconnect can race `simctl shutdown`: remove the failed session so a
+      // later Start creates a fresh native capture instead of reusing a rejected
+      // promise. The rejection is observed here and by the endpoint that awaited
+      // it, so it cannot terminate Node/Bun as an unhandled rejection.
+      if (sessions.get(udid) !== created) return;
+      sessions.delete(udid);
+      created.close();
+    });
   }
   return session;
 }

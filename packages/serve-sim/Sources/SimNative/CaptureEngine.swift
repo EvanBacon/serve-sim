@@ -48,7 +48,7 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
                     let encoded = try await encoder.encode(frame)
                     await onFrame(encoded)
                 } catch {
-                    print("error encoding frame: \(error)")
+                    print("error encoding \(E.self) frame: \(error)")
                     continue
                 }
             }
@@ -94,8 +94,25 @@ actor CaptureEngine {
             // drop old frames if there's backpressure
             bufferingPolicy: .bufferingNewest(1)
         )
-        try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
-            frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+        do {
+            try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
+                frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+            }
+        } catch {
+            // Preserve retryability after an ordinary start failure, but never
+            // overwrite a concurrent stop() that moved the actor to .stopped.
+            frameContinuation.finish()
+            await frameCapture.stop()
+            if phase == .starting { phase = .unstarted }
+            throw error
+        }
+        // Actor methods are reentrant across the await above. A simulator can
+        // be shut down while FrameCapture is starting; do not resurrect a
+        // session that stop() already marked stopped.
+        guard phase == .starting else {
+            frameContinuation.finish()
+            await frameCapture.stop()
+            throw CancellationError()
         }
         Task {
             for await frame in frames {
@@ -148,7 +165,7 @@ actor CaptureEngine {
             let flagDescription: Int32 = 1 << 0
             let flagKeyframe: Int32 = 1 << 1
 
-            guard let self else { return }
+            guard let self, let encoded else { return }
             if let description = encoded.description {
                 await onFrame(
                     screenSize,
@@ -203,13 +220,13 @@ actor AVCCEncoder: FrameEncoder {
 
     init() {}
 
-    func encode(_ frame: Frame) async throws -> H264Encoder.Encoded {
+    func encode(_ frame: Frame) async throws -> H264Encoder.Encoded? {
         // TODO: cancel after timeout using TaskGroup
         let result = try await h264Encoder.encode(
             frame.pixelBuffer,
             forceKeyframe: forceKeyframe,
         )
-        forceKeyframe = false
+        if result != nil { forceKeyframe = false }
         return result
     }
 

@@ -4,6 +4,7 @@ import CoreMedia
 import CoreGraphics
 import IOSurface
 import ObjectiveC
+import SimNativeSupport
 
 /// Headless simulator frame capture via direct IOSurface access.
 ///
@@ -40,6 +41,9 @@ actor FrameCapture {
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: UUID] = [:]
     private var ioClient: NSObject?
+    private var expectedScreenSize: FramebufferSurfaceSize?
+    private var didLogRejectedPresentationSurface = false
+    private var didLogMissingExpectedSurface = false
 
     func start(deviceUDID: String, onFrame: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {
         self.onFrame = onFrame
@@ -53,6 +57,7 @@ actor FrameCapture {
         guard state == "Booted" else {
             throw makeError(2, "Device not booted (state: \(state))")
         }
+        self.expectedScreenSize = Self.nativeScreenSize(for: device)
 
         guard let io = device.perform(NSSelectorFromString("io"))?.takeUnretainedValue() as? NSObject else {
             throw makeError(3, "Failed to get device IO")
@@ -139,22 +144,56 @@ actor FrameCapture {
         return candidates
     }
 
-    /// Return the descriptor whose live surface has the largest area.
-    /// Secondary planes/overlays are typically smaller than the main screen.
+    /// Return the descriptor matching the device type's native screen size.
+    /// Xcode 27 can expose an additional 7680x4320 presentation surface while
+    /// Device Hub is resizing; selecting the historical largest surface then
+    /// feeds a non-device frame to VideoToolbox and produces `encodingFailed`.
+    /// If screen metadata is unavailable, retain the old largest-live fallback.
     private func pickBestDescriptor() -> NSObject? {
         let surfSel = NSSelectorFromString("framebufferSurface")
-        var best: NSObject?
-        var bestArea: Int = 0
-        for desc in descriptors {
-            guard let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { continue }
-            let surf = unsafeBitCast(surfObj, to: IOSurface.self)
-            let area = IOSurfaceGetWidth(surf) * IOSurfaceGetHeight(surf)
-            if area > bestArea {
-                best = desc
-                bestArea = area
+        let sizes = descriptors.map { desc -> FramebufferSurfaceSize in
+            guard let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else {
+                return FramebufferSurfaceSize(width: 0, height: 0)
             }
+            let surf = unsafeBitCast(surfObj, to: IOSurface.self)
+            return FramebufferSurfaceSize(
+                width: IOSurfaceGetWidth(surf),
+                height: IOSurfaceGetHeight(surf)
+            )
         }
-        return best
+        guard let selection = FramebufferSurfaceSelector.select(
+            from: sizes,
+            expectedSize: expectedScreenSize
+        ) else {
+            return nil
+        }
+
+        if selection.matchedExpectedSize, !didLogRejectedPresentationSurface {
+            let selected = sizes[selection.index]
+            let selectedArea = Int64(selected.width) * Int64(selected.height)
+            if let larger = sizes.filter(\.isLive).max(by: {
+                Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
+            }), Int64(larger.width) * Int64(larger.height) > selectedArea {
+                print(
+                    "[capture] Ignoring non-device framebuffer \(larger.width)x\(larger.height); "
+                    + "native screen is \(selected.width)x\(selected.height)"
+                )
+                didLogRejectedPresentationSurface = true
+            }
+        } else if
+            !selection.matchedExpectedSize,
+            let expectedScreenSize,
+            !didLogMissingExpectedSurface
+        {
+            let selected = sizes[selection.index]
+            print(
+                "[capture] No framebuffer matches native screen "
+                + "\(expectedScreenSize.width)x\(expectedScreenSize.height); "
+                + "falling back to \(selected.width)x\(selected.height)"
+            )
+            didLogMissingExpectedSurface = true
+        }
+        return descriptors[selection.index]
     }
 
     // MARK: - Frame callbacks via objc_msgSend
@@ -270,7 +309,16 @@ actor FrameCapture {
         callbackUUIDs.removeAll()
         descriptors.removeAll()
         lastSeeds.removeAll()
+        onFrame = nil
+        frameCount = 0
+        capturedWidth = 0
+        capturedHeight = 0
+        rewireTickCount = 0
+        lastCaptureTime = .now
         ioClient = nil
+        expectedScreenSize = nil
+        didLogRejectedPresentationSurface = false
+        didLogMissingExpectedSurface = false
     }
 
     // MARK: - Helpers
@@ -278,6 +326,34 @@ actor FrameCapture {
     private func makeError(_ code: Int, _ msg: String) -> NSError {
         NSError(domain: "FrameCapture", code: code,
                 userInfo: [NSLocalizedDescriptionKey: msg])
+    }
+
+    /// SimDeviceType.mainScreenSize is private but stable across the same
+    /// SimulatorKit versions already used by this file. Runtime validation on
+    /// Xcode 27 confirms that it reports native pixels, not logical points, and
+    /// matches the primary IOSurface exactly. The `@convention(c)` IMP type is
+    /// intentional: it preserves the platform CGSize return ABI (registers on
+    /// arm64 and the appropriate struct-return convention on x86_64).
+    private static func nativeScreenSize(for device: NSObject) -> FramebufferSurfaceSize? {
+        let deviceTypeSelector = NSSelectorFromString("deviceType")
+        guard
+            device.responds(to: deviceTypeSelector),
+            let deviceType = device.perform(deviceTypeSelector)?.takeUnretainedValue() as? NSObject
+        else {
+            return nil
+        }
+        let selector = NSSelectorFromString("mainScreenSize")
+        guard deviceType.responds(to: selector) else { return nil }
+
+        typealias GetSize = @convention(c) (AnyObject, Selector) -> CGSize
+        let getSize = unsafeBitCast(deviceType.method(for: selector), to: GetSize.self)
+        let size = getSize(deviceType, selector)
+        guard size.width.isFinite, size.height.isFinite else { return nil }
+
+        let width = Int(size.width.rounded())
+        let height = Int(size.height.rounded())
+        guard width > 0, height > 0 else { return nil }
+        return FramebufferSurfaceSize(width: width, height: height)
     }
 
     static func findSimDevice(udid: String) -> NSObject? {

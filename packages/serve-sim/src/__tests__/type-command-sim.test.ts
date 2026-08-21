@@ -8,10 +8,11 @@ import { join } from "path";
  * Native e2e for `serve-sim type`.
  *
  * Boots through the full stack: textToKeyEvents → WS 0x06 frames →
- * SimStreamHelper.ClientManager → HIDInjector.sendKey → CoreSimulator's HID
- * legacy client. The helper logs `[hid] Key <down|up> usage=0x<hex>` for every
- * accepted key event, which is what we assert against — proving the event
- * round-tripped all the way to the sim, not just to the helper's WS reader.
+ * SimStreamHelper.ClientManager → HIDInjector.sendKey → the Xcode 27 Device Hub
+ * route or the legacy CoreSimulator HID fallback. The helper logs the selected
+ * route for every accepted key event, which is what we assert against — proving
+ * the event round-tripped all the way to native injection, not just to the
+ * helper's WS reader.
  *
  * Those per-event HID logs are gated behind `SERVE_SIM_DEBUG_HID` (they otherwise
  * flood stdout), so the server is started with that env set to make them visible.
@@ -51,8 +52,8 @@ describeWithSim(`serve-sim type e2e (booted sim ${bootedUdid ?? "<skipped>"})`, 
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "inherit"],
       timeout: 45_000,
-      // Surface the per-event `[hid] Key …` lines this test asserts on; the
-      // env propagates to the detached `serve` child the CLI re-execs.
+      // Surface the per-event native route lines this test asserts on; the env
+      // propagates to the detached `serve` child the CLI re-execs.
       env: { ...process.env, SERVE_SIM_DEBUG_HID: "1" },
     });
     if (detach.status !== 0 || !detach.stdout) {
@@ -97,7 +98,7 @@ describeWithSim(`serve-sim type e2e (booted sim ${bootedUdid ?? "<skipped>"})`, 
 
     if (afterCount - beforeCount !== 10) {
       throw new Error(
-        `expected 10 new [hid] Key lines, got ${afterCount - beforeCount}.\n` +
+        `expected 10 new native key lines, got ${afterCount - beforeCount}.\n` +
           `new server log output since typing:\n${newLines.trim() || "(none)"}`,
       );
     }
@@ -110,13 +111,13 @@ describeWithSim(`serve-sim type e2e (booted sim ${bootedUdid ?? "<skipped>"})`, 
     }
 
     // And we should see balanced down/up events for the new slice.
-    expect(countMatches(newLines, /\[hid\] Key down /g)).toBe(5);
-    expect(countMatches(newLines, /\[hid\] Key up /g)).toBe(5);
+    expect(countMatches(newLines, /\[hid\] (?:Key|Posted Device Hub key) down /g)).toBe(5);
+    expect(countMatches(newLines, /\[hid\] (?:Key|Posted Device Hub key) up /g)).toBe(5);
   }, 30_000);
 });
 
 function countKeyLines(s: string): number {
-  return countMatches(s, /\[hid\] Key (down|up) /g);
+  return countMatches(s, /\[hid\] (?:Key|Posted Device Hub key) (down|up) /g);
 }
 
 function countMatches(s: string, re: RegExp): number {

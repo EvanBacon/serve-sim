@@ -31,8 +31,12 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "SimNativeSupport"
+        ),
+        .target(
             name: "SimNative",
             dependencies: [
+                "SimNativeSupport",
                 .product(name: "NodeAPI", package: "node-swift"),
                 .product(name: "NodeModuleSupport", package: "node-swift"),
             ],
@@ -45,6 +49,10 @@ let package = Package(
                     "-Xlinker", "dynamic_lookup",
                 ])
             ]
+        ),
+        .testTarget(
+            name: "SimNativeSupportTests",
+            dependencies: ["SimNativeSupport"]
         ),
     ],
     // The reused SimStreamHelper logic was written against the standalone helper

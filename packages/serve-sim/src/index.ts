@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command, InvalidArgumentError } from "commander";
-import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
+import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { networkInterfaces } from "os";
@@ -31,6 +31,7 @@ import {
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
+import { simctlBootStatusArguments } from "./simctl";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -325,10 +326,11 @@ async function findAvailablePort(start: number): Promise<number> {
 
 async function ensureBooted(udid: string): Promise<void> {
   bootDevice(udid);
-  // `simctl bootstatus -b` blocks until the device's services are actually ready
-  // (not just flipped to "Booted"). Much more reliable than polling `simctl list`.
+  // Boot was requested by bootDevice. Passing `-b` redundantly can remain
+  // blocked on Xcode 27 even after the device is Booted. Monitor the existing
+  // transition; bootstatus still waits for services, not merely the state flag.
   try {
-    execSync(`xcrun simctl bootstatus ${udid} -b`, {
+    execFileSync("xcrun", simctlBootStatusArguments(udid), {
       encoding: "utf-8",
       stdio: "pipe",
       timeout: 60_000,
