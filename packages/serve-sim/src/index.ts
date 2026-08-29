@@ -10,6 +10,7 @@ import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from ".
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, resolveDevice } from "./device";
+import { deviceState } from "./device-state";
 import { permissions } from "./permissions";
 import { setUiOption, uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
@@ -1860,6 +1861,12 @@ program
   .description("Simulate a memory warning on the device")
   .option(...deviceOpt)
   .action((opts) => memoryWarning(opts.device));
+
+program
+  .command("state")
+  .description("Print device state as JSON (lock state, frontmost app)")
+  .option(...deviceOpt)
+  .action((opts) => deviceState(opts.device));
 
 program
   .command("event-log")
