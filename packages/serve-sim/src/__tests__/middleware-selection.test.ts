@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   matchInstalledAppByDisplayName,
-  parseForegroundAppLogMessage,
   previewConfigForState,
   rewriteStateForRequestHost,
   selectServeSimState,
   type ServeSimState,
 } from "../middleware";
+import { parseForegroundAppLogMessage } from "../foreground-tracker";
 
 const states: ServeSimState[] = [
   {
@@ -51,6 +51,7 @@ describe("previewConfigForState", () => {
       eventLogEndpoint: "/preview/api/event-log?device=DEVICE-B",
       eventLogEventsEndpoint: "/preview/api/event-log/events?device=DEVICE-B",
       axEndpoint: "/preview/ax?device=DEVICE-B",
+      metricsEndpoint: "/preview/metrics?device=DEVICE-B",
       cameraStatusEndpoint: "/preview/helper/DEVICE-B/camera/status",
       devtoolsEndpoint: "/preview/devtools?device=DEVICE-B",
       serveSimBin: "/bin/serve-sim",

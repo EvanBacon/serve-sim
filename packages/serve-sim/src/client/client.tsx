@@ -1183,6 +1183,7 @@ function AppWithConfig({
         deviceRuntime={deviceRuntime}
         currentApp={currentApp}
         eventLogEventsEndpoint={config.eventLogEventsEndpoint}
+        metricsEndpoint={config.metricsEndpoint}
         axOverlayEnabled={axOverlayEnabled}
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
         codecPreference={codecPreference}
