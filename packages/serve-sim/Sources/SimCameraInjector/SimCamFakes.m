@@ -317,8 +317,7 @@ static AVCaptureInputPort *SimCamFakeInputPortForInput(AVCaptureInput *input, AV
 - (AVCaptureOutput *)output { return _outputRef; }
 - (NSArray *)inputPorts {
     AVCaptureInput *input = SimCamOutputInput(_outputRef) ?: SimCamFakeInputForPosition(_position);
-    AVCaptureInputPort *port = SimCamFakeInputPortForInput(input, _position);
-    return port ? @[port] : @[];
+    return SimCamFakePortsForInput(input);
 }
 - (AVCaptureInput *)input { return SimCamOutputInput(_outputRef) ?: SimCamFakeInputForPosition(_position); }
 - (AVCaptureVideoPreviewLayer *)videoPreviewLayer { return nil; }
@@ -478,6 +477,12 @@ static AVCaptureInputPort *SimCamFakeInputPortForInput(AVCaptureInput *input, AV
         }
     }
     return port;
+}
+
+NSArray<AVCaptureInputPort *> *SimCamFakePortsForInput(AVCaptureInput *input) {
+    if (!SimCamIsFakeInput(input)) return @[];
+    AVCaptureInputPort *port = SimCamFakeInputPortForInput(input, SimCamPositionOf(input));
+    return port ? @[port] : @[];
 }
 
 #pragma mark - SimCamFakeInput marking
