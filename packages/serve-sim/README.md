@@ -55,6 +55,7 @@ serve-sim ca-debug <option> <on|off> [-d udid]
                                       (blended|copies|misaligned|offscreen|slow-animations)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events
+serve-sim ax [-d udid]                Dump the accessibility tree as JSON
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app

@@ -15,6 +15,7 @@ import { setUiOption, uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
+import { fetchAxSnapshot } from "./ax-cli";
 import {
   parsePreviewPanes,
   parseSimulatorTheme,
@@ -718,6 +719,23 @@ function deviceLabelsForEvents(events: EventLogEntry[]): Map<string, string> {
     labels.set(device, counts.get(name)! > 1 ? `${name} (${device.slice(0, 8)})` : name);
   }
   return labels;
+}
+
+async function axDump(deviceArg?: string) {
+  const udid = deviceArg ? resolveDevice(deviceArg) : undefined;
+  const state = readState(udid);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim` first.");
+    process.exit(1);
+  }
+
+  try {
+    const snapshot = await fetchAxSnapshot(state.streamUrl);
+    console.log(JSON.stringify(snapshot));
+  } catch (err) {
+    console.error(`Failed to read accessibility tree: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }
 
 async function gesture(jsonStr: string, deviceArg?: string) {
@@ -1868,6 +1886,12 @@ program
   .option("-j, --json", "Print JSON")
   .option("-n, --limit <count>", "Maximum number of events")
   .action((opts) => eventLog(opts.device, { json: opts.json, limit: opts.limit }));
+
+program
+  .command("ax")
+  .description("Dump the current accessibility tree as JSON")
+  .option(...deviceOpt)
+  .action((opts) => axDump(opts.device));
 
 // `camera` and `permissions` keep their own dedicated argument parsers (the
 // camera verb has nested sub-verbs and source flags; permissions has a
