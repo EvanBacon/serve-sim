@@ -12,6 +12,8 @@ import type { Socket } from "net";
 // importing the dependency keeps the proxy working regardless of runtime.
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
+import { createMetricsSamplerCache, type MetricsSamplerCache } from "./cpu-mem-sampler";
+import { corsAllowOriginHeaders } from "./middleware-utils";
 import { readCameraStatus } from "./camera-helper";
 import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
 import {
@@ -110,6 +112,7 @@ type ExecRequestBody = { command?: string };
 export type ServeSimState = ServeSimDeviceState;
 
 const axStreamerCache = createAxStreamerCache();
+const metricsSamplerCache = createMetricsSamplerCache();
 
 // Hard cap on the SSE line-assembly buffer for child-process stdout.
 // A malformed log entry without a newline can't grow this beyond 1 MB;
@@ -880,6 +883,7 @@ export function previewConfigForState(
   eventLogEndpoint: string;
   eventLogEventsEndpoint: string;
   axEndpoint: string;
+  metricsEndpoint: string;
   cameraStatusEndpoint: string;
   devtoolsEndpoint: string;
   serveSimBin: string;
@@ -901,6 +905,7 @@ export function previewConfigForState(
     eventLogEndpoint: endpoint(base, "/api/event-log", state.device),
     eventLogEventsEndpoint: endpoint(base, "/api/event-log/events", state.device),
     axEndpoint: endpoint(base, "/ax", state.device),
+    metricsEndpoint: endpoint(base, "/metrics", state.device),
     cameraStatusEndpoint: `${base === "/" ? "" : base}/helper/${encodeURIComponent(state.device)}/camera/status`,
     devtoolsEndpoint: endpoint(base, "/devtools", state.device),
     serveSimBin,
@@ -1238,6 +1243,12 @@ export interface SimMiddlewareOptions {
   /** Pin this preview server to a specific simulator UDID. */
   device?: string;
   /**
+   * Origins allowed to read the `/metrics` SSE stream cross-origin (e.g. a
+   * hosted dashboard). Loopback is always allowed; anything else must be
+   * listed here. Unset means same-origin only.
+   */
+  metricsCorsOrigins?: string[];
+  /**
    * Per-session bearer token gating the `/exec` shell-exec route.
    * Auto-generated if omitted. The token is injected into the preview HTML
    * so the in-page UI can call `/exec` same-origin; LAN attackers and
@@ -1290,6 +1301,40 @@ function isJsonContentType(value: string | undefined): boolean {
  *   GET  {basePath}/api     — serve-sim state JSON
  *   GET  {basePath}/ax      — SSE stream of normalized accessibility snapshots
  */
+export function handleMetricsRequest(
+  req: SimReq,
+  res: SimRes,
+  state: ServeSimState | null,
+  samplerCache: MetricsSamplerCache = metricsSamplerCache,
+  corsOrigins: readonly string[] = [],
+): void {
+  if (!state) {
+    res.writeHead(404);
+    res.end("No serve-sim device");
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    ...corsAllowOriginHeaders(req.headers.origin, corsOrigins),
+  });
+  res.write(":\n\n");
+  const { meta, unsubscribe } = samplerCache.subscribe(state.device, (sample) => {
+    if (!res.writableEnded) res.write("data: " + JSON.stringify(sample) + "\n\n");
+  });
+  res.write("event: meta\ndata: " + JSON.stringify(meta) + "\n\n");
+  // Heartbeat keeps an idle stream alive through buffering proxies.
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(":\n\n");
+  }, 15000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+}
+
 export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
   const helperPrefix = helperProxyPrefix(base);
@@ -1300,6 +1345,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // can call /exec; cross-origin pages and LAN clients cannot, because they
   // can't read this value (it's only injected into the preview page's config).
   const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
+  const metricsCorsOrigins = options?.metricsCorsOrigins ?? [];
 
   // Simulator-settings requests run in-process (just the underlying simctl /
   // ax-tool spawn) instead of round-tripping a full `node <cli>` exec per
@@ -1904,6 +1950,16 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
 
+    // GET /metrics — SSE stream of the foreground app's CPU/memory. Mirrors /ax:
+    // an `event: meta` frame first (schema, udid, host cores, cadence), then one
+    // `data:` line per sample. One sampler per udid fans out to every viewer.
+    if (url === base + "/metrics") {
+      const states = await readServeSimStates();
+      const state = selectServeSimState(states, selectedDevice);
+      handleMetricsRequest(req, res, state, metricsSamplerCache, metricsCorsOrigins);
+      return;
+    }
+
     // POST /exec — run a shell command on the host. Gated by a per-process
     // bearer token injected only into the same-origin preview HTML, with
     // Content-Type + Origin checks to block CORS-simple CSRF (a malicious
@@ -2118,6 +2174,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       `${base}/api/event-log/events`,
       `${base}/appstate`,
       `${base}/ax`,
+      `${base}/metrics`,
     ],
     onUiRequest: handleUiRequest,
     onCommandResult: (command, result) => recordCommandEvent(command, result),

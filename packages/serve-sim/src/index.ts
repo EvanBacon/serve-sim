@@ -1602,6 +1602,7 @@ async function serve(
   codec: string | undefined,
   initialState: PreviewInitialState | undefined,
   theme: SimulatorTheme | undefined,
+  metricsCorsOrigins: string[] = [],
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -1623,6 +1624,7 @@ async function serve(
     device: targetDevice,
     codec,
     initialState,
+    metricsCorsOrigins,
     proxyHelpers: true,
   });
 
@@ -1749,6 +1751,19 @@ program
       return v;
     },
   )
+  .option(
+    "--metrics-cors-origin <origin>",
+    "Allow a cross-origin dashboard to read the /metrics SSE stream (e.g. a hosted " +
+      "session page). Repeatable, or comma-separated. Loopback is always allowed.",
+    (value: string, previous: string[]) =>
+      previous.concat(
+        value
+          .split(",")
+          .map((o) => o.trim())
+          .filter(Boolean),
+      ),
+    [] as string[],
+  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -1795,6 +1810,7 @@ Examples:
         opts.codec,
         initialState,
         opts.theme,
+        opts.metricsCorsOrigin,
       );
     }
   });
