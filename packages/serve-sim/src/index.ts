@@ -7,6 +7,7 @@ import { networkInterfaces } from "os";
 import { join, resolve } from "path";
 import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, type ServeSimDeviceState } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
+import { parseGestureSteps, stepPayload, DEFAULT_STEP_DELAY_MS, type GestureStep } from "./gesture-steps";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, resolveDevice } from "./device";
@@ -727,11 +728,11 @@ async function gesture(jsonStr: string, deviceArg?: string) {
     process.exit(1);
   }
 
-  let touch: { type: string; x: number; y: number };
+  let steps: GestureStep[];
   try {
-    touch = JSON.parse(jsonStr);
-  } catch {
-    console.error("Invalid JSON:", jsonStr);
+    steps = parseGestureSteps(jsonStr);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 
@@ -739,12 +740,24 @@ async function gesture(jsonStr: string, deviceArg?: string) {
     const ws = new WebSocket(state.wsUrl);
     ws.binaryType = "arraybuffer";
 
-    ws.onopen = () => {
+    const send = (touch: ReturnType<typeof stepPayload>) => {
       const json = new TextEncoder().encode(JSON.stringify(touch));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x03;
       msg.set(json, 1);
       ws.send(msg);
+    };
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+    // All steps replay on THIS socket: a begin→move×N→end sequence split
+    // across CLI invocations (one socket each) registers as a long-press.
+    ws.onopen = async () => {
+      for (const [i, step] of steps.entries()) {
+        send(stepPayload(step));
+        if (i < steps.length - 1) {
+          await sleep(step.delayMs ?? DEFAULT_STEP_DELAY_MS);
+        }
+      }
       setTimeout(() => { ws.close(); resolve(); }, 50);
     };
 
@@ -1803,8 +1816,11 @@ const deviceOpt = ["-d, --device <udid>", "Target a specific simulator (udid or 
 
 program
   .command("gesture")
-  .description("Send a touch gesture")
-  .argument("<json>", 'Gesture JSON, e.g. \'{"type":"begin","x":0.5,"y":0.5}\'')
+  .description("Send a touch gesture — one event, or an array of steps replayed on one socket (drag/swipe/scroll)")
+  .argument(
+    "<json>",
+    'Touch JSON: \'{"type":"begin","x":0.5,"y":0.5}\' or a sequence \'[{"type":"begin","x":0.5,"y":0.8},{"type":"move","x":0.5,"y":0.4},{"type":"end","x":0.5,"y":0.4}]\' (per-step optional "delayMs", default 16)',
+  )
   .option(...deviceOpt)
   .action((json: string, opts) => gesture(json, opts.device));
 

@@ -73,7 +73,7 @@ Key invariants the agent must respect:
 | List running streams | `npx serve-sim --list` | Add `-q` for JSON-only output. |
 | Stop all helpers | `npx serve-sim --kill` | Pass `[device]` to stop a specific one. |
 | Single tap | `npx serve-sim tap <x> <y>` | `<x> <y>` in `0..1`. **Use this, not `gesture`, for plain taps.** See "Critical gotcha" below. |
-| Multi-step gesture | `npx serve-sim gesture '<json>'` | See [references/gestures.md](references/gestures.md). |
+| Drag / swipe / scroll | `npx serve-sim gesture '[<step>, <step>, …]'` | ONE call, JSON array — all steps replay on one socket (per-step `delayMs`, default 16). See [references/gestures.md](references/gestures.md). |
 | Hardware button | `npx serve-sim button <name>` | Names: `home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`. See [references/buttons-rotation.md](references/buttons-rotation.md). |
 | Rotate device | `npx serve-sim rotate <orientation>` | `portrait`, `portrait_upside_down`, `landscape_left`, `landscape_right`. |
 | Simulate memory warning | `npx serve-sim memory-warning` | Equivalent to Debug → Simulate Memory Warning. |
@@ -89,7 +89,7 @@ Most subcommands accept `-d <udid|name>` to target a specific device when severa
 
 Each `serve-sim gesture` call opens its own WebSocket. If you issue two back-to-back `gesture` calls — one with `{"type":"begin",...}` and one with `{"type":"end",...}` — the simulator receives them with enough latency between them that the touch is interpreted as a **long-press**, not a tap. This is a deliberate constraint of the protocol, not a bug to work around.
 
-**Rule**: for any single-shot tap, use `serve-sim tap <x> <y>`. Only use `gesture` for drags, swipes, or multi-step interactions where you must thread the same socket across `begin` → `move` × N → `end`.
+**Rule**: for any single-shot tap, use `serve-sim tap <x> <y>`. For drags, swipes, and other multi-step interactions, pass the WHOLE `begin` → `move` × N → `end` sequence as a JSON **array** in ONE `gesture` call — the CLI replays it on a single socket. Never split a sequence across multiple `gesture` calls.
 
 ## Targeting a specific device
 
