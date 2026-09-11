@@ -8,7 +8,8 @@
 // logic in SimStreamHelper is reused verbatim.
 //
 // The actual .node is produced by Sources/SimNative/build.sh, which drives
-// `swift build --arch arm64 --arch x86_64` for a universal binary and links
+// `swift build` with `--arch` flags from SERVE_SIM_ARCH (default universal
+// arm64+x86_64; CI tests use arm64) and links
 // napi_* with `-undefined dynamic_lookup` (resolved against the host Node/Bun
 // at dlopen). `node-swift rebuild` is intentionally not used: it builds a single
 // arch only, and cross-compiling per-arch with `--triple` breaks the

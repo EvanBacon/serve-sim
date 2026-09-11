@@ -4,11 +4,15 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT_DIR="${1:-$HERE/../../dist/simcam}"
 mkdir -p "$OUT_DIR"
 
+# shellcheck source=../../scripts/serve-sim-arch.sh
+source "$HERE/../../scripts/serve-sim-arch.sh"
+serve_sim_resolve_arch
+
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 BIN="$OUT_DIR/serve-sim-camera-helper"
 
 xcrun --sdk macosx clang \
-    -arch arm64 -arch x86_64 \
+    "${SERVE_SIM_CLANG_ARCH_FLAGS[@]}" \
     -mmacosx-version-min=14.0 \
     -isysroot "$SDK" \
     -fobjc-arc -fmodules \

@@ -3,8 +3,28 @@ name: serve-sim tests
 on:
   pull_request:
     paths:
-      - "packages/serve-sim/**"
+      # Darwin e2e is for native/sim/helper coverage. Client-only and unit-test
+      # diffs run on Ubuntu via serve-sim-unit.yml instead of occupying a Mac.
+      - "packages/serve-sim/Sources/**"
+      - "packages/serve-sim/Tests/**"
+      - "packages/serve-sim/Package.swift"
+      - "packages/serve-sim/build.ts"
+      - "packages/serve-sim/package.json"
+      - "packages/serve-sim/scripts/**"
+      - "packages/serve-sim/src/*.ts"
+      - "bun.lock"
       - ".github/workflows/sim-test.yml"
+      - ".github/scripts/**"
+      - ".github/actions/**"
+      - "packages/serve-sim/src/__tests__/accessibility-endpoint.test.ts"
+      - "packages/serve-sim/src/__tests__/avcc-stream-endpoint.test.ts"
+      - "packages/serve-sim/src/__tests__/camera-connections.e2e.test.ts"
+      - "packages/serve-sim/src/__tests__/hid-malformed-input.test.ts"
+      - "packages/serve-sim/src/__tests__/idle-floor.test.ts"
+      - "packages/serve-sim/src/__tests__/permissions.e2e.test.ts"
+      - "packages/serve-sim/src/__tests__/type-command-sim.test.ts"
+      - "packages/serve-sim/src/__tests__/ui-settings.e2e.test.ts"
+      - "packages/serve-sim/src/__tests__/shm-probe.integration.test.ts"
 
 # Cancel superseded runs — pushing twice to the same PR shouldn't burn two
 # macOS slots in parallel.
@@ -15,11 +35,9 @@ concurrency:
 jobs:
   sim-test:
     runs-on: macos-26
-    # 25 (not 15) leaves headroom for the one e2e retry below: the sim-backed
-    # tests can wedge the shared simulator (a malformed-HID frame leaving a
-    # stuck finger, a mid-stream native crash), which cascades connection
-    # errors into every later sim test. One reboot-and-retry clears a transient
-    # wedge; a real regression still fails both attempts.
+    # 25 (not 15) leaves headroom for per-file e2e retry: a malformed-HID frame
+    # or mid-stream native crash can wedge the shared simulator. Reboot-and-retry
+    # that file once; a real regression still fails both attempts.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -28,76 +46,22 @@ jobs:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
 
-      # The permissions e2e test drives the built CLI (dist/serve-sim.js), so
-      # build it up front rather than from inside the test.
-      - name: Build serve-sim
-        run: bun run build.ts
-        working-directory: packages/serve-sim
+      # Boot overlaps `bun run build.ts`. SwiftPM `.build` is cached provisionally:
+      # a miss runs `.github/scripts/probe-swiftpm-cache.sh` (tar-restore into a
+      # clean tree). Keep the cache only if that rebuild is seconds/low tens, not
+      # another ~200s cold swift-syntax compile. Exact key includes OS, Swift/Xcode,
+      # SERVE_SIM_ARCH, Package.swift, SimNative sources, bun.lock, package.json.
+      - name: Build serve-sim (arm64) and boot simulator
+        id: ci-build
+        uses: ./.github/actions/build-serve-sim-for-ci
+        with:
+          arch: arm64
 
-      - name: Boot iOS simulator
-        id: boot-sim
-        run: |
-          # Fast path: GitHub's macOS runner images pre-create iPhone
-          # simulators, so try booting one by name directly. `simctl list`
-          # enumerates every device/runtime and was costing 1.5-3min of
-          # cold-CoreSimulator first-touch — boot-by-name pays that once on a
-          # single device instead. The first available name wins; fall back
-          # to the full discovery+create path only if none boot.
-          UDID=""
-          for NAME in "iPhone 17 Pro" "iPhone 16 Pro" "iPhone 16" "iPhone 15 Pro" "iPhone 15"; do
-            echo "Trying to boot \"$NAME\"..."
-            if OUT=$(xcrun simctl boot "$NAME" 2>&1); then
-              UDID=$(xcrun simctl list devices booted -j | node -e "
-                const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-                for (const devs of Object.values(data.devices)) {
-                  for (const d of devs) { console.log(d.udid); process.exit(0); }
-                }
-              ")
-              echo "Booted \"$NAME\" -> $UDID"
-              break
-            fi
-            echo "  skip: $OUT"
-          done
-
-          if [ -z "$UDID" ]; then
-            echo "No pre-created iPhone simulator booted; creating one from the latest runtime"
-            RUNTIME=$(xcrun simctl list runtimes -j | node -e "
-              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-              const ios = data.runtimes.filter(r => r.isAvailable && r.identifier.includes('iOS'));
-              ios.sort((a, b) => a.version.localeCompare(b.version));
-              console.log(ios[ios.length - 1].identifier);
-            ")
-            DEVICETYPE=$(xcrun simctl list devicetypes -j | node -e "
-              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-              const iphones = data.devicetypes.filter(d => d.identifier.includes('iPhone'));
-              console.log(iphones[iphones.length - 1].identifier);
-            ")
-            UDID=$(xcrun simctl create "ci-test-iphone" "$DEVICETYPE" "$RUNTIME")
-            xcrun simctl boot "$UDID" || true
-          fi
-
-          xcrun simctl bootstatus "$UDID" -b
-          open -ga Simulator || true
-          echo "udid=$UDID" >> $GITHUB_OUTPUT
-
-      - name: serve-sim tests
+      - name: serve-sim Darwin tests
         env:
-          UDID: ${{ steps.boot-sim.outputs.udid }}
-        run: |
-          run_tests() { bun test --max-concurrency=1 packages/serve-sim/src/__tests__/; }
-          if run_tests; then exit 0; fi
-          # The sim-backed e2e tests share one simulator; a wedge from one test
-          # (stuck finger, native crash) shows up as hook timeouts / ECONNRESET /
-          # ConnectionRefused in unrelated later tests. Reboot for a clean slate
-          # and retry once — a genuine failure reproduces, a transient wedge clears.
-          echo "::warning title=sim e2e retry::test run failed; rebooting $UDID and retrying once"
-          xcrun simctl shutdown "$UDID" 2>/dev/null || true
-          sleep 3
-          xcrun simctl boot "$UDID" || true
-          xcrun simctl bootstatus "$UDID" -b || true
-          open -ga Simulator || true
-          run_tests
+          UDID: ${{ steps.ci-build.outputs.udid }}
+        run: bun packages/serve-sim/scripts/run-sim-e2e.ts
 
       - name: Shutdown simulator
-        if: always() && steps.boot-sim.outputs.udid != ''
-        run: xcrun simctl shutdown "${{ steps.boot-sim.outputs.udid }}" || true
+        if: always() && steps.ci-build.outputs.udid != ''
+        run: xcrun simctl shutdown "${{ steps.ci-build.outputs.udid }}" || true

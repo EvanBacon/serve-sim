@@ -46,6 +46,7 @@
     "Sources/SimCameraHelper/build.sh",
     "Sources/SimAXSettings/sim-ax-settings.m",
     "Sources/SimAXSettings/build.sh",
+    "scripts/serve-sim-arch.sh",
     "dist/native/serve-sim-native.node",
     "Package.swift",
     "Sources/SimNative/*.swift",

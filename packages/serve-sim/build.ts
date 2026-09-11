@@ -20,11 +20,14 @@ import { resolve } from "path";
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { spawnSync } from "child_process";
 import tailwindPlugin from "bun-plugin-tailwind";
+import { parseServeSimArch } from "./src/serve-sim-arch";
 
 const root = import.meta.dir;
 const distDir = resolve(root, "dist");
+const nativeArch = parseServeSimArch(process.env.SERVE_SIM_ARCH);
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
+console.log(`native arch       ${nativeArch}`);
 
 function kb(n: number): string {
   return `${(n / 1024).toFixed(1)} KB`;
@@ -240,8 +243,8 @@ if (axSettingsBuild.status !== 0) {
 console.log("dist/simax/serve-sim-ax-settings");
 
 // ─── 8. serve-sim-native.node — in-process N-API addon ───────────────────
-// Replaces the spawned serve-sim-bin helper. arm64 (Apple Silicon); loaded by
-// path from both the node bundle (createRequire) and the bun-compiled executable.
+// Replaces the spawned serve-sim-bin helper. Architecture follows SERVE_SIM_ARCH
+// (default universal). Loaded by path from the node bundle and compiled binary.
 
 const nativeBuild = spawnSync(
   "bash",
