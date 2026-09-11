@@ -63,6 +63,9 @@ describe("CI workflow factory invariants", () => {
     expect(sim).toMatch(/runs-on:\s*macos-26/);
     expect(sim).toContain("scripts/run-sim-e2e.ts");
     expect(sim).not.toMatch(/bun test --max-concurrency=1 packages\/serve-sim\/src\/__tests__\//);
+    const runner = readFileSync(join(REPO, "packages/serve-sim/scripts/run-sim-e2e.ts"), "utf-8");
+    expect(runner).toContain("--max-concurrency=1");
+    expect(runner).toContain("DARWIN_INTEGRATION_TEST_FILES");
   });
 
   test("sim-test.yml path filters include every Darwin test file and exclude client-only", () => {
