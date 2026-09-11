@@ -68,8 +68,8 @@ describeWithSim(`serve-sim accessibility endpoint (booted sim ${bootedUdid ?? "<
   }, 60_000);
 
   afterAll(() => {
-    try { execSync(`bun run ${CLI_PATH} --kill ${bootedUdid}`, { stdio: "pipe" }); } catch {}
-  });
+    try { execSync(`bun run ${CLI_PATH} --kill ${bootedUdid}`, { stdio: "pipe", timeout: 20_000 }); } catch {}
+  }, 30_000);
 
   test("returns a bounded accessibility tree without crashing the helper", async () => {
     const deadline = Date.now() + AX_READY_BUDGET_MS;

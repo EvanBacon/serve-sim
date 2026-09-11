@@ -1,0 +1,37 @@
+name: serve-sim unit tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/serve-sim/**"
+      - ".bun-version"
+      - ".github/workflows/serve-sim-unit.yml"
+  pull_request:
+    paths:
+      - "packages/serve-sim/**"
+      - ".bun-version"
+      - ".github/workflows/serve-sim-unit.yml"
+
+concurrency:
+  group: serve-sim-unit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      # Full bun concurrency. Sim-backed / native-helper files skip on Linux
+      # (no xcrun / no Darwin dylibs); they run serially on macOS in sim-test.yml.
+      - name: serve-sim unit tests
+        run: bun test packages/serve-sim/src/__tests__/

@@ -63,80 +63,27 @@ jobs:
         if: steps.changes.outputs.sim == 'true'
         run: bun install --frozen-lockfile
 
-      - name: Boot iOS simulator for serve-sim tests
+      # Test-phase build is arm64-only; boot overlaps it. The publish step below
+      # rebuilds without SERVE_SIM_ARCH so the npm tarball stays universal.
+      - name: Build serve-sim (arm64) and boot simulator
         if: steps.changes.outputs.sim == 'true'
-        id: boot-sim
-        run: |
-          # Pick the newest available iOS simulator device. The runner image
-          # ships pre-created sims - boot one so the serve-sim idle-floor
-          # integration test has something real to talk to. Fallback: create
-          # one from the latest iOS runtime.
-          UDID=$(xcrun simctl list devices available -j | node -e "
-            const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-            const iosRuntimes = Object.keys(data.devices).filter(r => r.includes('iOS'));
-            iosRuntimes.sort().reverse();
-            for (const runtime of iosRuntimes) {
-              for (const d of data.devices[runtime]) {
-                if (d.isAvailable && d.name.includes('iPhone')) {
-                  console.log(d.udid);
-                  process.exit(0);
-                }
-              }
-            }
-          ")
-          if [ -z "$UDID" ]; then
-            echo "No pre-created iOS simulator found; creating one from the latest runtime"
-            RUNTIME=$(xcrun simctl list runtimes -j | node -e "
-              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-              const ios = data.runtimes.filter(r => r.isAvailable && r.identifier.includes('iOS'));
-              ios.sort((a, b) => a.version.localeCompare(b.version));
-              console.log(ios[ios.length - 1].identifier);
-            ")
-            DEVICETYPE=$(xcrun simctl list devicetypes -j | node -e "
-              const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-              const iphones = data.devicetypes.filter(d => d.identifier.includes('iPhone'));
-              console.log(iphones[iphones.length - 1].identifier);
-            ")
-            UDID=$(xcrun simctl create "ci-test-iphone" "$DEVICETYPE" "$RUNTIME")
-          fi
-          echo "Booting simulator $UDID"
-          xcrun simctl boot "$UDID" || true
-          xcrun simctl bootstatus "$UDID" -b
-          open -ga Simulator || true
-          echo "udid=$UDID" >> $GITHUB_OUTPUT
+        id: ci-build
+        uses: ./.github/actions/build-serve-sim-for-ci
+        with:
+          arch: arm64
 
-      # The serve-sim e2e tests load the in-process native addon
-      # (dist/native/serve-sim-native.node), so build it before running them.
-      # (The publish step below rebuilds after the version bump to embed it.)
-      - name: Build serve-sim
-        if: steps.changes.outputs.sim == 'true'
-        run: bun run build.ts
-        working-directory: packages/serve-sim
-
-      - name: serve-sim tests (idle floor regression)
+      - name: serve-sim Darwin tests
         if: steps.changes.outputs.sim == 'true'
         env:
-          UDID: ${{ steps.boot-sim.outputs.udid }}
-        run: |
-          # Mirror sim-test.yml: the sim-backed e2e tests share one simulator,
-          # so a wedge from one test (stuck finger, native crash) cascades into
-          # ConnectionRefused / "server not alive" failures in unrelated later
-          # tests. Reboot for a clean slate and retry once — a transient wedge
-          # clears, a genuine regression reproduces on the second run.
-          run_tests() { bun test --max-concurrency=1 packages/serve-sim/src/__tests__/; }
-          if run_tests; then exit 0; fi
-          echo "::warning title=sim e2e retry::test run failed; rebooting $UDID and retrying once"
-          xcrun simctl shutdown "$UDID" 2>/dev/null || true
-          sleep 3
-          xcrun simctl boot "$UDID" || true
-          xcrun simctl bootstatus "$UDID" -b || true
-          open -ga Simulator || true
-          run_tests
+          UDID: ${{ steps.ci-build.outputs.udid }}
+          # Camera e2e clang uses parseServeSimArch(); default is universal (fat).
+          SERVE_SIM_ARCH: arm64
+        run: bun packages/serve-sim/scripts/run-sim-e2e.ts
 
       - name: Shutdown simulator
-        if: always() && steps.boot-sim.outputs.udid != ''
+        if: always() && steps.ci-build.outputs.udid != ''
         run: |
-          xcrun simctl shutdown "${{ steps.boot-sim.outputs.udid }}" || true
+          xcrun simctl shutdown "${{ steps.ci-build.outputs.udid }}" || true
 
       - name: Build and publish serve-sim beta
         if: steps.changes.outputs.sim == 'true'

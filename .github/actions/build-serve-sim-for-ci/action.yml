@@ -1,0 +1,60 @@
+name: Build serve-sim for CI
+description: Arm64-or-universal native build with iOS simulator boot overlapped.
+inputs:
+  arch:
+    description: SERVE_SIM_ARCH (arm64 for tests, universal for npm publish builds)
+    required: false
+    default: arm64
+  boot-simulator:
+    description: Start iOS simulator boot in the background and wait after the build
+    required: false
+    default: "true"
+outputs:
+  udid:
+    description: Booted simulator UDID (empty if boot-simulator is false)
+    value: ${{ steps.wait-sim.outputs.udid }}
+  build-seconds:
+    description: Wall time of bun run build.ts
+    value: ${{ steps.build.outputs.elapsed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Start iOS simulator boot
+      if: inputs.boot-simulator == 'true'
+      shell: bash
+      run: |
+        STATE_DIR="${SERVE_SIM_BOOT_DIR:-/tmp/serve-sim-boot}"
+        mkdir -p "$STATE_DIR"
+        nohup "${GITHUB_ACTION_PATH}/../../scripts/boot-ios-simulator.sh" \
+          >"$STATE_DIR/log" 2>&1 &
+        echo $! > "$STATE_DIR/pid"
+        echo "Simulator boot started (pid $(cat "$STATE_DIR/pid"))"
+
+    - name: Build serve-sim
+      id: build
+      working-directory: packages/serve-sim
+      shell: bash
+      env:
+        SERVE_SIM_ARCH: ${{ inputs.arch }}
+      run: |
+        START=$(date +%s)
+        bun run build.ts
+        END=$(date +%s)
+        ELAPSED=$((END - START))
+        echo "elapsed=$ELAPSED" >> "$GITHUB_OUTPUT"
+        echo "Build elapsed ${ELAPSED}s (SERVE_SIM_ARCH=$SERVE_SIM_ARCH)"
+        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          {
+            echo "### serve-sim CI build"
+            echo ""
+            echo "- \`bun run build.ts\`: **${ELAPSED}s**"
+            echo "- SERVE_SIM_ARCH: \`$SERVE_SIM_ARCH\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Wait for iOS simulator
+      id: wait-sim
+      if: inputs.boot-simulator == 'true'
+      shell: bash
+      run: bash "${GITHUB_ACTION_PATH}/../../scripts/wait-ios-simulator.sh"
