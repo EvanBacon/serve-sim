@@ -8,6 +8,7 @@ on:
       - "packages/serve-sim/Sources/**"
       - "packages/serve-sim/Tests/**"
       - "packages/serve-sim/Package.swift"
+      - "packages/serve-sim/Package.resolved"
       - "packages/serve-sim/build.ts"
       - "packages/serve-sim/package.json"
       - "packages/serve-sim/scripts/**"
@@ -46,11 +47,9 @@ jobs:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
 
-      # Boot overlaps `bun run build.ts`. SwiftPM `.build` is cached provisionally:
-      # a miss runs `.github/scripts/probe-swiftpm-cache.sh` (tar-restore into a
-      # clean tree). Keep the cache only if that rebuild is seconds/low tens, not
-      # another ~200s cold swift-syntax compile. Exact key includes OS, Swift/Xcode,
-      # SERVE_SIM_ARCH, Package.swift, SimNative sources, bun.lock, package.json.
+      # Boot overlaps `bun run build.ts`. SwiftPM `.build` is cached with
+      # actions/cache (OS + Package.resolved + Swift sources + toolchain/arch).
+      # Measured: restore + `bun run build.ts` = 4.81s vs cold ~204s.
       - name: Build serve-sim (arm64) and boot simulator
         id: ci-build
         uses: ./.github/actions/build-serve-sim-for-ci

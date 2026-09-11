@@ -72,6 +72,7 @@ describe("CI workflow factory invariants", () => {
     }
     expect(sim).toContain("packages/serve-sim/src/*.ts");
     expect(sim).toContain("packages/serve-sim/Sources/**");
+    expect(sim).toContain("packages/serve-sim/Package.resolved");
     expect(sim).not.toMatch(/packages\/serve-sim\/src\/client\/\*\*/);
   });
 
@@ -103,15 +104,17 @@ describe("CI workflow factory invariants", () => {
     expect(waitIdx).toBeGreaterThan(buildIdx);
   });
 
-  test("SwiftPM cache key includes OS, toolchain, Package.swift, sources, and lockfiles", () => {
+  test("SwiftPM cache key includes OS, Package.resolved, Swift sources, and toolchain", () => {
     const action = actionYml();
     expect(action).toContain("packages/serve-sim/.build");
+    expect(action).toContain("uses: actions/cache/restore@v4");
+    expect(action).toContain("uses: actions/cache/save@v4");
     expect(action).toContain("swift --version");
     expect(action).toContain("xcodebuild -version");
+    expect(action).toContain("packages/serve-sim/Package.resolved");
     expect(action).toContain("packages/serve-sim/Package.swift");
     expect(action).toContain("packages/serve-sim/Sources/SimNative/**");
-    expect(action).toContain("bun.lock");
-    expect(action).toContain("probe-swiftpm-cache.sh");
+    expect(action).toContain("packages/serve-sim/Sources/SimNativeSupport/**");
   });
 
   test("wait-ios-simulator.sh succeeds on a done marker and fails on failed/timeout", () => {
