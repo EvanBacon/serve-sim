@@ -86,11 +86,15 @@ describe("CI workflow factory invariants", () => {
 
     const sim = workflow("sim-test.yml");
     expect(sim).toMatch(/arch:\s*arm64/);
+    const simDarwin = sim.split("serve-sim Darwin tests")[1] ?? "";
+    expect(simDarwin).toMatch(/SERVE_SIM_ARCH:\s*arm64/);
 
     for (const name of ["publish.yml", "publish-stable.yml"] as const) {
       const yml = workflow(name);
       expect(yml).toContain("build-serve-sim-for-ci");
       expect(yml).toMatch(/arch:\s*arm64/);
+      const darwinStep = (yml.split("serve-sim Darwin tests")[1] ?? "").split("Build and publish")[0] ?? "";
+      expect(darwinStep).toMatch(/SERVE_SIM_ARCH:\s*arm64/);
       const publishStep = yml.split("Build and publish")[1] ?? "";
       expect(publishStep).toMatch(/bun run build/);
       expect(publishStep).not.toMatch(/SERVE_SIM_ARCH:\s*arm64/);

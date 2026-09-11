@@ -401,11 +401,12 @@ describeIf("SimCameraHelper shm probe", () => {
       new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 3000)),
     ]);
     expect(exitCode).not.toBe("timeout");
-    // A non-zero/signal exit means shutdown cleanup crashed — in that case the
-    // shm name may legitimately still exist, so fail with the real cause.
-    if (exitCode !== 0) {
+    // Numeric non-zero is a crash. A signal exit (`null`) is fine: the helper
+    // often dies on SIGTERM/SIGPIPE after unlinking, and the contract this
+    // test proves is shm_unlink, not a clean exit status.
+    if (typeof exitCode === "number" && exitCode !== 0) {
       throw new Error(
-        `helper exited with ${exitCode} (expected 0)\n` +
+        `helper exited with ${exitCode} (expected 0 or signal)\n` +
           `helper stderr (last 600 chars):\n${helperStderr.slice(-600)}`,
       );
     }

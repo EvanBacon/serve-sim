@@ -54,6 +54,8 @@ jobs:
       - name: serve-sim Darwin tests
         env:
           UDID: ${{ steps.ci-build.outputs.udid }}
+          # Camera e2e clang uses parseServeSimArch(); default is universal (fat).
+          SERVE_SIM_ARCH: arm64
         run: bun packages/serve-sim/scripts/run-sim-e2e.ts
 
       - name: Shutdown simulator
