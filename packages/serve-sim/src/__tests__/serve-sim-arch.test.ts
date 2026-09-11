@@ -90,7 +90,8 @@ describe("native build.sh wiring", () => {
 
   test("camera-connections e2e compiles the test app with SERVE_SIM_ARCH flags", () => {
     const text = readFileSync(join(PKG, "src/__tests__/camera-connections.e2e.test.ts"), "utf-8");
-    expect(text).toContain("clangArchArgs(parseServeSimArch())");
+    expect(text).toContain("clangArchArgs(arch)");
+    expect(text).toContain("camera e2e clang SERVE_SIM_ARCH=");
     expect(text).not.toMatch(/-arch", "arm64", "-arch", "x86_64/);
   });
 });
