@@ -75,7 +75,6 @@ describe("CI workflow factory invariants", () => {
     }
     expect(sim).toContain("packages/serve-sim/src/*.ts");
     expect(sim).toContain("packages/serve-sim/Sources/**");
-    expect(sim).toContain("packages/serve-sim/Package.resolved");
     expect(sim).not.toMatch(/packages\/serve-sim\/src\/client\/\*\*/);
   });
 
@@ -83,6 +82,7 @@ describe("CI workflow factory invariants", () => {
     const action = actionYml();
     expect(action).toMatch(/default:\s*arm64/);
     expect(action).toContain("SERVE_SIM_ARCH");
+    expect(action).not.toContain("actions/cache");
 
     const sim = workflow("sim-test.yml");
     expect(sim).toMatch(/arch:\s*arm64/);
@@ -105,19 +105,6 @@ describe("CI workflow factory invariants", () => {
     expect(startIdx).toBeGreaterThanOrEqual(0);
     expect(buildIdx).toBeGreaterThan(startIdx);
     expect(waitIdx).toBeGreaterThan(buildIdx);
-  });
-
-  test("SwiftPM cache key includes OS, Package.resolved, Swift sources, and toolchain", () => {
-    const action = actionYml();
-    expect(action).toContain("packages/serve-sim/.build");
-    expect(action).toContain("uses: actions/cache/restore@v4");
-    expect(action).toContain("uses: actions/cache/save@v4");
-    expect(action).toContain("swift --version");
-    expect(action).toContain("xcodebuild -version");
-    expect(action).toContain("packages/serve-sim/Package.resolved");
-    expect(action).toContain("packages/serve-sim/Package.swift");
-    expect(action).toContain("packages/serve-sim/Sources/SimNative/**");
-    expect(action).toContain("packages/serve-sim/Sources/SimNativeSupport/**");
   });
 
   test("wait-ios-simulator.sh succeeds on a done marker and fails on failed/timeout", () => {
@@ -155,14 +142,6 @@ describe("CI workflow factory invariants", () => {
       const err = error as { message?: string; stderr?: string };
       expect(`${err.stderr ?? ""}\n${err.message ?? ""}`).toMatch(/Timed out/);
     }
-  });
-
-  test("probe-swiftpm-cache.sh refuses to run without .build", () => {
-    const probe = join(REPO, ".github/scripts/probe-swiftpm-cache.sh");
-    expect(existsSync(probe)).toBe(true);
-    // The real packages/serve-sim/.build is gitignored and absent in this
-    // checkout, so the probe should error out instead of claiming a warm hit.
-    expect(() => execFileSync("bash", [probe], { encoding: "utf-8" })).toThrow();
   });
 
   test("every file under src/__tests__ is either a Darwin e2e/integration test or a unit test", () => {

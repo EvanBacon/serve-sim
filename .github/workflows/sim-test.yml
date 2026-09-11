@@ -47,9 +47,8 @@ jobs:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
 
-      # Boot overlaps `bun run build.ts`. SwiftPM `.build` is cached with
-      # actions/cache (OS + Package.resolved + Swift sources + toolchain/arch).
-      # Measured: restore + `bun run build.ts` = 4.81s vs cold ~204s.
+      # Boot overlaps `bun run build.ts`. SwiftPM `.build` is not cached:
+      # CI hits were 58s then 292s (ineffective / slower than cold).
       - name: Build serve-sim (arm64) and boot simulator
         id: ci-build
         uses: ./.github/actions/build-serve-sim-for-ci

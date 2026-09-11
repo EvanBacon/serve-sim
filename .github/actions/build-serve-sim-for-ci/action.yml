@@ -1,5 +1,5 @@
 name: Build serve-sim for CI
-description: Restore SwiftPM .build, arm64-or-universal native build, overlap iOS sim boot, optionally probe cache restore.
+description: Arm64-or-universal native build with iOS simulator boot overlapped.
 inputs:
   arch:
     description: SERVE_SIM_ARCH (arm64 for tests, universal for npm publish builds)
@@ -9,32 +9,13 @@ inputs:
     description: Start iOS simulator boot in the background and wait after the build
     required: false
     default: "true"
-  probe-cache:
-    description: On cache miss, tar-roundtrip .build and rebuild (optional; Mac restore already measured at 4.81s)
-    required: false
-    default: "false"
 outputs:
   udid:
     description: Booted simulator UDID (empty if boot-simulator is false)
     value: ${{ steps.wait-sim.outputs.udid }}
-  cache-hit:
-    description: Exact SwiftPM cache key hit
-    value: ${{ steps.swiftpm-restore.outputs.cache-hit }}
-  cache-key:
-    description: SwiftPM cache key used for restore/save
-    value: ${{ steps.toolchain.outputs.cache-key }}
   build-seconds:
     description: Wall time of bun run build.ts
     value: ${{ steps.build.outputs.elapsed }}
-  probe-warm:
-    description: true if the cache-miss restore probe rebuilt within the warm budget
-    value: ${{ steps.probe.outputs.warm }}
-  probe-seconds:
-    description: Restore-rebuild seconds from the cache probe (empty on cache hit)
-    value: ${{ steps.probe.outputs.rebuild_seconds }}
-  probe-verdict:
-    description: WARM_HIT, NO_SPEEDUP, BROKEN, or skipped
-    value: ${{ steps.probe.outputs.verdict }}
 
 runs:
   using: composite
@@ -50,33 +31,6 @@ runs:
         echo $! > "$STATE_DIR/pid"
         echo "Simulator boot started (pid $(cat "$STATE_DIR/pid"))"
 
-    - name: Record Swift/Xcode identity
-      id: toolchain
-      shell: bash
-      run: |
-        SWIFT=$(swift --version 2>&1 | tr '\n' ' ' | tr -s ' ')
-        XCODE=$(xcodebuild -version 2>&1 | tr '\n' ' ' | tr -s ' ')
-        echo "swift: $SWIFT"
-        echo "xcode: $XCODE"
-        TOOLCHAIN_ID=$(printf '%s\n%s\n' "$SWIFT" "$XCODE" | shasum -a 256 | awk '{print $1}')
-        echo "toolchain_id=$TOOLCHAIN_ID" >> "$GITHUB_OUTPUT"
-        # Primary key material: OS + Package.resolved + Swift sources.
-        # Toolchain and SERVE_SIM_ARCH are included so an Xcode bump or
-        # arm64-vs-universal layout cannot restore a broken .build.
-        FILES_HASH="${{ hashFiles('packages/serve-sim/Package.resolved', 'packages/serve-sim/Package.swift', 'packages/serve-sim/Sources/SimNative/**', 'packages/serve-sim/Sources/SimNativeSupport/**', 'packages/serve-sim/Tests/SimNativeSupportTests/**') }}"
-        KEY="${{ runner.os }}-swiftpm-${{ inputs.arch }}-${TOOLCHAIN_ID}-${FILES_HASH}"
-        echo "cache-key=$KEY" >> "$GITHUB_OUTPUT"
-        echo "SwiftPM cache key: $KEY"
-
-    - name: Restore SwiftPM .build
-      id: swiftpm-restore
-      uses: actions/cache/restore@v4
-      with:
-        path: packages/serve-sim/.build
-        key: ${{ steps.toolchain.outputs.cache-key }}
-        restore-keys: |
-          ${{ runner.os }}-swiftpm-${{ inputs.arch }}-${{ steps.toolchain.outputs.toolchain_id }}-
-
     - name: Build serve-sim
       id: build
       working-directory: packages/serve-sim
@@ -89,42 +43,15 @@ runs:
         END=$(date +%s)
         ELAPSED=$((END - START))
         echo "elapsed=$ELAPSED" >> "$GITHUB_OUTPUT"
-        HIT="${{ steps.swiftpm-restore.outputs.cache-hit }}"
-        echo "Build elapsed ${ELAPSED}s (cache-hit=${HIT:-false}, SERVE_SIM_ARCH=$SERVE_SIM_ARCH)"
+        echo "Build elapsed ${ELAPSED}s (SERVE_SIM_ARCH=$SERVE_SIM_ARCH)"
         if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
           {
             echo "### serve-sim CI build"
             echo ""
             echo "- \`bun run build.ts\`: **${ELAPSED}s**"
-            echo "- SwiftPM cache-hit: \`${HIT:-false}\`"
             echo "- SERVE_SIM_ARCH: \`$SERVE_SIM_ARCH\`"
-            echo "- cache key: \`${{ steps.toolchain.outputs.cache-key }}\`"
-            echo ""
-            echo "Measured restore (clean tree + \`.build\` tarball, then \`bun run build.ts\`): **4.81s** vs cold ~204s. Cache path: \`packages/serve-sim/.build\`."
           } >> "$GITHUB_STEP_SUMMARY"
         fi
-        if [[ "$HIT" == "true" && "$ELAPSED" -gt 60 ]]; then
-          echo "::warning title=SwiftPM cache hit was not warm::cache-hit=true but build took ${ELAPSED}s (expected seconds/low tens). Treat this cache as ineffective."
-        fi
-
-    - name: Probe SwiftPM .build restore
-      id: probe
-      if: inputs.probe-cache == 'true' && steps.swiftpm-restore.outputs.cache-hit != 'true'
-      shell: bash
-      env:
-        SERVE_SIM_ARCH: ${{ inputs.arch }}
-      run: bash "${GITHUB_ACTION_PATH}/../../scripts/probe-swiftpm-cache.sh"
-
-    - name: Save SwiftPM .build
-      if: >-
-        always() &&
-        steps.build.outcome == 'success' &&
-        steps.swiftpm-restore.outputs.cache-hit != 'true' &&
-        (inputs.probe-cache != 'true' || steps.probe.outputs.warm == 'true')
-      uses: actions/cache/save@v4
-      with:
-        path: packages/serve-sim/.build
-        key: ${{ steps.toolchain.outputs.cache-key }}
 
     - name: Wait for iOS simulator
       id: wait-sim
