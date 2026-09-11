@@ -14,6 +14,7 @@ on:
       - "packages/serve-sim/scripts/**"
       - "packages/serve-sim/src/*.ts"
       - "bun.lock"
+      - ".bun-version"
       - ".github/workflows/sim-test.yml"
       - ".github/scripts/**"
       - ".github/actions/**"
@@ -35,6 +36,8 @@ concurrency:
 
 jobs:
   sim-test:
+    permissions:
+      contents: read
     runs-on: macos-26
     # 25 (not 15) leaves headroom for per-file e2e retry: a malformed-HID frame
     # or mid-stream native crash can wedge the shared simulator. Reboot-and-retry
@@ -42,6 +45,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version

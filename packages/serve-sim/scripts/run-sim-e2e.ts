@@ -28,17 +28,26 @@ function runBunTest(files: readonly string[], extraArgs: string[] = []): number 
   return result.status ?? 1;
 }
 
-function rebootSimulator(): void {
+function rebootSimulator(): boolean {
   if (!udid) {
-    console.warn("UDID unset; skipping simulator reboot");
-    return;
+    console.error("UDID unset; cannot reboot simulator for retry");
+    return false;
   }
   console.warn(`Rebooting simulator ${udid} before retry`);
   spawnSync("xcrun", ["simctl", "shutdown", udid], { stdio: "inherit" });
   spawnSync("sleep", ["3"], { stdio: "inherit" });
-  spawnSync("xcrun", ["simctl", "boot", udid], { stdio: "inherit" });
-  spawnSync("xcrun", ["simctl", "bootstatus", udid, "-b"], { stdio: "inherit" });
+  const boot = spawnSync("xcrun", ["simctl", "boot", udid], { stdio: "inherit" });
+  if (boot.status !== 0) {
+    console.error(`simctl boot ${udid} failed (status ${boot.status}); skipping retry`);
+    return false;
+  }
+  const bootstatus = spawnSync("xcrun", ["simctl", "bootstatus", udid, "-b"], { stdio: "inherit" });
+  if (bootstatus.status !== 0) {
+    console.error(`simctl bootstatus ${udid} failed (status ${bootstatus.status}); skipping retry`);
+    return false;
+  }
   spawnSync("open", ["-ga", "Simulator"], { stdio: "inherit" });
+  return true;
 }
 
 for (const file of DARWIN_INTEGRATION_TEST_FILES) {
@@ -53,7 +62,11 @@ for (const file of SIM_E2E_TEST_FILES) {
   console.log(`\n=== sim e2e ${file} ===`);
   if (runBunTest([file], serialArgs) === 0) continue;
   console.warn(`::warning title=sim e2e retry::${file} failed; rebooting and retrying once`);
-  rebootSimulator();
+  if (!rebootSimulator()) {
+    console.error(`Simulator reboot failed; not retrying ${file}`);
+    failed.push(file);
+    continue;
+  }
   if (runBunTest([file], serialArgs) === 0) continue;
   failed.push(file);
 }

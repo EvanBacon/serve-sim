@@ -56,6 +56,9 @@ describe("CI workflow factory invariants", () => {
     expect(unit).toMatch(/runs-on:\s*ubuntu-latest/);
     expect(unit).toMatch(/bun test packages\/serve-sim\/src\/__tests__\//);
     expect(unit).not.toMatch(/max-concurrency=1/);
+    expect(unit).toContain(".bun-version");
+    expect(unit).toMatch(/contents:\s*read/);
+    expect(unit).toMatch(/persist-credentials:\s*false/);
   });
 
   test("macOS e2e uses the per-file runner, not a serial full-tree bun test", () => {
@@ -66,6 +69,8 @@ describe("CI workflow factory invariants", () => {
     const runner = readFileSync(join(REPO, "packages/serve-sim/scripts/run-sim-e2e.ts"), "utf-8");
     expect(runner).toContain("--max-concurrency=1");
     expect(runner).toContain("DARWIN_INTEGRATION_TEST_FILES");
+    expect(runner).toMatch(/bootstatus[\s\S]*status !== 0/);
+    expect(runner).toContain("Simulator reboot failed; not retrying");
   });
 
   test("sim-test.yml path filters include every Darwin test file and exclude client-only", () => {
@@ -75,6 +80,9 @@ describe("CI workflow factory invariants", () => {
     }
     expect(sim).toContain("packages/serve-sim/src/*.ts");
     expect(sim).toContain("packages/serve-sim/Sources/**");
+    expect(sim).toContain(".bun-version");
+    expect(sim).toMatch(/contents:\s*read/);
+    expect(sim).toMatch(/persist-credentials:\s*false/);
     expect(sim).not.toMatch(/packages\/serve-sim\/src\/client\/\*\*/);
   });
 
@@ -109,6 +117,41 @@ describe("CI workflow factory invariants", () => {
     expect(startIdx).toBeGreaterThanOrEqual(0);
     expect(buildIdx).toBeGreaterThan(startIdx);
     expect(waitIdx).toBeGreaterThan(buildIdx);
+  });
+
+  test("boot-ios-simulator.sh resolves a matching UDID, not the first globally booted device", () => {
+    const boot = readFileSync(join(REPO, ".github/scripts/boot-ios-simulator.sh"), "utf-8");
+    expect(boot).toContain("d.name !== name");
+    expect(boot).toContain('simctl boot "$CANDIDATE"');
+    expect(boot).not.toMatch(/for \(const d of devs\) \{ console\.log\(d\.udid\); process\.exit\(0\); \}/);
+
+    const dir = mkdtempSync(join(tmpdir(), "serve-sim-devices-"));
+    const jsonPath = join(dir, "devices.json");
+    writeFileSync(jsonPath, JSON.stringify({
+      devices: {
+        "com.apple.CoreSimulator.SimRuntime.iOS-18-4": [
+          { name: "iPhone 15", udid: "UDID-15", state: "Shutdown", isAvailable: true },
+          { name: "iPhone 16 Pro", udid: "UDID-16-PRO", state: "Shutdown", isAvailable: true },
+        ],
+        "com.apple.CoreSimulator.SimRuntime.watchOS-11-4": [
+          { name: "Apple Watch", udid: "UDID-WATCH-BOOTED", state: "Booted", isAvailable: true },
+        ],
+      },
+    }));
+    const resolved = execFileSync("bash", [
+      join(REPO, ".github/scripts/boot-ios-simulator.sh"),
+      "--resolve-udid",
+      "iPhone 16 Pro",
+    ], {
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        SERVE_SIM_DEVICES_JSON: jsonPath,
+        SERVE_SIM_BOOT_DIR: dir,
+      },
+    }).trim();
+    expect(resolved).toBe("UDID-16-PRO");
+    rmSync(dir, { recursive: true, force: true });
   });
 
   test("wait-ios-simulator.sh succeeds on a done marker and fails on failed/timeout", () => {

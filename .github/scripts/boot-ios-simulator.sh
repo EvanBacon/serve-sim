@@ -7,6 +7,42 @@
 #   log    — caller usually redirects stdout/stderr here
 set -euo pipefail
 
+# Resolve a UDID that matches NAME (prefer already-booted), then boot that
+# UDID. Never publish "first globally booted" — another simulator can already
+# be up on the runner.
+resolve_udid_for_name() {
+  local name="$1"
+  local devices_json
+  if [[ -n "${SERVE_SIM_DEVICES_JSON:-}" ]]; then
+    devices_json=$(cat "$SERVE_SIM_DEVICES_JSON")
+  else
+    devices_json=$(xcrun simctl list devices -j)
+  fi
+  printf '%s' "$devices_json" | NAME="$name" node -e '
+    const name = process.env.NAME;
+    const data = JSON.parse(require("fs").readFileSync(0, "utf-8"));
+    let fallback = "";
+    for (const [runtime, devs] of Object.entries(data.devices || {})) {
+      if (!/iOS/i.test(runtime)) continue;
+      for (const d of devs) {
+        if (d.name !== name || !d.udid || d.isAvailable === false) continue;
+        if (d.state === "Booted") {
+          process.stdout.write(d.udid);
+          process.exit(0);
+        }
+        if (!fallback) fallback = d.udid;
+      }
+    }
+    if (fallback) process.stdout.write(fallback);
+  '
+}
+
+if [[ "${1:-}" == "--resolve-udid" ]]; then
+  resolve_udid_for_name "${2:-}"
+  printf '\n'
+  exit 0
+fi
+
 STATE_DIR="${SERVE_SIM_BOOT_DIR:-/tmp/serve-sim-boot}"
 mkdir -p "$STATE_DIR"
 rm -f "$STATE_DIR/done" "$STATE_DIR/failed" "$STATE_DIR/udid"
@@ -19,15 +55,20 @@ trap on_fail ERR
 
 UDID=""
 for NAME in "iPhone 17 Pro" "iPhone 16 Pro" "iPhone 16" "iPhone 15 Pro" "iPhone 15"; do
-  echo "Trying to boot \"$NAME\"..."
-  if OUT=$(xcrun simctl boot "$NAME" 2>&1); then
-    UDID=$(xcrun simctl list devices booted -j | node -e "
-      const data = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-      for (const devs of Object.values(data.devices)) {
-        for (const d of devs) { console.log(d.udid); process.exit(0); }
-      }
-    ")
+  CANDIDATE=$(resolve_udid_for_name "$NAME")
+  if [ -z "$CANDIDATE" ]; then
+    echo "  skip: no available \"$NAME\""
+    continue
+  fi
+  echo "Trying to boot \"$NAME\" ($CANDIDATE)..."
+  if OUT=$(xcrun simctl boot "$CANDIDATE" 2>&1); then
+    UDID="$CANDIDATE"
     echo "Booted \"$NAME\" -> $UDID"
+    break
+  fi
+  if printf '%s\n' "$OUT" | grep -qiE 'current state: (Booted|Booting)'; then
+    UDID="$CANDIDATE"
+    echo "Already booted \"$NAME\" -> $UDID"
     break
   fi
   echo "  skip: $OUT"

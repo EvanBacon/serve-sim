@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "packages/serve-sim/**"
+      - ".bun-version"
       - ".github/workflows/serve-sim-unit.yml"
   pull_request:
     paths:
       - "packages/serve-sim/**"
+      - ".bun-version"
       - ".github/workflows/serve-sim-unit.yml"
 
 concurrency:
@@ -17,10 +19,14 @@ concurrency:
 
 jobs:
   unit:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
