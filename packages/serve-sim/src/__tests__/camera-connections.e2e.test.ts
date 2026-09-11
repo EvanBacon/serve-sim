@@ -3,6 +3,7 @@ import { execFileSync, execSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { clangArchArgs, parseServeSimArch } from "../serve-sim-arch";
 
 const BUNDLE_ID = "dev.servesim.camera-connection-test";
 const RESULT_FILE = "simcam-connection-result.json";
@@ -42,7 +43,7 @@ describeIfSimulator("synthetic camera connection graph", () => {
     }).trim();
     execFileSync("xcrun", [
       "--sdk", "iphonesimulator", "clang",
-      "-arch", "arm64", "-arch", "x86_64",
+      ...clangArchArgs(parseServeSimArch()),
       "-mios-simulator-version-min=15.0",
       "-isysroot", sdk,
       "-fobjc-arc", "-fmodules",
@@ -87,7 +88,7 @@ describeIfSimulator("synthetic camera connection graph", () => {
       execFileSync("xcrun", ["simctl", "uninstall", udid!, BUNDLE_ID]);
     } catch {}
     if (buildDir) rmSync(buildDir, { recursive: true, force: true });
-  });
+  }, 30_000);
 
   test("preserves no-connections state until the explicit connection is added", async () => {
     execFileSync("xcrun", ["simctl", "launch", udid!, BUNDLE_ID], {
