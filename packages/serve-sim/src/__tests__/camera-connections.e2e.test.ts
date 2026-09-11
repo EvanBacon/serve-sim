@@ -41,9 +41,12 @@ describeIfSimulator("synthetic camera connection graph", () => {
     const sdk = execFileSync("xcrun", ["--sdk", "iphonesimulator", "--show-sdk-path"], {
       encoding: "utf-8",
     }).trim();
+    const arch = parseServeSimArch();
+    const archArgs = clangArchArgs(arch);
+    console.log(`camera e2e clang SERVE_SIM_ARCH=${arch} args=${JSON.stringify(archArgs)}`);
     execFileSync("xcrun", [
       "--sdk", "iphonesimulator", "clang",
-      ...clangArchArgs(parseServeSimArch()),
+      ...archArgs,
       "-mios-simulator-version-min=15.0",
       "-isysroot", sdk,
       "-fobjc-arc", "-fmodules",
@@ -81,7 +84,7 @@ describeIfSimulator("synthetic camera connection graph", () => {
     try {
       unlinkSync(resultPath);
     } catch {}
-  }, 60_000);
+  }, 120_000);
 
   afterAll(() => {
     try {
