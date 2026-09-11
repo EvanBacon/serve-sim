@@ -461,8 +461,27 @@ describeIf("SimCameraHelper shutdown race", () => {
               `stderr:\n${stderr.slice(0, 600)}`,
           );
         }
-        // One 30fps tick is 33ms; sit in the middle so PublishFrame is live.
-        await new Promise((r) => setTimeout(r, 20));
+        // The first PublishFrame is synchronous at source start; the 30fps
+        // timer does not fire until ~33ms later. Wait until frameSeq
+        // advances so shutdown races a live timer, not the idle gap.
+        const handle = await openExistingShm(shmName);
+        if (!handle) {
+          throw new Error(`cycle ${i + 1}: shm ${shmName} missing after bind`);
+        }
+        try {
+          const startSeq = readHeader(handle.buffer).frameSeq;
+          const advanced = await waitFor(
+            () => readHeader(handle.buffer).frameSeq > startSeq,
+            2000,
+          );
+          if (!advanced) {
+            throw new Error(
+              `cycle ${i + 1}: frameSeq did not advance (start=${startSeq})`,
+            );
+          }
+        } finally {
+          await closeShm(handle);
+        }
         try {
           await sendHelperCommand(socketPath, { action: "shutdown" });
         } catch {}

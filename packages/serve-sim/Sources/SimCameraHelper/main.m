@@ -609,12 +609,18 @@ static BOOL StartVideoSource(NSString *path, NSString **err) {
     return YES;
 }
 
-static void StopVideoSource(void) {
+// SwitchSource uses a 1s cap so a wedged decoder cannot stall a hot-swap.
+// Process shutdown must wait until RunVideoLoop can no longer PublishFrame,
+// otherwise ReleaseSurfaces UAF's an in-flight IOSurface.
+static void StopVideoSourceWaiting(dispatch_time_t deadline) {
     if (!gVideoStopped) return;
     atomic_store(&gVideoCancelled, true);
-    // Wait up to 1s for the decode loop to bail.
-    dispatch_semaphore_wait(gVideoStopped, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
+    dispatch_semaphore_wait(gVideoStopped, deadline);
     gVideoStopped = nil;
+}
+
+static void StopVideoSource(void) {
+    StopVideoSourceWaiting(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
 }
 
 #pragma mark Source switch entry point
@@ -949,12 +955,12 @@ int main(int argc, const char *argv[]) {
             dispatch_sync(gSourceQueue, ^{
                 StopPlaceholderSource();
                 StopWebcamSource();
-                StopVideoSource();
+                StopVideoSourceWaiting(DISPATCH_TIME_FOREVER);
             });
         } else {
             StopPlaceholderSource();
             StopWebcamSource();
-            StopVideoSource();
+            StopVideoSourceWaiting(DISPATCH_TIME_FOREVER);
         }
         ReleaseSurfaces();
         fprintf(stderr, "[serve-sim-camera] stopped\n");
