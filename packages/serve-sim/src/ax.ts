@@ -9,7 +9,7 @@ const POLL_INTERVAL_MS = 500;
 const MAX_POLL_INTERVAL_MS = 2000;
 const UNAVAILABLE_RETRY_INTERVAL_MS = 15_000;
 
-interface RawAxeNode {
+export interface RawAxeNode {
   AXUniqueId: string | null;
   AXLabel: string | null;
   AXValue: string | null;
@@ -38,7 +38,22 @@ function sameRect(a: AxRect, b: AxRect) {
   );
 }
 
-function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
+function isOversizedAnonymousGroup(node: RawAxeNode, screen: AxRect) {
+  const frame = node.frame;
+  const label = node.AXLabel?.trim() ?? "";
+  const value = node.AXValue?.trim() ?? "";
+  const role = node.role_description.trim().toLowerCase();
+
+  return (
+    role === "group" &&
+    !label &&
+    !value &&
+    frame.width >= screen.width * 1.25 &&
+    frame.height >= screen.height * 0.95
+  );
+}
+
+export function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   const screen = chooseScreenFrame(roots);
   const elements: AxElement[] = [];
 
@@ -47,8 +62,9 @@ function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
 
     const frame = node.frame;
     const isScreenSized = sameRect(frame, screen);
+    const isIgnoredOverlayGroup = isOversizedAnonymousGroup(node, screen);
 
-    if (!isScreenSized) {
+    if (!isScreenSized && !isIgnoredOverlayGroup) {
       elements.push({
         id: node.AXUniqueId ?? path,
         path,
