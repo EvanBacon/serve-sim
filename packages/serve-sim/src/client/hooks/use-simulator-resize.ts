@@ -419,6 +419,7 @@ export function useSimulatorResize({
     maxWidth,
     isResizing,
     isInertia,
+    reducedMotion,
     handleHovered,
     handleActive: handleHovered || isResizing || isInertia,
     setHandleHovered,

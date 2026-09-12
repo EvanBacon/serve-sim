@@ -74,6 +74,7 @@ import {
   persistChromeHiddenPreference,
   readChromeHiddenPreference,
   shouldUseDeviceChrome,
+  shouldWrapDeviceChrome,
 } from "./utils/chrome-visibility";
 import { proxyPreviewConfigForBrowser } from "./utils/preview-config";
 import { selectInitialRightPane } from "../preview-initial-state";
@@ -83,9 +84,8 @@ import {
   fetchSelectedStreamConfig,
 } from "./utils/selected-stream-config";
 import {
-  SIMULATOR_RESIZE_DRAG_TRANSITION,
-  SIMULATOR_RESIZE_LAYOUT_TRANSITION,
   SIMULATOR_RESIZE_PAGE_TRANSITION,
+  simulatorFrameLayoutTransition,
 } from "./utils/simulator-resize";
 import {
   flushWsMessageQueue,
@@ -582,6 +582,13 @@ function AppWithConfig({
     isLandscape,
     hideChrome,
   });
+  // Wrap whenever chrome *could* be shown. Toggling hideChrome only fades the
+  // bezel / expands the screen slot — remounting DeviceKitChrome would tear
+  // down SimulatorView and flash "Connecting…".
+  const wrapChrome = shouldWrapDeviceChrome({
+    hasChrome: !!chrome,
+    isLandscape,
+  });
   const chromeScale = useChrome ? chrome!.frame.width / chrome!.screen.width : 1;
   const containerDefaultWidth = frameMaxWidth * chromeScale;
   const containerAspectRatioValue = useChrome
@@ -949,10 +956,7 @@ function AppWithConfig({
         className="flex flex-col items-center gap-3 min-w-0"
         style={{
           width: simulatorResize.width,
-          transition:
-            simulatorResize.isResizing || simulatorResize.isInertia
-              ? SIMULATOR_RESIZE_DRAG_TRANSITION
-              : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
+          transition: simulatorFrameLayoutTransition(simulatorResize),
         }}
       >
         <SimulatorToolbar
@@ -996,10 +1000,7 @@ function AppWithConfig({
           style={{
             width: simulatorResize.width,
             aspectRatio: containerAspectRatio,
-            transition:
-              simulatorResize.isResizing || simulatorResize.isInertia
-                ? SIMULATOR_RESIZE_DRAG_TRANSITION
-                : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
+            transition: simulatorFrameLayoutTransition(simulatorResize),
             willChange:
               simulatorResize.isResizing || simulatorResize.isInertia ? "width" : undefined,
           }}
@@ -1053,16 +1054,18 @@ function AppWithConfig({
                 {axOverlayEnabled && <AxDomOverlay />}
               </>
             );
-            if (!useChrome) return screenContent;
+            if (!wrapChrome) return screenContent;
             // The screen slot is the bezel's true opening; the stream letterboxes
             // (contains) inside it, filling the constraining axis and leaving a
             // thin black margin on the other — the device's own black screen
             // border. Containing (not covering) keeps the stream from ever
-            // overflowing past the bezel.
+            // overflowing past the bezel. `framed` hides that chrome without
+            // swapping this wrapper (and the stream inside it).
             return (
               <DeviceKitChrome
                 chrome={chrome!}
-                interactive
+                framed={useChrome}
+                interactive={useChrome}
                 onButton={handleChromeButton}
                 onCrownWheel={(deltaY, deltaMode) => {
                   const delta = digitalCrownDeltaFromWheel(

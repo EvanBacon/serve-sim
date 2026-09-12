@@ -76,3 +76,17 @@ export function shouldUseDeviceChrome({
 }): boolean {
   return hasChrome && !isLandscape && !hideChrome;
 }
+
+/** Keep the DeviceKit wrapper mounted whenever chrome *could* be shown.
+ *  Hiding the bezel must not remount the live stream (that flashes
+ *  "Connecting…" while the MJPEG/AVCC node reconnects). Landscape and
+ *  devices without chrome data stay unwrapped. */
+export function shouldWrapDeviceChrome({
+  hasChrome,
+  isLandscape,
+}: {
+  hasChrome: boolean;
+  isLandscape: boolean;
+}): boolean {
+  return hasChrome && !isLandscape;
+}

@@ -12,7 +12,12 @@ import type {
   DeviceKitChromeDescriptor,
   GridRect,
 } from "../utils/grid";
+import { usePrefersReducedMotion } from "../hooks/use-prefers-reduced-motion";
 import { simEndpoint } from "../utils/sim-endpoint";
+
+// Match the simulator container's hide/show ease so the bezel fade and the
+// screen-slot expand stay in lockstep with the width / aspect-ratio tween.
+const CHROME_TOGGLE_EASE = "0.24s cubic-bezier(0.22, 1, 0.36, 1)";
 
 // Shared DeviceKit chrome renderer. Lays everything out in the chrome's own
 // frame coordinate space (every piece positioned as a percentage of
@@ -31,6 +36,7 @@ export function DeviceKitChrome({
   chrome,
   screen,
   interactive = false,
+  framed = true,
   onButton,
   onCrownWheel,
 }: {
@@ -38,57 +44,103 @@ export function DeviceKitChrome({
   /** Rendered inside the screen cutout (the live stream, or a black fill). */
   screen?: ReactNode;
   interactive?: boolean;
+  /** When false, fade the bezel/buttons and expand the screen slot to fill
+   *  the container. The `screen` child stays mounted so a live stream does
+   *  not remount / reconnect. */
+  framed?: boolean;
   onButton?: (press: ChromeButtonPress) => void;
   /** Wheel over the Digital Crown — forwards rotation to scroll the watch. */
   onCrownWheel?: (deltaY: number, deltaMode: number) => void;
 }) {
+  const reducedMotion = usePrefersReducedMotion();
+  const chromeMotion = reducedMotion ? "none" : `opacity ${CHROME_TOGGLE_EASE}`;
+  const slotMotion = reducedMotion
+    ? "none"
+    : `left ${CHROME_TOGGLE_EASE}, top ${CHROME_TOGGLE_EASE}, width ${CHROME_TOGGLE_EASE}, height ${CHROME_TOGGLE_EASE}, border-radius ${CHROME_TOGGLE_EASE}`;
+  const buttonsLive = interactive && framed;
+
   // Apple's composite pictures only the bezel — the hardware buttons are
   // separate sprites that poke out past the metal edge (the part overshooting
   // the bezel is what's visible). So every button is always drawn; `onTop` ones
   // (watch crown / side / action) sit above the bezel, the rest behind it.
+  // Keep that layer mounted when unframed so showing the bezel again does not
+  // refetch chrome images, and so the screen child never changes parent.
   return (
-    <div className="absolute inset-0">
-      {chrome.buttons.map((button) => (
-        <ChromeButton
-          key={`button-${button.name}`}
-          chrome={chrome}
-          button={button}
-          interactive={interactive}
-          onButton={onButton}
-          onWheel={
-            interactive && button.name === "digital-crown" ? onCrownWheel : undefined
-          }
-        />
-      ))}
+    <div className="absolute inset-0" data-devicekit-chrome="" data-framed={framed ? "on" : "off"}>
+      <div
+        aria-hidden={framed ? undefined : true}
+        style={{
+          opacity: framed ? 1 : 0,
+          pointerEvents: framed ? undefined : "none",
+          transition: chromeMotion,
+        }}
+      >
+        {chrome.buttons.map((button) => (
+          <ChromeButton
+            key={`button-${button.name}`}
+            chrome={chrome}
+            button={button}
+            interactive={buttonsLive}
+            onButton={onButton}
+            onWheel={
+              buttonsLive && button.name === "digital-crown" ? onCrownWheel : undefined
+            }
+          />
+        ))}
 
-      {/* Bezel BEHIND (z1) — the full device incl. its opaque black screen
-          border, which frames the stream the way a real display's black border
-          does (the metal edge → black border → active screen). */}
-      {chrome.compositeImage ? (
-        <ChromeImage
-          chrome={chrome}
-          image={chrome.compositeImage}
-          rect={chrome.body}
-          zIndex={1}
-        />
-      ) : chrome.slice && chrome.corner ? (
-        <NineSliceChrome chrome={chrome} />
-      ) : null}
+        {/* Bezel BEHIND (z1) — the full device incl. its opaque black screen
+            border, which frames the stream the way a real display's black border
+            does (the metal edge → black border → active screen). */}
+        {chrome.compositeImage ? (
+          <ChromeImage
+            chrome={chrome}
+            image={chrome.compositeImage}
+            rect={chrome.body}
+            zIndex={1}
+          />
+        ) : chrome.slice && chrome.corner ? (
+          <NineSliceChrome chrome={chrome} />
+        ) : null}
+      </div>
 
       {/* Stream ON TOP of the bezel (z2), clipped to the active screen rect with
           the inner-corner radius, so it sits exactly in the screen opening with
-          the bezel framing it (matches Apple Simulator). */}
+          the bezel framing it (matches Apple Simulator). When unframed the slot
+          fills the container — same node, no remount. */}
       <div
-        className="absolute overflow-hidden bg-black"
+        className="absolute overflow-hidden"
         style={{
-          ...rectStyle(chrome, chrome.screen, 2),
-          borderRadius: deviceKitScreenRadius(chrome),
+          ...deviceKitScreenSlotStyle(chrome, framed),
+          background: framed ? "#000" : undefined,
+          transition: slotMotion,
         }}
       >
         {screen}
       </div>
     </div>
   );
+}
+
+/** Screen-slot geometry. Framed: DeviceKit screen cutout. Unframed: fill the
+ *  wrapper so hide/show only moves this box — never swaps the stream node. */
+export function deviceKitScreenSlotStyle(
+  chrome: DeviceKitChromeDescriptor,
+  framed: boolean,
+): CSSProperties {
+  if (!framed) {
+    return {
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      zIndex: 2,
+      borderRadius: 0,
+    };
+  }
+  return {
+    ...rectStyle(chrome, chrome.screen, 2),
+    borderRadius: deviceKitScreenRadius(chrome),
+  };
 }
 
 /** CSS border-radius for the screen cutout, matched to its measured corner radius. */
