@@ -5,6 +5,24 @@ export const SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME = 136;
 export const SIMULATOR_RESIZE_DRAG_TRANSITION = "width 70ms linear";
 export const SIMULATOR_RESIZE_LAYOUT_TRANSITION =
   "width 0.24s cubic-bezier(0.22, 1, 0.36, 1), aspect-ratio 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
+
+/** CSS `transition` for the preview frame. Drag/inertia stay snappy; hide/show
+ *  chrome eases width + aspect-ratio. Reduced motion snaps with no tween. */
+export function simulatorFrameLayoutTransition({
+  isResizing,
+  isInertia,
+  reducedMotion,
+}: {
+  isResizing: boolean;
+  isInertia: boolean;
+  reducedMotion: boolean;
+}): string {
+  if (reducedMotion) return "none";
+  return isResizing || isInertia
+    ? SIMULATOR_RESIZE_DRAG_TRANSITION
+    : SIMULATOR_RESIZE_LAYOUT_TRANSITION;
+}
+
 export const SIMULATOR_RESIZE_PAGE_TRANSITION = "padding-right 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
 
 // ─── Visual constants for the curved-arc corner handle ────────────────────

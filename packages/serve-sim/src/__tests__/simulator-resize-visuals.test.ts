@@ -4,9 +4,12 @@ import {
   RESIZE_MAIN_STROKE_W,
   restoredSimulatorFrameWidth,
   SIMULATOR_RESIZE_ABSOLUTE_MIN_WIDTH,
+  SIMULATOR_RESIZE_DRAG_TRANSITION,
   SIMULATOR_RESIZE_HANDLE_DUR_HOT,
   SIMULATOR_RESIZE_HANDLE_DUR_IDLE,
+  SIMULATOR_RESIZE_LAYOUT_TRANSITION,
   SIMULATOR_RESIZE_MIN_WIDTH,
+  simulatorFrameLayoutTransition,
 } from "../client/utils/simulator-resize";
 
 describe("simulator resize visual tuning", () => {
@@ -32,5 +35,46 @@ describe("simulator resize visual tuning", () => {
 
   test("falls back to the default frame width for invalid persisted scale", () => {
     expect(restoredSimulatorFrameWidth(320, 1280, 900, 1179 / 2556, Number.NaN)).toBe(320);
+  });
+
+  test("skips the width/aspect-ratio tween when reduced motion is preferred", () => {
+    expect(
+      simulatorFrameLayoutTransition({
+        isResizing: false,
+        isInertia: false,
+        reducedMotion: true,
+      }),
+    ).toBe("none");
+    expect(
+      simulatorFrameLayoutTransition({
+        isResizing: true,
+        isInertia: false,
+        reducedMotion: true,
+      }),
+    ).toBe("none");
+  });
+
+  test("uses the drag tween while resizing and the layout tween otherwise", () => {
+    expect(
+      simulatorFrameLayoutTransition({
+        isResizing: true,
+        isInertia: false,
+        reducedMotion: false,
+      }),
+    ).toBe(SIMULATOR_RESIZE_DRAG_TRANSITION);
+    expect(
+      simulatorFrameLayoutTransition({
+        isResizing: false,
+        isInertia: true,
+        reducedMotion: false,
+      }),
+    ).toBe(SIMULATOR_RESIZE_DRAG_TRANSITION);
+    expect(
+      simulatorFrameLayoutTransition({
+        isResizing: false,
+        isInertia: false,
+        reducedMotion: false,
+      }),
+    ).toBe(SIMULATOR_RESIZE_LAYOUT_TRANSITION);
   });
 });
