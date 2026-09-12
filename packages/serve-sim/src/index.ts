@@ -5,11 +5,23 @@ import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unl
 import { createHash } from "crypto";
 import { networkInterfaces } from "os";
 import { join, resolve } from "path";
-import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, type ServeSimDeviceState } from "./state";
+import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, resolveDevice } from "./device";
+import {
+  classifyStaleState,
+  collectKillPids,
+  dropStateFileIfDead,
+  formatListPayload,
+  isProcessAlive,
+  parseDeviceState,
+  persistRecoveredState,
+  resolveLiveHelperState,
+  startSimulatorShutdownWatch,
+  stopProcess,
+} from "./helper-lifecycle";
 import { permissions } from "./permissions";
 import { setUiOption, uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
@@ -77,10 +89,8 @@ function readState(udid?: string): ServerState | null {
 }
 
 /**
- * Snapshot simctl's boot state once per `readStateFile` batch. A full
- * `simctl list devices -j` is ~50ms; doing it per-state multiplied the cost
- * by the number of running helpers. We cache for 1 second so a flurry of
- * readStateFile() calls (e.g. readAllStates loop) shares one lookup.
+ * Snapshot simctl's boot state for `--detach` reuse and the shutdown watch.
+ * Cached for 1 second so a flurry of lookups shares one `simctl` call.
  */
 let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
 function getBootedUdids(): Set<string> | null {
@@ -119,49 +129,49 @@ function readStateFile(file: string): ServerState | null {
       debugState("state file missing %s", file);
       return null;
     }
-    const state = JSON.parse(readFileSync(file, "utf-8")) as ServerState;
-    try {
-      process.kill(state.pid, 0);
-    } catch {
-      // Helper process is gone — drop the file.
-      debugState("helper pid %d dead, removing stale state %s", state.pid, file);
-      unlinkSync(file);
+    const recorded = parseDeviceState(readFileSync(file, "utf-8"));
+    if (!recorded) {
+      debugState("malformed state %s", file);
+      dropStateFileIfDead(file);
       return null;
     }
-    // The helper is alive, but the simulator it was bound to may have been
-    // shut down (Simulator.app quit, machine slept, `simctl shutdown`, etc.).
-    // When that happens the helper keeps accepting /stream.mjpeg connections
-    // but never emits frames, so clients hang on "Connecting...". Detect and
-    // recycle here so --detach / --list always return a working stream.
-    const booted = getBootedUdids();
-    if (booted && !booted.has(state.device)) {
-      if (state.pid === process.pid) {
-        // The state belongs to *this* process (an in-process/preview server
-        // recorded its own pid via inProcessServeSimState). Never SIGTERM
-        // ourselves — that would take the whole server down. Just drop the
-        // stale file; the live server reaps its own sessions on grid polls.
-        debugState("dropping own stale state for non-booted device %s", state.device);
-        try { unlinkSync(file); } catch {}
-        return null;
-      }
-      debugState(
-        "helper pid %d bound to non-booted device %s — killing stale helper",
-        state.pid,
-        state.device,
-      );
-      console.error(
-        `[serve-sim] Helper pid ${state.pid} is bound to device ${state.device} which is no longer booted — killing stale helper.`,
-      );
-      try { process.kill(state.pid, "SIGTERM"); } catch {}
-      try { unlinkSync(file); } catch {}
+    const live = resolveLiveHelperState(recorded);
+    if (!live) {
+      debugState("helper pid %d dead, removing stale state %s", recorded.pid, file);
+      dropStateFileIfDead(file);
       return null;
     }
-    debugState("state ok pid=%d device=%s port=%d", state.pid, state.device, state.port);
-    return state;
+    if (live.pid !== recorded.pid) persistRecoveredState(live);
+    debugState("state ok pid=%d device=%s port=%d", live.pid, live.device, live.port);
+    return live;
   } catch (err) {
     debugState("readStateFile threw for %s: %o", file, err);
     return null;
   }
+}
+
+/**
+ * Existing helper we can reuse for `--detach` / follow. A live process bound
+ * to a simulator that is no longer booted is recycled (stopped, then replaced)
+ * instead of being treated as a working stream.
+ */
+function readReusableState(udid: string): ServerState | null {
+  const state = readState(udid);
+  if (!state) return null;
+  const action = classifyStaleState(state, getBootedUdids(), process.pid);
+  if (action === "keep") return state;
+  debugState(
+    "recycling %s helper pid=%d for unbooted device %s",
+    action,
+    state.pid,
+    state.device,
+  );
+  if (action === "recycle-helper") {
+    for (const pid of collectKillPids(state)) stopProcess(pid);
+    killPortHolder(state.port);
+  }
+  clearState(udid);
+  return null;
 }
 
 function readAllStates(): ServerState[] {
@@ -174,8 +184,7 @@ function readAllStates(): ServerState[] {
 }
 
 function writeState(state: ServerState) {
-  ensureStateDir();
-  writeFileSync(stateFileForDevice(state.device), JSON.stringify(state, null, 2));
+  writeServeSimState(state);
   debugState("wrote state pid=%d device=%s port=%d", state.pid, state.device, state.port);
 }
 
@@ -254,29 +263,6 @@ function isDeviceBooted(udid: string): boolean {
     }
   } catch {}
   return false;
-}
-
-function isProcessAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-/** Kill a process and wait for it to actually exit. */
-function stopProcess(pid: number): void {
-  try { process.kill(pid, "SIGTERM"); } catch { return; }
-  const deadline = Date.now() + 500;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0);
-      sleepSync(25);
-    } catch {
-      return;
-    }
-  }
-  try { process.kill(pid, "SIGKILL"); } catch {}
-  const deadline2 = Date.now() + 500;
-  while (Date.now() < deadline2) {
-    try { process.kill(pid, 0); sleepSync(25); } catch { return; }
-  }
 }
 
 function bootDevice(udid: string): void {
@@ -385,7 +371,14 @@ async function startHelper(
 
   const logFile = join(STATE_DIR, `server-${udid}.log`);
   const logFd = openSync(logFile, "w");
-  const { command, args } = reExecArgs([udid, "--port", String(port), "--host", host]);
+  const { command, args } = reExecArgs([
+    udid,
+    "--port",
+    String(port),
+    "--host",
+    host,
+    "--exit-on-simulator-shutdown",
+  ]);
   const child = nodeSpawn(command, args, {
     detached: opts.detach,
     stdio: ["ignore", logFd, logFd],
@@ -431,8 +424,8 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
   let port = startPort;
 
   for (const udid of udids) {
-    // Return existing server if already running
-    const existing = readState(udid);
+    // Return existing server if already running (and still bound to a booted sim)
+    const existing = readReusableState(udid);
     if (existing) {
       if (!quiet) {
         const name = getDeviceName(udid) ?? udid;
@@ -549,7 +542,7 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
   let port = startPort;
 
   for (const udid of udids) {
-    const existing = readState(udid);
+    const existing = readReusableState(udid);
     if (existing) {
       states.push(existing);
       continue;
@@ -582,45 +575,20 @@ function printStatesJSON(states: ServerState[]) {
   }
 }
 
-/** List running streams (--list). */
+/** List running streams (--list). Alive helpers stay visible even if the sim is down. */
 function listStreams(deviceArg?: string) {
-  if (deviceArg) {
-    const udid = resolveDevice(deviceArg);
-    const state = readState(udid);
-    if (!state) {
-      console.log(JSON.stringify({ running: false, device: udid }));
-    } else {
-      console.log(JSON.stringify({
-        running: true,
-        url: state.url, streamUrl: state.streamUrl, wsUrl: state.wsUrl,
-        port: state.port, device: state.device, pid: state.pid,
-      }));
-    }
-    return;
-  }
-
-  const states = readAllStates();
-  if (states.length === 0) {
-    console.log(JSON.stringify({ running: false }));
-  } else if (states.length === 1) {
-    const s = states[0]!;
-    console.log(JSON.stringify({
-      running: true,
-      url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl,
-      port: s.port, device: s.device, pid: s.pid,
-    }));
-  } else {
-    console.log(JSON.stringify({
-      running: true,
-      streams: states.map((s) => ({
-        url: s.url, streamUrl: s.streamUrl, wsUrl: s.wsUrl,
-        port: s.port, device: s.device, pid: s.pid,
-      })),
-    }));
-  }
+  const udid = deviceArg ? resolveDevice(deviceArg) : undefined;
+  const states = udid ? [readState(udid)].filter((s): s is ServerState => s != null) : readAllStates();
+  console.log(JSON.stringify(formatListPayload(states, udid)));
 }
 
-/** Kill running streams (--kill). */
+function killHelperState(state: ServerState): void {
+  for (const pid of collectKillPids(state)) stopProcess(pid);
+  killPortHolder(state.port);
+  clearState(state.device);
+}
+
+/** Kill running streams (--kill). Uses the pidfile plus the recorded listen port. */
 function killStreams(deviceArg?: string) {
   if (deviceArg) {
     const udid = resolveDevice(deviceArg);
@@ -629,23 +597,21 @@ function killStreams(deviceArg?: string) {
       console.log(JSON.stringify({ disconnected: true, device: udid }));
       return;
     }
-    try { process.kill(state.pid, "SIGTERM"); } catch {}
-    clearState(udid);
+    killHelperState(state);
     console.log(JSON.stringify({ disconnected: true, device: state.device }));
-  } else {
-    const states = readAllStates();
-    if (states.length === 0) {
-      console.log(JSON.stringify({ disconnected: true, devices: [] }));
-      return;
-    }
-    const devices: string[] = [];
-    for (const state of states) {
-      try { process.kill(state.pid, "SIGTERM"); } catch {}
-      devices.push(state.device);
-    }
-    clearState();
-    console.log(JSON.stringify({ disconnected: true, devices }));
+    return;
   }
+  const states = readAllStates();
+  if (states.length === 0) {
+    console.log(JSON.stringify({ disconnected: true, devices: [] }));
+    return;
+  }
+  const devices: string[] = [];
+  for (const state of states) {
+    killHelperState(state);
+    devices.push(state.device);
+  }
+  console.log(JSON.stringify({ disconnected: true, devices }));
 }
 
 async function eventLog(
@@ -1602,6 +1568,7 @@ async function serve(
   codec: string | undefined,
   initialState: PreviewInitialState | undefined,
   theme: SimulatorTheme | undefined,
+  exitOnSimulatorShutdown = false,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -1684,6 +1651,26 @@ async function serve(
   // Exit cleanly on Ctrl+C
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
+
+  // Detached / --no-preview helpers should not sit forever as PPID-1 orphans
+  // after `simctl shutdown`. The interactive preview omits this flag so the
+  // grid can boot another device without tearing down the HTTP server.
+  if (exitOnSimulatorShutdown) {
+    startSimulatorShutdownWatch(targetDevices, {
+      checkBooted: async () => {
+        bootedSnapshot = { at: 0, booted: null };
+        return getBootedUdids();
+      },
+      onExit: () => {
+        const label = targetDevices.join(", ");
+        console.error(
+          `[serve-sim] Target simulator ${label} is no longer booted — exiting.`,
+        );
+        process.exit(0);
+      },
+    });
+  }
+
   await new Promise(() => {});
 }
 
@@ -1711,6 +1698,10 @@ program
     "127.0.0.1",
   )
   .option("--detach", "Spawn helper and exit (daemon mode)")
+  .option(
+    "--exit-on-simulator-shutdown",
+    "Exit this process when its target simulator is no longer booted (used by --detach helpers)",
+  )
   .option("-q, --quiet", "Suppress human-readable output, JSON only")
   .option("--no-preview", "Skip the web preview server; stream in foreground only")
   .option(
@@ -1795,6 +1786,7 @@ Examples:
         opts.codec,
         initialState,
         opts.theme,
+        !!opts.exitOnSimulatorShutdown,
       );
     }
   });

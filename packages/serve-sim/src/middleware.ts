@@ -22,6 +22,7 @@ import {
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
+import { classifyStaleState, persistRecoveredState, resolveLiveHelperState } from "./helper-lifecycle";
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
@@ -169,30 +170,6 @@ function isSimulatorUdid(value: string): boolean {
   return /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(value);
 }
 
-/** What to do with a persisted device state when reaping during a grid poll. */
-type StaleStateAction = "keep" | "recycle-self" | "recycle-helper";
-
-/**
- * Decide how to reap a state record whose backing simulator may have been shut
- * down. A booted device (or a non-simulator/unknown `booted` set) is kept.
- *
- * The critical distinction is `recycle-self` vs `recycle-helper`: in in-process
- * mode `inProcessServeSimState` records the *server's own* pid, so SIGTERMing it
- * (as we do for a separate stale helper) would kill the whole server — and
- * index.ts converts SIGTERM into `process.exit`. When the dead device is ours,
- * we stop just that device's capture session instead of signalling the pid.
- */
-function classifyStaleState(
-  state: { pid: number; device: string },
-  booted: Set<string> | null,
-  selfPid: number,
-): StaleStateAction {
-  if (booted && isSimulatorUdid(state.device) && !booted.has(state.device)) {
-    return state.pid === selfPid ? "recycle-self" : "recycle-helper";
-  }
-  return "keep";
-}
-
 export function parseForegroundAppLogMessage(message: string): { bundleId: string; pid: number } | null {
   // e.g. "[app<com.apple.mobilesafari>:43117] Setting process visibility to: Foreground"
   const match = /\[app<([^>]+)>:(\d+)\] Setting process visibility to: Foreground/.exec(message);
@@ -323,14 +300,14 @@ export async function readServeSimStates(): Promise<ServeSimState[]> {
   for (const f of files) {
     const path = join(STATE_DIR, f);
     try {
-      const state: ServeSimState = JSON.parse(readFileSync(path, "utf-8"));
-      try {
-        process.kill(state.pid, 0);
-      } catch {
-        debugMw("helper pid=%d gone, removing %s", state.pid, path);
+      const recorded: ServeSimState = JSON.parse(readFileSync(path, "utf-8"));
+      const state = resolveLiveHelperState(recorded);
+      if (!state) {
+        debugMw("helper pid=%d gone, removing %s", recorded.pid, path);
         try { unlinkSync(path); } catch {}
         continue;
       }
+      if (state.pid !== recorded.pid) persistRecoveredState(state);
       // Helper alive but its simulator was shut down — the MJPEG stream
       // would accept connections yet never produce frames, leaving the
       // preview stuck on "Connecting...". Recycle the stale state so the
@@ -349,13 +326,15 @@ export async function readServeSimStates(): Promise<ServeSimState[]> {
           closeDeviceSession(state.device);
         } else {
           debugMw(
-            "recycling stale helper pid=%d (device %s no longer booted)",
+            "asking stale helper pid=%d to exit (device %s no longer booted)",
             state.pid,
             state.device,
           );
           try { process.kill(state.pid, "SIGTERM"); } catch {}
         }
-        try { unlinkSync(path); } catch {}
+        // Keep the pidfile while the process is alive so `--list` / `--kill`
+        // can still find a detached helper after simctl shutdown. The file
+        // is dropped the next time the pid is observed dead.
         continue;
       }
       states.push(state);
@@ -1528,9 +1507,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
 
-    // Shutdown a booted simulator. Any running helper for the device is reaped
-    // by readServeSimStates() on the next /grid/api poll (it kills helpers
-    // whose backing simulator is no longer in the booted set).
+    // Shutdown a booted simulator. The next /grid/api poll closes our own
+    // in-process session and asks a detached helper to exit; the helper
+    // pidfile stays until that process is actually gone so `--kill` can
+    // still find it.
     if (url === base + "/grid/api/shutdown" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk: Buffer | string) => {
