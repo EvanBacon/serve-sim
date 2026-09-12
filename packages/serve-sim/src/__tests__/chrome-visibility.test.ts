@@ -5,6 +5,7 @@ import {
   persistChromeHiddenPreference,
   readChromeHiddenPreference,
   shouldUseDeviceChrome,
+  shouldWrapDeviceChrome,
 } from "../client/utils/chrome-visibility";
 
 describe("parseChromeHiddenQuery", () => {
@@ -97,6 +98,18 @@ describe("shouldUseDeviceChrome", () => {
     expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: true, hideChrome: false })).toBe(false);
     expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: true, hideChrome: true })).toBe(false);
     expect(shouldUseDeviceChrome({ hasChrome: false, isLandscape: false, hideChrome: false })).toBe(false);
+  });
+});
+
+describe("shouldWrapDeviceChrome", () => {
+  test("keeps the chrome wrapper mounted when the user hides the bezel", () => {
+    expect(shouldWrapDeviceChrome({ hasChrome: true, isLandscape: false })).toBe(true);
+    expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: false, hideChrome: true })).toBe(false);
+  });
+
+  test("does not wrap landscape or missing-chrome paths", () => {
+    expect(shouldWrapDeviceChrome({ hasChrome: true, isLandscape: true })).toBe(false);
+    expect(shouldWrapDeviceChrome({ hasChrome: false, isLandscape: false })).toBe(false);
   });
 });
 

@@ -74,6 +74,7 @@ import {
   persistChromeHiddenPreference,
   readChromeHiddenPreference,
   shouldUseDeviceChrome,
+  shouldWrapDeviceChrome,
 } from "./utils/chrome-visibility";
 import { proxyPreviewConfigForBrowser } from "./utils/preview-config";
 import { selectInitialRightPane } from "../preview-initial-state";
@@ -582,6 +583,13 @@ function AppWithConfig({
     isLandscape,
     hideChrome,
   });
+  // Wrap whenever chrome *could* be shown. Toggling hideChrome only fades the
+  // bezel / expands the screen slot — remounting DeviceKitChrome would tear
+  // down SimulatorView and flash "Connecting…".
+  const wrapChrome = shouldWrapDeviceChrome({
+    hasChrome: !!chrome,
+    isLandscape,
+  });
   const chromeScale = useChrome ? chrome!.frame.width / chrome!.screen.width : 1;
   const containerDefaultWidth = frameMaxWidth * chromeScale;
   const containerAspectRatioValue = useChrome
@@ -1053,16 +1061,18 @@ function AppWithConfig({
                 {axOverlayEnabled && <AxDomOverlay />}
               </>
             );
-            if (!useChrome) return screenContent;
+            if (!wrapChrome) return screenContent;
             // The screen slot is the bezel's true opening; the stream letterboxes
             // (contains) inside it, filling the constraining axis and leaving a
             // thin black margin on the other — the device's own black screen
             // border. Containing (not covering) keeps the stream from ever
-            // overflowing past the bezel.
+            // overflowing past the bezel. `framed` hides that chrome without
+            // swapping this wrapper (and the stream inside it).
             return (
               <DeviceKitChrome
                 chrome={chrome!}
-                interactive
+                framed={useChrome}
+                interactive={useChrome}
                 onButton={handleChromeButton}
                 onCrownWheel={(deltaY, deltaMode) => {
                   const delta = digitalCrownDeltaFromWheel(
