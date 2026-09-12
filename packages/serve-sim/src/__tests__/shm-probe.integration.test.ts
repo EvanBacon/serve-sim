@@ -390,22 +390,26 @@ describeIf("SimCameraHelper shm probe", () => {
 
   test("shutdown unmaps shm so a fresh shm_open returns -1 (ENOENT)", async () => {
     if (!helper) return;
-    const exited = new Promise<number | null>((resolve) => {
-      helper!.once("exit", (code) => resolve(code ?? null));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      helper!.once("exit", (code, signal) => resolve({ code, signal }));
     });
     try {
       await sendHelperCommand(SOCKET_PATH, { action: "shutdown" });
     } catch {}
-    const exitCode = await Promise.race([
+    const exit = await Promise.race([
       exited,
       new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 3000)),
     ]);
-    expect(exitCode).not.toBe("timeout");
+    expect(exit).not.toBe("timeout");
     // A non-zero/signal exit means shutdown cleanup crashed — in that case the
     // shm name may legitimately still exist, so fail with the real cause.
-    if (exitCode !== 0) {
+    // #143: placeholder timer used to be ARC-released mid-PublishFrame.
+    if (exit === "timeout" || exit.code !== 0) {
+      const detail = exit === "timeout"
+        ? "timeout"
+        : `${exit.code} signal=${exit.signal ?? "none"}`;
       throw new Error(
-        `helper exited with ${exitCode} (expected 0)\n` +
+        `helper exited with ${detail} (expected 0)\n` +
           `helper stderr (last 600 chars):\n${helperStderr.slice(-600)}`,
       );
     }
@@ -427,4 +431,82 @@ describeIf("SimCameraHelper shm probe", () => {
     }
     expect(fd).toBeLessThan(0);
   });
+});
+
+// Isolated from the long-lived helper above so a mid-suite shutdown cannot
+// starve the header/IOSurface tests. Repeats the #143 window: cancel the
+// 30fps placeholder timer while a frame is likely in-flight.
+describeIf("SimCameraHelper shutdown race", () => {
+  test("placeholder helper exits 0 across repeated in-flight shutdowns", async () => {
+    const cycles = 6;
+    for (let i = 0; i < cycles; i++) {
+      const tag = `${process.pid.toString(36)}${Date.now().toString(36)}${i}`.slice(-12);
+      const shmName = `/sscam-sd-${tag}`;
+      const socketPath = `/tmp/sscam-sd-${tag}.sock`;
+      let stderr = "";
+      const child = spawn(
+        HELPER_PATH,
+        ["--shm", shmName, "--socket", socketPath, "--source", "placeholder"],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+        child.once("exit", (code, signal) => resolve({ code, signal }));
+      });
+      try {
+        const ready = await waitFor(() => existsSync(socketPath), 5000);
+        if (!ready) {
+          throw new Error(
+            `cycle ${i + 1}: helper never bound ${socketPath}\n` +
+              `stderr:\n${stderr.slice(0, 600)}`,
+          );
+        }
+        // The first PublishFrame is synchronous at source start; the 30fps
+        // timer does not fire until ~33ms later. Wait until frameSeq
+        // advances so shutdown races a live timer, not the idle gap.
+        const handle = await openExistingShm(shmName);
+        if (!handle) {
+          throw new Error(`cycle ${i + 1}: shm ${shmName} missing after bind`);
+        }
+        try {
+          const startSeq = readHeader(handle.buffer).frameSeq;
+          const advanced = await waitFor(
+            () => readHeader(handle.buffer).frameSeq > startSeq,
+            2000,
+          );
+          if (!advanced) {
+            throw new Error(
+              `cycle ${i + 1}: frameSeq did not advance (start=${startSeq})`,
+            );
+          }
+        } finally {
+          await closeShm(handle);
+        }
+        try {
+          await sendHelperCommand(socketPath, { action: "shutdown" });
+        } catch {}
+        const exit = await Promise.race([
+          exited,
+          new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 3000)),
+        ]);
+        if (exit === "timeout" || exit.code !== 0) {
+          const detail = exit === "timeout"
+            ? "timeout"
+            : `${exit.code} signal=${exit.signal ?? "none"}`;
+          throw new Error(
+            `cycle ${i + 1}/${cycles}: helper exited with ${detail} (expected 0)\n` +
+              `stderr (last 600 chars):\n${stderr.slice(-600)}`,
+          );
+        }
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          try { child.kill("SIGKILL"); } catch {}
+        }
+        try {
+          const sys = await loadFfi();
+          sys.shm_unlink(Buffer.from(`${shmName}\0`));
+        } catch {}
+      }
+    }
+  }, 30_000);
 });

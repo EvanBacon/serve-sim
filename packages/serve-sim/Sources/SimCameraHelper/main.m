@@ -82,16 +82,16 @@ static void PublishFrame(const uint8_t *bgra) {
     BOOL found = NO;
     for (uint32_t tries = 0; tries < count; tries++) {
         idx = (idx + 1) % count;
-        if (idx == latest) continue;
+        if (idx == latest || !gSurfaces[idx]) continue;
         if (!IOSurfaceIsInUse(gSurfaces[idx])) {
             found = YES;
             break;
         }
     }
     if (!found) return;
-    gWriteIndex = idx;
-
     IOSurfaceRef surface = gSurfaces[idx];
+    if (!surface) return;
+    gWriteIndex = idx;
     IOSurfaceLock(surface, 0, NULL);
     uint8_t *dst = (uint8_t *)IOSurfaceGetBaseAddress(surface);
     size_t dstStride = IOSurfaceGetBytesPerRow(surface);
@@ -330,10 +330,19 @@ static void StartPlaceholderSource(void) {
 }
 
 static void StopPlaceholderSource(void) {
-    if (gPlaceholderTimer) {
-        dispatch_source_cancel(gPlaceholderTimer);
-        gPlaceholderTimer = NULL;
-    }
+    if (!gPlaceholderTimer) return;
+    // Keep a local retain so ARC does not release the source until any
+    // in-flight event handler (PublishFrame → IOSurface*) has returned.
+    // Cancel + nil without waiting was aborting the helper on shutdown
+    // (~1/4 locally; see #143).
+    dispatch_source_t timer = gPlaceholderTimer;
+    gPlaceholderTimer = NULL;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_source_set_cancel_handler(timer, ^{
+        dispatch_semaphore_signal(done);
+    });
+    dispatch_source_cancel(timer);
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 }
 
 #pragma mark Webcam source
@@ -600,12 +609,18 @@ static BOOL StartVideoSource(NSString *path, NSString **err) {
     return YES;
 }
 
-static void StopVideoSource(void) {
+// SwitchSource uses a 1s cap so a wedged decoder cannot stall a hot-swap.
+// Process shutdown must wait until RunVideoLoop can no longer PublishFrame,
+// otherwise ReleaseSurfaces UAF's an in-flight IOSurface.
+static void StopVideoSourceWaiting(dispatch_time_t deadline) {
     if (!gVideoStopped) return;
     atomic_store(&gVideoCancelled, true);
-    // Wait up to 1s for the decode loop to bail.
-    dispatch_semaphore_wait(gVideoStopped, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
+    dispatch_semaphore_wait(gVideoStopped, deadline);
     gVideoStopped = nil;
+}
+
+static void StopVideoSource(void) {
+    StopVideoSourceWaiting(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
 }
 
 #pragma mark Source switch entry point
@@ -934,9 +949,19 @@ int main(int argc, const char *argv[]) {
         // Unlink the shm name before stopping capture sources: if a source
         // teardown crashes, the name must not stay resolvable forever.
         if (gShmName) shm_unlink(gShmName);
-        StopPlaceholderSource();
-        StopWebcamSource();
-        StopVideoSource();
+        // Stop sources on the same serial queue SwitchSource uses so a
+        // mid-switch start cannot race ReleaseSurfaces.
+        if (gSourceQueue) {
+            dispatch_sync(gSourceQueue, ^{
+                StopPlaceholderSource();
+                StopWebcamSource();
+                StopVideoSourceWaiting(DISPATCH_TIME_FOREVER);
+            });
+        } else {
+            StopPlaceholderSource();
+            StopWebcamSource();
+            StopVideoSourceWaiting(DISPATCH_TIME_FOREVER);
+        }
         ReleaseSurfaces();
         fprintf(stderr, "[serve-sim-camera] stopped\n");
         return 0;
