@@ -23,6 +23,9 @@ export function ToolsPanel({
   onCodecPreferenceChange,
   activeCodec,
   avccSupported,
+  chromeAvailable = false,
+  hideChrome = false,
+  onHideChromeChange,
   width,
 }: {
   open: boolean;
@@ -37,6 +40,9 @@ export function ToolsPanel({
   onCodecPreferenceChange: (next: CodecPreference) => void;
   activeCodec: "h264" | "mjpeg";
   avccSupported: boolean;
+  chromeAvailable?: boolean;
+  hideChrome?: boolean;
+  onHideChromeChange?: (next: boolean) => void;
   width: number;
 }) {
   return (
@@ -63,6 +69,9 @@ export function ToolsPanel({
             onPreferenceChange={onCodecPreferenceChange}
             activeCodec={activeCodec}
             avccSupported={avccSupported}
+            chromeAvailable={chromeAvailable}
+            hideChrome={hideChrome}
+            onHideChromeChange={onHideChromeChange}
           />
         </div>
       )}

@@ -31,6 +31,7 @@ import { ReloadIcon } from "./icons";
 import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
+import { ChromeToolbarButton } from "./components/chrome-toolbar-button";
 import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
@@ -69,6 +70,11 @@ import {
   DEVTOOLS_PANEL_WIDTH,
   PANEL_WIDTH,
 } from "./utils/panel-widths";
+import {
+  persistChromeHiddenPreference,
+  readChromeHiddenPreference,
+  shouldUseDeviceChrome,
+} from "./utils/chrome-visibility";
 import { proxyPreviewConfigForBrowser } from "./utils/preview-config";
 import { selectInitialRightPane } from "../preview-initial-state";
 import { simEndpoint, streamConfigFrom } from "./utils/sim-endpoint";
@@ -505,6 +511,21 @@ function AppWithConfig({
   useEffect(() => {
     window.localStorage.setItem(CODEC_PREFERENCE_STORAGE_KEY, codecPreference);
   }, [codecPreference]);
+  // Viewer opt-out for DeviceKit chrome. Default stays framed; `?chrome=0`
+  // (and the toolbar / tools toggle) hide the bezel without restarting the helper.
+  const [hideChrome, setHideChrome] = useState(() =>
+    readChromeHiddenPreference({
+      search: window.location.search,
+      storage: window.localStorage,
+    }),
+  );
+  useEffect(() => {
+    persistChromeHiddenPreference(hideChrome, {
+      storage: window.localStorage,
+      location: window.location,
+      replaceState: (url) => window.history.replaceState(null, "", url),
+    });
+  }, [hideChrome]);
   // The server can pin the stream codec (`serve-sim --codec mjpeg`) for hosts
   // whose hardware can't encode H.264 — e.g. VMs lacking the high/low-latency
   // H.264 profiles. Treat that as a hard override the viewer can't switch off.
@@ -548,13 +569,19 @@ function AppWithConfig({
 
   // DeviceKit chrome wraps the live stream in the real device bezel (with
   // working hardware buttons). It's authored portrait, so in landscape we drop
-  // back to the bare rounded screen. When chromed, the on-screen container is
-  // the full frame (bezel + screen): `chromeScale` is how much bigger the frame
-  // is than the screen, so we scale the container up by it while keeping the
-  // *screen* at the same comfortable size — and resize / panel-collision math
-  // all operate on the frame dimensions.
+  // back to the bare rounded screen. Viewers can also hide it (toolbar, tools
+  // panel, or `?chrome=0`) — default stays framed so desktop previews match
+  // Simulator.app. When chromed, the on-screen container is the full frame
+  // (bezel + screen): `chromeScale` is how much bigger the frame is than the
+  // screen, so we scale the container up by it while keeping the *screen* at
+  // the same comfortable size — and resize / panel-collision math all operate
+  // on the frame dimensions.
   const isLandscape = isLandscapeConfig(activeStreamConfig);
-  const useChrome = !!chrome && !isLandscape;
+  const useChrome = shouldUseDeviceChrome({
+    hasChrome: !!chrome,
+    isLandscape,
+    hideChrome,
+  });
   const chromeScale = useChrome ? chrome!.frame.width / chrome!.screen.width : 1;
   const containerDefaultWidth = frameMaxWidth * chromeScale;
   const containerAspectRatioValue = useChrome
@@ -965,6 +992,7 @@ function AppWithConfig({
         <div
           ref={simContainerRef}
           className="relative max-h-full"
+          data-device-chrome={useChrome ? "on" : "off"}
           style={{
             width: simulatorResize.width,
             aspectRatio: containerAspectRatio,
@@ -1115,6 +1143,12 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <SimulatorToolbar.RotateButton title="Rotate device" />
+              {!!chrome && (
+                <ChromeToolbarButton
+                  hideChrome={hideChrome}
+                  onToggle={() => setHideChrome((hidden) => !hidden)}
+                />
+              )}
             </SimulatorToolbar.Actions>
           </SimulatorToolbar>
           <SimulatorToolbar
@@ -1189,6 +1223,9 @@ function AppWithConfig({
         onCodecPreferenceChange={setCodecPreference}
         activeCodec={useAvccVideo ? "h264" : "mjpeg"}
         avccSupported={avcc.supported}
+        chromeAvailable={!!chrome}
+        hideChrome={hideChrome}
+        onHideChromeChange={setHideChrome}
         width={toolsPanelWidth}
       />
       <ResizeHandle

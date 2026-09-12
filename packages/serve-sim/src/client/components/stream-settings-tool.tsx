@@ -1,6 +1,8 @@
 import { useState } from "react";
+import { Frame } from "lucide-react";
 import { CollapsibleSection } from "./collapsible-section";
 import { SettingRow, SettingSelect } from "./simulator-settings-tool";
+import { SettingSwitch } from "./setting-switch";
 
 // Client-side video preference. "auto" decodes H.264 (AVCC via WebCodecs) when
 // the browser supports it; "mjpeg" forces the software JPEG path. H.264 decode
@@ -26,17 +28,20 @@ const VideoIcon = (
 );
 
 /**
- * Tools-panel section letting the viewer pick the stream codec (H.264 vs MJPEG)
- * and explaining the trade-off. The control reflects the effective codec —
- * pinned to MJPEG when the browser can't decode H.264, and surfacing when an
- * "auto" preference was downgraded mid-stream — so it never misrepresents what
- * is actually painting.
+ * Tools-panel section for viewer-side stream display: codec (H.264 vs MJPEG)
+ * and optional DeviceKit chrome. The codec control reflects the effective
+ * codec — pinned to MJPEG when the browser can't decode H.264, and surfacing
+ * when an "auto" preference was downgraded mid-stream — so it never
+ * misrepresents what is actually painting.
  */
 export function StreamSettingsTool({
   preference,
   onPreferenceChange,
   activeCodec,
   avccSupported,
+  chromeAvailable = false,
+  hideChrome = false,
+  onHideChromeChange,
 }: {
   /** The user's saved codec preference. */
   preference: CodecPreference;
@@ -45,6 +50,11 @@ export function StreamSettingsTool({
   activeCodec: "h264" | "mjpeg";
   /** Whether this browser can decode H.264 (WebCodecs available). */
   avccSupported: boolean;
+  /** DeviceKit chrome exists for this device (portrait bezel can be shown). */
+  chromeAvailable?: boolean;
+  /** Viewer opted out of the device bezel. */
+  hideChrome?: boolean;
+  onHideChromeChange?: (next: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -82,6 +92,23 @@ export function StreamSettingsTool({
             onChange={(v) => onPreferenceChange(v as CodecPreference)}
           />
         </SettingRow>
+        {chromeAvailable && onHideChromeChange && (
+          <>
+            <SettingRow
+              icon={<Frame size={14} strokeWidth={2} />}
+              label="Device frame"
+            >
+              <SettingSwitch
+                label="Device frame"
+                checked={!hideChrome}
+                onChange={(show) => onHideChromeChange(!show)}
+              />
+            </SettingRow>
+            <p className="text-[11px] text-white/55 leading-snug px-0.5">
+              Turn off to hide the bezel when viewing the simulator on a phone, so nested frames don't shrink the screen.
+            </p>
+          </>
+        )}
         <p className="text-[11px] text-white/55 leading-snug px-0.5">
           {!avccSupported
             ? "This browser can't decode H.264, so the stream uses MJPEG."
