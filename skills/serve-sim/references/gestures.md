@@ -87,41 +87,50 @@ Two back-to-back `gesture` calls for `begin` and `end` will be interpreted as a 
 
 ### Drag (vertical scroll down)
 
-A drag is a sequence on a single WebSocket. With the CLI, the simplest correct approach is the streaming server's WebSocket. From an agent that only has the CLI, prefer breaking the drag into a single `gesture` call that contains the full sequence — or use `button swipe_home` for the specific case of swipe-to-home.
-
-For ad-hoc drags via the CLI, this minimal sequence works because it issues one socket call per phase but the simulator coalesces them when issued rapidly:
+A drag is a sequence on a single WebSocket. Pass the whole sequence as a JSON **array** in ONE `gesture` call — the CLI replays every step on the same socket, waiting `delayMs` (default 16ms, ~one 60fps frame) after each step:
 
 ```sh
-npx serve-sim gesture '{"type":"begin","x":0.5,"y":0.2}'
-npx serve-sim gesture '{"type":"move","x":0.5,"y":0.5}'
-npx serve-sim gesture '{"type":"move","x":0.5,"y":0.8}'
-npx serve-sim gesture '{"type":"end","x":0.5,"y":0.8}'
+# scroll DOWN one screen = drag the finger UP
+npx serve-sim gesture '[
+  {"type":"begin","x":0.5,"y":0.8},
+  {"type":"move","x":0.5,"y":0.65},
+  {"type":"move","x":0.5,"y":0.5},
+  {"type":"move","x":0.5,"y":0.35},
+  {"type":"move","x":0.5,"y":0.3,"delayMs":80},
+  {"type":"end","x":0.5,"y":0.3}
+]'
 ```
 
-The agent should accept that this may produce a long-press start on some hosts. For reliable drags, drive the WebSocket directly (see `references/endpoints.md`).
+The `delayMs: 80` settle before `end` makes the touch read as a positional drag; drop it (and use fewer moves) for a momentum flick. Do NOT split the sequence across multiple `gesture` calls — each call opens a fresh WebSocket, so the first call's lone `begin` registers as a long-press (in a webview it triggers text selection) and later calls never scroll.
 
 ### Pinch to zoom in
 
 ```sh
-npx serve-sim gesture '{"type":"begin","x1":0.4,"y1":0.5,"x2":0.6,"y2":0.5}'
-npx serve-sim gesture '{"type":"move","x1":0.25,"y1":0.5,"x2":0.75,"y2":0.5}'
-npx serve-sim gesture '{"type":"end","x1":0.25,"y1":0.5,"x2":0.75,"y2":0.5}'
+npx serve-sim gesture '[
+  {"type":"begin","x1":0.4,"y1":0.5,"x2":0.6,"y2":0.5},
+  {"type":"move","x1":0.25,"y1":0.5,"x2":0.75,"y2":0.5},
+  {"type":"end","x1":0.25,"y1":0.5,"x2":0.75,"y2":0.5}
+]'
 ```
 
 ### Pull down Notification Center (top edge)
 
 ```sh
-npx serve-sim gesture '{"type":"begin","x":0.5,"y":0.02,"edge":2}'
-npx serve-sim gesture '{"type":"move","x":0.5,"y":0.4,"edge":2}'
-npx serve-sim gesture '{"type":"end","x":0.5,"y":0.4,"edge":2}'
+npx serve-sim gesture '[
+  {"type":"begin","x":0.5,"y":0.02,"edge":2},
+  {"type":"move","x":0.5,"y":0.4,"edge":2},
+  {"type":"end","x":0.5,"y":0.4,"edge":2}
+]'
 ```
 
 ### Swipe back from left edge
 
 ```sh
-npx serve-sim gesture '{"type":"begin","x":0.01,"y":0.5,"edge":1}'
-npx serve-sim gesture '{"type":"move","x":0.5,"y":0.5,"edge":1}'
-npx serve-sim gesture '{"type":"end","x":0.5,"y":0.5,"edge":1}'
+npx serve-sim gesture '[
+  {"type":"begin","x":0.01,"y":0.5,"edge":1},
+  {"type":"move","x":0.5,"y":0.5,"edge":1},
+  {"type":"end","x":0.5,"y":0.5,"edge":1}
+]'
 ```
 
 ## Why `tap` is preferred
