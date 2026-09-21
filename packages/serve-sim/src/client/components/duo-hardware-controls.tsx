@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Camera, Lock, Volume1, Volume2 } from "lucide-react";
+import { SimulatorToolbar } from "../simulator";
 
 const keys = [
   { name: "Volume down", page: 12, usage: 234, Icon: Volume1 },
@@ -14,8 +15,7 @@ function HardwareKey({ value, onPress }: { value: Key; onPress: Press }) {
   const held = useRef(false);
   const release = useCallback(() => { if (held.current) { held.current = false; onPress(value, "up"); } }, [value, onPress]);
   useEffect(() => release, [release]);
-  return <button type="button" aria-label={value.name} title={`${value.name} (hold for long press)`}
-    className="rounded-lg p-2 text-white hover:bg-white/10 active:bg-white/20"
+  return <SimulatorToolbar.Button aria-label={value.name} title={`${value.name} (hold for long press)`}
     onPointerDown={(event) => {
       if (event.button !== 0) return;
       event.preventDefault();
@@ -24,12 +24,12 @@ function HardwareKey({ value, onPress }: { value: Key; onPress: Press }) {
       onPress(value, "down");
     }} onPointerUp={release} onPointerCancel={release} onLostPointerCapture={release}
     onClick={(event) => { if (event.detail === 0) onPress(value, "press"); }}>
-    <value.Icon size={18} aria-hidden="true" />
-  </button>;
+    <value.Icon size={18} strokeWidth={2} aria-hidden="true" />
+  </SimulatorToolbar.Button>;
 }
 
 export function DuoHardwareControls({ onPress }: { onPress: Press }) {
-  return <div role="group" aria-label="Duo hardware buttons" className="flex justify-center gap-1">
+  return <div role="group" aria-label="Duo hardware buttons" className="flex items-center">
     {keys.map((key) => <HardwareKey key={key.name} value={key} onPress={onPress} />)}
   </div>;
 }

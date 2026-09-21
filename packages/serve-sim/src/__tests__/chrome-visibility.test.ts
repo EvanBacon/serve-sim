@@ -99,6 +99,15 @@ describe("shouldUseDeviceChrome", () => {
     expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: true, hideChrome: true })).toBe(false);
     expect(shouldUseDeviceChrome({ hasChrome: false, isLandscape: false, hideChrome: false })).toBe(false);
   });
+
+  test("leaves foldables unframed so a phone bezel is not wrapped around Duo panels", () => {
+    expect(
+      shouldUseDeviceChrome({ hasChrome: true, isLandscape: false, hideChrome: false, multiDisplay: true }),
+    ).toBe(false);
+    expect(
+      shouldUseDeviceChrome({ hasChrome: true, isLandscape: false, hideChrome: true, multiDisplay: true }),
+    ).toBe(false);
+  });
 });
 
 describe("shouldWrapDeviceChrome", () => {
@@ -107,9 +116,10 @@ describe("shouldWrapDeviceChrome", () => {
     expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: false, hideChrome: true })).toBe(false);
   });
 
-  test("does not wrap landscape or missing-chrome paths", () => {
+  test("does not wrap landscape, foldable, or missing-chrome paths", () => {
     expect(shouldWrapDeviceChrome({ hasChrome: true, isLandscape: true })).toBe(false);
     expect(shouldWrapDeviceChrome({ hasChrome: false, isLandscape: false })).toBe(false);
+    expect(shouldWrapDeviceChrome({ hasChrome: true, isLandscape: false, multiDisplay: true })).toBe(false);
   });
 });
 

@@ -66,6 +66,7 @@ import { useGridDevices } from "./hooks/use-grid-devices";
 import type { DeviceDisplayDescriptor, DeviceKitChromeDescriptor } from "./utils/grid";
 import { matchDeviceDisplay } from "../device-displays";
 import { poseForDisplayRole } from "../device-pose";
+import { duoPreviewIsThreeD, type DuoPreviewMode } from "./utils/duo-preview";
 import {
   avccFallbackReducer,
   initialAvccFallback,
@@ -538,10 +539,13 @@ function AppWithConfig({
       replaceState: (url) => window.history.replaceState(null, "", url),
     });
   }, [hideChrome]);
+  // Null keeps the product default: foldables open on the 3D model. "2d" is the
+  // flat-stream opt-out; switching devices clears it back to the default.
+  const [duoView, setDuoView] = useState<DuoPreviewMode | null>(null);
+  const duo3D = duoPreviewIsThreeD(displays?.length ?? 0, duoView);
   // The server can pin the stream codec (`serve-sim --codec mjpeg`) for hosts
   // whose hardware can't encode H.264 — e.g. VMs lacking the high/low-latency
   // H.264 profiles. Treat that as a hard override the viewer can't switch off.
-  const [duo3D, setDuo3D] = useState(false);
   const serverForcesMjpeg = config.codec === "mjpeg";
   const useAvccVideo =
     !serverForcesMjpeg && avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
@@ -591,16 +595,19 @@ function AppWithConfig({
   // working hardware buttons). It's authored portrait, so in landscape we drop
   // back to the bare rounded screen. Viewers can also hide it (toolbar, tools
   // panel, or `?chrome=0`) — default stays framed so desktop previews match
-  // Simulator.app. When chromed, the on-screen container is the full frame
-  // (bezel + screen): `chromeScale` is how much bigger the frame is than the
-  // screen, so we scale the container up by it while keeping the *screen* at
-  // the same comfortable size — and resize / panel-collision math all operate
-  // on the frame dimensions.
+  // Simulator.app. Foldables skip it: phone14/phone15 openings don't match
+  // Duo cover (1398×2034) or inner (2007×2853), and the 3D model is the frame.
+  // When chromed, the on-screen container is the full frame (bezel + screen):
+  // `chromeScale` is how much bigger the frame is than the screen, so we scale
+  // the container up by it while keeping the *screen* at the same comfortable
+  // size — and resize / panel-collision math all operate on the frame dimensions.
   const isLandscape = isLandscapeConfig(activeStreamConfig);
+  const multiDisplay = (displays?.length ?? 0) > 1;
   const useChrome = shouldUseDeviceChrome({
     hasChrome: !!activeChrome,
     isLandscape,
     hideChrome,
+    multiDisplay,
   });
   // Wrap whenever chrome *could* be shown. Toggling hideChrome only fades the
   // bezel / expands the screen slot — remounting DeviceKitChrome would tear
@@ -608,6 +615,7 @@ function AppWithConfig({
   const wrapChrome = shouldWrapDeviceChrome({
     hasChrome: !!activeChrome,
     isLandscape,
+    multiDisplay,
   });
   const chromeScale = useChrome ? activeChrome!.frame.width / activeChrome!.screen.width : 1;
   const containerDefaultWidth = duo3D ? 500 : frameMaxWidth * chromeScale;
@@ -788,7 +796,7 @@ function AppWithConfig({
   useEffect(() => {
     setLiveStreamConfig(null);
     setWsStreamConfig(null);
-    setDuo3D(false);
+    setDuoView(null);
     setDuoProjection(null);
     setFoldGestureEnabled(false);
     setPendingHinge(null);
@@ -981,7 +989,7 @@ function AppWithConfig({
   const simulatorResize = useSimulatorResize({
     defaultWidth: containerDefaultWidth,
     viewportWidth,
-    viewportHeight: viewportHeight - ((displays?.length ?? 0) > 1 ? 150 : 0),
+    viewportHeight,
     aspectRatio: containerAspectRatioValue,
     initialFit: initialState?.fit === true,
     onStart: () => setSimFocused(false),
@@ -1082,7 +1090,7 @@ function AppWithConfig({
           {(() => {
             if (duo3D) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
               projection={duoProjection} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
-              onError={() => { setDuo3D(false); toast.error("3D rendering is unavailable. Check the selected Xcode and server log."); }} />;
+              onError={() => { setDuoView("2d"); toast.error("3D rendering is unavailable. Check the selected Xcode and server log."); }} />;
             const streamView = (
               <SimulatorView
                 url={config.url}
@@ -1186,7 +1194,7 @@ function AppWithConfig({
             visible={simulatorResize.isResizing || simulatorResize.isInertia}
           />
         </div>
-        <div className="inline-flex items-center justify-center gap-2 max-w-full">
+        <div className={`inline-flex items-center justify-center gap-2 ${multiDisplay ? "" : "max-w-full"}`}>
           <SimulatorToolbar
             exec={execOnHost}
             onRotate={rotateDevice}
@@ -1198,12 +1206,13 @@ function AppWithConfig({
             aria-label="Simulator actions"
             style={{
               alignSelf: "center",
-              width: "auto",
               minWidth: 0,
-              maxWidth: "100%",
               justifyContent: "center",
               padding: "6px 8px",
               borderRadius: 18,
+              ...(multiDisplay
+                ? { flexWrap: "nowrap", width: "max-content", maxWidth: "none" }
+                : { width: "auto", maxWidth: "100%" }),
             }}
           >
             <SimulatorToolbar.Actions>
@@ -1222,50 +1231,84 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <SimulatorToolbar.RotateButton title="Rotate device" />
-              {!!displays && displays.length > 1 && <SimulatorToolbar.Button aria-label="3D device model"
-                aria-pressed={duo3D} onClick={() => setDuo3D((value) => !value)}>3D</SimulatorToolbar.Button>}
-              {!!displays && displays.length > 1 && (
+              {multiDisplay && (
+                <SimulatorToolbar.Button
+                  aria-label="3D device model"
+                  aria-pressed={duo3D}
+                  title={duo3D ? "Show flat stream" : "Show 3D device"}
+                  onClick={() => setDuoView(duo3D ? "2d" : "3d")}
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    letterSpacing: 0.2,
+                    ...(duo3D
+                      ? { color: "rgba(255,255,255,0.95)", background: "rgba(255,255,255,0.12)" }
+                      : {}),
+                  }}
+                >
+                  3D
+                </SimulatorToolbar.Button>
+              )}
+              {multiDisplay && !duo3D && (
                 <DeviceDisplayToolbarButton
-                  displays={displays}
+                  displays={displays ?? []}
                   selectedId={matchedDisplay?.id ?? null}
                   onSelect={selectDeviceDisplay}
                 />
               )}
-              {!!activeChrome && (
+              {!multiDisplay && !!activeChrome && (
                 <ChromeToolbarButton
                   hideChrome={hideChrome}
                   onToggle={() => setHideChrome((hidden) => !hidden)}
                 />
               )}
+              {multiDisplay && (
+                <>
+                  <AxToolbarButton
+                    overlayEnabled={axOverlayEnabled}
+                    streaming={streaming}
+                    onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+                  />
+                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+                  <DuoHardwareControls onPress={onDuoHardwarePress} />
+                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+                  <DeviceHingeControls
+                    angle={hingeAngle}
+                    folding={foldGestureEnabled}
+                    onFoldingChange={setFoldGestureEnabled}
+                    onChange={setHinge}
+                    onPose={setPose}
+                  />
+                </>
+              )}
             </SimulatorToolbar.Actions>
           </SimulatorToolbar>
-          <SimulatorToolbar
-            exec={execOnHost}
-            onRotate={rotateDevice}
-            orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
-            deviceUdid={config.device}
-            deviceName={deviceName}
-            deviceRuntime={deviceRuntime}
-            streaming={streaming}
-            aria-label="Accessibility overlay"
-            style={{
-              width: "auto",
-              minWidth: 0,
-              justifyContent: "center",
-              padding: 6,
-              borderRadius: 22,
-            }}
-          >
-            <AxToolbarButton
-              overlayEnabled={axOverlayEnabled}
+          {!multiDisplay && (
+            <SimulatorToolbar
+              exec={execOnHost}
+              onRotate={rotateDevice}
+              orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+              deviceUdid={config.device}
+              deviceName={deviceName}
+              deviceRuntime={deviceRuntime}
               streaming={streaming}
-              onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
-            />
-          </SimulatorToolbar>
+              aria-label="Accessibility overlay"
+              style={{
+                width: "auto",
+                minWidth: 0,
+                justifyContent: "center",
+                padding: 6,
+                borderRadius: 22,
+              }}
+            >
+              <AxToolbarButton
+                overlayEnabled={axOverlayEnabled}
+                streaming={streaming}
+                onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+              />
+            </SimulatorToolbar>
+          )}
         </div>
-        {!!displays && displays.length > 1 && <DuoHardwareControls onPress={onDuoHardwarePress} />}
-        {!!displays && displays.length > 1 && <DeviceHingeControls angle={hingeAngle}
-          folding={foldGestureEnabled} onFoldingChange={setFoldGestureEnabled} onChange={setHinge} onPose={setPose} />}
       </div>
 
       {/* The left device sidebar + its rail live in App so they persist across
@@ -1314,7 +1357,7 @@ function AppWithConfig({
         onCodecPreferenceChange={setCodecPreference}
         activeCodec={useAvccVideo ? "h264" : "mjpeg"}
         avccSupported={avcc.supported}
-        chromeAvailable={!!activeChrome}
+        chromeAvailable={!!activeChrome && !multiDisplay}
         hideChrome={hideChrome}
         onHideChromeChange={setHideChrome}
         width={toolsPanelWidth}
