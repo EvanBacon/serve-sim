@@ -1,5 +1,4 @@
-// Device Hub's guest HID protocol, documented by tddworks/baguette:
-// https://github.com/tddworks/baguette/blob/main/docs/features/hinge.md
+// Guest HID transport for hinge angles and hardware buttons.
 // Spawned inside iOS Simulator; one command/reply per line until EOF.
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>

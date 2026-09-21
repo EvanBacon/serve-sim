@@ -1,4 +1,4 @@
-/** Named Device Hub fold poses. 0° is closed (cover), 180° is flat open (inner). */
+/** Named fold poses. 0° is closed (cover), 180° is flat open (inner). */
 export type DevicePoseId = "closed" | "open" | "book" | "tent" | "tabletop";
 
 export type DevicePoseSpec = {

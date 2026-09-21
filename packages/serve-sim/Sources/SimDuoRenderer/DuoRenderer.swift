@@ -7,8 +7,6 @@ import ImageIO
 import UniformTypeIdentifiers
 
 /// Renders Apple's installed V68 asset; no Apple asset is copied into the package.
-/// The model/material identifiers and folding clip are documented by Baguette:
-/// https://github.com/tddworks/baguette/blob/main/docs/features/iphone-duo.md
 @MainActor final class DuoRenderer {
     private let renderer: RealityRenderer
     private let wrapper = Entity()

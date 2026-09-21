@@ -1,7 +1,6 @@
-/// Fold poses Device Hub exposes for iPhone Duo (V68).
+/// Fold poses for iPhone Duo (V68).
 ///
-/// Device Hub's HingeController transmits a commanded hinge angle to the
-/// simulated device. Closed is ~0°, fully open / flat is ~180°. The cover
+/// The hinge service transmits a commanded angle to the simulated device. Closed is ~0°, fully open / flat is ~180°. The cover
 /// display selection uses a 90° heuristic until guest panel-state readback
 /// is available. It is not a measurement of SpringBoard's switching threshold.
 /// Do not toggle SimScreen power — FrontBoard's bookend display monitor
