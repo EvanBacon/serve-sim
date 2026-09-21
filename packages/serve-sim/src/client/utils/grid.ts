@@ -4,8 +4,21 @@ export interface GridDevice {
   runtime: string;
   state: string;
   chrome?: DeviceKitChromeDescriptor | null;
+  /** Present when the device has more than one framed display (iPhone Duo). */
+  displays?: DeviceDisplayDescriptor[] | null;
   placeholderAsset?: DevicePlaceholderAssetDescriptor | null;
   helper: { port: number; url: string; streamUrl: string; wsUrl: string } | null;
+}
+
+export type DeviceDisplayRole = "cover" | "inner" | "display";
+
+export interface DeviceDisplayDescriptor {
+  id: string;
+  role: DeviceDisplayRole;
+  name: string;
+  width: number;
+  height: number;
+  chrome: DeviceKitChromeDescriptor;
 }
 
 export interface DevicePlaceholderAssetDescriptor {

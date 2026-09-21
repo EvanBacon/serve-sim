@@ -26,6 +26,7 @@ import { classifyStaleState, persistRecoveredState, resolveLiveHelperState } fro
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
+  resolveDeviceDisplays,
   resolveDeviceKitChrome,
   serveDeviceKitChromeAsset,
   serveDevicePlaceholderAsset,
@@ -482,6 +483,7 @@ function helperProxyTarget(rawUrl: string, prefix: string): { device: string | n
     "health",
     "stream.avcc",
     "stream.mjpeg",
+    "stream.3d.mjpeg",
     "ws",
   ]);
   let device = parsed.searchParams.get("device");
@@ -729,6 +731,7 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
     return false; // not booted / capture unavailable → 404
   }
   switch (endpoint) {
+    case "/stream.3d.mjpeg": session.handleDuoMjpeg(req, res); return true;
     case "/stream.mjpeg": session.handleMjpeg(req, res); return true;
     case "/stream.avcc": session.handleAvcc(req, res); return true;
     case "/config": session.handleConfig(req, res); return true;
@@ -1480,12 +1483,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       const devices = page.map((d) => {
         const helper = helperByUdid.get(d.udid);
         const remoteHelper = helper ? rewriteStateForRequestHost(helper, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
+        const displays = resolveDeviceDisplays(d);
         return {
           device: d.udid,
           name: d.name,
           runtime: d.runtime,
           state: d.state,
           chrome: resolveDeviceKitChrome(d),
+          displays: displays.length > 1 ? displays : undefined,
           placeholderAsset: resolveDevicePlaceholderAsset(d),
           helper: remoteHelper
             ? {

@@ -65,4 +65,55 @@ final class FramebufferSurfaceSelectorTests: XCTestCase {
             FramebufferSurfaceSelection(index: 1, matchedExpectedSize: false)
         )
     }
+
+    func testMultipleExpectedSizesPreferTheCover() {
+        XCTAssertEqual(
+            FramebufferSurfaceSelector.select(
+                from: [
+                    FramebufferSurfaceSize(width: 7680, height: 4320),
+                    FramebufferSurfaceSize(width: 1398, height: 2034),
+                    FramebufferSurfaceSize(width: 2007, height: 2853),
+                ],
+                expectedSizes: [
+                    FramebufferSurfaceSize(width: 1398, height: 2034),
+                    FramebufferSurfaceSize(width: 2007, height: 2853),
+                ]
+            ),
+            FramebufferSurfaceSelection(index: 1, matchedExpectedSize: true)
+        )
+    }
+
+    func testPreferredSizeBeatsLargerExpectedMatch() {
+        XCTAssertEqual(
+            FramebufferSurfaceSelector.select(
+                from: [
+                    FramebufferSurfaceSize(width: 1398, height: 2034),
+                    FramebufferSurfaceSize(width: 2007, height: 2853),
+                ],
+                expectedSizes: [
+                    FramebufferSurfaceSize(width: 1398, height: 2034),
+                    FramebufferSurfaceSize(width: 2007, height: 2853),
+                ],
+                preferredSize: FramebufferSurfaceSize(width: 1398, height: 2034)
+            ),
+            FramebufferSurfaceSelection(index: 0, matchedExpectedSize: true)
+        )
+    }
+
+    func testPreferredSizeFallsBackWhenThatSurfaceIsNotLive() {
+        XCTAssertEqual(
+            FramebufferSurfaceSelector.select(
+                from: [
+                    FramebufferSurfaceSize(width: 0, height: 0),
+                    FramebufferSurfaceSize(width: 2007, height: 2853),
+                ],
+                expectedSizes: [
+                    FramebufferSurfaceSize(width: 1398, height: 2034),
+                    FramebufferSurfaceSize(width: 2007, height: 2853),
+                ],
+                preferredSize: FramebufferSurfaceSize(width: 1398, height: 2034)
+            ),
+            FramebufferSurfaceSelection(index: 1, matchedExpectedSize: true)
+        )
+    }
 }

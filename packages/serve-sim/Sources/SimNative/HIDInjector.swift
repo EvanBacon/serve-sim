@@ -1,6 +1,8 @@
 import Foundation
 import ObjectiveC
 import Darwin
+import CoreGraphics
+import SimNativeSupport
 
 /// Per-event HID logging is gated behind `SERVE_SIM_DEBUG_HID`. These lines fire
 /// on every touch/move/button/key/crown event — a single drag emits a dozen —
@@ -70,18 +72,27 @@ actor HIDInjector {
     private typealias IndigoDigitalCrownFunc = @convention(c) (Double) -> UnsafeMutableRawPointer?
     private var digitalCrownFunc: IndigoDigitalCrownFunc?
 
+    private var duoBridge: DuoHIDBridge?
+    private var touchTarget: UInt32 = 0x32
+
     // NOTE: scroll is NOT a native HID event on the simulator — see the "Scroll
     // events" section below. Device Hub's trackpad-capture path requires private
     // Apple HID entitlements an unprivileged helper can't have, and synthetic
     // scroll events are ignored by iOS, so we scroll via a touch drag instead.
 
-    func setup(deviceUDID: String) throws {
+    func setup(deviceUDID: String, duoHelper: String) throws {
         SimFrameworks.load()
         guard let device = FrameCapture.findSimDevice(udid: deviceUDID) else {
             throw NSError(domain: "HIDInjector", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Device \(deviceUDID) not found"])
         }
         self.simDevice = device
+        if let type = device.value(forKey: "deviceType") as? NSObject,
+           let identifier = type.value(forKey: "identifier") as? String,
+           identifier == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo" {
+            duoBridge = DuoHIDBridge(udid: deviceUDID, executable: duoHelper)
+            touchTarget = 0x40000001 // Duo's integrated cover; never the shared 0x32 slot.
+        }
 
         guard let funcPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForMouseNSEvent") else {
             throw NSError(domain: "HIDInjector", code: 5,
@@ -186,7 +197,7 @@ actor HIDInjector {
         default: return nil
         }
         var point = CGPoint(x: x, y: y)
-        return mouseFunc(&point, nil, 0x32, eventType, 1.0, 1.0, edge)
+        return mouseFunc(&point, nil, touchTarget, eventType, 1.0, 1.0, edge)
     }
 
     /// Synchronously build + send a single touch. For use inside gesture blocks
@@ -196,6 +207,7 @@ actor HIDInjector {
     }
 
     func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) {
+        updateTouchTarget(width: screenWidth, height: screenHeight)
         guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return }
         hidLog("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
         rawSend(msg)
@@ -211,10 +223,11 @@ actor HIDInjector {
         default: return
         }
 
+        updateTouchTarget(width: screenWidth, height: screenHeight)
         // Pass both CGPoints to create a 3-block multi-touch message.
         var point1 = CGPoint(x: x1, y: y1)
         var point2 = CGPoint(x: x2, y: y2)
-        guard let rawMsg = mouseFunc(&point1, &point2, 0x32, eventType, 1.0, 1.0, 0) else {
+        guard let rawMsg = mouseFunc(&point1, &point2, touchTarget, eventType, 1.0, 1.0, 0) else {
             print("[hid] IndigoHIDMessageForMouseNSEvent returned nil for multi-touch \(type)")
             return
         }
@@ -357,6 +370,7 @@ actor HIDInjector {
     func sendScroll(dx: Double, dy: Double, anchorX: Double?, anchorY: Double?, screenWidth: Int, screenHeight: Int) async {
         guard dx.isFinite, dy.isFinite, (dx != 0 || dy != 0), screenWidth > 0, screenHeight > 0 else { return }
 
+        updateTouchTarget(width: screenWidth, height: screenHeight)
         // Finger moves opposite to content: scrolling content down = swipe up.
         let stepX = -(dx / Double(screenWidth)) * HIDInjector.scrollDragGain
         let stepY = -(dy / Double(screenHeight)) * HIDInjector.scrollDragGain
@@ -412,6 +426,18 @@ actor HIDInjector {
     /// - phase: "down" / "up" hold the button for natural long-presses (power
     ///   off slider, side-button menus); "press" sends a momentary down+up.
     func sendButtonHID(page: UInt32, usage: UInt32, phase: String) async {
+        if let duoBridge {
+            switch phase {
+            case "down": _ = duoBridge.send("key \(page) \(usage) 1")
+            case "up": _ = duoBridge.send("key \(page) \(usage) 0")
+            case "press":
+                guard duoBridge.send("key \(page) \(usage) 1") else { return }
+                try? await Task.sleep(for: .milliseconds(250))
+                _ = duoBridge.send("key \(page) \(usage) 0")
+            default: break
+            }
+            return
+        }
         guard let arb = hidArbitraryFunc else {
             print("[hid] Arbitrary HID injection unavailable (page=\(page) usage=\(usage))")
             return
@@ -465,6 +491,10 @@ actor HIDInjector {
             }
 
         case "lock":
+            if duoBridge != nil {
+                await sendButtonHID(page: 0x0c, usage: 0x30, phase: "press")
+                return
+            }
             sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonDown)
             sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonUp)
 
@@ -507,6 +537,33 @@ actor HIDInjector {
         let result = fn(device, sel, name as NSString, ObjCBool(enabled))
         hidLog("[sim] setCADebugOption(\(name), \(enabled)) → \(result.boolValue)")
         return result.boolValue
+    }
+
+    // MARK: - Fold pose / hinge
+
+    func isFoldable() -> Bool { duoBridge != nil }
+
+    func close() { duoBridge = nil }
+
+    private func updateTouchTarget(width: Int, height: Int) {
+        guard duoBridge != nil else { return }
+        if let target = DevicePose.touchTarget(width: width, height: height) { touchTarget = target }
+    }
+
+    func setPose(_ name: String, fromDegrees: Double) -> (width: Int, height: Int)? {
+        guard let pose = DevicePose.preset(named: name), fromDegrees.isFinite,
+              (0...180).contains(fromDegrees),
+              duoBridge?.send("sweep \(fromDegrees) \(pose.hingeDegrees) 800") == true else { return nil }
+        updateTouchTarget(width: pose.preferredWidth, height: pose.preferredHeight)
+        return (pose.preferredWidth, pose.preferredHeight)
+    }
+
+    func setHingeAngle(degrees: Double) -> (width: Int, height: Int)? {
+        guard degrees.isFinite, (0...180).contains(degrees),
+              duoBridge?.send("angle \(degrees)") == true else { return nil }
+        let pose = DevicePose.spec(hingeDegrees: degrees)
+        updateTouchTarget(width: pose.preferredWidth, height: pose.preferredHeight)
+        return (pose.preferredWidth, pose.preferredHeight)
     }
 
     /// Toggle the on-screen software keyboard, exactly like Simulator.app's

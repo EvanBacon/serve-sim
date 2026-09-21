@@ -1,8 +1,8 @@
 # serve-sim
 
-The `npx serve` of Apple Simulators. 
+The `npx serve` of Apple Simulators.
 
-Host your simulator for use with Agent tools like Codex, Cursor, or Claude Desktop — locally, over your LAN, or host on a remote mac and tunnel anywhere. 
+Host your simulator for use with Agent tools like Codex, Cursor, or Claude Desktop — locally, over your LAN, or host on a remote mac and tunnel anywhere.
 
 ```sh
 npx serve-sim
@@ -13,14 +13,14 @@ https://github.com/user-attachments/assets/fbf890f4-c8c7-4684-82be-d677b8a188f8
 
 `serve-sim` spawns a small Swift helper that captures the simulator's framebuffer via `simctl io`, exposes it as an MJPEG stream + WebSocket control channel, and serves a React preview UI on top. It works with any booted iOS Simulator — no Xcode plugin, no instrumentation in your app.
 
-## Features 
+## Features
 
 - Full 60 FPS video stream in the browser.
 - Swipe from the bottom to go home.
 - gestures like pinch to zoom by holding the option key.
 - Simulator logs are forwarded to the browser for browser-use MCP tools to read from.
 - Recent simulator actions are available in the browser tools panel and `serve-sim event-log`.
-- Drag and drop videos and images to add them to the simulator device. 
+- Drag and drop videos and images to add them to the simulator device.
 - Keyboard commands and hot keys are forwarded to the simulator, including CMD+SHIFT+H to go home.
 - Apple Watch, iPad, and iOS support.
 
@@ -38,6 +38,52 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and a [maintained 
 
 > **Xcode 27 keyboard input:** Device Hub must be running with the target simulator window visible and frontmost. macOS may also require the app that launched `serve-sim` (for example Terminal) to be enabled in **System Settings → Privacy & Security → Accessibility**. Xcode 26 and older keep using the legacy simulator HID path. Set `SERVE_SIM_DISABLE_DEVICE_HUB_KEYBOARD=1` to opt out of the Xcode 27 bridge.
 
+## iPhone Duo
+
+With Xcode 27.1 and the iOS 27.1 runtime, the preview exposes **Cover** and
+**Inner** controls for iPhone Duo. Selecting one drives the simulator's hinge
+and selects that panel's framebuffer and chrome. Touches use the panel's own
+integrated digitizer; volume and power controls use a guest HID service.
+
+```sh
+serve-sim pose closed -d <udid>
+serve-sim pose open -d <udid>      # flat, 180°
+serve-sim pose book -d <udid>      # 130°
+serve-sim pose 100 -d <udid>
+```
+
+Commands wait for the guest to acknowledge dispatch. Invalid angles and failed
+commands do not change capture. The bundled `simduo/serve-sim-duo-hid` executable
+runs inside the simulator and exits with the device session.
+
+The **3D** button renders the installed Xcode Duo model with RealityKit, with
+live screen textures and touches mapped to each bent screen half. Apple's model
+stays in Xcode; it is not redistributed. The regular 2D stream remains available.
+Screenshots capture the app framebuffer.
+
+Use the pose buttons or the **Hinge** slider for angles from 0° through 180°.
+**Fold mode** lets you pinch out to open, pinch in to close, or drag horizontally
+with a mouse. It consumes those gestures; switch back to **Interact with app**
+to send gestures to iOS. Trackpad pinch and Safari gesture events are supported.
+Volume, power, and camera buttons support press-and-hold in either view.
+
+The preview follows hinge changes made in Device Hub. Closed (0°), Tent (80°),
+Table (100°), Book (130°), and Open (180°) are angle presets; use Rotate for
+orientation. SpringBoard primary-display events choose the captured panel,
+including intermediate poses that depend on whether you were opening or closing.
+Until guest readback arrives, a 90° threshold provides the initial fallback.
+The runtime decides which intermediate poses apps adopt.
+
+Xcode 27 Device Hub can disconnect legacy touch/keyboard services. If input
+stops working, run `serve-sim repair-input -d <udid>`. **This restarts SpringBoard
+and closes running apps.** Restart serve-sim afterward to reconnect guest HID
+services, then reopen your app. This repair is explicit, never automatic.
+
+If Device Hub is stuck on “Connecting display…” and `xcrun simctl io <udid>
+enumerate` lists no framebuffer ports, streaming cannot start until the simulator's
+display connection is restored. Duo relies on private beta APIs and the selected
+Xcode's `V68.usdz` model; compatibility must be rechecked after SDK updates.
+
 ## CLI
 
 ```
@@ -53,6 +99,8 @@ serve-sim rotate <orientation> [-d udid]
 serve-sim ca-debug <option> <on|off> [-d udid]
                                       Toggle a CoreAnimation debug flag
                                       (blended|copies|misaligned|offscreen|slow-animations)
+serve-sim pose <name|degrees> [-d udid]  Set a Duo fold pose or angle (0–180)
+serve-sim repair-input [-d udid]         Repair Device Hub input (restarts apps)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events
 
@@ -231,7 +279,9 @@ const middleware = simMiddleware({ basePath: "/.sim", proxyHelpers: true });
 app.use(middleware);
 
 const server = app.listen(3000);
-server.on("upgrade", (req, socket, head) => middleware.handleUpgrade(req, socket, head));
+server.on("upgrade", (req, socket, head) =>
+  middleware.handleUpgrade(req, socket, head),
+);
 ```
 
 If you enable `proxyHelpers` but don't wire `upgrade`, the page still loads video over HTTP but loses simulator input and DevTools (their sockets never reach the proxy). When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.

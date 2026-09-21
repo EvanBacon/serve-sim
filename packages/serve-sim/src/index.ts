@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
 import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
@@ -811,6 +812,68 @@ async function typeText(
   }
 
   await sendKeyEventsToWs(state.wsUrl, events);
+}
+
+async function pose(name: string, deviceArg?: string) {
+  const state = readState(deviceArg);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim` first.");
+    process.exit(1);
+  }
+
+  const hinge = Number(name);
+  if (Number.isFinite(hinge) && (hinge < 0 || hinge > 180 || !name.trim())) {
+    throw new Error("Hinge angle must be between 0 and 180 degrees.");
+  }
+  const payload = Number.isFinite(hinge)
+    ? { hinge }
+    : { pose: name };
+  if (!Number.isFinite(hinge)) {
+    const { resolveDevicePose } = await import("./device-pose");
+    if (!resolveDevicePose(name)) {
+      console.error(
+        "Usage: serve-sim pose <closed|open|book|tent|tabletop|<degrees>> [-d udid]",
+      );
+      process.exit(1);
+    }
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const ws = new WebSocket(state.wsUrl);
+    ws.binaryType = "arraybuffer";
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      ws.close();
+      if (error) reject(error); else resolve();
+    };
+    const timeout = setTimeout(() => finish(new Error("Timed out waiting for the simulator pose.")), 10000);
+    ws.onmessage = ({ data }) => {
+      const frame = Buffer.from(data as ArrayBuffer);
+      if (frame[0] !== 0x0e) return;
+      try {
+        const reply = JSON.parse(frame.subarray(1).toString());
+        finish(reply.ok === true ? undefined : new Error("Simulator rejected the pose. An iPhone Duo with guest HID support is required."));
+      } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    };
+    ws.onclose = () => finish(new Error("Connection closed before the simulator acknowledged the pose."));
+
+    ws.onopen = () => {
+      const json = new TextEncoder().encode(JSON.stringify(payload));
+      const msg = new Uint8Array(1 + json.length);
+      msg[0] = 0x0e;
+      msg.set(json, 1);
+      ws.send(msg);
+
+    };
+
+    ws.onerror = () => {
+      console.error("Failed to connect to serve-sim server at", state.wsUrl);
+      finish(new Error("WebSocket connection failed"));
+    };
+  });
 }
 
 async function rotate(orientation: string, deviceArg?: string) {
@@ -1835,6 +1898,27 @@ program
   .argument("<orientation>")
   .option(...deviceOpt)
   .action((orientation: string, opts) => rotate(orientation, opts.device));
+
+program
+  .command("repair-input")
+  .description("Repair Device Hub input; restarts SpringBoard and closes running apps")
+  .option(...deviceOpt)
+  .action(async (opts) => {
+    const udid = opts.device ? resolveDevice(opts.device) : findBootedDevice();
+    if (!udid) throw new Error("No booted simulator found.");
+    const { repairDeviceHubInput } = await import("./device-hub-input");
+    const repaired = await repairDeviceHubInput(udid);
+    console.log(repaired ? "Input repaired. Restart serve-sim to reconnect its guest services, then reopen your app." : "Input is not shadowed by Device Hub; no restart needed.");
+  });
+
+program
+  .command("pose")
+  .description(
+    "Set iPhone Duo fold pose (closed|open|book|tent|tabletop) or a hinge angle in degrees",
+  )
+  .argument("<pose>")
+  .option(...deviceOpt)
+  .action((name: string, opts) => pose(name, opts.device));
 
 program
   .command("ca-debug")

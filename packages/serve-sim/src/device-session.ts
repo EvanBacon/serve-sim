@@ -1,3 +1,5 @@
+import { warnDeviceHubInput } from "./device-hub-input";
+import { DuoRenderer, type DuoProjection } from "./duo-renderer";
 /**
  * In-process device session — the replacement for the spawned serve-sim-bin
  * helper. One session per booted simulator owns a NativeCapture + NativeHid and
@@ -14,7 +16,9 @@
  * Replaces the helper's HTTP/client layer; the framing here mirrors the
  * original byte-for-byte so the existing browser client is unchanged.
  */
+import { DuoStateMonitor, type DuoState } from "./duo-state";
 import type { IncomingMessage, ServerResponse } from "http";
+import { displaySizeForHingeDegrees, resolveDevicePose } from "./device-pose";
 import {
   NativeCapture,
   NativeHid,
@@ -141,7 +145,7 @@ async function writeAndDrain(
 
 type CaptureTransport = Pick<
   NativeCapture,
-  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc"
+  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "setPreferredScreenSize"
 >;
 type HidTransport = Pick<
   NativeHid,
@@ -156,11 +160,15 @@ type HidTransport = Pick<
   | "memoryWarning"
   | "softwareKeyboard"
   | "caDebug"
->;
+  | "pose"
+  | "hinge"
+> & Partial<Pick<NativeHid, "close" | "isFoldable">>;
 
 export interface DeviceSessionDependencies {
   capture: CaptureTransport;
   hid: HidTransport;
+  createDuoRenderer?: () => Pick<DuoRenderer, "render" | "close">;
+  createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
 }
 
 type Unsubscribe = () => void | Promise<void>;
@@ -179,10 +187,21 @@ export class DeviceSession {
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
   private readonly hidSockets = new Set<HidSocket>();
+  private duoRenderer?: Pick<DuoRenderer, "render" | "close">;
+  private duoProjection?: DuoProjection;
+  private duoRenderBusy = false;
+  private duoRenderPending = false;
+  private readonly duoResponses = new Set<ServerResponse>();
+  private duoMonitor?: Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  private hingeDegrees?: number;
+  private followedPanel?: boolean;
+  private primaryDuoPanel?: "cover" | "inner";
+  private poseQueue: Promise<void> = Promise.resolve();
+  private duoStateQueue: Promise<void> = Promise.resolve();
   private readonly streamResponses = new Set<ServerResponse>();
   private touchGestureLog?: TouchGestureLog;
 
-  constructor(public readonly udid: string, dependencies?: DeviceSessionDependencies) {
+  constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.hid = dependencies?.hid ?? new NativeHid(udid);
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
   }
@@ -206,6 +225,15 @@ export class DeviceSession {
       }
       this.unsubscribeMjpeg = unsubscribe;
       this.phase = "running";
+      if (await this.hid.isFoldable?.() && !this.isStopped()) {
+        if (!this.dependencies?.createDuoMonitor) void warnDeviceHubInput(this.udid);
+        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState) => new DuoStateMonitor(udid, onState));
+        this.duoMonitor = createMonitor(this.udid, (state) => {
+          void this.followDuoState(state).catch((error) => {
+            console.error("[duo] State update failed:", error);
+          });
+        });
+      }
     })().catch((error) => {
       // Failed DeviceSession instances are evicted by the registry below. Keep
       // this promise latched so concurrent endpoints all observe the same
@@ -229,6 +257,9 @@ export class DeviceSession {
   close(): void {
     if (this.phase === "stopped") return;
     this.phase = "stopped";
+    this.duoMonitor?.close();
+    this.duoRenderer?.close();
+    this.duoResponses.clear();
     for (const ws of this.hidSockets) {
       this.runCleanup("HID socket close", () => ws.close());
     }
@@ -240,7 +271,29 @@ export class DeviceSession {
       this.runCleanup("shared MJPEG unsubscribe", this.unsubscribeMjpeg);
     }
     this.hidSockets.clear();
+    this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
+  }
+
+  private followDuoState(state: DuoState): Promise<void> {
+    const update = this.duoStateQueue.then(() => this.applyDuoState(state));
+    this.duoStateQueue = update.catch(() => {});
+    return update;
+  }
+
+  private async applyDuoState(state: DuoState): Promise<void> {
+    if (this.isStopped()) return;
+    if (state.hingeDegrees != null) this.hingeDegrees = state.hingeDegrees;
+    if (state.primaryPanel) this.primaryDuoPanel = state.primaryPanel;
+    const size = displaySizeForHingeDegrees(this.primaryDuoPanel ? (this.primaryDuoPanel === "cover" ? 0 : 180) : this.hingeDegrees ?? 0);
+    if ((state.hingeDegrees != null || state.primaryPanel) && size.coverActive !== this.followedPanel) {
+      await this.capture.setPreferredScreenSize(size.width, size.height);
+      this.followedPanel = size.coverActive;
+    }
+    const orientation = state.orientations[size.coverActive ? "cover" : "inner"];
+    if (orientation) this.orientation = orientation;
+    this.broadcastConfig();
+    this.renderDuoFrame();
   }
 
   // ── Frame handling ───────────────────────────────────────────────────────
@@ -260,6 +313,39 @@ export class DeviceSession {
     }
     this.latestJpegBuffer.set(jpeg, 0);
     this.latestJpegLength = jpeg.length;
+    this.renderDuoFrame();
+  }
+
+  private renderDuoFrame(): void {
+    const renderer = this.duoRenderer;
+    const jpeg = this.latestJpeg();
+    if (!this.duoResponses.size || !renderer || !jpeg || this.hingeDegrees == null || this.isStopped()) return;
+    if (this.duoRenderBusy) { this.duoRenderPending = true; return; }
+    this.duoRenderBusy = true;
+    this.duoRenderPending = false;
+    const panel = this.width === 1398 || this.height === 1398 ? "cover" : "inner";
+    const orientationRoll: Record<string, number> = { portrait: 0, landscape_left: -90, portrait_upside_down: 180, landscape_right: 90 };
+    const roll = (orientationRoll[this.orientation] ?? 0) + (panel === "inner" ? 90 : 0);
+    void renderer.render(jpeg, panel, this.hingeDegrees, roll).then(({ jpeg: rendered, projection }) => {
+      if (this.isStopped() || this.duoRenderer !== renderer) return;
+      if (JSON.stringify(this.duoProjection) !== JSON.stringify(projection)) {
+        this.duoProjection = projection;
+        const config = Buffer.concat([Buffer.from([0x83]), Buffer.from(JSON.stringify(projection))]);
+        for (const ws of this.hidSockets) ws.send(config);
+      }
+      for (const response of this.duoResponses) {
+        if (!response.destroyed && !response.writableEnded && response.writableLength < 1024 * 1024) this.writeMjpegFrame(response, rendered);
+      }
+    }).catch((error) => {
+      if (this.duoRenderer !== renderer) return;
+      for (const response of this.duoResponses) this.handleStreamError(response, error);
+      renderer.close();
+      this.duoRenderer = undefined;
+    }).finally(() => {
+      if (this.duoRenderer !== renderer) return;
+      this.duoRenderBusy = false;
+      if (this.duoRenderPending) this.renderDuoFrame();
+    });
   }
 
   private latestJpeg(): Buffer | null {
@@ -276,6 +362,27 @@ export class DeviceSession {
   }
 
   // ── HTTP handlers ────────────────────────────────────────────────────────
+
+  handleDuoMjpeg(req: IncomingMessage, res: ServerResponse): void {
+    void (async () => {
+      await this.start();
+      if (res.destroyed || res.writableEnded) return;
+      if (!await this.hid.isFoldable?.()) { this.sendJson(res, 400, { error: "This device has no Duo model" }); return; }
+      if (!this.duoRenderer) {
+        this.duoRenderer = this.dependencies?.createDuoRenderer?.() ?? new DuoRenderer();
+        this.duoRenderBusy = false;
+      }
+      const raw = new URL(req.url ?? "", "http://x").searchParams.get("raw") === "1";
+      res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store", ...CORS });
+      this.trackStreamResponse(res);
+      this.duoResponses.add(res);
+      this.renderDuoFrame();
+      res.once("close", () => {
+        this.duoResponses.delete(res);
+        if (!this.duoResponses.size) { this.duoRenderer?.close(); this.duoRenderer = undefined; }
+      });
+    })().catch((error) => this.handleStreamError(res, error));
+  }
 
   handleMjpeg(req: IncomingMessage, res: ServerResponse): void {
     void this.serveMjpeg(req, res).catch((error) => this.handleStreamError(res, error));
@@ -404,13 +511,29 @@ export class DeviceSession {
   attachHidSocket(ws: HidSocket): void {
     this.hidSockets.add(ws);
     const cfg = this.configFrame();
+    if (this.duoProjection) ws.send(Buffer.concat([Buffer.from([0x83]), Buffer.from(JSON.stringify(this.duoProjection))]));
     if (cfg) ws.send(cfg); // seed dimensions/orientation, replacing the old poll
-    ws.on("message", (data: Buffer) => this.handleHidMessage(Buffer.isBuffer(data) ? data : Buffer.from(data)));
+    ws.on("message", (data: Buffer) => {
+      const frame = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      if (frame[0] === 0x0e) {
+        this.poseQueue = this.poseQueue.then(async () => {
+          if (this.isStopped()) return;
+          let ok = false;
+          try { ok = await this.handleHidMessage(frame) === true; }
+          catch (error) { console.error("[hid] Pose failed:", error); }
+          if (this.hidSockets.has(ws)) {
+            ws.send(Buffer.concat([Buffer.from([0x0e]), Buffer.from(JSON.stringify({ ok }))]));
+          }
+        }).catch((error) => { console.error("[hid] Pose reply failed:", error); });
+      } else {
+        void this.handleHidMessage(frame).catch((error) => { console.error("[hid] Input failed:", error); });
+      }
+    });
     ws.on("close", () => this.hidSockets.delete(ws));
     ws.on("error", () => this.hidSockets.delete(ws));
   }
 
-  private async handleHidMessage(data: Buffer): Promise<void> {
+  private async handleHidMessage(data: Buffer): Promise<boolean | void> {
     if (data.length < 1) return;
     const tag = data[0];
     const body = data.length > 1 ? data.subarray(1) : null;
@@ -507,6 +630,40 @@ export class DeviceSession {
         this.recordHidEvent(tag, {});
         this.hid.softwareKeyboard();
         break;
+      case 0x0d: {
+        const m = json<{ width?: number; height?: number }>();
+        if (!m) break;
+        const width = Number(m.width);
+        const height = Number(m.height);
+        if (!Number.isFinite(width) || !Number.isFinite(height)) break;
+        this.recordHidEvent(tag, m);
+        await this.capture.setPreferredScreenSize(Math.round(width), Math.round(height));
+        break;
+      }
+      case 0x0e: {
+        const m = json<{ pose?: string; hinge?: number }>();
+        if (!m) break;
+        this.recordHidEvent(tag, m);
+        if (typeof m.pose === "string" && m.pose.trim()) {
+          const spec = resolveDevicePose(m.pose);
+          if (spec && await this.hid.pose(m.pose, this.hingeDegrees ?? 0)) {
+            this.hingeDegrees = spec.hingeDegrees;
+            await this.followDuoState({ hingeDegrees: spec.hingeDegrees, orientations: {} });
+            this.duoMonitor?.refreshOrientation();
+            this.broadcastConfig();
+            this.renderDuoFrame();
+            return true;
+          }
+        } else if (typeof m.hinge === "number" && Number.isFinite(m.hinge) && m.hinge >= 0 && m.hinge <= 180) {
+          if (!await this.hid.hinge(m.hinge)) break;
+          await this.followDuoState({ hingeDegrees: m.hinge, orientations: {} });
+          this.duoMonitor?.refreshOrientation();
+          this.broadcastConfig();
+          this.renderDuoFrame();
+          return true;
+        }
+        break;
+      }
     }
   }
 
@@ -631,8 +788,8 @@ export class DeviceSession {
 
   // ── Config ───────────────────────────────────────────────────────────────
 
-  screenConfig(): { width: number; height: number; orientation: string } {
-    return { width: this.width, height: this.height, orientation: this.orientation };
+  screenConfig(): { width: number; height: number; orientation: string; hingeDegrees?: number } {
+    return { width: this.width, height: this.height, orientation: this.orientation, ...(this.hingeDegrees == null ? {} : { hingeDegrees: this.hingeDegrees }) };
   }
 
   private configFrame(): Buffer | null {

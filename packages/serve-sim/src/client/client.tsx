@@ -1,3 +1,8 @@
+import { DuoHardwareControls } from "./components/duo-hardware-controls";
+import { DuoThreeDView } from "./components/duo-three-d-view";
+import type { DuoProjection } from "../duo-renderer";
+import { DeviceHingeControls } from "./components/device-hinge-controls";
+import { useHingeGesture } from "./hooks/use-hinge-gesture";
 import { createRoot } from "react-dom/client";
 import {
   useCallback,
@@ -34,10 +39,12 @@ import { AxToolbarButton } from "./components/ax-toolbar-button";
 import { ChromeToolbarButton } from "./components/chrome-toolbar-button";
 import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
+import { DeviceDisplayToolbarButton } from "./components/device-display-toolbar-button";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
+import { toast } from "sonner";
 import { ServeSimToaster } from "./components/app-toasts";
 import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
 import { StreamStatusPill } from "./components/stream-status-pill";
@@ -56,7 +63,9 @@ import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
 import { useGridDevices } from "./hooks/use-grid-devices";
-import type { DeviceKitChromeDescriptor } from "./utils/grid";
+import type { DeviceDisplayDescriptor, DeviceKitChromeDescriptor } from "./utils/grid";
+import { matchDeviceDisplay } from "../device-displays";
+import { poseForDisplayRole } from "../device-pose";
 import {
   avccFallbackReducer,
   initialAvccFallback,
@@ -341,6 +350,7 @@ function App() {
         deviceName={selectedDevice?.name ?? null}
         deviceRuntime={selectedDevice?.runtime ?? null}
         chrome={selectedDevice?.chrome ?? null}
+        displays={selectedDevice?.displays ?? null}
         preferMjpeg={uiStarted.has(config.device)}
         axOverlayEnabled={axOverlayEnabled}
         setAxOverlayEnabled={setAxOverlayEnabled}
@@ -426,6 +436,7 @@ interface AppWithConfigProps {
   deviceName: string | null;
   deviceRuntime: string | null;
   chrome: DeviceKitChromeDescriptor | null;
+  displays: DeviceDisplayDescriptor[] | null;
   preferMjpeg: boolean;
   axOverlayEnabled: boolean;
   setAxOverlayEnabled: React.Dispatch<React.SetStateAction<boolean>>;
@@ -445,6 +456,7 @@ function AppWithConfig({
   deviceName,
   deviceRuntime,
   chrome,
+  displays,
   preferMjpeg,
   axOverlayEnabled,
   setAxOverlayEnabled,
@@ -529,10 +541,11 @@ function AppWithConfig({
   // The server can pin the stream codec (`serve-sim --codec mjpeg`) for hosts
   // whose hardware can't encode H.264 — e.g. VMs lacking the high/low-latency
   // H.264 profiles. Treat that as a hard override the viewer can't switch off.
+  const [duo3D, setDuo3D] = useState(false);
   const serverForcesMjpeg = config.codec === "mjpeg";
   const useAvccVideo =
     !serverForcesMjpeg && avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
-  const mjpeg = useMjpegStream(useAvccVideo ? null : config.streamUrl);
+  const mjpeg = useMjpegStream(duo3D || useAvccVideo ? null : config.streamUrl);
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
   useEffect(() => {
@@ -553,12 +566,19 @@ function AppWithConfig({
     );
     return () => clearTimeout(timer);
   }, [useAvccVideo, config.streamUrl]);
+  const [duoProjection, setDuoProjection] = useState<DuoProjection | null>(null);
   const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
   // Screen config now arrives over the input WebSocket (pushed by the helper on
   // connect + on every dimension/orientation change) instead of a 1s /config poll.
   const [wsStreamConfig, setWsStreamConfig] = useState<StreamConfig | null>(null);
   const streamConfig = wsStreamConfig;
   const activeStreamConfig = liveStreamConfig ?? streamConfig ?? fallbackScreenSize(deviceType, deviceName);
+  const matchedDisplay = matchDeviceDisplay(
+    displays,
+    activeStreamConfig.width,
+    activeStreamConfig.height,
+  );
+  const activeChrome = matchedDisplay?.chrome ?? chrome;
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
   const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
   const frameAspectRatio = simulatorAspectRatio(activeStreamConfig);
@@ -578,7 +598,7 @@ function AppWithConfig({
   // on the frame dimensions.
   const isLandscape = isLandscapeConfig(activeStreamConfig);
   const useChrome = shouldUseDeviceChrome({
-    hasChrome: !!chrome,
+    hasChrome: !!activeChrome,
     isLandscape,
     hideChrome,
   });
@@ -586,16 +606,16 @@ function AppWithConfig({
   // bezel / expands the screen slot — remounting DeviceKitChrome would tear
   // down SimulatorView and flash "Connecting…".
   const wrapChrome = shouldWrapDeviceChrome({
-    hasChrome: !!chrome,
+    hasChrome: !!activeChrome,
     isLandscape,
   });
-  const chromeScale = useChrome ? chrome!.frame.width / chrome!.screen.width : 1;
-  const containerDefaultWidth = frameMaxWidth * chromeScale;
-  const containerAspectRatioValue = useChrome
-    ? chrome!.frame.width / chrome!.frame.height
+  const chromeScale = useChrome ? activeChrome!.frame.width / activeChrome!.screen.width : 1;
+  const containerDefaultWidth = duo3D ? 500 : frameMaxWidth * chromeScale;
+  const containerAspectRatioValue = duo3D ? 1000 / 900 : useChrome
+    ? activeChrome!.frame.width / activeChrome!.frame.height
     : frameAspectRatioValue;
-  const containerAspectRatio = useChrome
-    ? `${chrome!.frame.width} / ${chrome!.frame.height}`
+  const containerAspectRatio = duo3D ? "1000 / 900" : useChrome
+    ? `${activeChrome!.frame.width} / ${activeChrome!.frame.height}`
     : frameAspectRatio;
 
   // Touch/button relay via direct WebSocket
@@ -630,6 +650,17 @@ function AppWithConfig({
         // Server -> client screen-config push (tag 0x82): [tag][JSON].
         if (!(ev.data instanceof ArrayBuffer)) return;
         const bytes = new Uint8Array(ev.data);
+        if (bytes[0] === 0x83) {
+          try { setDuoProjection(JSON.parse(new TextDecoder().decode(bytes.subarray(1)))); } catch {}
+          return;
+        }
+        if (bytes[0] === 0x0e) {
+          try {
+            const reply = JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
+            if (reply.ok === false) { setPendingHinge(null); toast.error("Could not change the simulator fold pose."); }
+          } catch {}
+          return;
+        }
         if (bytes.length < 1 || bytes[0] !== 0x82) return;
         try {
           const cfg = JSON.parse(new TextDecoder().decode(bytes.subarray(1))) as StreamConfig;
@@ -638,7 +669,7 @@ function AppWithConfig({
             prev &&
             prev.width === cfg.width &&
             prev.height === cfg.height &&
-            prev.orientation === cfg.orientation
+            prev.orientation === cfg.orientation && prev.hingeDegrees === cfg.hingeDegrees
               ? prev
               : cfg,
           );
@@ -675,6 +706,40 @@ function AppWithConfig({
   const onStreamTouch = useCallback((data: any) => sendWs(0x03, data), [sendWs]);
   const onStreamMultiTouch = useCallback((data: any) => sendWs(0x05, data), [sendWs]);
   const onStreamButton = useCallback((button: string) => sendWs(0x04, { button }), [sendWs]);
+  const selectDeviceDisplay = useCallback(
+    (display: DeviceDisplayDescriptor) => {
+      const pose = poseForDisplayRole(display.role);
+      if (pose) sendWs(0x0e, { pose: pose.id });
+      else sendWs(0x0d, { width: display.width, height: display.height });
+    },
+    [sendWs],
+  );
+  const [foldGestureEnabled, setFoldGestureEnabled] = useState(false);
+  const [pendingHinge, setPendingHinge] = useState<number | null>(null);
+  const hingeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestHinge = useRef<number | null>(null);
+  const setHinge = useCallback((angle: number) => {
+    setPendingHinge(angle === streamConfig?.hingeDegrees ? null : angle);
+    latestHinge.current = angle;
+    if (hingeTimer.current) return;
+    hingeTimer.current = setTimeout(() => {
+      hingeTimer.current = null;
+      sendWs(0x0e, { hinge: latestHinge.current });
+    }, 50);
+  }, [sendWs, streamConfig?.hingeDegrees]);
+  const setPose = useCallback((pose: string) => {
+    if (hingeTimer.current) clearTimeout(hingeTimer.current);
+    hingeTimer.current = null;
+    setPendingHinge(null);
+    sendWs(0x0e, { pose });
+  }, [sendWs]);
+  useEffect(() => () => { if (hingeTimer.current) clearTimeout(hingeTimer.current); }, []);
+  useEffect(() => {
+    if (streamConfig?.hingeDegrees != null) {
+      setPendingHinge((pending) => pending != null && Math.abs(pending - streamConfig.hingeDegrees!) < 0.6 ? null : pending);
+    }
+  }, [streamConfig?.hingeDegrees]);
+  const hingeAngle = pendingHinge ?? streamConfig?.hingeDegrees ?? (matchedDisplay?.role === "inner" ? 180 : 0);
   // A hardware button on the device chrome was pressed/released. Forward its HID
   // (page, usage) so the helper injects it via arbitrary HID — `down`/`up` phases
   // let power / side buttons be held for their long-press menus.
@@ -690,6 +755,9 @@ function AppWithConfig({
     },
     [sendWs],
   );
+  const onDuoHardwarePress = useCallback((key: { name: string; page: number; usage: number }, phase: "down" | "up" | "press") => {
+    sendWs(0x04, { button: key.name, page: key.page, usage: key.usage, phase });
+  }, [sendWs]);
   const onStreamDigitalCrown = useCallback((delta: number) => sendWs(0x0a, { delta }), [sendWs]);
   const onStreamScroll = useCallback((data: { dx: number; dy: number; x: number; y: number }) => sendWs(0x0b, data), [sendWs]);
   const onScreenConfigChange = useCallback((next: StreamConfig) => {
@@ -720,6 +788,10 @@ function AppWithConfig({
   useEffect(() => {
     setLiveStreamConfig(null);
     setWsStreamConfig(null);
+    setDuo3D(false);
+    setDuoProjection(null);
+    setFoldGestureEnabled(false);
+    setPendingHinge(null);
   }, [config.streamUrl]);
 
   useEffect(() => {
@@ -803,6 +875,7 @@ function AppWithConfig({
   }, [sendKey]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
+  useHingeGesture(simContainerRef, foldGestureEnabled && (displays?.length ?? 0) > 1, hingeAngle, setHinge);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
   const [deviceRenderedHeight, setDeviceRenderedHeight] = useState(0);
   useEffect(() => {
@@ -908,7 +981,7 @@ function AppWithConfig({
   const simulatorResize = useSimulatorResize({
     defaultWidth: containerDefaultWidth,
     viewportWidth,
-    viewportHeight,
+    viewportHeight: viewportHeight - ((displays?.length ?? 0) > 1 ? 150 : 0),
     aspectRatio: containerAspectRatioValue,
     initialFit: initialState?.fit === true,
     onStart: () => setSimFocused(false),
@@ -1007,6 +1080,9 @@ function AppWithConfig({
           {...mediaDrop.dropZoneProps}
         >
           {(() => {
+            if (duo3D) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
+              projection={duoProjection} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
+              onError={() => { setDuo3D(false); toast.error("3D rendering is unavailable. Check the selected Xcode and server log."); }} />;
             const streamView = (
               <SimulatorView
                 url={config.url}
@@ -1063,7 +1139,7 @@ function AppWithConfig({
             // swapping this wrapper (and the stream inside it).
             return (
               <DeviceKitChrome
-                chrome={chrome!}
+                chrome={activeChrome!}
                 framed={useChrome}
                 interactive={useChrome}
                 onButton={handleChromeButton}
@@ -1146,7 +1222,16 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <SimulatorToolbar.RotateButton title="Rotate device" />
-              {!!chrome && (
+              {!!displays && displays.length > 1 && <SimulatorToolbar.Button aria-label="3D device model"
+                aria-pressed={duo3D} onClick={() => setDuo3D((value) => !value)}>3D</SimulatorToolbar.Button>}
+              {!!displays && displays.length > 1 && (
+                <DeviceDisplayToolbarButton
+                  displays={displays}
+                  selectedId={matchedDisplay?.id ?? null}
+                  onSelect={selectDeviceDisplay}
+                />
+              )}
+              {!!activeChrome && (
                 <ChromeToolbarButton
                   hideChrome={hideChrome}
                   onToggle={() => setHideChrome((hidden) => !hidden)}
@@ -1178,6 +1263,9 @@ function AppWithConfig({
             />
           </SimulatorToolbar>
         </div>
+        {!!displays && displays.length > 1 && <DuoHardwareControls onPress={onDuoHardwarePress} />}
+        {!!displays && displays.length > 1 && <DeviceHingeControls angle={hingeAngle}
+          folding={foldGestureEnabled} onFoldingChange={setFoldGestureEnabled} onChange={setHinge} onPose={setPose} />}
       </div>
 
       {/* The left device sidebar + its rail live in App so they persist across
@@ -1226,7 +1314,7 @@ function AppWithConfig({
         onCodecPreferenceChange={setCodecPreference}
         activeCodec={useAvccVideo ? "h264" : "mjpeg"}
         avccSupported={avcc.supported}
-        chromeAvailable={!!chrome}
+        chromeAvailable={!!activeChrome}
         hideChrome={hideChrome}
         onHideChromeChange={setHideChrome}
         width={toolsPanelWidth}

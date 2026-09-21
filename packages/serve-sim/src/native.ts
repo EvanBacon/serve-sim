@@ -30,16 +30,21 @@ interface SimHIDHandle {
   memoryWarning(): Promise<void>;
   softwareKeyboard(): Promise<void>;
   caDebug(name: string, enabled: boolean): Promise<boolean>;
+  isFoldable(): Promise<boolean>;
+  close(): Promise<void>;
+  pose(name: string, fromDegrees: number): Promise<boolean>;
+  hinge(degrees: number): Promise<boolean>;
 }
 
 interface SimCaptureHandle {
   start(): Promise<void>;
   stop(): Promise<void>;
+  setPreferredScreenSize(width: number, height: number): Promise<void>;
   subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void | Promise<void>>;
 }
 
 interface NativeAddon {
-  SimHID: new (udid: string) => SimHIDHandle;
+  SimHID: new (udid: string, duoHelper: string) => SimHIDHandle;
   SimCapture: new (udid: string) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
@@ -118,7 +123,7 @@ export class NativeHid {
   private readonly handle: SimHIDHandle;
 
   constructor(udid: string) {
-    this.handle = new (load().SimHID)(udid);
+    this.handle = new (load().SimHID)(udid, join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid"));
   }
 
   // The N-API bindings throw synchronously when a JS value can't be coerced to
@@ -181,6 +186,22 @@ export class NativeHid {
   caDebug(name: string, enabled: boolean): Promise<boolean> {
     return this.guard("caDebug", () => this.handle.caDebug(name, enabled), false);
   }
+
+  isFoldable(): Promise<boolean> {
+    return this.guard("isFoldable", () => this.handle.isFoldable(), false);
+  }
+
+  close(): Promise<void> {
+    return this.guard("close", () => this.handle.close(), undefined);
+  }
+
+  pose(name: string, fromDegrees: number): Promise<boolean> {
+    return this.guard("pose", () => this.handle.pose(name, fromDegrees), false);
+  }
+
+  hinge(degrees: number): Promise<boolean> {
+    return this.guard("hinge", () => this.handle.hinge(degrees), false);
+  }
 }
 
 /**
@@ -199,6 +220,11 @@ export class NativeCapture {
   /** Begin capturing. Rejects if the device isn't booted. */
   start(): Promise<void> {
     return this.handle.start();
+  }
+
+  /** Pin capture to one native display (e.g. Duo cover vs inner). 0×0 clears. */
+  setPreferredScreenSize(width: number, height: number): Promise<void> {
+    return this.handle.setPreferredScreenSize(width, height);
   }
 
   subscribeMjpeg(onFrame: (frame: MjpegFrame) => Promise<void>): Promise<() => void | Promise<void>> {

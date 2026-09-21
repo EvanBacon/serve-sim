@@ -9,7 +9,9 @@ export type SimulatorOrientation =
 export interface StreamConfig {
   width: number;
   height: number;
-  /** Last orientation requested through serve-sim, when known. */
+  /** Live hinge reading for foldable devices. */
+  hingeDegrees?: number;
+  /** Guest orientation on Duo; last requested orientation elsewhere. */
   orientation?: SimulatorOrientation;
 }
 
