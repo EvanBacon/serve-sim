@@ -550,20 +550,15 @@ actor HIDInjector {
         if let target = DevicePose.touchTarget(width: width, height: height) { touchTarget = target }
     }
 
-    func setPose(_ name: String, fromDegrees: Double) -> (width: Int, height: Int)? {
+    func setPose(_ name: String, fromDegrees: Double) -> Bool {
         guard let pose = DevicePose.preset(named: name), fromDegrees.isFinite,
-              (0...180).contains(fromDegrees),
-              duoBridge?.send("sweep \(fromDegrees) \(pose.hingeDegrees) 800") == true else { return nil }
-        updateTouchTarget(width: pose.preferredWidth, height: pose.preferredHeight)
-        return (pose.preferredWidth, pose.preferredHeight)
+              (0...180).contains(fromDegrees) else { return false }
+        return duoBridge?.send("sweep \(fromDegrees) \(pose.hingeDegrees) 800") == true
     }
 
-    func setHingeAngle(degrees: Double) -> (width: Int, height: Int)? {
-        guard degrees.isFinite, (0...180).contains(degrees),
-              duoBridge?.send("angle \(degrees)") == true else { return nil }
-        let pose = DevicePose.spec(hingeDegrees: degrees)
-        updateTouchTarget(width: pose.preferredWidth, height: pose.preferredHeight)
-        return (pose.preferredWidth, pose.preferredHeight)
+    func setHingeAngle(degrees: Double) -> Bool {
+        guard degrees.isFinite, (0...180).contains(degrees) else { return false }
+        return duoBridge?.send("angle \(degrees)") == true
     }
 
     /// Toggle the on-screen software keyboard, exactly like Simulator.app's

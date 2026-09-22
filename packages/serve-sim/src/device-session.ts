@@ -261,13 +261,8 @@ export class DeviceSession {
   close(): void {
     if (this.phase === "stopped") return;
     this.phase = "stopped";
-    clearTimeout(this.duoSettleTimer);
-    clearTimeout(this.duoRotationTimer);
-    clearTimeout(this.duoFoldTimer);
-    this.duoFold = undefined;
+    this.duo.close();
     this.duoMonitor?.close();
-    this.duoRenderer?.close();
-    this.duoResponses.clear();
     for (const ws of this.hidSockets) {
       this.runCleanup("HID socket close", () => ws.close());
     }
@@ -289,31 +284,25 @@ export class DeviceSession {
     return update;
   }
 
+  private activePanel(): DuoPanel {
+    return duoPanel({ primaryPanel: this.primaryDuoPanel, hingeDegrees: this.duo.hinge });
+  }
+
   private async applyDuoState(state: DuoState): Promise<void> {
     if (this.isStopped()) return;
-    if (state.hingeDegrees != null) {
-      this.hingeDegrees = state.hingeDegrees;
-      const fold = this.duoFold;
-      if (fold && fold.began == null && fold.from !== fold.target) {
-        const fraction = (state.hingeDegrees - fold.from) / (fold.target - fold.from);
-        if (fraction > 0 && fraction <= 1) {
-          // Invert the guest's 800 ms cubic ease-out sweep. Starting on its
-          // first sample avoids animating before the HID bridge is ready.
-          fold.began = performance.now() - DUO_FOLD_DURATION_MS * (1 - Math.cbrt(1 - fraction));
-          this.tickDuoFold();
-        }
-      }
-    }
+    if (state.hingeDegrees != null) this.duo.noteHinge(state.hingeDegrees);
     if (state.primaryPanel) this.primaryDuoPanel = state.primaryPanel;
-    const size = displaySizeForHingeDegrees(this.primaryDuoPanel ? (this.primaryDuoPanel === "cover" ? 0 : 180) : this.hingeDegrees ?? 0);
-    if ((state.hingeDegrees != null || state.primaryPanel) && size.coverActive !== this.followedPanel) {
+    const panel = this.activePanel();
+    const size = displaySizeForPanel(panel);
+    if ((state.hingeDegrees != null || state.primaryPanel) && (panel === "cover") !== this.followedCover) {
       await this.capture.setPreferredScreenSize(size.width, size.height);
-      this.followedPanel = size.coverActive;
+      this.followedCover = panel === "cover";
     }
-    const orientation = state.orientations[size.coverActive ? "cover" : "inner"];
+    const orientation = state.orientations[panel];
     if (orientation) this.orientation = orientation;
+    this.duo.setPanel(panel);
     this.broadcastConfig();
-    this.renderDuoFrame();
+    this.duo.requestFrame();
   }
 
   // ── Frame handling ───────────────────────────────────────────────────────
@@ -333,79 +322,8 @@ export class DeviceSession {
     }
     this.latestJpegBuffer.set(jpeg, 0);
     this.latestJpegLength = jpeg.length;
-    this.renderDuoFrame();
-  }
-
-  private renderDuoFrame(fullResolution = false): void {
-    const renderer = this.duoRenderer;
-    const jpeg = this.latestJpeg();
-    if (!this.duoResponses.size || !renderer || !jpeg || this.hingeDegrees == null || this.isStopped()) return;
-    if (!fullResolution) {
-      clearTimeout(this.duoSettleTimer);
-      this.duoSettleTimer = setTimeout(() => this.renderDuoFrame(true), 180);
-      this.duoSettleTimer.unref?.();
-    }
-    if (this.duoRenderBusy) { this.duoRenderPending = true; return; }
-    this.duoRenderBusy = true;
-    this.duoRenderPending = false;
-    const panel = this.width === 1398 || this.height === 1398 ? "cover" : "inner";
-    // Guest orientation and active display can change during folding. Keep the
-    // physical model stable; only an explicit Rotate command changes its roll.
-    const roll = this.duoViewRoll;
-    void renderer.render(jpeg, panel, this.duoFoldAngle(), roll, fullResolution).then(({ jpeg: rendered, projection }) => {
-      if (this.isStopped() || this.duoRenderer !== renderer) return;
-      if (JSON.stringify(this.duoProjection) !== JSON.stringify(projection)) {
-        this.duoProjection = projection;
-        const config = Buffer.concat([Buffer.from([0x83]), Buffer.from(JSON.stringify(projection))]);
-        for (const ws of this.hidSockets) ws.send(config);
-      }
-      for (const response of this.duoResponses) {
-        if (!response.destroyed && !response.writableEnded && response.writableLength === 0) this.writeDuoFrame(response, rendered);
-      }
-    }).catch((error) => {
-      if (this.duoRenderer !== renderer) return;
-      for (const response of this.duoResponses) this.handleStreamError(response, error);
-      renderer.close();
-      this.duoRenderer = undefined;
-    }).finally(() => {
-      if (this.duoRenderer !== renderer) return;
-      this.duoRenderBusy = false;
-      if (this.duoRenderPending) this.renderDuoFrame();
-    });
-  }
-
-  private duoFoldAngle(): number {
-    const fold = this.duoFold;
-    if (!fold || fold.began == null) return this.hingeDegrees ?? 0;
-    const progress = Math.min(1, Math.max(0, (performance.now() - fold.began) / DUO_FOLD_DURATION_MS));
-    return fold.from + (fold.target - fold.from) * (1 - (1 - progress) ** 3);
-  }
-
-  private tickDuoFold(): void {
-    clearTimeout(this.duoFoldTimer);
-    if (this.isStopped() || this.duoFold?.began == null) return;
-    this.renderDuoFrame();
-    if (performance.now() < this.duoFold.began + DUO_FOLD_DURATION_MS) {
-      this.duoFoldTimer = setTimeout(() => this.tickDuoFold(), 16);
-      this.duoFoldTimer.unref?.();
-    }
-  }
-
-  private animateDuoRotation(orientation: string): void {
-    clearTimeout(this.duoRotationTimer);
-    const target = { portrait: 0, landscape_left: -90, portrait_upside_down: -180, landscape_right: 90 }[orientation] ?? 0;
-    const start = this.duoViewRoll;
-    const delta = ((target - start + 540) % 360) - 180;
-    const began = performance.now();
-    const tick = () => {
-      if (this.isStopped()) return;
-      const progress = Math.min(1, (performance.now() - began) / 300);
-      const eased = progress * progress * (3 - 2 * progress);
-      this.duoViewRoll = progress === 1 ? target : start + delta * eased;
-      this.renderDuoFrame();
-      if (progress < 1) this.duoRotationTimer = setTimeout(tick, 16);
-    };
-    tick();
+    const cached = this.latestJpeg();
+    if (cached) this.duo.onCapturedFrame(cached);
   }
 
   private latestJpeg(): Buffer | null {
@@ -421,14 +339,6 @@ export class DeviceSession {
     return headerAccepted && frameAccepted && trailerAccepted;
   }
 
-  /** Duo 3D frames are PNG with alpha so the page shows through (no black matte). */
-  private writeDuoFrame(res: ServerResponse, frame: Uint8Array): boolean {
-    const headerAccepted = res.write(duoFrameHeader(frame.length));
-    const frameAccepted = res.write(frame);
-    const trailerAccepted = res.write(MJPEG_TRAILER);
-    return headerAccepted && frameAccepted && trailerAccepted;
-  }
-
   // ── HTTP handlers ────────────────────────────────────────────────────────
 
   handleDuoMjpeg(req: IncomingMessage, res: ServerResponse): void {
@@ -436,19 +346,12 @@ export class DeviceSession {
       await this.start();
       if (res.destroyed || res.writableEnded) return;
       if (!await this.hid.isFoldable?.()) { this.sendJson(res, 400, { error: "This device has no Duo model" }); return; }
-      if (!this.duoRenderer) {
-        this.duoRenderer = this.dependencies?.createDuoRenderer?.() ?? new DuoRenderer();
-        this.duoRenderBusy = false;
-      }
       const raw = new URL(req.url ?? "", "http://x").searchParams.get("raw") === "1";
       res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store", ...CORS });
       this.trackStreamResponse(res);
-      this.duoResponses.add(res);
-      this.renderDuoFrame();
-      res.once("close", () => {
-        this.duoResponses.delete(res);
-        if (!this.duoResponses.size) { clearTimeout(this.duoSettleTimer); this.duoRenderer?.close(); this.duoRenderer = undefined; }
-      });
+      this.duo.setPanel(this.activePanel());
+      this.duo.attach(res);
+      res.once("close", () => this.duo.detach(res));
     })().catch((error) => this.handleStreamError(res, error));
   }
 
@@ -579,7 +482,8 @@ export class DeviceSession {
   attachHidSocket(ws: HidSocket): void {
     this.hidSockets.add(ws);
     const cfg = this.configFrame();
-    if (this.duoProjection) ws.send(Buffer.concat([Buffer.from([0x83]), Buffer.from(JSON.stringify(this.duoProjection))]));
+    const projection = this.duo.projectionFrame();
+    if (projection) ws.send(projection);
     if (cfg) ws.send(cfg); // seed dimensions/orientation, replacing the old poll
     ws.on("message", (data: Buffer) => {
       const frame = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -658,16 +562,15 @@ export class DeviceSession {
         const value = ORIENTATION_BY_NAME[m.orientation];
         if (value != null && await this.hid.orientation(value)) {
           this.recordHidEvent(tag, m);
-          if (m.orientation !== this.orientation || m.orientation !== this.duoViewOrientation) {
+          if (m.orientation !== this.orientation || m.orientation !== this.duo.viewOrientationName) {
             // Duo physical orientation and the active panel's UI orientation
             // differ (the inner panel's natural axis is rotated). Let the
             // monitor report the guest UI; never overwrite it with view state.
-            if (this.hingeDegrees == null) this.orientation = m.orientation;
-            this.duoViewOrientation = m.orientation;
-            this.animateDuoRotation(m.orientation);
+            if (this.duo.hinge == null) this.orientation = m.orientation;
+            this.duo.animateRotation(m.orientation);
             this.duoMonitor?.refreshOrientation();
             this.broadcastConfig();
-            this.renderDuoFrame();
+            this.duo.requestFrame();
           }
         }
         break;
@@ -721,35 +624,27 @@ export class DeviceSession {
         this.recordHidEvent(tag, m);
         if (typeof m.pose === "string" && m.pose.trim()) {
           const spec = resolveDevicePose(m.pose);
-          if (spec) {
-            const from = this.hingeDegrees ?? 0;
-            this.duoFold = { from, target: spec.hingeDegrees };
-            let accepted = false;
-            try {
-              accepted = await this.hid.pose(m.pose, from);
-              if (accepted) {
-                clearTimeout(this.duoFoldTimer);
-                this.duoFold = undefined;
-                await this.followDuoState({ hingeDegrees: spec.hingeDegrees, orientations: {} });
-                this.duoMonitor?.refreshOrientation();
-                this.broadcastConfig();
-                this.renderDuoFrame();
-                return true;
-              }
-            } finally {
-              clearTimeout(this.duoFoldTimer);
-              this.duoFold = undefined;
-              // Failed commands return to confirmed guest state; close() is
-              // guarded by renderDuoFrame and cannot restart the animation.
-              if (!accepted) this.renderDuoFrame();
-            }
+          if (!spec) break;
+          const from = this.duo.displayAngle();
+          this.duo.beginPose(from, spec.hingeDegrees);
+          const accepted = await this.hid.pose(m.pose, from);
+          if (!accepted) {
+            this.duo.cancelPose();
+            break;
           }
+          this.duo.finishPose(spec.hingeDegrees);
+          await this.followDuoState({ hingeDegrees: spec.hingeDegrees, orientations: {} });
+          this.duoMonitor?.refreshOrientation();
+          this.broadcastConfig();
+          this.duo.requestFrame();
+          return true;
         } else if (typeof m.hinge === "number" && Number.isFinite(m.hinge) && m.hinge >= 0 && m.hinge <= 180) {
           if (!await this.hid.hinge(m.hinge)) break;
+          this.duo.cancelPose();
           await this.followDuoState({ hingeDegrees: m.hinge, orientations: {} });
           this.duoMonitor?.refreshOrientation();
           this.broadcastConfig();
-          this.renderDuoFrame();
+          this.duo.requestFrame();
           return true;
         }
         break;
@@ -879,7 +774,13 @@ export class DeviceSession {
   // ── Config ───────────────────────────────────────────────────────────────
 
   screenConfig(): { width: number; height: number; orientation: string; hingeDegrees?: number; duoViewOrientation?: string } {
-    return { width: this.width, height: this.height, orientation: this.orientation, ...(this.hingeDegrees == null ? {} : { hingeDegrees: this.hingeDegrees, duoViewOrientation: this.duoViewOrientation }) };
+    const hingeDegrees = this.duo.hinge;
+    return {
+      width: this.width,
+      height: this.height,
+      orientation: this.orientation,
+      ...(hingeDegrees == null ? {} : { hingeDegrees, duoViewOrientation: this.duo.viewOrientationName }),
+    };
   }
 
   private configFrame(): Buffer | null {

@@ -11,20 +11,12 @@ final class DevicePoseTests: XCTestCase {
         XCTAssertNil(DevicePose.touchTarget(width: 0, height: 0))
     }
 
-    func testClosedPoseUsesCoverDisplay() {
-        let pose = DevicePose.preset(named: "closed")
-        XCTAssertEqual(pose?.hingeDegrees, 0)
-        XCTAssertEqual(pose?.coverActive, true)
-        XCTAssertEqual(pose?.preferredWidth, 1398)
-        XCTAssertEqual(pose?.preferredHeight, 2034)
-    }
-
-    func testOpenPoseUsesInnerDisplay() {
-        let pose = DevicePose.preset(named: "open")
-        XCTAssertEqual(pose?.hingeDegrees, 180)
-        XCTAssertEqual(pose?.coverActive, false)
-        XCTAssertEqual(pose?.preferredWidth, 2007)
-        XCTAssertEqual(pose?.preferredHeight, 2853)
+    func testClosedAndOpenHingeAngles() {
+        XCTAssertEqual(DevicePose.preset(named: "closed")?.hingeDegrees, 0)
+        XCTAssertEqual(DevicePose.preset(named: "open")?.hingeDegrees, 180)
+        XCTAssertEqual(DevicePose.preset(named: "book")?.hingeDegrees, 130)
+        XCTAssertEqual(DevicePose.preset(named: "tent")?.hingeDegrees, 80)
+        XCTAssertEqual(DevicePose.preset(named: "tabletop")?.hingeDegrees, 100)
     }
 
     func testCoverAndInnerAliases() {
@@ -33,16 +25,4 @@ final class DevicePoseTests: XCTestCase {
         XCTAssertEqual(DevicePose.preset(named: "flat")?.name, "open")
     }
 
-    func testBookAndTableUseInnerWhileTentUsesCover() {
-        XCTAssertEqual(DevicePose.preset(named: "book")?.coverActive, false)
-        XCTAssertEqual(DevicePose.preset(named: "tent")?.coverActive, true)
-        XCTAssertEqual(DevicePose.preset(named: "tabletop")?.coverActive, false)
-    }
-
-    func testCoverActiveThreshold() {
-        XCTAssertTrue(DevicePose.spec(hingeDegrees: 0).coverActive)
-        XCTAssertTrue(DevicePose.spec(hingeDegrees: 89).coverActive)
-        XCTAssertFalse(DevicePose.spec(hingeDegrees: 90).coverActive)
-        XCTAssertFalse(DevicePose.spec(hingeDegrees: 180).coverActive)
-    }
 }

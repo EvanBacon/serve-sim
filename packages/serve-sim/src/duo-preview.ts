@@ -79,6 +79,14 @@ export class DuoPreview {
     this.requestFrame();
   }
 
+  /** The guest accepted the pose. The commanded angle becomes the confirmed one. */
+  finishPose(target: number): void {
+    clearTimeout(this.foldTimer);
+    this.fold = undefined;
+    this.hingeDegrees = target;
+    this.requestFrame();
+  }
+
   displayAngle(now = performance.now()): number {
     const fold = this.fold;
     if (!fold) return this.hingeDegrees ?? 0;
@@ -148,7 +156,7 @@ export class DuoPreview {
   requestFrame(fullResolution = false): void {
     const renderer = this.renderer;
     const jpeg = this.jpeg;
-    if (this.closed || !this.responses.size || !renderer || !jpeg || this.hingeDegrees == null && !this.fold) return;
+    if (this.closed || !this.responses.size || !renderer || !jpeg || (this.hingeDegrees == null && !this.fold)) return;
     if (!fullResolution) {
       clearTimeout(this.settleTimer);
       this.settleTimer = setTimeout(() => this.requestFrame(true), DUO_SETTLE_MS);

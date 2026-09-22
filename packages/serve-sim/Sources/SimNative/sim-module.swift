@@ -97,12 +97,12 @@ private func u32(_ v: Int) -> UInt32 {
 
     @NodeMethod func pose(_ name: String, _ fromDegrees: Double) async throws -> Bool {
         try await setupTask.value
-        return await injector.setPose(name, fromDegrees: fromDegrees) != nil
+        return await injector.setPose(name, fromDegrees: fromDegrees)
     }
 
     @NodeMethod func hinge(_ degrees: Double) async throws -> Bool {
         try await setupTask.value
-        return await injector.setHingeAngle(degrees: degrees) != nil
+        return await injector.setHingeAngle(degrees: degrees)
     }
 }
 

@@ -814,17 +814,36 @@ async function typeText(
   await sendKeyEventsToWs(state.wsUrl, events);
 }
 
+function openHidSocket(wsUrl: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => resolve(ws);
+    ws.onerror = () => {
+      console.error("Failed to connect to serve-sim server at", wsUrl);
+      reject(new Error("WebSocket connection failed"));
+    };
+  });
+}
+
+function sendHid(ws: WebSocket, tag: number, payload: object): void {
+  const json = new TextEncoder().encode(JSON.stringify(payload));
+  const msg = new Uint8Array(1 + json.length);
+  msg[0] = tag;
+  msg.set(json, 1);
+  ws.send(msg);
+}
+
 async function fold(hinge: number, deviceArg?: string) {
   const state = readState(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
     process.exit(1);
   }
-  const payload = { hinge };
 
+  const ws = await openHidSocket(state.wsUrl);
+  const FOLD_TAG = 0x0e;
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
-    ws.binaryType = "arraybuffer";
     let settled = false;
     const finish = (error?: Error) => {
       if (settled) return;
@@ -836,27 +855,14 @@ async function fold(hinge: number, deviceArg?: string) {
     const timeout = setTimeout(() => finish(new Error("Timed out waiting for the simulator fold.")), 10000);
     ws.onmessage = ({ data }) => {
       const frame = Buffer.from(data as ArrayBuffer);
-      if (frame[0] !== 0x0e) return;
+      if (frame[0] !== FOLD_TAG) return;
       try {
         const reply = JSON.parse(frame.subarray(1).toString());
         finish(reply.ok === true ? undefined : new Error("Simulator rejected the fold. An iPhone Duo with guest HID support is required."));
       } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     };
     ws.onclose = () => finish(new Error("Connection closed before the simulator acknowledged the fold."));
-
-    ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify(payload));
-      const msg = new Uint8Array(1 + json.length);
-      msg[0] = 0x0e;
-      msg.set(json, 1);
-      ws.send(msg);
-
-    };
-
-    ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", state.wsUrl);
-      finish(new Error("WebSocket connection failed"));
-    };
+    sendHid(ws, FOLD_TAG, { hinge });
   });
 }
 
@@ -880,24 +886,9 @@ async function rotate(orientation: string, deviceArg?: string) {
     process.exit(1);
   }
 
-  return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify({ orientation }));
-      const msg = new Uint8Array(1 + json.length);
-      msg[0] = 0x07;
-      msg.set(json, 1);
-      ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
-    };
-
-    ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", state.wsUrl);
-      reject(new Error("WebSocket connection failed"));
-    };
-  });
+  const ws = await openHidSocket(state.wsUrl);
+  sendHid(ws, 0x07, { orientation });
+  setTimeout(() => { ws.close(); }, 50);
 }
 
 // HID (page, usage) codes for hardware buttons not backed by a named idb event

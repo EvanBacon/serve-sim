@@ -62,7 +62,6 @@ import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
 import { useGridDevices } from "./hooks/use-grid-devices";
 import type { DeviceDisplayDescriptor, DeviceKitChromeDescriptor } from "./utils/grid";
 import { matchDeviceDisplay, screenshotDisplayName } from "../device-displays";
-import { duoPreviewIsThreeD } from "./utils/duo-preview";
 import {
   avccFallbackReducer,
   initialAvccFallback,
@@ -536,14 +535,14 @@ function AppWithConfig({
       replaceState: (url) => window.history.replaceState(null, "", url),
     });
   }, [hideChrome]);
-  const duo3D = duoPreviewIsThreeD(displays?.length ?? 0);
+  const foldable = (displays?.length ?? 0) > 1;
   // The server can pin the stream codec (`serve-sim --codec mjpeg`) for hosts
   // whose hardware can't encode H.264 — e.g. VMs lacking the high/low-latency
   // H.264 profiles. Treat that as a hard override the viewer can't switch off.
   const serverForcesMjpeg = config.codec === "mjpeg";
   const useAvccVideo =
     !serverForcesMjpeg && avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
-  const mjpeg = useMjpegStream(duo3D || useAvccVideo ? null : config.streamUrl);
+  const mjpeg = useMjpegStream(foldable || useAvccVideo ? null : config.streamUrl);
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
   useEffect(() => {
@@ -589,40 +588,41 @@ function AppWithConfig({
   // working hardware buttons). It's authored portrait, so in landscape we drop
   // back to the bare rounded screen. Viewers can also hide it (toolbar, tools
   // panel, or `?chrome=0`) — default stays framed so desktop previews match
-  // Simulator.app. Foldables skip it: phone14/phone15 openings don't match
-  // Duo cover (1398×2034) or inner (2007×2853), and the 3D model is the frame.
+  // Simulator.app. Foldables never ask: the 3D model is their frame.
   // When chromed, the on-screen container is the full frame (bezel + screen):
   // `chromeScale` is how much bigger the frame is than the screen, so we scale
   // the container up by it while keeping the *screen* at the same comfortable
   // size — and resize / panel-collision math all operate on the frame dimensions.
   const isLandscape = isLandscapeConfig(activeStreamConfig);
-  const multiDisplay = (displays?.length ?? 0) > 1;
-  const useChrome = shouldUseDeviceChrome({
+  const useChrome = !foldable && shouldUseDeviceChrome({
     hasChrome: !!activeChrome,
     isLandscape,
     hideChrome,
-    multiDisplay,
   });
   // Wrap whenever chrome *could* be shown. Toggling hideChrome only fades the
   // bezel / expands the screen slot — remounting DeviceKitChrome would tear
   // down SimulatorView and flash "Connecting…".
-  const wrapChrome = shouldWrapDeviceChrome({
+  const wrapChrome = !foldable && shouldWrapDeviceChrome({
     hasChrome: !!activeChrome,
     isLandscape,
-    multiDisplay,
   });
   const chromeScale = useChrome ? activeChrome!.frame.width / activeChrome!.screen.width : 1;
-  // Duo fills the stage: no corner-resize — width is always the largest frame that fits.
-  // Use a large natural width so getSimulatorFrameMaxWidth is viewport-limited, not content-capped.
-  const containerDefaultWidth = multiDisplay
-    ? Math.max(frameMaxWidth * chromeScale, duo3D ? 2000 : frameMaxWidth)
+  const duoAspect = duoProjection && duoProjection.width > 0 && duoProjection.height > 0
+    ? duoProjection.width / duoProjection.height
+    : 10 / 9;
+  const containerDefaultWidth = foldable
+    ? Math.max(frameMaxWidth, duoProjection?.width ?? 0)
     : frameMaxWidth * chromeScale;
-  const containerAspectRatioValue = duo3D ? 2000 / 1800 : useChrome
-    ? activeChrome!.frame.width / activeChrome!.frame.height
-    : frameAspectRatioValue;
-  const containerAspectRatio = duo3D ? "2000 / 1800" : useChrome
-    ? `${activeChrome!.frame.width} / ${activeChrome!.frame.height}`
-    : frameAspectRatio;
+  const containerAspectRatioValue = foldable
+    ? duoAspect
+    : useChrome
+      ? activeChrome!.frame.width / activeChrome!.frame.height
+      : frameAspectRatioValue;
+  const containerAspectRatio = foldable
+    ? String(duoAspect)
+    : useChrome
+      ? `${activeChrome!.frame.width} / ${activeChrome!.frame.height}`
+      : frameAspectRatio;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -978,7 +978,7 @@ function AppWithConfig({
     viewportWidth,
     viewportHeight,
     aspectRatio: containerAspectRatioValue,
-    initialFit: multiDisplay || initialState?.fit === true,
+    initialFit: foldable || initialState?.fit === true,
     onStart: () => setSimFocused(false),
   });
   const rightPanelWidthPx = devtoolsOpen
@@ -987,10 +987,10 @@ function AppWithConfig({
     ? toolsPanelWidth
     : 0;
   // Duo never exposes corner-resize — always the largest frame that fits the viewport.
-  const simulatorFrameWidth = multiDisplay
+  const simulatorFrameWidth = foldable
     ? getSimulatorFrameMaxWidth(
         containerDefaultWidth,
-        duo3D ? Math.max(240, viewportWidth - (gridOpen ? gridPanelWidth : 0) - rightPanelWidthPx - 96) : viewportWidth,
+        Math.max(240, viewportWidth - (gridOpen ? gridPanelWidth : 0) - rightPanelWidthPx - 96),
         viewportHeight,
         containerAspectRatioValue,
       )
@@ -1015,8 +1015,8 @@ function AppWithConfig({
     const shiftNeeded = 2 * overlap;
     return shiftNeeded <= panelWidthPx + PANEL_GAP ? shiftNeeded : 0;
   };
-  const shiftForRightPanel = duo3D ? rightPanelWidthPx : shiftToClear(rightPanelWidthPx);
-  const shiftForLeftPanel = duo3D ? (gridOpen ? gridPanelWidth : 0) : shiftToClear(gridOpen ? gridPanelWidth : 0);
+  const shiftForRightPanel = foldable ? rightPanelWidthPx : shiftToClear(rightPanelWidthPx);
+  const shiftForLeftPanel = foldable ? (gridOpen ? gridPanelWidth : 0) : shiftToClear(gridOpen ? gridPanelWidth : 0);
 
   return (
     <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
@@ -1084,7 +1084,7 @@ function AppWithConfig({
           {...mediaDrop.dropZoneProps}
         >
           {(() => {
-            if (duo3D) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
+            if (foldable) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
               projection={duoProjection} screenConfig={activeStreamConfig} onStreamingChange={setStreaming} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
               onError={() => toast.error("Device rendering is unavailable. Check the selected Xcode and server log.")}>
               {axOverlayEnabled && duoProjection && <AxDomOverlay projection={duoProjection} screenConfig={activeStreamConfig} />}
@@ -1173,7 +1173,7 @@ function AppWithConfig({
               <span className="text-[13px] font-medium">Drop media or .ipa</span>
             </div>
           )}
-          {!multiDisplay && (
+          {!foldable && (
             <>
               <SimulatorResizeCornerHandle
                 simulatorResize={simulatorResize}
@@ -1196,7 +1196,7 @@ function AppWithConfig({
             </>
           )}
         </div>
-        <div className={`inline-flex items-center justify-center gap-2 ${multiDisplay ? "" : "max-w-full"}`}>
+        <div className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
           <SimulatorToolbar
             exec={execOnHost}
             onRotate={rotateDevice}
@@ -1212,7 +1212,7 @@ function AppWithConfig({
               justifyContent: "center",
               padding: "6px 8px",
               borderRadius: 18,
-              ...(multiDisplay
+              ...(foldable
                 ? { flexWrap: "nowrap", width: "max-content", maxWidth: "none" }
                 : { width: "auto", maxWidth: "100%" }),
             }}
@@ -1233,13 +1233,13 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <SimulatorToolbar.RotateButton title="Rotate device" />
-              {!multiDisplay && !!activeChrome && (
+              {!foldable && !!activeChrome && (
                 <ChromeToolbarButton
                   hideChrome={hideChrome}
                   onToggle={() => setHideChrome((hidden) => !hidden)}
                 />
               )}
-              {multiDisplay && (
+              {foldable && (
                 <>
                   <AxToolbarButton
                     overlayEnabled={axOverlayEnabled}
@@ -1257,7 +1257,7 @@ function AppWithConfig({
               )}
             </SimulatorToolbar.Actions>
           </SimulatorToolbar>
-          {!multiDisplay && (
+          {!foldable && (
             <SimulatorToolbar
               exec={execOnHost}
               onRotate={rotateDevice}
@@ -1331,7 +1331,7 @@ function AppWithConfig({
         onCodecPreferenceChange={setCodecPreference}
         activeCodec={useAvccVideo ? "h264" : "mjpeg"}
         avccSupported={avcc.supported}
-        chromeAvailable={!!activeChrome && !multiDisplay}
+        chromeAvailable={!!activeChrome && !foldable}
         hideChrome={hideChrome}
         onHideChromeChange={setHideChrome}
         width={toolsPanelWidth}

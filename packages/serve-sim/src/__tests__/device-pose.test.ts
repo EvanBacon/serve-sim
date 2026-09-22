@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { displaySizeForHingeDegrees, poseForDisplayRole, resolveDevicePose } from "../device-pose";
+import { displaySizeForHingeDegrees, displaySizeForPanel, duoPanel, poseForDisplayRole, resolveDevicePose } from "../device-pose";
 
 describe("device pose presets", () => {
   test("closed uses the cover display at 0°", () => {
@@ -44,5 +44,11 @@ describe("device pose presets", () => {
       width: 2007,
       height: 2853,
     });
+  });
+
+  test("primary panel wins over the hinge rule", () => {
+    expect(duoPanel({ primaryPanel: "cover", hingeDegrees: 180 })).toBe("cover");
+    expect(duoPanel({ primaryPanel: "inner", hingeDegrees: 0 })).toBe("inner");
+    expect(displaySizeForPanel("inner")).toEqual({ coverActive: false, width: 2007, height: 2853 });
   });
 });

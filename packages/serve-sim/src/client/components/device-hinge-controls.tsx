@@ -4,16 +4,13 @@ import { bindAltHeld } from "../utils/bind-alt-held";
 import type { SimulatorOrientation } from "../types";
 import { DeviceGlyph } from "./device-glyph";
 import { Slider } from "./slider";
+import { devicePosePresets, type DevicePoseId } from "../../device-pose";
 
-const poses = [
-  { id: "closed", label: "Folded", angle: 0 },
-  { id: "book", label: "Semi-folded", angle: 130 },
-  { id: "open", label: "Fully open", angle: 180 },
-] as const;
+const poses = devicePosePresets();
 
 const pressedStyle: CSSProperties = { color: "#0a84ff" };
 
-function PoseIcon({ pose }: { pose: string }) {
+function PoseIcon({ pose }: { pose: DevicePoseId }) {
   if (pose === "closed") {
     return <span aria-hidden="true" className="contents"><DeviceGlyph type="iphone" duo size={18} /></span>;
   }
@@ -47,9 +44,9 @@ export function DeviceHingeControls({ angle, onChange, onPose, orientation = "po
         className="min-w-0 flex-1" />
       <output className="w-11 text-right text-[11px] tabular-nums text-white/90">{Math.round(angle)}°</output>
     </div> : poses.map((pose) => {
-      const selected = Math.abs(angle - pose.angle) < 0.6;
+      const selected = Math.abs(angle - pose.hingeDegrees) < 0.6;
       return <SimulatorToolbar.Button key={pose.id}
-        aria-label={`${pose.label} pose`} title={`${pose.label} · ${pose.angle}°`}
+        aria-label={`${pose.label} pose`} title={`${pose.label} · ${pose.hingeDegrees}°`}
         aria-pressed={selected}
         onClick={() => onPose(pose.id)}
         style={selected ? pressedStyle : undefined}>

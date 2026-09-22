@@ -17,9 +17,11 @@ describe("DeviceHingeControls", () => {
     const html = render();
     expect(html).toContain('aria-label="Fold pose"');
     expect(html).not.toContain("Hold Alt");
-    expect(html).toContain("Folded pose");
-    expect(html).toContain("Semi-folded pose");
-    expect(html).toContain("Fully open pose");
+    expect(html).toContain("Closed pose");
+    expect(html).toContain("Tent pose");
+    expect(html).toContain("Table pose");
+    expect(html).toContain("Book pose");
+    expect(html).toContain("Open pose");
     expect(html).not.toContain("Fold gesture mode");
     expect(html).not.toContain("Hold ⌥ Alt for precise hinge control");
     expect(html).not.toContain("Pinch or drag to fold");
@@ -28,7 +30,7 @@ describe("DeviceHingeControls", () => {
 
   test("marks the matching pose as pressed", () => {
     const html = render(130);
-    expect(html).toContain("Semi-folded pose");
+    expect(html).toContain("Book pose");
     expect(html).toContain('aria-pressed="true"');
   });
 });

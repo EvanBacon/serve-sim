@@ -64,36 +64,29 @@ export function persistChromeHiddenPreference(
   } catch {}
 }
 
-/** Whether the live preview should wrap the stream in DeviceKit chrome.
- *  Foldables stay bare: phone14/phone15 bezels are a tall phone opening, and
- *  Duo cover (1398×2034) / inner (2007×2853) panels do not sit in that slot.
- *  The 3D model is the frame for those devices. */
+/** Whether the live preview should wrap the stream in DeviceKit chrome. */
 export function shouldUseDeviceChrome({
   hasChrome,
   isLandscape,
   hideChrome,
-  multiDisplay = false,
 }: {
   hasChrome: boolean;
   isLandscape: boolean;
   hideChrome: boolean;
-  multiDisplay?: boolean;
 }): boolean {
-  return hasChrome && !isLandscape && !hideChrome && !multiDisplay;
+  return hasChrome && !isLandscape && !hideChrome;
 }
 
 /** Keep the DeviceKit wrapper mounted whenever chrome *could* be shown.
  *  Hiding the bezel must not remount the live stream (that flashes
- *  "Connecting…" while the MJPEG/AVCC node reconnects). Landscape, foldables,
- *  and devices without chrome data stay unwrapped. */
+ *  "Connecting…" while the MJPEG/AVCC node reconnects). Landscape and
+ *  devices without chrome data stay unwrapped. */
 export function shouldWrapDeviceChrome({
   hasChrome,
   isLandscape,
-  multiDisplay = false,
 }: {
   hasChrome: boolean;
   isLandscape: boolean;
-  multiDisplay?: boolean;
 }): boolean {
-  return hasChrome && !isLandscape && !multiDisplay;
+  return hasChrome && !isLandscape;
 }

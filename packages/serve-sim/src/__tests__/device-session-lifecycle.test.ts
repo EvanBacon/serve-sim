@@ -622,9 +622,9 @@ test.each([true, false])("fold frames advance between sparse readbacks and settl
     await waitFor(() => angles.length > 0);
     receive(Buffer.concat([Buffer.from([0x0e]), Buffer.from('{"pose":"open"}')]));
     await waitFor(() => release != null);
-    // No movement before the guest acknowledges the first hinge sample.
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(angles.every((angle) => angle === 130)).toBe(true);
+    // The preview clock starts with the command. Samples do not have to arrive first.
+    await waitFor(() => angles.some((angle) => angle > 130 && angle < 180));
+    expect(session.screenConfig().hingeDegrees).toBe(130);
     update({ hingeDegrees: 140, orientations: {} });
     await waitFor(() => angles.some((angle) => angle > 145 && angle < 180));
     expect(session.screenConfig().hingeDegrees).toBe(140);

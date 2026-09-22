@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   defaultDeviceDisplay,
+  integratedCapabilityDisplays,
   screenshotDisplayName,
   matchDeviceDisplay,
   nameForDisplayRole,
@@ -37,6 +38,27 @@ describe("device display helpers", () => {
     expect(matchDeviceDisplay(displays, 1398, 2034)?.id).toBe("cover");
     expect(matchDeviceDisplay(displays, 2853, 2007)?.id).toBe("inner");
     expect(matchDeviceDisplay(displays, 1206, 2622)).toBeNull();
+  });
+
+  test("reads integrated digitizer displays from a capabilities plist", () => {
+    const displays = integratedCapabilityDisplays({
+      capabilities: {
+        displays: [
+          { displayType: "integrated", hasDigitizer: true, chromeIdentifier: "com.apple.chrome.v68", deviceName: "primary", width: 1398, height: 2034, scale: 3 },
+          { displayType: "external", hasDigitizer: true, chromeIdentifier: "skip", width: 100, height: 100 },
+          { displayType: "integrated", hasDigitizer: false, chromeIdentifier: "skip", width: 100, height: 100 },
+        ],
+      },
+    });
+    expect(displays).toEqual([{
+      id: "primary",
+      label: "primary",
+      chromeIdentifier: "com.apple.chrome.v68",
+      mask: null,
+      width: 1398,
+      height: 2034,
+      logicalScreenSize: { width: 466, height: 678 },
+    }]);
   });
 
   test("names foldable roles Cover and Inner", () => {

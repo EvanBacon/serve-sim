@@ -15,6 +15,7 @@ import { basename, dirname, join } from "path";
 import { inflateSync } from "zlib";
 import {
   defaultDeviceDisplay,
+  integratedCapabilityDisplays,
   nameForDisplayRole,
   rolesForIntegratedDisplays,
   type DeviceDisplayRole,
@@ -358,7 +359,7 @@ function resolveDeviceDisplaysUncached(profileName: string): DeviceDisplayDescri
   for (let i = 0; i < raw.length; i++) {
     const display = raw[i]!;
     const chrome = resolveChromeDescriptor(
-      display.chromeIdentifier,
+      bareChromeIdentifier(display.chromeIdentifier),
       framebufferMaskSizeAt(profileDir, display.mask),
       display.logicalScreenSize,
     );
@@ -371,50 +372,6 @@ function resolveDeviceDisplaysUncached(profileName: string): DeviceDisplayDescri
       width: display.width,
       height: display.height,
       chrome,
-    });
-  }
-  return out;
-}
-
-type CapabilityDisplay = {
-  id: string;
-  label: string;
-  chromeIdentifier: string;
-  mask: string | null;
-  width: number;
-  height: number;
-  logicalScreenSize: Size | null;
-};
-
-function integratedCapabilityDisplays(capabilities: JsonRecord | null): CapabilityDisplay[] {
-  const root = capabilities
-    ? record(capabilities.capabilities ?? capabilities)
-    : {};
-  const displays = Array.isArray(root.displays) ? root.displays : [];
-  const out: CapabilityDisplay[] = [];
-  for (const entry of displays) {
-    const display = record(entry);
-    if (stringValue(display.displayType) !== "integrated") continue;
-    if (display.hasDigitizer !== true) continue;
-    const chromeIdentifier = stringValue(display.chromeIdentifier);
-    if (!chromeIdentifier) continue;
-    const width = numberOrNull(display.width);
-    const height = numberOrNull(display.height);
-    if (!width || !height || width <= 0 || height <= 0) continue;
-    const scale = numberOrNull(display.scale);
-    const id =
-      stringValue(display.deviceName) ??
-      (typeof display.screenID === "number" ? `screen-${display.screenID}` : `display-${out.length}`);
-    const label = stringValue(display.displayName) ?? id;
-    out.push({
-      id,
-      label,
-      chromeIdentifier: bareChromeIdentifier(chromeIdentifier),
-      mask: stringValue(display.framebufferMaskIdentifier),
-      width,
-      height,
-      logicalScreenSize:
-        scale && scale > 0 ? { width: width / scale, height: height / scale } : null,
     });
   }
   return out;
