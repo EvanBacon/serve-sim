@@ -23,6 +23,10 @@ import UniformTypeIdentifiers
     private(set) var pieces: [[[Double]]] = []
     private let cover: (ModelEntity, Int)
     private let inner: (ModelEntity, Int)
+    private var lastAngle: Double = .nan
+    private var lastRoll: Double = .nan
+    // Live preview: half of the studio still (was 2000×1800). Full size + 4× MSAA
+    // + dual RealityKit passes + PNG was ~5–6 fps / ~500KB frames.
     let width = 1000
     let height = 900
 
@@ -48,7 +52,7 @@ import UniformTypeIdentifiers
         flatBounds = subject.visualBounds(relativeTo: wrapper)
         innerBounds = Self.screenBounds(inner, relativeTo: wrapper)
         coverBounds = Self.screenBounds(cover, relativeTo: wrapper)
-        cameraDistance = max(flatBounds.extents.x, flatBounds.extents.y) * 2.1
+        cameraDistance = max(flatBounds.extents.x, flatBounds.extents.y) * 2.25
         renderer.entities.append(wrapper)
         let camera = PerspectiveCamera()
         camera.camera.fieldOfViewInDegrees = 35
@@ -65,8 +69,8 @@ import UniformTypeIdentifiers
         fill.light.intensity = 1500
         fill.look(at: [0, 0, 0], from: [-2, 1, 3], relativeTo: nil)
         renderer.entities.append(fill)
-        renderer.cameraSettings.antialiasing = .multisample4X
-        renderer.cameraSettings.colorBackground = .color(CGColor(red: 0.04, green: 0.04, blue: 0.04, alpha: 1))
+        renderer.cameraSettings.antialiasing = .none
+        renderer.cameraSettings.colorBackground = .color(CGColor(red: 0, green: 0, blue: 0, alpha: 0))
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
         descriptor.storageMode = .shared
         descriptor.usage = [.renderTarget, .shaderRead]
@@ -86,20 +90,20 @@ import UniformTypeIdentifiers
         material.color = .init(tint: .white, texture: .init(try TextureResource.generate(from: image, options: .init(semantic: .color))))
         slot.0.model!.materials[slot.1] = material
         let raise = Float((180 - angle) * .pi / 180)
-        let yaw = panel == "cover" ? Float(angle * .pi / 180) : -raise / 2
+        // Keep the book planted: hinge motion comes only from the fold clip.
+        // Angle-linked yaw spun the whole model while pinching closed.
         controller.time = (180 - angle) / 180 * 5
-        let turn = simd_quatf(angle: yaw, axis: [0, 1, 0])
-        rest.orientation = turn * simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+        rest.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
         wrapper.orientation = simd_quatf(angle: Float(roll * .pi / 180), axis: [0, 0, 1])
         // Keep the bent body's horizontal extent centred as the left leaf closes.
         let fold = simd_quatf(angle: raise, axis: [0, 1, 0])
         let half = flatBounds.extents.x / 2
         let points: [SIMD3<Float>] = [fold.act([-half, 0, 0]), [0, 0, 0], [half, 0, 0]]
-        let xs = points.map { turn.act($0).x }
+        let xs = points.map(\.x)
         rest.position.x = -((xs.min() ?? 0) + (xs.max() ?? 0)) / 2
         let rollRotation = wrapper.orientation
         func project(_ p: SIMD3<Float>, folded: Bool) -> [Double] {
-            var point = turn.act(folded ? fold.act(p) : p)
+            var point = folded ? fold.act(p) : p
             point.x += rest.position.x
             point = rollRotation.act(point)
             let depth = max(0.001, cameraDistance - point.z)
@@ -123,7 +127,12 @@ import UniformTypeIdentifiers
                        project([0, bottom, z], folded: false), project([0, top, z], folded: false), [0, 0, 1, 0.5]]]
         }
         // Advancing the paused clip's time takes an update before skinning settles.
-        for _ in 0..<2 {
+        // Texture-only frames (same hinge/roll) only need one pass.
+        let poseChanged = lastAngle != angle || lastRoll != roll
+        lastAngle = angle
+        lastRoll = roll
+        let passes = poseChanged ? 2 : 1
+        for _ in 0..<passes {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 do {
                     try renderer.updateAndRender(deltaTime: 1 / 60, cameraOutput: output, onComplete: { _ in continuation.resume() })
@@ -131,10 +140,10 @@ import UniformTypeIdentifiers
             }
         }
         guard let rendered = CIImage(mtlTexture: texture, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])?.oriented(.downMirrored),
-              let cg = context.createCGImage(rendered, from: rendered.extent) else { throw CocoaError(.fileReadUnknown) }
+              let cg = context.createCGImage(rendered, from: rendered.extent, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!) else { throw CocoaError(.fileReadUnknown) }
         let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { throw CocoaError(.fileWriteUnknown) }
-        CGImageDestinationAddImage(destination, cg, [kCGImageDestinationLossyCompressionQuality: 0.88] as CFDictionary)
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { throw CocoaError(.fileWriteUnknown) }
+        CGImageDestinationAddImage(destination, cg, nil)
         guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
         return data as Data
     }

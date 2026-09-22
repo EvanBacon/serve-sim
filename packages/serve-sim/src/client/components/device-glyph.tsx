@@ -4,14 +4,20 @@ const SCREEN_ON_FILL = "#47b7ff";
 
 // Compact device-family glyphs for the sidebar rows. Stroked outlines keyed off
 // `getDeviceType(name)` — a stand-in when a device has no live stream thumbnail.
+// Duo uses a hinged two-panel silhouette (Apple ships no SF Symbol for iPhone Duo;
+// `flipphone` is a candy-bar flip phone). Geometry mirrors the Duo simdevicetype
+// framebuffer mask: flat hinge edge, rounded outer corners.
 export function DeviceGlyph({
   type,
   size = 20,
   screenOn = false,
+  duo = false,
 }: {
   type: DeviceType;
   size?: number;
   screenOn?: boolean;
+  /** True for iPhone Duo / multi-display foldables. */
+  duo?: boolean;
 }) {
   const common = {
     width: size,
@@ -23,6 +29,29 @@ export function DeviceGlyph({
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
   };
+
+  if (duo) {
+    // Left / right leaves open at the hinge (x ≈ 12). Outer corners rounded;
+    // hinge edge stays square — same silhouette language as Duo's framebuffer mask.
+    const left =
+      "M10.35 3.35H5.15C3.96 3.35 3.15 4.22 3.15 5.45v13.1c0 1.23.81 2.1 2 2.1h5.2V3.35Z";
+    const right =
+      "M13.65 3.35h5.2c1.19 0 2 .87 2 2.1v13.1c0 1.23-.81 2.1-2 2.1h-5.2V3.35Z";
+    return (
+      <svg {...common} data-testid="device-glyph-duo">
+        {screenOn && (
+          <>
+            <path d={left} fill={SCREEN_ON_FILL} stroke="none" data-testid="device-glyph-screen-on" />
+            <path d={right} fill={SCREEN_ON_FILL} stroke="none" />
+          </>
+        )}
+        <path d={left} />
+        <path d={right} />
+        <line x1="12" y1="7.25" x2="12" y2="16.75" />
+      </svg>
+    );
+  }
+
   switch (type) {
     case "ipad":
       return (

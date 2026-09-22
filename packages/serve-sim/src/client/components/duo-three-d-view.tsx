@@ -53,7 +53,7 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError 
     else { onTouch({ type: "end", ...previous }); points.current.delete(event.pointerId); }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
-  return <div aria-label="Interactive 3D iPhone Duo" className="w-full h-full" style={{ touchAction: "none", cursor: "pointer" }}
+  return <div aria-label="Interactive 3D iPhone Duo" className="w-full h-full bg-transparent" style={{ touchAction: "none", cursor: "pointer" }}
     onPointerDown={(event) => {
       if (event.button !== 0 || points.current.size >= 2) return;
       const raw = point(event);
@@ -75,6 +75,6 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError 
       const two = pair();
       if (two) onMultiTouch({ type: "move", ...two }); else onTouch({ type: "move", ...raw });
     }} onPointerUp={end} onPointerCancel={end}>
-    <img ref={image} onError={onError} alt="Live 3D iPhone Duo" draggable={false} className="block w-full h-full pointer-events-none" />
+    <img ref={image} onError={onError} alt="Live 3D iPhone Duo" draggable={false} className="block w-full h-full object-contain pointer-events-none bg-transparent" />
   </div>;
 }

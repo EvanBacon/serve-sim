@@ -10,7 +10,7 @@ class Surface extends EventTarget {
   releasePointerCapture(id: number) { this.captured.delete(id); }
 }
 function dispatch(surface: Surface, type: string, properties: Record<string, unknown>) {
-  const event = Object.assign(new Event(type, { cancelable: true }), { button: 0, pointerType: "touch", ...properties });
+  const event = Object.assign(new Event(type, { cancelable: true }), { button: 0, pointerType: "touch", altKey: false, ctrlKey: false, ...properties });
   surface.dispatchEvent(event);
   return event;
 }
@@ -36,10 +36,12 @@ test("two finger pinch opens from closed and closes from flat without app input"
   expect(angle).toBe(0);
 });
 
-test("trackpad wheel and Safari pinch both clamp and prevent browser zoom", () => {
+test("plain scroll reaches the sim; ctrl-wheel and Safari pinch fold", () => {
   const surface = new Surface();
   let angle = 0;
   const cleanup = bindHingeGesture(surface as unknown as HTMLElement, () => ({ angle, onChange: (next) => { angle = next; } }));
+  expect(dispatch(surface, "wheel", { deltaY: -180, deltaMode: 0 }).defaultPrevented).toBe(false);
+  expect(angle).toBe(0);
   expect(dispatch(surface, "wheel", { ctrlKey: true, deltaY: -180, deltaMode: 0 }).defaultPrevented).toBe(true);
   expect(angle).toBe(180);
   dispatch(surface, "gesturestart", { scale: 1 });
@@ -51,13 +53,18 @@ test("trackpad wheel and Safari pinch both clamp and prevent browser zoom", () =
   cleanup();
 });
 
-test("mouse folding keeps its scale when the active panel changes size", () => {
+test("mouse folding requires Alt so single-finger swipes reach the sim", () => {
   const surface = new Surface();
   let angle = 0;
   const cleanup = bindHingeGesture(surface as unknown as HTMLElement, () => ({ angle, onChange: (next) => { angle = next; } }));
-  dispatch(surface, "pointerdown", { pointerId: 1, pointerType: "mouse", clientX: 0, clientY: 0 });
-  surface.clientWidth = 800;
+  const plain = dispatch(surface, "pointerdown", { pointerId: 1, pointerType: "mouse", clientX: 0, clientY: 0 });
+  expect(plain.defaultPrevented).toBe(false);
   dispatch(surface, "pointermove", { pointerId: 1, pointerType: "mouse", clientX: 400, clientY: 0 });
+  expect(angle).toBe(0);
+  dispatch(surface, "pointerup", { pointerId: 1, pointerType: "mouse" });
+  dispatch(surface, "pointerdown", { pointerId: 1, pointerType: "mouse", altKey: true, clientX: 0, clientY: 0 });
+  surface.clientWidth = 800;
+  dispatch(surface, "pointermove", { pointerId: 1, pointerType: "mouse", altKey: true, clientX: 400, clientY: 0 });
   expect(angle).toBe(180);
   cleanup();
 });

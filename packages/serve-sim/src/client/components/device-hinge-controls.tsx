@@ -18,23 +18,13 @@ function PoseIcon({ pose }: { pose: string }) {
   </svg>;
 }
 
-export function DeviceHingeControls({ angle, folding, onFoldingChange, onChange, onPose }: {
+export function DeviceHingeControls({ angle, onChange, onPose }: {
   onPose: (pose: string) => void;
-  angle: number; folding: boolean; onFoldingChange: (enabled: boolean) => void; onChange: (angle: number) => void;
+  angle: number; onChange: (angle: number) => void;
 }) {
   const [altHeld, setAltHeld] = useState(false);
   useEffect(() => bindAltHeld(window, setAltHeld), []);
   return <div role="group" aria-label="Fold pose" title="Hold Alt (Option) for precise hinge control" className="flex items-center">
-    <SimulatorToolbar.Button aria-label="Fold gesture mode" aria-pressed={folding}
-      title="Fold gesture mode: pinch or drag to open and close"
-      onClick={() => onFoldingChange(!folding)}
-      style={folding ? pressedStyle : undefined}>
-      <svg width="18" height="18" viewBox="0 0 34 34" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <rect x="9" y="9" width="17" height="17" rx="3" />
-        <path d="M3 14V8a5 5 0 0 1 5-5h5m-4-3 4 3-4 3M31 20v6a5 5 0 0 1-5 5h-5m4-3-4 3 4 3" />
-      </svg>
-    </SimulatorToolbar.Button>
-    <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-white/15" />
     {altHeld ? <div className="flex w-36 items-center gap-1.5 px-1">
       <input aria-label="Hinge angle" aria-valuetext={`${angle.toFixed(1)} degrees`} type="range"
         min="0" max="180" step="0.1" value={angle}

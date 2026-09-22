@@ -97,6 +97,10 @@ function mjpegHeader(jpegLength: number): Buffer {
   return Buffer.from(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpegLength}\r\n\r\n`, "ascii");
 }
 
+function duoFrameHeader(frameLength: number): Buffer {
+  return Buffer.from(`--frame\r\nContent-Type: image/png\r\nContent-Length: ${frameLength}\r\n\r\n`, "ascii");
+}
+
 function avccSeed(jpeg: Uint8Array): Buffer {
   const out = Buffer.allocUnsafe(5 + jpeg.length);
   out.writeUInt32BE(jpeg.length + 1, 0); // length covers the tag byte + payload
@@ -324,8 +328,10 @@ export class DeviceSession {
     this.duoRenderBusy = true;
     this.duoRenderPending = false;
     const panel = this.width === 1398 || this.height === 1398 ? "cover" : "inner";
-    const orientationRoll: Record<string, number> = { portrait: 0, landscape_left: -90, portrait_upside_down: 180, landscape_right: 90 };
-    const roll = (orientationRoll[this.orientation] ?? 0) + (panel === "inner" ? 90 : 0);
+    // 3D framing stays planted while folding. Guest UI orientation used to add
+    // ±90/180 roll and spun the model when SpringBoard flipped during a close.
+    // Inner keeps a fixed quarter-turn for its authored landscape UVs only.
+    const roll = panel === "inner" ? 90 : 0;
     void renderer.render(jpeg, panel, this.hingeDegrees, roll).then(({ jpeg: rendered, projection }) => {
       if (this.isStopped() || this.duoRenderer !== renderer) return;
       if (JSON.stringify(this.duoProjection) !== JSON.stringify(projection)) {
@@ -334,7 +340,7 @@ export class DeviceSession {
         for (const ws of this.hidSockets) ws.send(config);
       }
       for (const response of this.duoResponses) {
-        if (!response.destroyed && !response.writableEnded && response.writableLength < 1024 * 1024) this.writeMjpegFrame(response, rendered);
+        if (!response.destroyed && !response.writableEnded && response.writableLength < 1024 * 1024) this.writeDuoFrame(response, rendered);
       }
     }).catch((error) => {
       if (this.duoRenderer !== renderer) return;
@@ -357,6 +363,14 @@ export class DeviceSession {
   private writeMjpegFrame(res: ServerResponse, jpeg: Uint8Array): boolean {
     const headerAccepted = res.write(mjpegHeader(jpeg.length));
     const frameAccepted = res.write(jpeg);
+    const trailerAccepted = res.write(MJPEG_TRAILER);
+    return headerAccepted && frameAccepted && trailerAccepted;
+  }
+
+  /** Duo 3D frames are PNG with alpha so the page shows through (no black matte). */
+  private writeDuoFrame(res: ServerResponse, frame: Uint8Array): boolean {
+    const headerAccepted = res.write(duoFrameHeader(frame.length));
+    const frameAccepted = res.write(frame);
     const trailerAccepted = res.write(MJPEG_TRAILER);
     return headerAccepted && frameAccepted && trailerAccepted;
   }

@@ -1,4 +1,4 @@
-import { DuoHardwareControls } from "./components/duo-hardware-controls";
+import { DuoHardwareMenu } from "./components/duo-hardware-menu";
 import { DuoThreeDView } from "./components/duo-three-d-view";
 import type { DuoProjection } from "../duo-renderer";
 import { DeviceHingeControls } from "./components/device-hinge-controls";
@@ -95,6 +95,7 @@ import {
 } from "./utils/selected-stream-config";
 import {
   SIMULATOR_RESIZE_PAGE_TRANSITION,
+  getSimulatorFrameMaxWidth,
   simulatorFrameLayoutTransition,
 } from "./utils/simulator-resize";
 import {
@@ -618,11 +619,15 @@ function AppWithConfig({
     multiDisplay,
   });
   const chromeScale = useChrome ? activeChrome!.frame.width / activeChrome!.screen.width : 1;
-  const containerDefaultWidth = duo3D ? 500 : frameMaxWidth * chromeScale;
-  const containerAspectRatioValue = duo3D ? 1000 / 900 : useChrome
+  // Duo fills the stage: no corner-resize — width is always the largest frame that fits.
+  // Use a large natural width so getSimulatorFrameMaxWidth is viewport-limited, not content-capped.
+  const containerDefaultWidth = multiDisplay
+    ? Math.max(frameMaxWidth * chromeScale, duo3D ? 2000 : frameMaxWidth)
+    : frameMaxWidth * chromeScale;
+  const containerAspectRatioValue = duo3D ? 2000 / 1800 : useChrome
     ? activeChrome!.frame.width / activeChrome!.frame.height
     : frameAspectRatioValue;
-  const containerAspectRatio = duo3D ? "1000 / 900" : useChrome
+  const containerAspectRatio = duo3D ? "2000 / 1800" : useChrome
     ? `${activeChrome!.frame.width} / ${activeChrome!.frame.height}`
     : frameAspectRatio;
 
@@ -722,7 +727,7 @@ function AppWithConfig({
     },
     [sendWs],
   );
-  const [foldGestureEnabled, setFoldGestureEnabled] = useState(false);
+  // Duo fold: pinch / Alt-drag / ctrl-wheel. Plain swipes and scroll stay with the sim.
   const [pendingHinge, setPendingHinge] = useState<number | null>(null);
   const hingeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestHinge = useRef<number | null>(null);
@@ -798,7 +803,6 @@ function AppWithConfig({
     setWsStreamConfig(null);
     setDuoView(null);
     setDuoProjection(null);
-    setFoldGestureEnabled(false);
     setPendingHinge(null);
   }, [config.streamUrl]);
 
@@ -883,7 +887,7 @@ function AppWithConfig({
   }, [sendKey]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
-  useHingeGesture(simContainerRef, foldGestureEnabled && (displays?.length ?? 0) > 1, hingeAngle, setHinge);
+  useHingeGesture(simContainerRef, (displays?.length ?? 0) > 1, hingeAngle, setHinge);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
   const [deviceRenderedHeight, setDeviceRenderedHeight] = useState(0);
   useEffect(() => {
@@ -991,9 +995,18 @@ function AppWithConfig({
     viewportWidth,
     viewportHeight,
     aspectRatio: containerAspectRatioValue,
-    initialFit: initialState?.fit === true,
+    initialFit: multiDisplay || initialState?.fit === true,
     onStart: () => setSimFocused(false),
   });
+  // Duo never exposes corner-resize — always the largest frame that fits the viewport.
+  const simulatorFrameWidth = multiDisplay
+    ? getSimulatorFrameMaxWidth(
+        containerDefaultWidth,
+        viewportWidth,
+        viewportHeight,
+        containerAspectRatioValue,
+      )
+    : simulatorResize.width;
 
   // Only shift the simulator when a panel would otherwise collide with it.
   // Tools/DevTools dock on the right; the device sidebar docks on the left, so
@@ -1001,8 +1014,8 @@ function AppWithConfig({
   const PANEL_EDGE_OFFSET = 12;
   const PANEL_GAP = 24;
   const deviceWidth = deviceRenderedWidth > 0
-    ? Math.min(deviceRenderedWidth, simulatorResize.width)
-    : simulatorResize.width;
+    ? Math.min(deviceRenderedWidth, simulatorFrameWidth)
+    : simulatorFrameWidth;
   // Shift needed to clear a docked panel of `panelWidthPx` on the given side
   // without ever pushing the device under the opposite edge.
   const shiftToClear = (panelWidthPx: number): number => {
@@ -1036,7 +1049,7 @@ function AppWithConfig({
       <div
         className="flex flex-col items-center gap-3 min-w-0"
         style={{
-          width: simulatorResize.width,
+          width: simulatorFrameWidth,
           transition: simulatorFrameLayoutTransition(simulatorResize),
         }}
       >
@@ -1079,7 +1092,7 @@ function AppWithConfig({
           className="relative max-h-full"
           data-device-chrome={useChrome ? "on" : "off"}
           style={{
-            width: simulatorResize.width,
+            width: simulatorFrameWidth,
             aspectRatio: containerAspectRatio,
             transition: simulatorFrameLayoutTransition(simulatorResize),
             willChange:
@@ -1175,24 +1188,28 @@ function AppWithConfig({
               <span className="text-[13px] font-medium">Drop media or .ipa</span>
             </div>
           )}
-          <SimulatorResizeCornerHandle
-            simulatorResize={simulatorResize}
-            deviceType={deviceType}
-            streamConfig={activeStreamConfig}
-            containerWidth={deviceRenderedWidth || simulatorResize.width}
-            containerHeight={
-              deviceRenderedHeight ||
-              (containerAspectRatioValue > 0 ? simulatorResize.width / containerAspectRatioValue : 0)
-            }
-          />
-          <SimulatorResizeSizeBadge
-            width={deviceRenderedWidth || simulatorResize.width}
-            height={
-              deviceRenderedHeight ||
-              (containerAspectRatioValue > 0 ? simulatorResize.width / containerAspectRatioValue : 0)
-            }
-            visible={simulatorResize.isResizing || simulatorResize.isInertia}
-          />
+          {!multiDisplay && (
+            <>
+              <SimulatorResizeCornerHandle
+                simulatorResize={simulatorResize}
+                deviceType={deviceType}
+                streamConfig={activeStreamConfig}
+                containerWidth={deviceRenderedWidth || simulatorFrameWidth}
+                containerHeight={
+                  deviceRenderedHeight ||
+                  (containerAspectRatioValue > 0 ? simulatorFrameWidth / containerAspectRatioValue : 0)
+                }
+              />
+              <SimulatorResizeSizeBadge
+                width={deviceRenderedWidth || simulatorFrameWidth}
+                height={
+                  deviceRenderedHeight ||
+                  (containerAspectRatioValue > 0 ? simulatorFrameWidth / containerAspectRatioValue : 0)
+                }
+                visible={simulatorResize.isResizing || simulatorResize.isInertia}
+              />
+            </>
+          )}
         </div>
         <div className={`inline-flex items-center justify-center gap-2 ${multiDisplay ? "" : "max-w-full"}`}>
           <SimulatorToolbar
@@ -1231,24 +1248,6 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <SimulatorToolbar.RotateButton title="Rotate device" />
-              {multiDisplay && (
-                <SimulatorToolbar.Button
-                  aria-label="3D device model"
-                  aria-pressed={duo3D}
-                  title={duo3D ? "Show flat stream" : "Show 3D device"}
-                  onClick={() => setDuoView(duo3D ? "2d" : "3d")}
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    letterSpacing: 0.2,
-                    ...(duo3D
-                      ? { color: "rgba(255,255,255,0.95)", background: "rgba(255,255,255,0.12)" }
-                      : {}),
-                  }}
-                >
-                  3D
-                </SimulatorToolbar.Button>
-              )}
               {multiDisplay && !duo3D && (
                 <DeviceDisplayToolbarButton
                   displays={displays ?? []}
@@ -1269,13 +1268,26 @@ function AppWithConfig({
                     streaming={streaming}
                     onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
                   />
+                  <DuoHardwareMenu onPress={onDuoHardwarePress} />
                   <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
-                  <DuoHardwareControls onPress={onDuoHardwarePress} />
-                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+                  <SimulatorToolbar.Button
+                    aria-label="3D device model"
+                    aria-pressed={duo3D}
+                    title={duo3D ? "Show flat stream" : "Show 3D device"}
+                    onClick={() => setDuoView(duo3D ? "2d" : "3d")}
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      letterSpacing: 0.2,
+                      ...(duo3D
+                        ? { color: "rgba(255,255,255,0.95)", background: "rgba(255,255,255,0.12)" }
+                        : {}),
+                    }}
+                  >
+                    3D
+                  </SimulatorToolbar.Button>
                   <DeviceHingeControls
                     angle={hingeAngle}
-                    folding={foldGestureEnabled}
-                    onFoldingChange={setFoldGestureEnabled}
                     onChange={setHinge}
                     onPose={setPose}
                   />
