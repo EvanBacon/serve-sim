@@ -312,10 +312,16 @@ async function findAvailablePort(start: number): Promise<number> {
 }
 
 async function ensureBooted(udid: string): Promise<void> {
+  // `simctl bootstatus` waits for a boot transition. On a device that is
+  // already Booted (CI boots before the suite) that wait runs until its
+  // timeout, and `--detach` callers give up first. Only monitor a boot we
+  // just requested.
+  const wasBooted = isDeviceBooted(udid);
   bootDevice(udid);
-  // Boot was requested by bootDevice. Passing `-b` redundantly can remain
-  // blocked on Xcode 27 even after the device is Booted. Monitor the existing
-  // transition; bootstatus still waits for services, not merely the state flag.
+  if (wasBooted) return;
+  // Passing `-b` redundantly can remain blocked on Xcode 27 even after the
+  // device is Booted. Monitor the existing transition; bootstatus still waits
+  // for services, not merely the state flag.
   try {
     execFileSync("xcrun", simctlBootStatusArguments(udid), {
       encoding: "utf-8",
