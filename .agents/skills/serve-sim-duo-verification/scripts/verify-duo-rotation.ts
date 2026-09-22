@@ -1,9 +1,11 @@
-// Run with Bun against the local server: bun scripts/verify-duo-rotation.ts <udid> [port]
+// Run with Bun against the local server: bun .agents/skills/serve-sim-duo-verification/scripts/verify-duo-rotation.ts <udid> [port]
 // Safari must be foreground; its cover UI supports portrait and both landscapes.
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import WebSocket from "ws";
-import { parseIntegratedScreenOrientations } from "../src/duo-state";
+import { createRequire } from "node:module";
+const require = createRequire(new URL("../../../../packages/serve-sim/package.json", import.meta.url));
+const WebSocket = require("ws");
+import { parseIntegratedScreenOrientations } from "../../../../packages/serve-sim/src/duo-state";
 
 const [udid, port = "3200"] = process.argv.slice(2);
 if (!udid) throw new Error("Pass the booted Duo UDID");

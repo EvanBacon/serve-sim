@@ -61,6 +61,8 @@ const MJPEG_TRAILER = Buffer.from("\r\n", "ascii");
 // 2s liveness window instead of re-encoding identical pixels in Swift.
 const MJPEG_IDLE_REPLAY_MS = 1_000;
 const TOUCH_TAP_MAX_DISTANCE = 0.004;
+// Matches the cubic ease-out sweep in HIDInjector.setPose.
+const DUO_FOLD_DURATION_MS = 800;
 
 type TouchGestureLog = {
   eventId?: number;
@@ -305,7 +307,7 @@ export class DeviceSession {
         if (fraction > 0 && fraction <= 1) {
           // Invert the guest's 800 ms cubic ease-out sweep. Starting on its
           // first sample avoids animating before the HID bridge is ready.
-          fold.began = performance.now() - 800 * (1 - Math.cbrt(1 - fraction));
+          fold.began = performance.now() - DUO_FOLD_DURATION_MS * (1 - Math.cbrt(1 - fraction));
           this.tickDuoFold();
         }
       }
@@ -383,7 +385,7 @@ export class DeviceSession {
   private duoFoldAngle(): number {
     const fold = this.duoFold;
     if (!fold || fold.began == null) return this.hingeDegrees ?? 0;
-    const progress = Math.min(1, Math.max(0, (performance.now() - fold.began) / 800));
+    const progress = Math.min(1, Math.max(0, (performance.now() - fold.began) / DUO_FOLD_DURATION_MS));
     return fold.from + (fold.target - fold.from) * (1 - (1 - progress) ** 3);
   }
 
@@ -391,7 +393,7 @@ export class DeviceSession {
     clearTimeout(this.duoFoldTimer);
     if (this.isStopped() || this.duoFold?.began == null) return;
     this.renderDuoFrame();
-    if (performance.now() < this.duoFold.began + 800) {
+    if (performance.now() < this.duoFold.began + DUO_FOLD_DURATION_MS) {
       this.duoFoldTimer = setTimeout(() => this.tickDuoFold(), 16);
       this.duoFoldTimer.unref?.();
     }

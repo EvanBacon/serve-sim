@@ -51,7 +51,7 @@ Use [verification.md](verification.md) for historical validation; its earlier
   Check closed, book,
   and open poses. Guest UI orientation comes from panel readback, not the model
   target (the inner panel's natural axis differs from the cover).
-  With Safari foreground, run `bun packages/serve-sim/scripts/verify-duo-rotation.ts <udid> [port]`
+  With Safari foreground, run `bun .agents/skills/serve-sim-duo-verification/scripts/verify-duo-rotation.ts <udid> [port]`
   to verify all four physical orientations and app UI rotation in all three poses.
   Apps retain their supported-orientation policy: for example, Safari excludes
   upside-down portrait on the cover, and Settings stays portrait on the cover.
@@ -140,7 +140,7 @@ Relevant automated suites in `src/__tests__`:
 | Bent-screen touch mapping | `duo-projection.test.ts`, `duo-ax-frame.test.ts`, `duo-home-gesture.test.ts` |
 | Static-frame redraw, rotation interpolation, idle sharpening, lifecycle | `device-session-lifecycle.test.ts` |
 | Panel selection and screenshots | `device-displays.test.ts`, `screenshot-toast.test.tsx` |
-| Stream framing | `mjpeg-frame-parser.test.ts` |
+| Stream framing | `mjpeg-frame-parser.test.ts`, `duo-frame-parser.test.ts` |
 
 Run typecheck and lint too. Unit tests do not replace visual checks for color,
 framing, animation smoothness, hover fades, or actual guest screenshot content.
@@ -148,14 +148,12 @@ framing, animation smoothness, hover fades, or actual guest screenshot content.
 ## Known limits and implementation reference
 
 The PNG rendering pipeline remains slower than Device Hub's native composition.
-Local benchmarks improved from roughly 11–12 fps at full resolution to around
-20 fps during motion. This is a measured limitation, not a desired frame-rate
-cap or a claim of Device Hub-equivalent smoothness. Retain idle sharpness while
-improving performance; remeasure after renderer changes. Retain per-panel screen
-textures and skip decoding/uploading unchanged frames during pose animation. A
-subsequent cached-frame benchmark measured roughly 19 ms per frame, versus
-about 48 ms before reuse. Changing app content and moving poses can cost more;
-this is not a measured end-to-end browser frame rate.
+Retain full-resolution idle rendering, per-panel screen textures, and skip
+decoding/uploading unchanged frames during pose animation. Rotation-only frames
+use one render pass; hinge changes still allow skinning to settle. Under HTTP
+backpressure, skip obsolete frames instead of building an animation queue.
+Native timings below exclude browser decoding and do not guarantee sustained
+60 fps for changing app content. Remeasure after renderer changes.
 
 Device Hub uses a perspective camera, not a confirmed orthographic camera.
 Its focal length is adjustable and the sensor model is 36 mm.
@@ -166,12 +164,6 @@ same field of view.
 The shell material table and object lighting were inspected in Xcode 27.1's
 CoreDevicePopDeviceKitExtension. These private interfaces, material names, and
 screen device names must be rechecked after Xcode/runtime updates.
-
-Performance follow-up: fast lossless PNG export and retained screen textures
-measured about 15 ms per cached frame locally. Rotation-only frames use one
-render pass; hinge changes still allow skinning to settle. Under HTTP backpressure,
-skip obsolete frames instead of building an animation queue. These timings exclude
-browser decoding and are not a claim of sustained 60 fps for changing app content.
 
 The native encoder round-trip test can be run from the repository root:
 
@@ -190,7 +182,7 @@ This renders colored markers on both inner leaves at 100°, 130°, 170°, and 18
 and on the closed cover, in all four rotations. Projected marker centers must
 land within two output pixels of their rendered centers at 1500×1350.
 
-### September 22 performance regression notes
+### Performance regression checks
 
 - Native frame parsing copies each pipe byte once and parses each header once;
   fragmented PNG frames must not repeatedly copy the accumulated frame.

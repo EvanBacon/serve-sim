@@ -29,9 +29,3 @@ export function HardwareKey({ value, onPress, iconRotation = 0 }: { value: Key; 
     <value.Icon size={18} strokeWidth={2} aria-hidden="true" />
   </SimulatorToolbar.Button>;
 }
-
-export function DuoHardwareControls({ onPress }: { onPress: Press }) {
-  return <div role="group" aria-label="Duo hardware buttons" className="flex items-center">
-    {duoHardwareKeys.slice(0, 2).map((key) => <HardwareKey key={key.name} value={key} onPress={onPress} />)}
-  </div>;
-}

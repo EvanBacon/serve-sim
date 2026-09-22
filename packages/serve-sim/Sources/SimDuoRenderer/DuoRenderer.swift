@@ -30,7 +30,6 @@ import UniformTypeIdentifiers
     private var screenTextures: [String: TextureResource] = [:]
     private var screenFrames: [String: Data] = [:]
     private var lastAngle: Double = .nan
-    private var lastRoll: Double = .nan
     // Preserve fine screen detail on Retina displays and antialias the shell.
     var width: Int { texture.width }
     var height: Int { texture.height }
@@ -123,7 +122,6 @@ import UniformTypeIdentifiers
         // Camera rotation and texture-only frames do not change skinning: one pass.
         let poseChanged = lastAngle != angle
         lastAngle = angle
-        lastRoll = roll
         let passes = poseChanged ? 2 : 1
         for _ in 0..<passes {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in

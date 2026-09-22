@@ -73,16 +73,11 @@ The full camera/permissions E2E suite is not included in these results.
 
 ## Repeating a check
 
-```sh
-bun run packages/serve-sim/build.ts
-node packages/serve-sim/dist/serve-sim.js --port 3399
-node packages/serve-sim/dist/serve-sim.js pose open -d <udid>
-node packages/serve-sim/dist/serve-sim.js pose book -d <udid>
-xcrun devicectl device motion hinge-angle --device <udid> --timeout 5
-xcrun simctl io <udid> enumerate
-```
+Use the repository's [Duo verification skill](../../../../.agents/skills/serve-sim-duo-verification/SKILL.md)
+for live-check prerequisites, commands, and the rotation verifier. Reusable agent
+verification scripts and procedures belong with that skill; this document keeps
+historical results. The current regression contract remains in
+[Expected behavior](expected-behavior.md).
 
-Compare the preview's selected display with the latest SpringBoard
-`DisplayContentMode` event containing `.cover:pri` or `.inner:pri`. Repeat after
-`pose closed` to test the opposite direction. If input is shadowed, use the
-explicit `repair-input` procedure in the package README, then restart serve-sim.
+The pinch-to-fold, mouse drag-to-open, and separate 2D mode results above describe
+removed features. They are not current acceptance criteria.
