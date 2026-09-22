@@ -363,7 +363,9 @@ function App() {
       />
     );
   } else {
-    const leftPad = gridOpen ? gridPanelWidth + 36 : 24;
+    // Sidebar floats 12px off the left edge; keep a 24px gap to the placeholder.
+    // Closed inset matches the right page margin so neither side leaves a rail.
+    const leftPad = gridOpen ? 12 + gridPanelWidth + 24 : 24;
     mainView = (
       <div
         className="h-screen flex flex-col items-center justify-center gap-3 bg-page font-system box-border [transition:padding_0.25s_ease]"
@@ -997,14 +999,15 @@ function AppWithConfig({
     : simulatorResize.width;
 
   // Only shift the simulator when a panel would otherwise collide with it.
-  // Tools/DevTools dock on the right; the device sidebar docks on the left, so
-  // each pushes the centered simulator the opposite way.
+  // Tools/DevTools float on the right and the device sidebar floats on the
+  // left, both inset by PANEL_EDGE_OFFSET, so each pushes the centered
+  // simulator the opposite way.
   const PANEL_EDGE_OFFSET = 12;
   const PANEL_GAP = 24;
   const deviceWidth = deviceRenderedWidth > 0
     ? Math.min(deviceRenderedWidth, simulatorFrameWidth)
     : simulatorFrameWidth;
-  // Shift needed to clear a docked panel of `panelWidthPx` on the given side
+  // Shift needed to clear a floating panel of `panelWidthPx` on the given side
   // without ever pushing the device under the opposite edge.
   const shiftToClear = (panelWidthPx: number): number => {
     if (panelWidthPx <= 0) return 0;

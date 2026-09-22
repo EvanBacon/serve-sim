@@ -23,7 +23,8 @@ export function simulatorFrameLayoutTransition({
     : SIMULATOR_RESIZE_LAYOUT_TRANSITION;
 }
 
-export const SIMULATOR_RESIZE_PAGE_TRANSITION = "padding-right 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
+export const SIMULATOR_RESIZE_PAGE_TRANSITION =
+  "padding-left 0.24s cubic-bezier(0.22, 1, 0.36, 1), padding-right 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
 
 // ─── Visual constants for the curved-arc corner handle ────────────────────
 export const SIMULATOR_RESIZE_EASE = "cubic-bezier(0.2, 0.82, 0.22, 1)";
