@@ -39,7 +39,7 @@ private func readRequest() throws -> (Request, Data)? {
                 let rendered = try await renderer.render(jpeg: jpeg, panel: request.panel, angle: request.hingeDegrees, roll: request.rollDegrees, fullResolution: request.fullResolution ?? true)
                 let header = try JSONSerialization.data(withJSONObject: [
                     "jpegLength": rendered.count, "width": renderer.width, "height": renderer.height,
-                    "pieces": renderer.pieces, "panel": request.panel, "hingeDegrees": request.hingeDegrees,
+                    "pieces": renderer.pieces, "hardware": renderer.hardware, "panel": request.panel, "hingeDegrees": request.hingeDegrees,
                 ])
                 var length = UInt32(header.count).bigEndian
                 try FileHandle.standardOutput.write(contentsOf: Data(bytes: &length, count: 4))

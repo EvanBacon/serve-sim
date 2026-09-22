@@ -33,6 +33,14 @@ try:
  for panel,angle,roll in [('inner',a,r) for a in [180,170,130,100] for r in [0,90,180,270]] + [('cover',0,r) for r in [0,90,180,270]]:
   h=json.dumps(dict(jpegLength=len(source),panel=panel,hingeDegrees=angle,rollDegrees=roll,fullResolution=False)).encode();p.stdin.write(struct.pack('>I',len(h))+h+source);p.stdin.flush()
   out=json.loads(exact(p.stdout,struct.unpack('>I',exact(p.stdout,4))[0]));png=exact(p.stdout,out['jpegLength']);render=Image.open(io.BytesIO(png)).convert('RGB')
+  hardware=out['hardware']
+  assert len(hardware)==4
+  rgba=Image.open(io.BytesIO(png)).convert('RGBA')
+  for point in hardware:
+   assert all(math.isfinite(point[k]) for k in ['x','y','angle'])
+   x,y=round(point['x']*rgba.width),round(point['y']*rgba.height)
+   assert 0 <= x < rgba.width and 0 <= y < rgba.height
+   assert max(rgba.getpixel((xx,yy))[3] for xx in range(x-2,x+3) for yy in range(y-2,y+3)) > 200, (panel,angle,roll,point)
   errors=[]
   for u,v,c in markers:
    xy=project(out['pieces'][0 if panel=='cover' or v>.5 else 1],u,v);x,y=xy[0]*render.width,xy[1]*render.height

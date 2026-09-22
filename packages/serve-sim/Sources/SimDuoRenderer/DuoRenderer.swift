@@ -21,6 +21,8 @@ import UniformTypeIdentifiers
     private let flatBounds: BoundingBox
     private let cameraDistance: Float
     private(set) var pieces: [[[Double]]] = []
+    private let hardwareProjection: DuoHardwareProjection
+    private(set) var hardware: [[String: Double]] = []
     private let coverProjection: DuoScreenProjection
     private let innerProjection: DuoScreenProjection
     private let cover: (ModelEntity, Int)
@@ -51,6 +53,7 @@ import UniformTypeIdentifiers
         self.inner = inner
         // The inner screen's framebuffer is authored a quarter turn around its UVs.
         try Self.rotateTexture(on: inner.0, material: inner.1)
+        hardwareProjection = try DuoHardwareProjection(entity: inner.0)
         coverProjection = try DuoScreenProjection(slot: cover, inner: false)
         innerProjection = try DuoScreenProjection(slot: inner, inner: true)
         renderer = try RealityRenderer()
@@ -129,6 +132,7 @@ import UniformTypeIdentifiers
                 } catch { continuation.resume(throwing: error) }
             }
         }
+        hardware = hardwareProjection.project(cameraDistance: cameraDistance, fieldOfView: fieldOfView, aspect: Float(width) / Float(height))
         pieces = (panel == "cover" ? coverProjection : innerProjection).pieces(cameraDistance: cameraDistance, fieldOfView: fieldOfView, aspect: Float(width) / Float(height))
         // RealityRenderer outputs Display P3; sampling its sRGB Metal texture
         // yields linear values. Let Core Image convert the gamut and

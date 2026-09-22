@@ -1,3 +1,4 @@
+import { createDuoFrameParser } from "./duo-frame-parser";
 import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -10,12 +11,13 @@ export interface DuoProjection {
   hingeDegrees: number;
   /** Four projected raw-buffer corners followed by [u, v, width, height]. */
   pieces: number[][][];
+  /** Projected physical button centers and clockwise edge tangent, in key order. */
+  hardware?: { x: number; y: number; angle: number }[];
 }
 
 /** Persistent RealityKit worker. At most one immutable JPEG is in flight. */
 export class DuoRenderer {
   private readonly child: ChildProcessWithoutNullStreams;
-  private bytes = Buffer.alloc(0);
   private pending?: { resolve: (frame: { jpeg: Buffer; projection: DuoProjection }) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
   private closed = false;
 
@@ -32,27 +34,17 @@ export class DuoRenderer {
     this.child.on("error", (error) => this.fail(error));
     this.child.stdin.on("error", (error) => this.fail(error));
     this.child.on("exit", () => this.fail(new Error("Duo renderer exited")));
+    const parser = createDuoFrameParser((frame) => {
+      const pending = this.pending;
+      this.pending = undefined;
+      if (pending) {
+        clearTimeout(pending.timer);
+        pending.resolve(frame);
+      }
+    });
     this.child.stdout.on("data", (chunk: Buffer) => {
-      this.bytes = Buffer.concat([this.bytes, chunk]);
-      try {
-        if (this.bytes.length < 4) return;
-        const headerLength = this.bytes.readUInt32BE(0);
-        if (headerLength < 1 || headerLength > 65536) throw new Error("Invalid Duo render header");
-        if (this.bytes.length < 4 + headerLength) return;
-        const header = JSON.parse(this.bytes.subarray(4, 4 + headerLength).toString()) as DuoProjection & { jpegLength: number };
-        if (!Number.isInteger(header.jpegLength) || header.jpegLength < 1 || header.jpegLength > 32_000_000) throw new Error("Invalid Duo render frame");
-        const end = 4 + headerLength + header.jpegLength;
-        if (this.bytes.length < end) return;
-        const jpeg = this.bytes.subarray(4 + headerLength, end);
-        this.bytes = this.bytes.subarray(end);
-        const pending = this.pending;
-        this.pending = undefined;
-        if (pending) {
-          clearTimeout(pending.timer);
-          const { jpegLength: _length, ...projection } = header;
-          pending.resolve({ jpeg, projection });
-        }
-      } catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))); }
+      try { parser.push(chunk); }
+      catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))); }
     });
   }
 

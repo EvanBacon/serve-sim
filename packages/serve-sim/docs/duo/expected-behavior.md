@@ -67,7 +67,9 @@ Use [verification.md](verification.md) for historical validation; its earlier
 - [ ] Power/lock and camera controls are positioned outside their physical device
   edge. Volume down/up sit outside the volume-button edge, above it at the
   default orientation. There are no volume controls in the main control bar.
-- [ ] Each control position follows the projected physical edge in all four
+- [ ] Each control is centered on its actual V68 button mesh, skinned and
+  projected with the model; do not estimate positions from screen-edge fractions.
+  Each control position follows the projected physical edge in all four
   orientations, on both cover and inner displays. Do not anchor them to the
   viewport's axis-aligned right/top bounds. Icons and tooltips stay upright,
   including when the device is upside down. Open sidebars must not cover them.
@@ -182,3 +184,16 @@ python3 packages/serve-sim/scripts/verify-duo-projection.py
 This renders colored markers on both inner leaves at 100°, 130°, 170°, and 180°,
 and on the closed cover, in all four rotations. Projected marker centers must
 land within two output pixels of their rendered centers at 1500×1350.
+
+### September 22 performance regression notes
+
+- Native frame parsing copies each pipe byte once and parses each header once;
+  fragmented PNG frames must not repeatedly copy the accumulated frame.
+- PNG encoding preserves RGBA and sRGB, vectorizes unpremultiplication/filtering,
+  and compresses four independent DEFLATE stripes in parallel. Check images with
+  partial alpha, padded rows, small widths, and stripe boundaries.
+- Local 1500×1350 synthetic-screen benchmark (30 measured frames per motion):
+  median rotation frame time improved from about 22 ms to 15 ms; folding from
+  25 ms to 19 ms. PNG size stayed approximately 342 KiB for rotation and
+  135–136 KiB for folding. These are native round-trip measurements, not a
+  browser frame-rate guarantee; retain full-resolution idle rendering.
