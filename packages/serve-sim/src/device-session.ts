@@ -187,6 +187,9 @@ export class DeviceSession {
   private width = 0;
   private height = 0;
   private orientation = "portrait";
+  private duoViewOrientation = "portrait";
+  private duoViewRoll = 0;
+  private duoRotationTimer?: ReturnType<typeof setTimeout>;
 
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
@@ -195,6 +198,7 @@ export class DeviceSession {
   private duoProjection?: DuoProjection;
   private duoRenderBusy = false;
   private duoRenderPending = false;
+  private duoSettleTimer?: ReturnType<typeof setTimeout>;
   private readonly duoResponses = new Set<ServerResponse>();
   private duoMonitor?: Pick<DuoStateMonitor, "close" | "refreshOrientation">;
   private hingeDegrees?: number;
@@ -261,6 +265,8 @@ export class DeviceSession {
   close(): void {
     if (this.phase === "stopped") return;
     this.phase = "stopped";
+    clearTimeout(this.duoSettleTimer);
+    clearTimeout(this.duoRotationTimer);
     this.duoMonitor?.close();
     this.duoRenderer?.close();
     this.duoResponses.clear();
@@ -320,19 +326,23 @@ export class DeviceSession {
     this.renderDuoFrame();
   }
 
-  private renderDuoFrame(): void {
+  private renderDuoFrame(fullResolution = false): void {
     const renderer = this.duoRenderer;
     const jpeg = this.latestJpeg();
     if (!this.duoResponses.size || !renderer || !jpeg || this.hingeDegrees == null || this.isStopped()) return;
+    if (!fullResolution) {
+      clearTimeout(this.duoSettleTimer);
+      this.duoSettleTimer = setTimeout(() => this.renderDuoFrame(true), 180);
+      this.duoSettleTimer.unref?.();
+    }
     if (this.duoRenderBusy) { this.duoRenderPending = true; return; }
     this.duoRenderBusy = true;
     this.duoRenderPending = false;
     const panel = this.width === 1398 || this.height === 1398 ? "cover" : "inner";
-    // 3D framing stays planted while folding. Guest UI orientation used to add
-    // ±90/180 roll and spun the model when SpringBoard flipped during a close.
-    // Inner keeps a fixed quarter-turn for its authored landscape UVs only.
-    const roll = panel === "inner" ? 90 : 0;
-    void renderer.render(jpeg, panel, this.hingeDegrees, roll).then(({ jpeg: rendered, projection }) => {
+    // Guest orientation and active display can change during folding. Keep the
+    // physical model stable; only an explicit Rotate command changes its roll.
+    const roll = this.duoViewRoll;
+    void renderer.render(jpeg, panel, this.hingeDegrees, roll, fullResolution).then(({ jpeg: rendered, projection }) => {
       if (this.isStopped() || this.duoRenderer !== renderer) return;
       if (JSON.stringify(this.duoProjection) !== JSON.stringify(projection)) {
         this.duoProjection = projection;
@@ -352,6 +362,23 @@ export class DeviceSession {
       this.duoRenderBusy = false;
       if (this.duoRenderPending) this.renderDuoFrame();
     });
+  }
+
+  private animateDuoRotation(orientation: string): void {
+    clearTimeout(this.duoRotationTimer);
+    const target = { portrait: 0, landscape_left: -90, portrait_upside_down: -180, landscape_right: 90 }[orientation] ?? 0;
+    const start = this.duoViewRoll;
+    const delta = ((target - start + 540) % 360) - 180;
+    const began = performance.now();
+    const tick = () => {
+      if (this.isStopped()) return;
+      const progress = Math.min(1, (performance.now() - began) / 300);
+      const eased = progress * progress * (3 - 2 * progress);
+      this.duoViewRoll = progress === 1 ? target : start + delta * eased;
+      this.renderDuoFrame();
+      if (progress < 1) this.duoRotationTimer = setTimeout(tick, 16);
+    };
+    tick();
   }
 
   private latestJpeg(): Buffer | null {
@@ -393,7 +420,7 @@ export class DeviceSession {
       this.renderDuoFrame();
       res.once("close", () => {
         this.duoResponses.delete(res);
-        if (!this.duoResponses.size) { this.duoRenderer?.close(); this.duoRenderer = undefined; }
+        if (!this.duoResponses.size) { clearTimeout(this.duoSettleTimer); this.duoRenderer?.close(); this.duoRenderer = undefined; }
       });
     })().catch((error) => this.handleStreamError(res, error));
   }
@@ -604,9 +631,12 @@ export class DeviceSession {
         const value = ORIENTATION_BY_NAME[m.orientation];
         if (value != null && await this.hid.orientation(value)) {
           this.recordHidEvent(tag, m);
-          if (m.orientation !== this.orientation) {
+          if (m.orientation !== this.orientation || m.orientation !== this.duoViewOrientation) {
             this.orientation = m.orientation;
+            this.duoViewOrientation = m.orientation;
+            this.animateDuoRotation(m.orientation);
             this.broadcastConfig();
+            this.renderDuoFrame();
           }
         }
         break;
@@ -802,8 +832,8 @@ export class DeviceSession {
 
   // ── Config ───────────────────────────────────────────────────────────────
 
-  screenConfig(): { width: number; height: number; orientation: string; hingeDegrees?: number } {
-    return { width: this.width, height: this.height, orientation: this.orientation, ...(this.hingeDegrees == null ? {} : { hingeDegrees: this.hingeDegrees }) };
+  screenConfig(): { width: number; height: number; orientation: string; hingeDegrees?: number; duoViewOrientation?: string } {
+    return { width: this.width, height: this.height, orientation: this.orientation, ...(this.hingeDegrees == null ? {} : { hingeDegrees: this.hingeDegrees, duoViewOrientation: this.duoViewOrientation }) };
   }
 
   private configFrame(): Buffer | null {

@@ -56,12 +56,12 @@ export class DuoRenderer {
     });
   }
 
-  render(jpeg: Uint8Array, panel: "cover" | "inner", hingeDegrees: number, rollDegrees: number): Promise<{ jpeg: Buffer; projection: DuoProjection }> {
+  render(jpeg: Uint8Array, panel: "cover" | "inner", hingeDegrees: number, rollDegrees: number, fullResolution = false): Promise<{ jpeg: Buffer; projection: DuoProjection }> {
     if (this.closed || this.pending) return Promise.reject(new Error("Duo renderer is unavailable or busy"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.fail(new Error("Duo renderer timed out")), 10000);
       this.pending = { resolve, reject, timer };
-      const header = Buffer.from(JSON.stringify({ jpegLength: jpeg.length, panel, hingeDegrees, rollDegrees }));
+      const header = Buffer.from(JSON.stringify({ jpegLength: jpeg.length, panel, hingeDegrees, rollDegrees, fullResolution }));
       const prefix = Buffer.alloc(4);
       prefix.writeUInt32BE(header.length);
       // Copy native frame storage before its callback returns and it is reused.

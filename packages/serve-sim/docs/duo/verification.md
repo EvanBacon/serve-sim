@@ -1,5 +1,8 @@
 # Duo verification
 
+For the current feature contract and future regression checks, see
+[Expected behavior](expected-behavior.md). The records below are historical.
+
 Validated locally on September 20, 2026 with Xcode 27.1, iOS 27.1 iPhone Duo,
 Node 24, and the rebuilt local CLI. Apple's private beta interfaces can change.
 

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   defaultDeviceDisplay,
+  screenshotDisplayName,
   matchDeviceDisplay,
   nameForDisplayRole,
   pixelSizesMatch,
@@ -43,4 +44,16 @@ describe("device display helpers", () => {
     expect(nameForDisplayRole("inner")).toBe("Inner");
     expect(nameForDisplayRole("display", "LCD")).toBe("LCD");
   });
+});
+
+test("screenshots select the streamed display even after rotation", () => {
+  const displays = [
+    { width: 1398, height: 2034, role: "cover" as const },
+    { width: 2007, height: 2853, role: "inner" as const },
+  ];
+  for (const [width, height, name] of [[2007, 2853, "primary-1"], [2853, 2007, "primary-1"], [1398, 2034, "primary"], [2034, 1398, "primary"]] as const) {
+    expect(screenshotDisplayName(matchDeviceDisplay(displays, width, height)?.role)).toBe(name);
+  }
+  expect(screenshotDisplayName("display")).toBeUndefined();
+  expect(screenshotDisplayName(null)).toBeUndefined();
 });

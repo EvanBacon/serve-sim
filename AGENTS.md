@@ -58,3 +58,9 @@ Typical camera e2e flow: rebuild, `camera --stop-webcam`, `simctl terminate`
 the app, `camera <bundleId> --file <img> --mirror on` to re-inject, `openurl`
 to load the project, `tap 0.5 0.9` for the shutter, then read the saved JPEG
 off disk to verify (see the path under "agent-browser" above).
+
+## Duo regression contract
+
+- For changes to Duo rendering, input, controls, or capture, consult
+  [the expected-behavior checklist](packages/serve-sim/docs/duo/expected-behavior.md).
+  Update it when intended behavior changes and validate the relevant checks.

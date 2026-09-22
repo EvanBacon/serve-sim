@@ -5,7 +5,7 @@ import { DuoHardwareControls } from "./duo-hardware-controls";
 
 type Press = Parameters<typeof DuoHardwareControls>[0]["onPress"];
 
-/** Collapses Duo hardware keys (volume / power / camera) into a … overflow menu. */
+/** Keeps volume controls in the toolbar; power and camera sit beside the device. */
 export function DuoHardwareMenu({ onPress }: { onPress: Press }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -34,7 +34,7 @@ export function DuoHardwareMenu({ onPress }: { onPress: Press }) {
         aria-label="More Duo controls"
         aria-haspopup="menu"
         aria-expanded={open}
-        title="Volume, power, and camera control"
+        title="Volume controls"
         onClick={() => setOpen((value) => !value)}
         style={
           open

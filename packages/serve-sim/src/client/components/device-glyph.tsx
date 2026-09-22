@@ -4,9 +4,7 @@ const SCREEN_ON_FILL = "#47b7ff";
 
 // Compact device-family glyphs for the sidebar rows. Stroked outlines keyed off
 // `getDeviceType(name)` — a stand-in when a device has no live stream thumbnail.
-// Duo uses a hinged two-panel silhouette (Apple ships no SF Symbol for iPhone Duo;
-// `flipphone` is a candy-bar flip phone). Geometry mirrors the Duo simdevicetype
-// framebuffer mask: flat hinge edge, rounded outer corners.
+// Duo uses the custom cover-display silhouette.
 export function DeviceGlyph({
   type,
   size = 20,
@@ -31,23 +29,18 @@ export function DeviceGlyph({
   };
 
   if (duo) {
-    // Left / right leaves open at the hinge (x ≈ 12). Outer corners rounded;
-    // hinge edge stays square — same silhouette language as Duo's framebuffer mask.
-    const left =
-      "M10.35 3.35H5.15C3.96 3.35 3.15 4.22 3.15 5.45v13.1c0 1.23.81 2.1 2 2.1h5.2V3.35Z";
-    const right =
-      "M13.65 3.35h5.2c1.19 0 2 .87 2 2.1v13.1c0 1.23-.81 2.1-2 2.1h-5.2V3.35Z";
     return (
-      <svg {...common} data-testid="device-glyph-duo">
+      <svg width={size} height={size} viewBox="0 0 102 102" fill="currentColor" data-testid="device-glyph-duo">
         {screenOn && (
-          <>
-            <path d={left} fill={SCREEN_ON_FILL} stroke="none" data-testid="device-glyph-screen-on" />
-            <path d={right} fill={SCREEN_ON_FILL} stroke="none" />
-          </>
+          <path
+            d="M24 10H70C75.5229 10 80 14.4772 80 20V83C80 88.5228 75.5228 93 70 93H24C22.8954 93 22 92.1046 22 91V12C22 10.8954 22.8954 10 24 10Z"
+            fill={SCREEN_ON_FILL}
+            data-testid="device-glyph-screen-on"
+          />
         )}
-        <path d={left} />
-        <path d={right} />
-        <line x1="12" y1="7.25" x2="12" y2="16.75" />
+        <path d="M17 91V12C17 8.13401 20.134 5 24 5H70C78.2843 5 85 11.7157 85 20V83L84.9951 83.3867C84.7932 91.3638 78.3638 97.7932 70.3867 97.9951L70 98V93C75.5228 93 80 88.5228 80 83V20C80 14.4772 75.5229 10 70 10H24C22.8954 10 22 10.8954 22 12V91C22 92.1046 22.8954 93 24 93V98L23.6396 97.9912C20.0605 97.8097 17.1903 94.9395 17.0088 91.3604L17 91ZM70 93V98H24V93H70Z" />
+        <circle cx="69" cy="21" r="4" />
+        <path d="M40 88.5C40 87.6716 40.6716 87 41.5 87H61.5C62.3284 87 63 87.6716 63 88.5C63 89.3284 62.3284 90 61.5 90H41.5C40.6716 90 40 89.3284 40 88.5Z" />
       </svg>
     );
   }

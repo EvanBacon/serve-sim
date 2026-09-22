@@ -16,9 +16,9 @@ describe("DeviceHingeControls", () => {
   test("renders pose presets without a caption or fold-gesture toggle", () => {
     const html = render();
     expect(html).toContain('aria-label="Fold pose"');
-    expect(html).toContain("Hold Alt (Option) for precise hinge control");
+    expect(html).not.toContain("Hold Alt");
     expect(html).toContain("Folded pose");
-    expect(html).toContain("Cracked open pose");
+    expect(html).toContain("Semi-folded pose");
     expect(html).toContain("Fully open pose");
     expect(html).not.toContain("Fold gesture mode");
     expect(html).not.toContain("Hold ⌥ Alt for precise hinge control");
@@ -28,7 +28,7 @@ describe("DeviceHingeControls", () => {
 
   test("marks the matching pose as pressed", () => {
     const html = render(130);
-    expect(html).toContain("Cracked open pose");
+    expect(html).toContain("Semi-folded pose");
     expect(html).toContain('aria-pressed="true"');
   });
 });

@@ -1,8 +1,6 @@
-import { DuoHardwareMenu } from "./components/duo-hardware-menu";
 import { DuoThreeDView } from "./components/duo-three-d-view";
 import type { DuoProjection } from "../duo-renderer";
 import { DeviceHingeControls } from "./components/device-hinge-controls";
-import { useHingeGesture } from "./hooks/use-hinge-gesture";
 import { createRoot } from "react-dom/client";
 import {
   useCallback,
@@ -39,7 +37,6 @@ import { AxToolbarButton } from "./components/ax-toolbar-button";
 import { ChromeToolbarButton } from "./components/chrome-toolbar-button";
 import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
-import { DeviceDisplayToolbarButton } from "./components/device-display-toolbar-button";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
@@ -64,9 +61,8 @@ import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
 import { useGridDevices } from "./hooks/use-grid-devices";
 import type { DeviceDisplayDescriptor, DeviceKitChromeDescriptor } from "./utils/grid";
-import { matchDeviceDisplay } from "../device-displays";
-import { poseForDisplayRole } from "../device-pose";
-import { duoPreviewIsThreeD, type DuoPreviewMode } from "./utils/duo-preview";
+import { matchDeviceDisplay, screenshotDisplayName } from "../device-displays";
+import { duoPreviewIsThreeD } from "./utils/duo-preview";
 import {
   avccFallbackReducer,
   initialAvccFallback,
@@ -540,10 +536,7 @@ function AppWithConfig({
       replaceState: (url) => window.history.replaceState(null, "", url),
     });
   }, [hideChrome]);
-  // Null keeps the product default: foldables open on the 3D model. "2d" is the
-  // flat-stream opt-out; switching devices clears it back to the default.
-  const [duoView, setDuoView] = useState<DuoPreviewMode | null>(null);
-  const duo3D = duoPreviewIsThreeD(displays?.length ?? 0, duoView);
+  const duo3D = duoPreviewIsThreeD(displays?.length ?? 0);
   // The server can pin the stream codec (`serve-sim --codec mjpeg`) for hosts
   // whose hardware can't encode H.264 — e.g. VMs lacking the high/low-latency
   // H.264 profiles. Treat that as a hard override the viewer can't switch off.
@@ -682,7 +675,7 @@ function AppWithConfig({
             prev &&
             prev.width === cfg.width &&
             prev.height === cfg.height &&
-            prev.orientation === cfg.orientation && prev.hingeDegrees === cfg.hingeDegrees
+            prev.orientation === cfg.orientation && prev.hingeDegrees === cfg.hingeDegrees && prev.duoViewOrientation === cfg.duoViewOrientation
               ? prev
               : cfg,
           );
@@ -719,14 +712,6 @@ function AppWithConfig({
   const onStreamTouch = useCallback((data: any) => sendWs(0x03, data), [sendWs]);
   const onStreamMultiTouch = useCallback((data: any) => sendWs(0x05, data), [sendWs]);
   const onStreamButton = useCallback((button: string) => sendWs(0x04, { button }), [sendWs]);
-  const selectDeviceDisplay = useCallback(
-    (display: DeviceDisplayDescriptor) => {
-      const pose = poseForDisplayRole(display.role);
-      if (pose) sendWs(0x0e, { pose: pose.id });
-      else sendWs(0x0d, { width: display.width, height: display.height });
-    },
-    [sendWs],
-  );
   // Duo fold: pinch / Alt-drag / ctrl-wheel. Plain swipes and scroll stay with the sim.
   const [pendingHinge, setPendingHinge] = useState<number | null>(null);
   const hingeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -787,7 +772,7 @@ function AppWithConfig({
     sendWs(0x07, { orientation });
   }, [sendWs]);
   const currentOrientation =
-    (activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? "portrait";
+    (activeStreamConfig as StreamConfig).duoViewOrientation ?? (activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? "portrait";
   const canRotate = deviceType !== "watch" && deviceType !== "vision";
   const rotateBy = useCallback(
     (direction: "left" | "right") => {
@@ -801,7 +786,6 @@ function AppWithConfig({
   useEffect(() => {
     setLiveStreamConfig(null);
     setWsStreamConfig(null);
-    setDuoView(null);
     setDuoProjection(null);
     setPendingHinge(null);
   }, [config.streamUrl]);
@@ -887,7 +871,6 @@ function AppWithConfig({
   }, [sendKey]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
-  useHingeGesture(simContainerRef, (displays?.length ?? 0) > 1, hingeAngle, setHinge);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
   const [deviceRenderedHeight, setDeviceRenderedHeight] = useState(0);
   useEffect(() => {
@@ -971,7 +954,7 @@ function AppWithConfig({
   }, [sendWs, config.device, rotateBy]);
 
   const uploads = useUploadToasts();
-  const screenshot = useScreenshotToast(config.device);
+  const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
   const mediaDrop = useMediaDrop({
     exec: execOnHost,
     udid: config.device,
@@ -998,11 +981,16 @@ function AppWithConfig({
     initialFit: multiDisplay || initialState?.fit === true,
     onStart: () => setSimFocused(false),
   });
+  const rightPanelWidthPx = devtoolsOpen
+    ? devtoolsPanelWidth
+    : panelOpen
+    ? toolsPanelWidth
+    : 0;
   // Duo never exposes corner-resize — always the largest frame that fits the viewport.
   const simulatorFrameWidth = multiDisplay
     ? getSimulatorFrameMaxWidth(
         containerDefaultWidth,
-        viewportWidth,
+        duo3D ? Math.max(240, viewportWidth - (gridOpen ? gridPanelWidth : 0) - rightPanelWidthPx - 96) : viewportWidth,
         viewportHeight,
         containerAspectRatioValue,
       )
@@ -1027,13 +1015,8 @@ function AppWithConfig({
     const shiftNeeded = 2 * overlap;
     return shiftNeeded <= panelWidthPx + PANEL_GAP ? shiftNeeded : 0;
   };
-  const rightPanelWidthPx = devtoolsOpen
-    ? devtoolsPanelWidth
-    : panelOpen
-    ? toolsPanelWidth
-    : 0;
-  const shiftForRightPanel = shiftToClear(rightPanelWidthPx);
-  const shiftForLeftPanel = shiftToClear(gridOpen ? gridPanelWidth : 0);
+  const shiftForRightPanel = duo3D ? rightPanelWidthPx : shiftToClear(rightPanelWidthPx);
+  const shiftForLeftPanel = duo3D ? (gridOpen ? gridPanelWidth : 0) : shiftToClear(gridOpen ? gridPanelWidth : 0);
 
   return (
     <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
@@ -1056,7 +1039,7 @@ function AppWithConfig({
         <SimulatorToolbar
           exec={execOnHost}
           onRotate={rotateDevice}
-          orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+          orientation={currentOrientation}
           deviceUdid={config.device}
           deviceName={deviceName}
           deviceRuntime={deviceRuntime}
@@ -1089,7 +1072,7 @@ function AppWithConfig({
         </SimulatorToolbar>
         <div
           ref={simContainerRef}
-          className="relative max-h-full"
+          className="relative max-h-full select-none"
           data-device-chrome={useChrome ? "on" : "off"}
           style={{
             width: simulatorFrameWidth,
@@ -1102,8 +1085,8 @@ function AppWithConfig({
         >
           {(() => {
             if (duo3D) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
-              projection={duoProjection} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
-              onError={() => { setDuoView("2d"); toast.error("3D rendering is unavailable. Check the selected Xcode and server log."); }} />;
+              projection={duoProjection} onStreamingChange={setStreaming} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
+              onError={() => toast.error("Device rendering is unavailable. Check the selected Xcode and server log.")} />;
             const streamView = (
               <SimulatorView
                 url={config.url}
@@ -1215,7 +1198,7 @@ function AppWithConfig({
           <SimulatorToolbar
             exec={execOnHost}
             onRotate={rotateDevice}
-            orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+            orientation={currentOrientation}
             deviceUdid={config.device}
             deviceName={deviceName}
             deviceRuntime={deviceRuntime}
@@ -1248,13 +1231,6 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <SimulatorToolbar.RotateButton title="Rotate device" />
-              {multiDisplay && !duo3D && (
-                <DeviceDisplayToolbarButton
-                  displays={displays ?? []}
-                  selectedId={matchedDisplay?.id ?? null}
-                  onSelect={selectDeviceDisplay}
-                />
-              )}
               {!multiDisplay && !!activeChrome && (
                 <ChromeToolbarButton
                   hideChrome={hideChrome}
@@ -1268,25 +1244,9 @@ function AppWithConfig({
                     streaming={streaming}
                     onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
                   />
-                  <DuoHardwareMenu onPress={onDuoHardwarePress} />
                   <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
-                  <SimulatorToolbar.Button
-                    aria-label="3D device model"
-                    aria-pressed={duo3D}
-                    title={duo3D ? "Show flat stream" : "Show 3D device"}
-                    onClick={() => setDuoView(duo3D ? "2d" : "3d")}
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 600,
-                      letterSpacing: 0.2,
-                      ...(duo3D
-                        ? { color: "rgba(255,255,255,0.95)", background: "rgba(255,255,255,0.12)" }
-                        : {}),
-                    }}
-                  >
-                    3D
-                  </SimulatorToolbar.Button>
                   <DeviceHingeControls
+                    orientation={currentOrientation}
                     angle={hingeAngle}
                     onChange={setHinge}
                     onPose={setPose}
@@ -1299,7 +1259,7 @@ function AppWithConfig({
             <SimulatorToolbar
               exec={execOnHost}
               onRotate={rotateDevice}
-              orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+              orientation={currentOrientation}
               deviceUdid={config.device}
               deviceName={deviceName}
               deviceRuntime={deviceRuntime}

@@ -53,3 +53,8 @@ export function nameForDisplayRole(role: DeviceDisplayRole, fallback = "Display"
       return fallback;
   }
 }
+
+/** simctl defaults to the cover even while the inner display is primary. */
+export function screenshotDisplayName(role?: DeviceDisplayRole | null): "primary" | "primary-1" | undefined {
+  return role === "inner" ? "primary-1" : role === "cover" ? "primary" : undefined;
+}

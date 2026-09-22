@@ -5,6 +5,7 @@ private struct Request: Decodable, Sendable {
     let panel: String
     let hingeDegrees: Double
     let rollDegrees: Double
+    let fullResolution: Bool?
 }
 
 private func readExact(_ count: Int) throws -> Data? {
@@ -33,9 +34,9 @@ private func readRequest() throws -> (Request, Data)? {
     @MainActor static func main() async {
         do {
             guard CommandLine.arguments.count == 2 else { throw CocoaError(.fileReadInvalidFileName) }
-            let renderer = try DuoRenderer(modelURL: URL(fileURLWithPath: CommandLine.arguments[1]))
+            let renderer = try await DuoRenderer(modelURL: URL(fileURLWithPath: CommandLine.arguments[1]))
             while let (request, jpeg) = try await Task.detached(operation: { try readRequest() }).value {
-                let rendered = try await renderer.render(jpeg: jpeg, panel: request.panel, angle: request.hingeDegrees, roll: request.rollDegrees)
+                let rendered = try await renderer.render(jpeg: jpeg, panel: request.panel, angle: request.hingeDegrees, roll: request.rollDegrees, fullResolution: request.fullResolution ?? true)
                 let header = try JSONSerialization.data(withJSONObject: [
                     "jpegLength": rendered.count, "width": renderer.width, "height": renderer.height,
                     "pieces": renderer.pieces, "panel": request.panel, "hingeDegrees": request.hingeDegrees,

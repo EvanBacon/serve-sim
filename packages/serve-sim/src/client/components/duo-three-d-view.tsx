@@ -1,17 +1,30 @@
 import { useMjpegStream } from "../hooks/use-mjpeg-stream";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DuoProjection } from "../../duo-renderer";
 import { pointOnDuoScreen } from "../utils/duo-projection";
 
+import { duoHardwarePositions, duoPoseKey } from "../utils/duo-controls-position";
+import { duoHardwareKeys, HardwareKey } from "./duo-hardware-controls";
+
 type Point = { x: number; y: number };
-export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError }: {
+export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError, onHardwarePress, onStreamingChange }: {
   onError?: () => void;
+  onStreamingChange: (streaming: boolean) => void;
+  onHardwarePress: React.ComponentProps<typeof HardwareKey>["onPress"];
   url: string; projection: DuoProjection | null;
   onTouch: (event: { type: string; x: number; y: number; edge?: number }) => void;
   onMultiTouch: (event: { type: string; x1: number; y1: number; x2: number; y2: number }) => void;
 }) {
+  const hardwarePositions = duoHardwarePositions(projection);
+  const poseKey = duoPoseKey(projection);
+  const [settledPose, setSettledPose] = useState<string | null>(null);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledPose(poseKey), 220);
+    return () => clearTimeout(timer);
+  }, [poseKey]);
+  const controlsVisible = projection != null && settledPose === poseKey;
   const image = useRef<HTMLImageElement | null>(null);
-  const { subscribeFrame } = useMjpegStream(url);
+  const { subscribeFrame } = useMjpegStream(url, onStreamingChange);
   const errorHandler = useRef(onError);
   errorHandler.current = onError;
   useEffect(() => {
@@ -53,7 +66,7 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError 
     else { onTouch({ type: "end", ...previous }); points.current.delete(event.pointerId); }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
-  return <div aria-label="Interactive 3D iPhone Duo" className="w-full h-full bg-transparent" style={{ touchAction: "none", cursor: "pointer" }}
+  return <div aria-label="Interactive 3D iPhone Duo" className="relative w-full h-full bg-transparent select-none" style={{ touchAction: "none", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }}
     onPointerDown={(event) => {
       if (event.button !== 0 || points.current.size >= 2) return;
       const raw = point(event);
@@ -76,5 +89,14 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError 
       if (two) onMultiTouch({ type: "move", ...two }); else onTouch({ type: "move", ...raw });
     }} onPointerUp={end} onPointerCancel={end}>
     <img ref={image} onError={onError} alt="Live 3D iPhone Duo" draggable={false} className="block w-full h-full object-contain pointer-events-none bg-transparent" />
+    {controlsVisible && hardwarePositions.map((position) => <div
+      key={position.key}
+      className="duo-hardware-anchor"
+      style={{ left: `${position.x * 100}%`, top: `${position.y * 100}%`, transform: `rotate(${position.angle}deg)` }}
+    >
+      <div className="duo-hardware-region">
+        <HardwareKey value={duoHardwareKeys[position.key]!} iconRotation={-position.angle} onPress={onHardwarePress} />
+      </div>
+    </div>)}
   </div>;
 }

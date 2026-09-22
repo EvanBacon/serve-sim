@@ -11,6 +11,7 @@ export interface StreamConfig {
   height: number;
   /** Live hinge reading for foldable devices. */
   hingeDegrees?: number;
+  duoViewOrientation?: SimulatorOrientation;
   /** Guest orientation on Duo; last requested orientation elsewhere. */
   orientation?: SimulatorOrientation;
 }

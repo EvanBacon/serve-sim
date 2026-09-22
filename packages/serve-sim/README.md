@@ -40,9 +40,9 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and a [maintained 
 
 ## iPhone Duo
 
-With Xcode 27.1 and the iOS 27.1 runtime, the preview exposes **Cover** and
-**Inner** controls for iPhone Duo. Selecting one drives the simulator's hinge
-and selects that panel's framebuffer and chrome. Touches use the panel's own
+With Xcode 27.1 and the iOS 27.1 runtime, the preview exposes **Folded**,
+**Semi-folded**, and **Fully open** controls for iPhone Duo. Selecting one drives
+the simulator's hinge and follows the active panel's framebuffer. Touches use the panel's own
 integrated digitizer; volume and power controls use a guest HID service.
 
 ```sh
@@ -56,16 +56,20 @@ Commands wait for the guest to acknowledge dispatch. Invalid angles and failed
 commands do not change capture. The bundled `simduo/serve-sim-duo-hid` executable
 runs inside the simulator and exits with the device session.
 
-The **3D** button renders the installed Xcode Duo model with RealityKit, with
+Duo uses one interactive RealityKit preview of the installed Xcode model, with
 live screen textures and touches mapped to each bent screen half. Apple's model
-stays in Xcode; it is not redistributed. The regular 2D stream remains available.
-Screenshots capture the app framebuffer.
+stays in Xcode; it is not redistributed. Rotate animates the device and pose
+icons together. Motion uses a faster render target and sharpens when settled.
+Screenshots capture the active app framebuffer, including the unfolded inner display.
 
-Use the pose buttons or the **Hinge** slider for angles from 0° through 180°.
-**Fold mode** lets you pinch out to open, pinch in to close, or drag horizontally
-with a mouse. It consumes those gestures; switch back to **Interact with app**
-to send gestures to iOS. Trackpad pinch and Safari gesture events are supported.
-Volume, power, and camera buttons support press-and-hold in either view.
+Use the pose buttons or hold **Alt** to reveal the continuous hinge slider.
+Pinch gestures do not fold the device.
+Power, camera, and volume controls follow the device's physical edges, fade in
+when the cursor is nearby, and stay hidden during pose animation. They support
+press-and-hold. The main control bar has no volume menu or 2D/3D mode toggle.
+
+See the [feature contract and regression checklist](docs/duo/expected-behavior.md)
+for appearance, folding, rotation, controls, screenshot, and performance checks.
 
 The preview follows hinge changes made in Device Hub. Closed (0°), Tent (80°),
 Table (100°), Book (130°), and Open (180°) are angle presets; use Rotate for

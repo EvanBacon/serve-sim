@@ -11,7 +11,9 @@ import { createMjpegFrameParser } from "../utils/mjpeg-frame-parser";
  * Screen config (dimensions / orientation) is no longer polled here — it
  * arrives over the input WebSocket — so this hook only deals with frame bytes.
  */
-export function useMjpegStream(streamUrl: string | null) {
+export function useMjpegStream(streamUrl: string | null, onStreamingChange?: (streaming: boolean) => void) {
+  const streamingCallback = useRef(onStreamingChange);
+  streamingCallback.current = onStreamingChange;
   const subscribersRef = useRef<Set<(blobUrl: string) => void>>(new Set());
 
   const subscribeFrame = useCallback(
@@ -44,6 +46,7 @@ export function useMjpegStream(streamUrl: string | null) {
     };
 
     const emit = (jpeg: Uint8Array) => {
+      streamingCallback.current?.(true);
       if (subscribersRef.current.size === 0) return;
       // Blob copies the bytes, so handing it a subarray view is safe even as
       // the underlying accumulation buffer is reused/compacted.
@@ -70,6 +73,7 @@ export function useMjpegStream(streamUrl: string | null) {
       } catch {
         // Aborted or network error
       } finally {
+        if (!stopped) streamingCallback.current?.(false);
         scheduleRetry();
       }
     };
@@ -77,6 +81,7 @@ export function useMjpegStream(streamUrl: string | null) {
 
     return () => {
       stopped = true;
+      streamingCallback.current?.(false);
       if (retryTimer) clearTimeout(retryTimer);
       controller.abort();
     };

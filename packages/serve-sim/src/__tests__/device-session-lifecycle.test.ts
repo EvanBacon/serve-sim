@@ -460,6 +460,72 @@ test("3D attach and hinge updates render cached frames; stale worker failures ca
   expect(second.destroyed).toBe(true);
 });
 
+test("Duo rotation redraws a static frame in all four orientations and ignores rejected input", async () => {
+  let frame!: (value: { data: Uint8Array; width: number; height: number }) => Promise<void>;
+  let update!: (state: import("../duo-state").DuoState) => void;
+  let message!: (data: Buffer) => void;
+  let accepted = true;
+  const rolls: number[] = [];
+  const qualities: boolean[] = [];
+  const session = new DeviceSession("TEST-UDID", {
+    ...dependencies({ subscribeMjpeg: async (cb) => { frame = cb; return () => {}; } }),
+    hid: { ...dependencies().hid, isFoldable: async () => true, orientation: async () => accepted },
+    createDuoMonitor: (_udid, onState) => { update = onState; return { close() {}, refreshOrientation() {} }; },
+    createDuoRenderer: () => ({
+      close() {},
+      render: async (_jpeg, panel, hingeDegrees, roll, fullResolution = false) => {
+        qualities.push(fullResolution);
+        rolls.push(roll);
+        return { jpeg: Buffer.from([1]), projection: { width: 3000, height: 2700, panel, hingeDegrees, pieces: [] } };
+      },
+    }),
+  });
+  await session.start();
+  session.attachHidSocket({ send() {}, close() {}, on(event, cb) { if (event === "message") message = cb; } });
+  const response = new FakeServerResponse();
+  try {
+    update({ hingeDegrees: 180, primaryPanel: "inner", orientations: { inner: "portrait" } });
+    await frame({ data: new Uint8Array([1]), width: 2007, height: 2853 });
+    session.handleDuoMjpeg({} as IncomingMessage, response as unknown as ServerResponse);
+    await waitFor(() => rolls.length > 0);
+    expect(rolls.at(-1)).toBe(0);
+    for (const [orientation, roll] of [["landscape_left", -90], ["portrait_upside_down", -180], ["landscape_right", 90], ["portrait", 0]] as const) {
+      const count = rolls.length;
+      message(Buffer.concat([Buffer.from([0x07]), Buffer.from(JSON.stringify({ orientation }))]));
+      await waitFor(() => rolls.length > count && rolls.at(-1) === roll);
+      expect(rolls.slice(count).some((value) => value !== roll)).toBe(true);
+      expect(rolls.at(-1)).toBe(roll);
+      expect(session.screenConfig().orientation).toBe(orientation);
+    }
+    accepted = false;
+    message(Buffer.concat([Buffer.from([0x07]), Buffer.from('{"orientation":"landscape_left"}')]));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(session.screenConfig().orientation).toBe("portrait");
+    expect(rolls.at(-1)).toBe(0);
+    // Folding changes the active panel and guest orientation, never the view roll.
+    for (const [hingeDegrees, primaryPanel, width, height] of [[130, "inner", 2007, 2853], [0, "cover", 1398, 2034], [180, "inner", 2007, 2853]] as const) {
+      const count = rolls.length;
+      update({ hingeDegrees, primaryPanel, orientations: { inner: "landscape_right", cover: "portrait" } });
+      await frame({ data: new Uint8Array([1]), width, height });
+      await waitFor(() => rolls.length > count);
+      expect(rolls.at(-1)).toBe(0);
+      expect(session.screenConfig().duoViewOrientation).toBe("portrait");
+    }
+    // Rotate still works when the requested orientation matches guest readback.
+    accepted = true;
+    const count = rolls.length;
+    message(Buffer.concat([Buffer.from([0x07]), Buffer.from('{"orientation":"landscape_right"}')]));
+    await waitFor(() => rolls.length > count && rolls.at(-1) === 90);
+    expect(rolls.at(-1)).toBe(90);
+    expect(qualities.at(-1)).toBe(false);
+    await waitFor(() => qualities.at(-1) === true);
+    const countBeforeFrame = qualities.length;
+    await frame({ data: new Uint8Array([2]), width: 2007, height: 2853 });
+    await waitFor(() => qualities.length > countBeforeFrame);
+    expect(qualities.at(-1)).toBe(false);
+  } finally { session.close(); }
+});
+
 test("guest primary panel wins over hinge heuristics in both fold directions", async () => {
   let update!: (state: import("../duo-state").DuoState) => void;
   const sizes: number[] = [];

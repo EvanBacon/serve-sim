@@ -118,3 +118,37 @@ details.lem-section > summary:hover .lem-chevron {
   border-color: #a33;
 }
 .grid-tile:hover { border-color: #555 !important; }
+
+/* Each hit region extends outward in the physical button edge's coordinates. */
+.duo-hardware-anchor {
+  position: absolute;
+  z-index: 10;
+  transform-origin: 0 0;
+}
+.duo-hardware-region {
+  position: absolute;
+  left: -30px;
+  top: -68px;
+  width: 60px;
+  height: 78px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  cursor: default;
+}
+.duo-hardware-region > button {
+  opacity: 0;
+  pointer-events: none;
+}
+.duo-hardware-region:hover > button,
+.duo-hardware-region:focus-within > button {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .duo-hardware-region > button { opacity: 1; pointer-events: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .duo-hardware-region > button { transition: none !important; }
+}
