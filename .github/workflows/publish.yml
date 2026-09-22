@@ -1,4 +1,4 @@
-name: Publish beta to npm
+name: Publish beta or canary to npm
 
 on:
   push:
@@ -6,14 +6,19 @@ on:
     paths:
       - "packages/serve-sim/**"
       - ".github/workflows/publish.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      canary:
+        description: "Canary"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   publish-beta:
-    if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
+    if: github.repository == 'EvanBacon/serve-sim' && (github.ref == 'refs/heads/main' || inputs.canary == true)
     runs-on: macos-26
     permissions:
       contents: read
@@ -85,7 +90,7 @@ jobs:
         run: |
           xcrun simctl shutdown "${{ steps.ci-build.outputs.udid }}" || true
 
-      - name: Build and publish serve-sim beta
+      - name: Build and publish serve-sim prerelease
         if: steps.changes.outputs.sim == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -94,7 +99,10 @@ jobs:
 
           # Publish a unique prerelease from max(local, npm latest) + 1.
           # This keeps automatic main pushes on npm's beta tag until stable
-          # promotion is requested explicitly.
+          # promotion is requested explicitly. Manual runs with the Canary
+          # input checked publish the same way under npm's canary tag.
+          TAG=beta
+          if [ "${{ inputs.canary }}" = "true" ]; then TAG=canary; fi
           LOCAL=$(node -p "require('./package.json').version")
           PUBLISHED=$(npm view serve-sim dist-tags.latest 2>/dev/null || echo "")
           [ -z "$PUBLISHED" ] && PUBLISHED="$LOCAL"
@@ -103,7 +111,7 @@ jobs:
             const b='$PUBLISHED'.split('.').map(Number);
             const max=(a[0]>b[0]||(a[0]===b[0]&&a[1]>b[1])||(a[0]===b[0]&&a[1]===b[1]&&a[2]>b[2]))?a:b;
             max[2]++;
-            console.log(max.join('.') + '-beta.${{ github.run_number }}.${{ github.run_attempt }}');
+            console.log(max.join('.') + '-$TAG.${{ github.run_number }}.${{ github.run_attempt }}');
           ")
           echo "Bumped serve-sim: local=$LOCAL npm=$PUBLISHED -> $NEW"
           node -e "
@@ -115,4 +123,4 @@ jobs:
 
           bun run build
 
-          npm publish --access public --tag beta --provenance
+          npm publish --access public --tag "$TAG" --provenance
