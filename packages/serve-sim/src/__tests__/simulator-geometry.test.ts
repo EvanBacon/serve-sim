@@ -52,6 +52,10 @@ describe("simulator geometry helpers", () => {
   });
 
   test("falls back to known portrait screen dimensions", () => {
+    expect(fallbackScreenSize("iphone", "iPhone Duo")).toEqual({
+      width: 1398,
+      height: 2034,
+    });
     expect(fallbackScreenSize("iphone", "iPhone 16 Pro Max")).toEqual({
       width: 1320,
       height: 2868,

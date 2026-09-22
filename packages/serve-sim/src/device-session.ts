@@ -1,3 +1,6 @@
+import { warnDeviceHubInput } from "./device-hub-input";
+import { DuoRenderer } from "./duo-renderer";
+import { DuoPreview } from "./duo-preview";
 /**
  * In-process device session — the replacement for the spawned serve-sim-bin
  * helper. One session per booted simulator owns a NativeCapture + NativeHid and
@@ -13,8 +16,11 @@
  *
  * Replaces the helper's HTTP/client layer; the framing here mirrors the
  * original byte-for-byte so the existing browser client is unchanged.
+ * Duo's 3D preview, fold clock, and rotation clock live on DuoPreview.
  */
+import { DuoStateMonitor, type DuoState } from "./duo-state";
 import type { IncomingMessage, ServerResponse } from "http";
+import { displaySizeForPanel, duoPanel, resolveDevicePose, type DuoPanel } from "./device-pose";
 import {
   NativeCapture,
   NativeHid,
@@ -141,7 +147,7 @@ async function writeAndDrain(
 
 type CaptureTransport = Pick<
   NativeCapture,
-  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc"
+  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "setPreferredScreenSize"
 >;
 type HidTransport = Pick<
   NativeHid,
@@ -156,11 +162,15 @@ type HidTransport = Pick<
   | "memoryWarning"
   | "softwareKeyboard"
   | "caDebug"
->;
+  | "pose"
+  | "hinge"
+> & Partial<Pick<NativeHid, "close" | "isFoldable">>;
 
 export interface DeviceSessionDependencies {
   capture: CaptureTransport;
   hid: HidTransport;
+  createDuoRenderer?: () => Pick<DuoRenderer, "render" | "close">;
+  createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
 }
 
 type Unsubscribe = () => void | Promise<void>;
@@ -179,12 +189,25 @@ export class DeviceSession {
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
   private readonly hidSockets = new Set<HidSocket>();
+  private readonly duo: DuoPreview;
+  private duoMonitor?: Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  private followedCover?: boolean;
+  private primaryDuoPanel?: DuoPanel;
+  private poseQueue: Promise<void> = Promise.resolve();
+  private duoStateQueue: Promise<void> = Promise.resolve();
   private readonly streamResponses = new Set<ServerResponse>();
   private touchGestureLog?: TouchGestureLog;
 
-  constructor(public readonly udid: string, dependencies?: DeviceSessionDependencies) {
+  constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.hid = dependencies?.hid ?? new NativeHid(udid);
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
+    this.duo = new DuoPreview({
+      createRenderer: () => dependencies?.createDuoRenderer?.() ?? new DuoRenderer(),
+      onProjection: (frame) => {
+        for (const ws of this.hidSockets) ws.send(frame);
+      },
+      onStreamError: (res, error) => this.handleStreamError(res, error),
+    });
   }
 
   /** Begin capture and retain one shared MJPEG subscription. Idempotent. */
@@ -206,6 +229,15 @@ export class DeviceSession {
       }
       this.unsubscribeMjpeg = unsubscribe;
       this.phase = "running";
+      if (await this.hid.isFoldable?.() && !this.isStopped()) {
+        if (!this.dependencies?.createDuoMonitor) void warnDeviceHubInput(this.udid);
+        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState) => new DuoStateMonitor(udid, onState));
+        this.duoMonitor = createMonitor(this.udid, (state) => {
+          void this.followDuoState(state).catch((error) => {
+            console.error("[duo] State update failed:", error);
+          });
+        });
+      }
     })().catch((error) => {
       // Failed DeviceSession instances are evicted by the registry below. Keep
       // this promise latched so concurrent endpoints all observe the same
@@ -229,6 +261,8 @@ export class DeviceSession {
   close(): void {
     if (this.phase === "stopped") return;
     this.phase = "stopped";
+    this.duo.close();
+    this.duoMonitor?.close();
     for (const ws of this.hidSockets) {
       this.runCleanup("HID socket close", () => ws.close());
     }
@@ -240,7 +274,35 @@ export class DeviceSession {
       this.runCleanup("shared MJPEG unsubscribe", this.unsubscribeMjpeg);
     }
     this.hidSockets.clear();
+    this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
+  }
+
+  private followDuoState(state: DuoState): Promise<void> {
+    const update = this.duoStateQueue.then(() => this.applyDuoState(state));
+    this.duoStateQueue = update.catch(() => {});
+    return update;
+  }
+
+  private activePanel(): DuoPanel {
+    return duoPanel({ primaryPanel: this.primaryDuoPanel, hingeDegrees: this.duo.hinge });
+  }
+
+  private async applyDuoState(state: DuoState): Promise<void> {
+    if (this.isStopped()) return;
+    if (state.hingeDegrees != null) this.duo.noteHinge(state.hingeDegrees);
+    if (state.primaryPanel) this.primaryDuoPanel = state.primaryPanel;
+    const panel = this.activePanel();
+    const size = displaySizeForPanel(panel);
+    if ((state.hingeDegrees != null || state.primaryPanel) && (panel === "cover") !== this.followedCover) {
+      await this.capture.setPreferredScreenSize(size.width, size.height);
+      this.followedCover = panel === "cover";
+    }
+    const orientation = state.orientations[panel];
+    if (orientation) this.orientation = orientation;
+    this.duo.setPanel(panel);
+    this.broadcastConfig();
+    this.duo.requestFrame();
   }
 
   // ── Frame handling ───────────────────────────────────────────────────────
@@ -260,6 +322,8 @@ export class DeviceSession {
     }
     this.latestJpegBuffer.set(jpeg, 0);
     this.latestJpegLength = jpeg.length;
+    const cached = this.latestJpeg();
+    if (cached) this.duo.onCapturedFrame(cached);
   }
 
   private latestJpeg(): Buffer | null {
@@ -276,6 +340,20 @@ export class DeviceSession {
   }
 
   // ── HTTP handlers ────────────────────────────────────────────────────────
+
+  handleDuoMjpeg(req: IncomingMessage, res: ServerResponse): void {
+    void (async () => {
+      await this.start();
+      if (res.destroyed || res.writableEnded) return;
+      if (!await this.hid.isFoldable?.()) { this.sendJson(res, 400, { error: "This device has no Duo model" }); return; }
+      const raw = new URL(req.url ?? "", "http://x").searchParams.get("raw") === "1";
+      res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store", ...CORS });
+      this.trackStreamResponse(res);
+      this.duo.setPanel(this.activePanel());
+      this.duo.attach(res);
+      res.once("close", () => this.duo.detach(res));
+    })().catch((error) => this.handleStreamError(res, error));
+  }
 
   handleMjpeg(req: IncomingMessage, res: ServerResponse): void {
     void this.serveMjpeg(req, res).catch((error) => this.handleStreamError(res, error));
@@ -404,13 +482,30 @@ export class DeviceSession {
   attachHidSocket(ws: HidSocket): void {
     this.hidSockets.add(ws);
     const cfg = this.configFrame();
+    const projection = this.duo.projectionFrame();
+    if (projection) ws.send(projection);
     if (cfg) ws.send(cfg); // seed dimensions/orientation, replacing the old poll
-    ws.on("message", (data: Buffer) => this.handleHidMessage(Buffer.isBuffer(data) ? data : Buffer.from(data)));
+    ws.on("message", (data: Buffer) => {
+      const frame = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      if (frame[0] === 0x0e) {
+        this.poseQueue = this.poseQueue.then(async () => {
+          if (this.isStopped()) return;
+          let ok = false;
+          try { ok = await this.handleHidMessage(frame) === true; }
+          catch (error) { console.error("[hid] Pose failed:", error); }
+          if (this.hidSockets.has(ws)) {
+            ws.send(Buffer.concat([Buffer.from([0x0e]), Buffer.from(JSON.stringify({ ok }))]));
+          }
+        }).catch((error) => { console.error("[hid] Pose reply failed:", error); });
+      } else {
+        void this.handleHidMessage(frame).catch((error) => { console.error("[hid] Input failed:", error); });
+      }
+    });
     ws.on("close", () => this.hidSockets.delete(ws));
     ws.on("error", () => this.hidSockets.delete(ws));
   }
 
-  private async handleHidMessage(data: Buffer): Promise<void> {
+  private async handleHidMessage(data: Buffer): Promise<boolean | void> {
     if (data.length < 1) return;
     const tag = data[0];
     const body = data.length > 1 ? data.subarray(1) : null;
@@ -467,9 +562,15 @@ export class DeviceSession {
         const value = ORIENTATION_BY_NAME[m.orientation];
         if (value != null && await this.hid.orientation(value)) {
           this.recordHidEvent(tag, m);
-          if (m.orientation !== this.orientation) {
-            this.orientation = m.orientation;
+          if (m.orientation !== this.orientation || m.orientation !== this.duo.viewOrientationName) {
+            // Duo physical orientation and the active panel's UI orientation
+            // differ (the inner panel's natural axis is rotated). Let the
+            // monitor report the guest UI; never overwrite it with view state.
+            if (this.duo.hinge == null) this.orientation = m.orientation;
+            this.duo.animateRotation(m.orientation);
+            this.duoMonitor?.refreshOrientation();
             this.broadcastConfig();
+            this.duo.requestFrame();
           }
         }
         break;
@@ -507,6 +608,47 @@ export class DeviceSession {
         this.recordHidEvent(tag, {});
         this.hid.softwareKeyboard();
         break;
+      case 0x0d: {
+        const m = json<{ width?: number; height?: number }>();
+        if (!m) break;
+        const width = Number(m.width);
+        const height = Number(m.height);
+        if (!Number.isFinite(width) || !Number.isFinite(height)) break;
+        this.recordHidEvent(tag, m);
+        await this.capture.setPreferredScreenSize(Math.round(width), Math.round(height));
+        break;
+      }
+      case 0x0e: {
+        const m = json<{ pose?: string; hinge?: number }>();
+        if (!m) break;
+        this.recordHidEvent(tag, m);
+        if (typeof m.pose === "string" && m.pose.trim()) {
+          const spec = resolveDevicePose(m.pose);
+          if (!spec) break;
+          const from = this.duo.displayAngle();
+          this.duo.beginPose(from, spec.hingeDegrees);
+          const accepted = await this.hid.pose(m.pose, from);
+          if (!accepted) {
+            this.duo.cancelPose();
+            break;
+          }
+          this.duo.finishPose(spec.hingeDegrees);
+          await this.followDuoState({ hingeDegrees: spec.hingeDegrees, orientations: {} });
+          this.duoMonitor?.refreshOrientation();
+          this.broadcastConfig();
+          this.duo.requestFrame();
+          return true;
+        } else if (typeof m.hinge === "number" && Number.isFinite(m.hinge) && m.hinge >= 0 && m.hinge <= 180) {
+          if (!await this.hid.hinge(m.hinge)) break;
+          this.duo.cancelPose();
+          await this.followDuoState({ hingeDegrees: m.hinge, orientations: {} });
+          this.duoMonitor?.refreshOrientation();
+          this.broadcastConfig();
+          this.duo.requestFrame();
+          return true;
+        }
+        break;
+      }
     }
   }
 
@@ -631,8 +773,14 @@ export class DeviceSession {
 
   // ── Config ───────────────────────────────────────────────────────────────
 
-  screenConfig(): { width: number; height: number; orientation: string } {
-    return { width: this.width, height: this.height, orientation: this.orientation };
+  screenConfig(): { width: number; height: number; orientation: string; hingeDegrees?: number; duoViewOrientation?: string } {
+    const hingeDegrees = this.duo.hinge;
+    return {
+      width: this.width,
+      height: this.height,
+      orientation: this.orientation,
+      ...(hingeDegrees == null ? {} : { hingeDegrees, duoViewOrientation: this.duo.viewOrientationName }),
+    };
   }
 
   private configFrame(): Buffer | null {

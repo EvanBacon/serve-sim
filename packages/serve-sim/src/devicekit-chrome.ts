@@ -13,6 +13,13 @@ import type { ServerResponse } from "http";
 import { tmpdir } from "os";
 import { basename, dirname, join } from "path";
 import { inflateSync } from "zlib";
+import {
+  defaultDeviceDisplay,
+  integratedCapabilityDisplays,
+  nameForDisplayRole,
+  rolesForIntegratedDisplays,
+  type DeviceDisplayRole,
+} from "./device-displays";
 
 const DEVICE_TYPES_ROOT = "/Library/Developer/CoreSimulator/Profiles/DeviceTypes";
 const CHROME_ROOT = "/Library/Developer/DeviceKit/Chrome";
@@ -55,6 +62,15 @@ export type DevicePlaceholderAssetDescriptor = {
   name: string;
   width: number;
   height: number;
+};
+
+export type DeviceDisplayDescriptor = {
+  id: string;
+  role: DeviceDisplayRole;
+  name: string;
+  width: number;
+  height: number;
+  chrome: DeviceKitChromeDescriptor;
 };
 
 export type DeviceKitChromeDescriptor = {
@@ -142,6 +158,7 @@ type ParsedButton = {
 let deviceTypeNameByIdentifier: Map<string, string> | null = null;
 const chromeCache = new Map<string, ParsedChrome | null>();
 const descriptorCache = new Map<string, DeviceKitChromeDescriptor | null>();
+const displaysCache = new Map<string, DeviceDisplayDescriptor[]>();
 const placeholderDescriptorCache = new Map<string, DevicePlaceholderAssetDescriptor | null>();
 let coreTypesIconEntriesCache: CoreTypesIconEntry[] | null = null;
 const placeholderAssetInfoCache = new Map<string, PlaceholderAssetInfo | null>();
@@ -187,10 +204,27 @@ export function logicalScreenSizeFromProfile(
   return { width: size.width / scale, height: size.height / scale };
 }
 
+export function resolveDeviceDisplays(device: {
+  name: string;
+  deviceTypeIdentifier?: string;
+}): DeviceDisplayDescriptor[] {
+  const profileName = profileNameForDevice(device);
+  if (displaysCache.has(profileName)) return displaysCache.get(profileName) ?? [];
+
+  const resolved = resolveDeviceDisplaysUncached(profileName);
+  displaysCache.set(profileName, resolved);
+  return resolved;
+}
+
 export function resolveDeviceKitChrome(device: {
   name: string;
   deviceTypeIdentifier?: string;
 }): DeviceKitChromeDescriptor | null {
+  const displays = resolveDeviceDisplays(device);
+  if (displays.length > 0) {
+    return defaultDeviceDisplay(displays)?.chrome ?? null;
+  }
+
   const profileName = profileNameForDevice(device);
   const cacheKey = profileName;
   if (descriptorCache.has(cacheKey)) return descriptorCache.get(cacheKey) ?? null;
@@ -312,13 +346,56 @@ function fallbackPlaceholderAsset(name: string): PlaceholderAssetDefinition | nu
     : null;
 }
 
+function resolveDeviceDisplaysUncached(profileName: string): DeviceDisplayDescriptor[] {
+  const profilePath = profilePathForName(profileName);
+  if (!existsSync(profilePath)) return [];
+  const profileDir = dirname(profilePath);
+  const capabilities = readPlist(join(profileDir, "capabilities.plist"));
+  const raw = integratedCapabilityDisplays(capabilities);
+  if (raw.length === 0) return [];
+
+  const roles = rolesForIntegratedDisplays(raw.map((display) => display.width * display.height));
+  const out: DeviceDisplayDescriptor[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const display = raw[i]!;
+    const chrome = resolveChromeDescriptor(
+      bareChromeIdentifier(display.chromeIdentifier),
+      framebufferMaskSizeAt(profileDir, display.mask),
+      display.logicalScreenSize,
+    );
+    if (!chrome) continue;
+    const role = roles[i] ?? "display";
+    out.push({
+      id: display.id,
+      role,
+      name: nameForDisplayRole(role, display.label),
+      width: display.width,
+      height: display.height,
+      chrome,
+    });
+  }
+  return out;
+}
+
 function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDescriptor | null {
   const profilePath = profilePathForName(profileName);
   if (!existsSync(profilePath)) return null;
 
   const profile = readProfileMetadata(profilePath);
   if (!profile?.chromeIdentifier) return null;
-  const chrome = readChrome(profile.chromeIdentifier);
+  return resolveChromeDescriptor(
+    profile.chromeIdentifier,
+    profile.framebufferMaskSize,
+    profile.screenSize,
+  );
+}
+
+function resolveChromeDescriptor(
+  chromeIdentifier: string,
+  maskSize: Size | null,
+  logicalScreenSize: Size | null,
+): DeviceKitChromeDescriptor | null {
+  const chrome = readChrome(chromeIdentifier);
   if (!chrome) return null;
 
   let bodySize: Size | null = null;
@@ -337,10 +414,10 @@ function resolveDeviceKitChromeUncached(profileName: string): DeviceKitChromeDes
     ? compositeScreenBounds(chrome.identifier, chrome.compositeImage)
     : null;
   const screenSize =
-    (opening && profile.framebufferMaskSize
-      ? scaleMaskToPoints(profile.framebufferMaskSize, opening)
+    (opening && maskSize
+      ? scaleMaskToPoints(maskSize, opening)
       : null) ??
-    profile.screenSize ??
+    logicalScreenSize ??
     (bodySize
       ? {
           width: bodySize.width - chrome.insets.left - chrome.insets.right,
@@ -447,6 +524,11 @@ function framebufferMaskSize(profile: JsonRecord): Size | null {
   const mask = typeof profile.framebufferMask === "string" ? profile.framebufferMask : null;
   const profileDir = typeof profile.__profileDir === "string" ? profile.__profileDir : null;
   if (!mask || !profileDir) return null;
+  return framebufferMaskSizeAt(profileDir, mask);
+}
+
+function framebufferMaskSizeAt(profileDir: string, mask: string | null): Size | null {
+  if (!mask) return null;
   const maskPath = join(profileDir, `${mask}.pdf`);
   if (!existsSync(maskPath)) return null;
   return parsePdfPageSize(readFileSync(maskPath));

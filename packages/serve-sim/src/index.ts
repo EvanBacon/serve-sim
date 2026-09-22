@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
 import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
@@ -311,10 +312,16 @@ async function findAvailablePort(start: number): Promise<number> {
 }
 
 async function ensureBooted(udid: string): Promise<void> {
+  // `simctl bootstatus` waits for a boot transition. On a device that is
+  // already Booted (CI boots before the suite) that wait runs until its
+  // timeout, and `--detach` callers give up first. Only monitor a boot we
+  // just requested.
+  const wasBooted = isDeviceBooted(udid);
   bootDevice(udid);
-  // Boot was requested by bootDevice. Passing `-b` redundantly can remain
-  // blocked on Xcode 27 even after the device is Booted. Monitor the existing
-  // transition; bootstatus still waits for services, not merely the state flag.
+  if (wasBooted) return;
+  // Passing `-b` redundantly can remain blocked on Xcode 27 even after the
+  // device is Booted. Monitor the existing transition; bootstatus still waits
+  // for services, not merely the state flag.
   try {
     execFileSync("xcrun", simctlBootStatusArguments(udid), {
       encoding: "utf-8",
@@ -813,6 +820,58 @@ async function typeText(
   await sendKeyEventsToWs(state.wsUrl, events);
 }
 
+function openHidSocket(wsUrl: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => resolve(ws);
+    ws.onerror = () => {
+      console.error("Failed to connect to serve-sim server at", wsUrl);
+      reject(new Error("WebSocket connection failed"));
+    };
+  });
+}
+
+function sendHid(ws: WebSocket, tag: number, payload: object): void {
+  const json = new TextEncoder().encode(JSON.stringify(payload));
+  const msg = new Uint8Array(1 + json.length);
+  msg[0] = tag;
+  msg.set(json, 1);
+  ws.send(msg);
+}
+
+async function fold(hinge: number, deviceArg?: string) {
+  const state = readState(deviceArg);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim` first.");
+    process.exit(1);
+  }
+
+  const ws = await openHidSocket(state.wsUrl);
+  const FOLD_TAG = 0x0e;
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      ws.close();
+      if (error) reject(error); else resolve();
+    };
+    const timeout = setTimeout(() => finish(new Error("Timed out waiting for the simulator fold.")), 10000);
+    ws.onmessage = ({ data }) => {
+      const frame = Buffer.from(data as ArrayBuffer);
+      if (frame[0] !== FOLD_TAG) return;
+      try {
+        const reply = JSON.parse(frame.subarray(1).toString());
+        finish(reply.ok === true ? undefined : new Error("Simulator rejected the fold. An iPhone Duo with guest HID support is required."));
+      } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    };
+    ws.onclose = () => finish(new Error("Connection closed before the simulator acknowledged the fold."));
+    sendHid(ws, FOLD_TAG, { hinge });
+  });
+}
+
 async function rotate(orientation: string, deviceArg?: string) {
   const state = readState(deviceArg);
   if (!state) {
@@ -833,24 +892,9 @@ async function rotate(orientation: string, deviceArg?: string) {
     process.exit(1);
   }
 
-  return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify({ orientation }));
-      const msg = new Uint8Array(1 + json.length);
-      msg[0] = 0x07;
-      msg.set(json, 1);
-      ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
-    };
-
-    ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", state.wsUrl);
-      reject(new Error("WebSocket connection failed"));
-    };
-  });
+  const ws = await openHidSocket(state.wsUrl);
+  sendHid(ws, 0x07, { orientation });
+  setTimeout(() => { ws.close(); }, 50);
 }
 
 // HID (page, usage) codes for hardware buttons not backed by a named idb event
@@ -1835,6 +1879,31 @@ program
   .argument("<orientation>")
   .option(...deviceOpt)
   .action((orientation: string, opts) => rotate(orientation, opts.device));
+
+program
+  .command("repair-input")
+  .description("Repair Device Hub input; restarts SpringBoard and closes running apps")
+  .option(...deviceOpt)
+  .action(async (opts) => {
+    const udid = opts.device ? resolveDevice(opts.device) : findBootedDevice();
+    if (!udid) throw new Error("No booted simulator found.");
+    const { repairDeviceHubInput } = await import("./device-hub-input");
+    const repaired = await repairDeviceHubInput(udid);
+    console.log(repaired ? "Input repaired. Restart serve-sim to reconnect its guest services, then reopen your app." : "Input is not shadowed by Device Hub; no restart needed.");
+  });
+
+program
+  .command("fold")
+  .description("Set the iPhone Duo hinge angle in degrees (0 closed, 180 fully open)")
+  .argument("<deg>", "Hinge angle from 0 to 180", (raw: string) => {
+    const degrees = Number(raw);
+    if (!raw.trim() || !Number.isFinite(degrees) || degrees < 0 || degrees > 180) {
+      throw new InvalidArgumentError("Hinge angle must be between 0 and 180 degrees.");
+    }
+    return degrees;
+  })
+  .option(...deviceOpt)
+  .action((degrees: number, opts) => fold(degrees, opts.device));
 
 program
   .command("ca-debug")

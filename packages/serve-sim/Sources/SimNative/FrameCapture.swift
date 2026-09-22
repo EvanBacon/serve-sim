@@ -41,7 +41,8 @@ actor FrameCapture {
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: UUID] = [:]
     private var ioClient: NSObject?
-    private var expectedScreenSize: FramebufferSurfaceSize?
+    private var expectedScreenSizes: [FramebufferSurfaceSize] = []
+    private var preferredScreenSize: FramebufferSurfaceSize?
     private var didLogRejectedPresentationSurface = false
     private var didLogMissingExpectedSurface = false
 
@@ -57,7 +58,11 @@ actor FrameCapture {
         guard state == "Booted" else {
             throw makeError(2, "Device not booted (state: \(state))")
         }
-        self.expectedScreenSize = Self.nativeScreenSize(for: device)
+        self.expectedScreenSizes = Self.nativeScreenSizes(for: device)
+        if expectedScreenSizes.count > 1 {
+            let summary = expectedScreenSizes.map { "\($0.width)x\($0.height)" }.joined(separator: ", ")
+            print("[capture] Device has \(expectedScreenSizes.count) native displays: \(summary)")
+        }
 
         guard let io = device.perform(NSSelectorFromString("io"))?.takeUnretainedValue() as? NSObject else {
             throw makeError(3, "Failed to get device IO")
@@ -163,7 +168,8 @@ actor FrameCapture {
         }
         guard let selection = FramebufferSurfaceSelector.select(
             from: sizes,
-            expectedSize: expectedScreenSize
+            expectedSizes: expectedScreenSizes,
+            preferredSize: preferredScreenSize
         ) else {
             return nil
         }
@@ -182,13 +188,13 @@ actor FrameCapture {
             }
         } else if
             !selection.matchedExpectedSize,
-            let expectedScreenSize,
+            !expectedScreenSizes.isEmpty,
             !didLogMissingExpectedSurface
         {
             let selected = sizes[selection.index]
+            let expected = expectedScreenSizes.map { "\($0.width)x\($0.height)" }.joined(separator: ", ")
             print(
-                "[capture] No framebuffer matches native screen "
-                + "\(expectedScreenSize.width)x\(expectedScreenSize.height); "
+                "[capture] No framebuffer matches native screen(s) \(expected); "
                 + "falling back to \(selected.width)x\(selected.height)"
             )
             didLogMissingExpectedSurface = true
@@ -316,9 +322,21 @@ actor FrameCapture {
         rewireTickCount = 0
         lastCaptureTime = .now
         ioClient = nil
-        expectedScreenSize = nil
+        expectedScreenSizes = []
+        preferredScreenSize = nil
         didLogRejectedPresentationSurface = false
         didLogMissingExpectedSurface = false
+    }
+
+    func setPreferredScreenSize(width: Int, height: Int) {
+        if width > 0, height > 0 {
+            preferredScreenSize = FramebufferSurfaceSize(width: width, height: height)
+        } else {
+            preferredScreenSize = nil
+        }
+        didLogRejectedPresentationSurface = false
+        didLogMissingExpectedSurface = false
+        captureFrame(force: true)
     }
 
     // MARK: - Helpers
@@ -328,20 +346,43 @@ actor FrameCapture {
                 userInfo: [NSLocalizedDescriptionKey: msg])
     }
 
+    /// Native pixel sizes for every integrated digitizer display on this device
+    /// type. Foldables list more than one (iPhone Duo cover + inner). Falls back
+    /// to `SimDeviceType.mainScreenSize` when the capabilities plist is missing.
+    private static func nativeScreenSizes(for device: NSObject) -> [FramebufferSurfaceSize] {
+        if let fromCapabilities = sizesFromCapabilities(device), !fromCapabilities.isEmpty {
+            return fromCapabilities
+        }
+        if let main = mainScreenSize(for: device) {
+            return [main]
+        }
+        return []
+    }
+
+    private static func sizesFromCapabilities(_ device: NSObject) -> [FramebufferSurfaceSize]? {
+        guard let deviceType = deviceType(for: device) else { return nil }
+        let bundlePath: String?
+        if let path = deviceType.value(forKey: "bundlePath") as? String {
+            bundlePath = path
+        } else if let url = deviceType.value(forKey: "bundleURL") as? URL {
+            bundlePath = url.path
+        } else {
+            bundlePath = nil
+        }
+        guard let bundlePath else { return nil }
+        let capPath = (bundlePath as NSString).appendingPathComponent("Contents/Resources/capabilities.plist")
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: capPath)) else { return nil }
+        return DeviceDisplaySizes.nativeSizes(fromCapabilitiesPlist: data)
+    }
+
     /// SimDeviceType.mainScreenSize is private but stable across the same
     /// SimulatorKit versions already used by this file. Runtime validation on
     /// Xcode 27 confirms that it reports native pixels, not logical points, and
     /// matches the primary IOSurface exactly. The `@convention(c)` IMP type is
     /// intentional: it preserves the platform CGSize return ABI (registers on
     /// arm64 and the appropriate struct-return convention on x86_64).
-    private static func nativeScreenSize(for device: NSObject) -> FramebufferSurfaceSize? {
-        let deviceTypeSelector = NSSelectorFromString("deviceType")
-        guard
-            device.responds(to: deviceTypeSelector),
-            let deviceType = device.perform(deviceTypeSelector)?.takeUnretainedValue() as? NSObject
-        else {
-            return nil
-        }
+    private static func mainScreenSize(for device: NSObject) -> FramebufferSurfaceSize? {
+        guard let deviceType = deviceType(for: device) else { return nil }
         let selector = NSSelectorFromString("mainScreenSize")
         guard deviceType.responds(to: selector) else { return nil }
 
@@ -354,6 +395,17 @@ actor FrameCapture {
         let height = Int(size.height.rounded())
         guard width > 0, height > 0 else { return nil }
         return FramebufferSurfaceSize(width: width, height: height)
+    }
+
+    private static func deviceType(for device: NSObject) -> NSObject? {
+        let deviceTypeSelector = NSSelectorFromString("deviceType")
+        guard
+            device.responds(to: deviceTypeSelector),
+            let deviceType = device.perform(deviceTypeSelector)?.takeUnretainedValue() as? NSObject
+        else {
+            return nil
+        }
+        return deviceType
     }
 
     static func findSimDevice(udid: String) -> NSObject? {

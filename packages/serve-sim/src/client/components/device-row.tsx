@@ -25,6 +25,9 @@ export function DeviceRow({
   const helper = device.helper;
   const isBooted = device.state === "Booted";
   const type = getDeviceType(device.name);
+  const duo =
+    /duo/i.test(device.name) ||
+    (Array.isArray(device.displays) && device.displays.length > 1);
   const version = runtimeVersion(device.runtime);
 
   const status = helper
@@ -69,7 +72,7 @@ export function DeviceRow({
         className={`relative shrink-0 grid place-items-center size-9 rounded-[9px] overflow-hidden ${iconBackingClass}`}
       >
         <span className={iconColorClass}>
-          <DeviceGlyph type={type} screenOn={Boolean(helper)} />
+          <DeviceGlyph type={type} duo={duo} screenOn={Boolean(helper)} />
         </span>
         {dotColor && !helper && (
           <span

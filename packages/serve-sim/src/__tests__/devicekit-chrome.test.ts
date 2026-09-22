@@ -4,6 +4,7 @@ import {
   bareChromeIdentifier,
   logicalScreenSizeFromProfile,
   parsePdfPageSize,
+  resolveDeviceDisplays,
   resolveDevicePlaceholderAsset,
   resolveDeviceKitChrome,
 } from "../devicekit-chrome";
@@ -62,11 +63,12 @@ describe("DeviceKit chrome helpers", () => {
     // the metadata mapping (icon name) and that cropping produced sane bounds.
     const expectPlaceholder = (
       device: { name: string; deviceTypeIdentifier: string },
-      expectedName: string,
+      expectedName: string | readonly string[],
     ) => {
       const resolved = resolveDevicePlaceholderAsset(device);
       if (!resolved) return;
-      expect(resolved.name).toBe(expectedName);
+      const expectedNames = typeof expectedName === "string" ? [expectedName] : expectedName;
+      expect(expectedNames).toContain(resolved.name);
       expect(resolved.width).toBeGreaterThan(0);
       expect(resolved.height).toBeGreaterThan(0);
     };
@@ -90,7 +92,37 @@ describe("DeviceKit chrome helpers", () => {
         name: "iPad Air 11-inch (M4)",
         deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPad-Air-11-inch-M4",
       },
-      "ipad-air-11-inch-m4",
+      // Older CoreTypes uses the fallback name; macOS 27 ships a named icon.
+      ["ipad-air-11-inch-m4", "com.apple.ipad-air-11-inch-m4-1"],
     );
+  });
+
+  test("resolves iPhone Duo inner and cover displays when the device type is installed", () => {
+    if (
+      !existsSync("/Library/Developer/CoreSimulator/Profiles/DeviceTypes/iPhone Duo.simdevicetype")
+    ) {
+      return;
+    }
+
+    const device = {
+      name: "iPhone Duo",
+      deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
+    };
+    const displays = resolveDeviceDisplays(device);
+    expect(displays.length).toBe(2);
+
+    const cover = displays.find((display) => display.role === "cover");
+    const inner = displays.find((display) => display.role === "inner");
+    expect(cover?.width).toBe(1398);
+    expect(cover?.height).toBe(2034);
+    expect(cover?.chrome.identifier).toBe("phone15");
+    expect(inner?.width).toBe(2007);
+    expect(inner?.height).toBe(2853);
+    expect(inner?.chrome.identifier).toBe("phone14");
+
+    const chrome = resolveDeviceKitChrome(device);
+    expect(chrome?.identifier).toBe("phone15");
+    expect(chrome?.screen.width).toBeGreaterThan(0);
+    expect(chrome?.screen.height).toBeGreaterThan(0);
   });
 });

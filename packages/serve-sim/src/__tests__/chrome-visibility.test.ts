@@ -99,6 +99,7 @@ describe("shouldUseDeviceChrome", () => {
     expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: true, hideChrome: true })).toBe(false);
     expect(shouldUseDeviceChrome({ hasChrome: false, isLandscape: false, hideChrome: false })).toBe(false);
   });
+
 });
 
 describe("shouldWrapDeviceChrome", () => {

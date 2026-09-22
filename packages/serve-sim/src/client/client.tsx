@@ -1,3 +1,6 @@
+import { DuoThreeDView } from "./components/duo-three-d-view";
+import type { DuoProjection } from "../duo-renderer";
+import { DeviceHingeControls } from "./components/device-hinge-controls";
 import { createRoot } from "react-dom/client";
 import {
   useCallback,
@@ -38,6 +41,7 @@ import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chr
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
+import { toast } from "sonner";
 import { ServeSimToaster } from "./components/app-toasts";
 import { SimulatorResizeSizeBadge } from "./components/simulator-resize-size-badge";
 import { StreamStatusPill } from "./components/stream-status-pill";
@@ -56,7 +60,8 @@ import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
 import { useGridDevices } from "./hooks/use-grid-devices";
-import type { DeviceKitChromeDescriptor } from "./utils/grid";
+import type { DeviceDisplayDescriptor, DeviceKitChromeDescriptor } from "./utils/grid";
+import { matchDeviceDisplay, screenshotDisplayName } from "../device-displays";
 import {
   avccFallbackReducer,
   initialAvccFallback,
@@ -85,6 +90,7 @@ import {
 } from "./utils/selected-stream-config";
 import {
   SIMULATOR_RESIZE_PAGE_TRANSITION,
+  getSimulatorFrameMaxWidth,
   simulatorFrameLayoutTransition,
 } from "./utils/simulator-resize";
 import {
@@ -341,6 +347,7 @@ function App() {
         deviceName={selectedDevice?.name ?? null}
         deviceRuntime={selectedDevice?.runtime ?? null}
         chrome={selectedDevice?.chrome ?? null}
+        displays={selectedDevice?.displays ?? null}
         preferMjpeg={uiStarted.has(config.device)}
         axOverlayEnabled={axOverlayEnabled}
         setAxOverlayEnabled={setAxOverlayEnabled}
@@ -426,6 +433,7 @@ interface AppWithConfigProps {
   deviceName: string | null;
   deviceRuntime: string | null;
   chrome: DeviceKitChromeDescriptor | null;
+  displays: DeviceDisplayDescriptor[] | null;
   preferMjpeg: boolean;
   axOverlayEnabled: boolean;
   setAxOverlayEnabled: React.Dispatch<React.SetStateAction<boolean>>;
@@ -445,6 +453,7 @@ function AppWithConfig({
   deviceName,
   deviceRuntime,
   chrome,
+  displays,
   preferMjpeg,
   axOverlayEnabled,
   setAxOverlayEnabled,
@@ -526,13 +535,14 @@ function AppWithConfig({
       replaceState: (url) => window.history.replaceState(null, "", url),
     });
   }, [hideChrome]);
+  const foldable = (displays?.length ?? 0) > 1;
   // The server can pin the stream codec (`serve-sim --codec mjpeg`) for hosts
   // whose hardware can't encode H.264 — e.g. VMs lacking the high/low-latency
   // H.264 profiles. Treat that as a hard override the viewer can't switch off.
   const serverForcesMjpeg = config.codec === "mjpeg";
   const useAvccVideo =
     !serverForcesMjpeg && avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
-  const mjpeg = useMjpegStream(useAvccVideo ? null : config.streamUrl);
+  const mjpeg = useMjpegStream(foldable || useAvccVideo ? null : config.streamUrl);
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
   useEffect(() => {
@@ -553,12 +563,19 @@ function AppWithConfig({
     );
     return () => clearTimeout(timer);
   }, [useAvccVideo, config.streamUrl]);
+  const [duoProjection, setDuoProjection] = useState<DuoProjection | null>(null);
   const [liveStreamConfig, setLiveStreamConfig] = useState<StreamConfig | null>(null);
   // Screen config now arrives over the input WebSocket (pushed by the helper on
   // connect + on every dimension/orientation change) instead of a 1s /config poll.
   const [wsStreamConfig, setWsStreamConfig] = useState<StreamConfig | null>(null);
   const streamConfig = wsStreamConfig;
   const activeStreamConfig = liveStreamConfig ?? streamConfig ?? fallbackScreenSize(deviceType, deviceName);
+  const matchedDisplay = matchDeviceDisplay(
+    displays,
+    activeStreamConfig.width,
+    activeStreamConfig.height,
+  );
+  const activeChrome = matchedDisplay?.chrome ?? chrome;
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
   const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
   const frameAspectRatio = simulatorAspectRatio(activeStreamConfig);
@@ -571,32 +588,41 @@ function AppWithConfig({
   // working hardware buttons). It's authored portrait, so in landscape we drop
   // back to the bare rounded screen. Viewers can also hide it (toolbar, tools
   // panel, or `?chrome=0`) — default stays framed so desktop previews match
-  // Simulator.app. When chromed, the on-screen container is the full frame
-  // (bezel + screen): `chromeScale` is how much bigger the frame is than the
-  // screen, so we scale the container up by it while keeping the *screen* at
-  // the same comfortable size — and resize / panel-collision math all operate
-  // on the frame dimensions.
+  // Simulator.app. Foldables never ask: the 3D model is their frame.
+  // When chromed, the on-screen container is the full frame (bezel + screen):
+  // `chromeScale` is how much bigger the frame is than the screen, so we scale
+  // the container up by it while keeping the *screen* at the same comfortable
+  // size — and resize / panel-collision math all operate on the frame dimensions.
   const isLandscape = isLandscapeConfig(activeStreamConfig);
-  const useChrome = shouldUseDeviceChrome({
-    hasChrome: !!chrome,
+  const useChrome = !foldable && shouldUseDeviceChrome({
+    hasChrome: !!activeChrome,
     isLandscape,
     hideChrome,
   });
   // Wrap whenever chrome *could* be shown. Toggling hideChrome only fades the
   // bezel / expands the screen slot — remounting DeviceKitChrome would tear
   // down SimulatorView and flash "Connecting…".
-  const wrapChrome = shouldWrapDeviceChrome({
-    hasChrome: !!chrome,
+  const wrapChrome = !foldable && shouldWrapDeviceChrome({
+    hasChrome: !!activeChrome,
     isLandscape,
   });
-  const chromeScale = useChrome ? chrome!.frame.width / chrome!.screen.width : 1;
-  const containerDefaultWidth = frameMaxWidth * chromeScale;
-  const containerAspectRatioValue = useChrome
-    ? chrome!.frame.width / chrome!.frame.height
-    : frameAspectRatioValue;
-  const containerAspectRatio = useChrome
-    ? `${chrome!.frame.width} / ${chrome!.frame.height}`
-    : frameAspectRatio;
+  const chromeScale = useChrome ? activeChrome!.frame.width / activeChrome!.screen.width : 1;
+  const duoAspect = duoProjection && duoProjection.width > 0 && duoProjection.height > 0
+    ? duoProjection.width / duoProjection.height
+    : 10 / 9;
+  const containerDefaultWidth = foldable
+    ? Math.max(frameMaxWidth, duoProjection?.width ?? 0)
+    : frameMaxWidth * chromeScale;
+  const containerAspectRatioValue = foldable
+    ? duoAspect
+    : useChrome
+      ? activeChrome!.frame.width / activeChrome!.frame.height
+      : frameAspectRatioValue;
+  const containerAspectRatio = foldable
+    ? String(duoAspect)
+    : useChrome
+      ? `${activeChrome!.frame.width} / ${activeChrome!.frame.height}`
+      : frameAspectRatio;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -630,6 +656,17 @@ function AppWithConfig({
         // Server -> client screen-config push (tag 0x82): [tag][JSON].
         if (!(ev.data instanceof ArrayBuffer)) return;
         const bytes = new Uint8Array(ev.data);
+        if (bytes[0] === 0x83) {
+          try { setDuoProjection(JSON.parse(new TextDecoder().decode(bytes.subarray(1)))); } catch {}
+          return;
+        }
+        if (bytes[0] === 0x0e) {
+          try {
+            const reply = JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
+            if (reply.ok === false) { setPendingHinge(null); toast.error("Could not change the simulator fold pose."); }
+          } catch {}
+          return;
+        }
         if (bytes.length < 1 || bytes[0] !== 0x82) return;
         try {
           const cfg = JSON.parse(new TextDecoder().decode(bytes.subarray(1))) as StreamConfig;
@@ -638,7 +675,7 @@ function AppWithConfig({
             prev &&
             prev.width === cfg.width &&
             prev.height === cfg.height &&
-            prev.orientation === cfg.orientation
+            prev.orientation === cfg.orientation && prev.hingeDegrees === cfg.hingeDegrees && prev.duoViewOrientation === cfg.duoViewOrientation
               ? prev
               : cfg,
           );
@@ -675,6 +712,32 @@ function AppWithConfig({
   const onStreamTouch = useCallback((data: any) => sendWs(0x03, data), [sendWs]);
   const onStreamMultiTouch = useCallback((data: any) => sendWs(0x05, data), [sendWs]);
   const onStreamButton = useCallback((button: string) => sendWs(0x04, { button }), [sendWs]);
+  // Duo fold: pinch / Alt-drag / ctrl-wheel. Plain swipes and scroll stay with the sim.
+  const [pendingHinge, setPendingHinge] = useState<number | null>(null);
+  const hingeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestHinge = useRef<number | null>(null);
+  const setHinge = useCallback((angle: number) => {
+    setPendingHinge(angle === streamConfig?.hingeDegrees ? null : angle);
+    latestHinge.current = angle;
+    if (hingeTimer.current) return;
+    hingeTimer.current = setTimeout(() => {
+      hingeTimer.current = null;
+      sendWs(0x0e, { hinge: latestHinge.current });
+    }, 50);
+  }, [sendWs, streamConfig?.hingeDegrees]);
+  const setPose = useCallback((pose: string) => {
+    if (hingeTimer.current) clearTimeout(hingeTimer.current);
+    hingeTimer.current = null;
+    setPendingHinge(null);
+    sendWs(0x0e, { pose });
+  }, [sendWs]);
+  useEffect(() => () => { if (hingeTimer.current) clearTimeout(hingeTimer.current); }, []);
+  useEffect(() => {
+    if (streamConfig?.hingeDegrees != null) {
+      setPendingHinge((pending) => pending != null && Math.abs(pending - streamConfig.hingeDegrees!) < 0.6 ? null : pending);
+    }
+  }, [streamConfig?.hingeDegrees]);
+  const hingeAngle = pendingHinge ?? streamConfig?.hingeDegrees ?? (matchedDisplay?.role === "inner" ? 180 : 0);
   // A hardware button on the device chrome was pressed/released. Forward its HID
   // (page, usage) so the helper injects it via arbitrary HID — `down`/`up` phases
   // let power / side buttons be held for their long-press menus.
@@ -690,6 +753,9 @@ function AppWithConfig({
     },
     [sendWs],
   );
+  const onDuoHardwarePress = useCallback((key: { name: string; page: number; usage: number }, phase: "down" | "up" | "press") => {
+    sendWs(0x04, { button: key.name, page: key.page, usage: key.usage, phase });
+  }, [sendWs]);
   const onStreamDigitalCrown = useCallback((delta: number) => sendWs(0x0a, { delta }), [sendWs]);
   const onStreamScroll = useCallback((data: { dx: number; dy: number; x: number; y: number }) => sendWs(0x0b, data), [sendWs]);
   const onScreenConfigChange = useCallback((next: StreamConfig) => {
@@ -706,7 +772,7 @@ function AppWithConfig({
     sendWs(0x07, { orientation });
   }, [sendWs]);
   const currentOrientation =
-    (activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? "portrait";
+    (activeStreamConfig as StreamConfig).duoViewOrientation ?? (activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? "portrait";
   const canRotate = deviceType !== "watch" && deviceType !== "vision";
   const rotateBy = useCallback(
     (direction: "left" | "right") => {
@@ -720,6 +786,8 @@ function AppWithConfig({
   useEffect(() => {
     setLiveStreamConfig(null);
     setWsStreamConfig(null);
+    setDuoProjection(null);
+    setPendingHinge(null);
   }, [config.streamUrl]);
 
   useEffect(() => {
@@ -886,7 +954,7 @@ function AppWithConfig({
   }, [sendWs, config.device, rotateBy]);
 
   const uploads = useUploadToasts();
-  const screenshot = useScreenshotToast(config.device);
+  const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
   const mediaDrop = useMediaDrop({
     exec: execOnHost,
     udid: config.device,
@@ -910,9 +978,23 @@ function AppWithConfig({
     viewportWidth,
     viewportHeight,
     aspectRatio: containerAspectRatioValue,
-    initialFit: initialState?.fit === true,
+    initialFit: foldable || initialState?.fit === true,
     onStart: () => setSimFocused(false),
   });
+  const rightPanelWidthPx = devtoolsOpen
+    ? devtoolsPanelWidth
+    : panelOpen
+    ? toolsPanelWidth
+    : 0;
+  // Duo never exposes corner-resize — always the largest frame that fits the viewport.
+  const simulatorFrameWidth = foldable
+    ? getSimulatorFrameMaxWidth(
+        containerDefaultWidth,
+        Math.max(240, viewportWidth - (gridOpen ? gridPanelWidth : 0) - rightPanelWidthPx - 96),
+        viewportHeight,
+        containerAspectRatioValue,
+      )
+    : simulatorResize.width;
 
   // Only shift the simulator when a panel would otherwise collide with it.
   // Tools/DevTools dock on the right; the device sidebar docks on the left, so
@@ -920,8 +1002,8 @@ function AppWithConfig({
   const PANEL_EDGE_OFFSET = 12;
   const PANEL_GAP = 24;
   const deviceWidth = deviceRenderedWidth > 0
-    ? Math.min(deviceRenderedWidth, simulatorResize.width)
-    : simulatorResize.width;
+    ? Math.min(deviceRenderedWidth, simulatorFrameWidth)
+    : simulatorFrameWidth;
   // Shift needed to clear a docked panel of `panelWidthPx` on the given side
   // without ever pushing the device under the opposite edge.
   const shiftToClear = (panelWidthPx: number): number => {
@@ -933,13 +1015,8 @@ function AppWithConfig({
     const shiftNeeded = 2 * overlap;
     return shiftNeeded <= panelWidthPx + PANEL_GAP ? shiftNeeded : 0;
   };
-  const rightPanelWidthPx = devtoolsOpen
-    ? devtoolsPanelWidth
-    : panelOpen
-    ? toolsPanelWidth
-    : 0;
-  const shiftForRightPanel = shiftToClear(rightPanelWidthPx);
-  const shiftForLeftPanel = shiftToClear(gridOpen ? gridPanelWidth : 0);
+  const shiftForRightPanel = foldable ? rightPanelWidthPx : shiftToClear(rightPanelWidthPx);
+  const shiftForLeftPanel = foldable ? (gridOpen ? gridPanelWidth : 0) : shiftToClear(gridOpen ? gridPanelWidth : 0);
 
   return (
     <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
@@ -955,14 +1032,14 @@ function AppWithConfig({
       <div
         className="flex flex-col items-center gap-3 min-w-0"
         style={{
-          width: simulatorResize.width,
+          width: simulatorFrameWidth,
           transition: simulatorFrameLayoutTransition(simulatorResize),
         }}
       >
         <SimulatorToolbar
           exec={execOnHost}
           onRotate={rotateDevice}
-          orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+          orientation={currentOrientation}
           deviceUdid={config.device}
           deviceName={deviceName}
           deviceRuntime={deviceRuntime}
@@ -995,10 +1072,10 @@ function AppWithConfig({
         </SimulatorToolbar>
         <div
           ref={simContainerRef}
-          className="relative max-h-full"
+          className="relative max-h-full select-none"
           data-device-chrome={useChrome ? "on" : "off"}
           style={{
-            width: simulatorResize.width,
+            width: simulatorFrameWidth,
             aspectRatio: containerAspectRatio,
             transition: simulatorFrameLayoutTransition(simulatorResize),
             willChange:
@@ -1007,6 +1084,11 @@ function AppWithConfig({
           {...mediaDrop.dropZoneProps}
         >
           {(() => {
+            if (foldable) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
+              projection={duoProjection} screenConfig={activeStreamConfig} onStreamingChange={setStreaming} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
+              onError={() => toast.error("Device rendering is unavailable. Check the selected Xcode and server log.")}>
+              {axOverlayEnabled && duoProjection && <AxDomOverlay projection={duoProjection} screenConfig={activeStreamConfig} />}
+            </DuoThreeDView>;
             const streamView = (
               <SimulatorView
                 url={config.url}
@@ -1063,7 +1145,7 @@ function AppWithConfig({
             // swapping this wrapper (and the stream inside it).
             return (
               <DeviceKitChrome
-                chrome={chrome!}
+                chrome={activeChrome!}
                 framed={useChrome}
                 interactive={useChrome}
                 onButton={handleChromeButton}
@@ -1091,30 +1173,34 @@ function AppWithConfig({
               <span className="text-[13px] font-medium">Drop media or .ipa</span>
             </div>
           )}
-          <SimulatorResizeCornerHandle
-            simulatorResize={simulatorResize}
-            deviceType={deviceType}
-            streamConfig={activeStreamConfig}
-            containerWidth={deviceRenderedWidth || simulatorResize.width}
-            containerHeight={
-              deviceRenderedHeight ||
-              (containerAspectRatioValue > 0 ? simulatorResize.width / containerAspectRatioValue : 0)
-            }
-          />
-          <SimulatorResizeSizeBadge
-            width={deviceRenderedWidth || simulatorResize.width}
-            height={
-              deviceRenderedHeight ||
-              (containerAspectRatioValue > 0 ? simulatorResize.width / containerAspectRatioValue : 0)
-            }
-            visible={simulatorResize.isResizing || simulatorResize.isInertia}
-          />
+          {!foldable && (
+            <>
+              <SimulatorResizeCornerHandle
+                simulatorResize={simulatorResize}
+                deviceType={deviceType}
+                streamConfig={activeStreamConfig}
+                containerWidth={deviceRenderedWidth || simulatorFrameWidth}
+                containerHeight={
+                  deviceRenderedHeight ||
+                  (containerAspectRatioValue > 0 ? simulatorFrameWidth / containerAspectRatioValue : 0)
+                }
+              />
+              <SimulatorResizeSizeBadge
+                width={deviceRenderedWidth || simulatorFrameWidth}
+                height={
+                  deviceRenderedHeight ||
+                  (containerAspectRatioValue > 0 ? simulatorFrameWidth / containerAspectRatioValue : 0)
+                }
+                visible={simulatorResize.isResizing || simulatorResize.isInertia}
+              />
+            </>
+          )}
         </div>
-        <div className="inline-flex items-center justify-center gap-2 max-w-full">
+        <div className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
           <SimulatorToolbar
             exec={execOnHost}
             onRotate={rotateDevice}
-            orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
+            orientation={currentOrientation}
             deviceUdid={config.device}
             deviceName={deviceName}
             deviceRuntime={deviceRuntime}
@@ -1122,12 +1208,13 @@ function AppWithConfig({
             aria-label="Simulator actions"
             style={{
               alignSelf: "center",
-              width: "auto",
               minWidth: 0,
-              maxWidth: "100%",
               justifyContent: "center",
               padding: "6px 8px",
               borderRadius: 18,
+              ...(foldable
+                ? { flexWrap: "nowrap", width: "max-content", maxWidth: "none" }
+                : { width: "auto", maxWidth: "100%" }),
             }}
           >
             <SimulatorToolbar.Actions>
@@ -1146,37 +1233,55 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <SimulatorToolbar.RotateButton title="Rotate device" />
-              {!!chrome && (
+              {!foldable && !!activeChrome && (
                 <ChromeToolbarButton
                   hideChrome={hideChrome}
                   onToggle={() => setHideChrome((hidden) => !hidden)}
                 />
               )}
+              {foldable && (
+                <>
+                  <AxToolbarButton
+                    overlayEnabled={axOverlayEnabled}
+                    streaming={streaming}
+                    onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+                  />
+                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+                  <DeviceHingeControls
+                    orientation={currentOrientation}
+                    angle={hingeAngle}
+                    onChange={setHinge}
+                    onPose={setPose}
+                  />
+                </>
+              )}
             </SimulatorToolbar.Actions>
           </SimulatorToolbar>
-          <SimulatorToolbar
-            exec={execOnHost}
-            onRotate={rotateDevice}
-            orientation={(activeStreamConfig as { orientation?: SimulatorOrientation }).orientation ?? null}
-            deviceUdid={config.device}
-            deviceName={deviceName}
-            deviceRuntime={deviceRuntime}
-            streaming={streaming}
-            aria-label="Accessibility overlay"
-            style={{
-              width: "auto",
-              minWidth: 0,
-              justifyContent: "center",
-              padding: 6,
-              borderRadius: 22,
-            }}
-          >
-            <AxToolbarButton
-              overlayEnabled={axOverlayEnabled}
+          {!foldable && (
+            <SimulatorToolbar
+              exec={execOnHost}
+              onRotate={rotateDevice}
+              orientation={currentOrientation}
+              deviceUdid={config.device}
+              deviceName={deviceName}
+              deviceRuntime={deviceRuntime}
               streaming={streaming}
-              onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
-            />
-          </SimulatorToolbar>
+              aria-label="Accessibility overlay"
+              style={{
+                width: "auto",
+                minWidth: 0,
+                justifyContent: "center",
+                padding: 6,
+                borderRadius: 22,
+              }}
+            >
+              <AxToolbarButton
+                overlayEnabled={axOverlayEnabled}
+                streaming={streaming}
+                onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+              />
+            </SimulatorToolbar>
+          )}
         </div>
       </div>
 
@@ -1226,7 +1331,7 @@ function AppWithConfig({
         onCodecPreferenceChange={setCodecPreference}
         activeCodec={useAvccVideo ? "h264" : "mjpeg"}
         avccSupported={avcc.supported}
-        chromeAvailable={!!chrome}
+        chromeAvailable={!!activeChrome && !foldable}
         hideChrome={hideChrome}
         onHideChromeChange={setHideChrome}
         width={toolsPanelWidth}

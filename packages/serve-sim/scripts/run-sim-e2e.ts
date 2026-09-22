@@ -28,6 +28,11 @@ function runBunTest(files: readonly string[], extraArgs: string[] = []): number 
   return result.status ?? 1;
 }
 
+function alreadyBooted(result: ReturnType<typeof spawnSync>): boolean {
+  const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  return /current state: Booted|already booted/i.test(text);
+}
+
 function rebootSimulator(): boolean {
   if (!udid) {
     console.error("UDID unset; cannot reboot simulator for retry");
@@ -36,12 +41,21 @@ function rebootSimulator(): boolean {
   console.warn(`Rebooting simulator ${udid} before retry`);
   spawnSync("xcrun", ["simctl", "shutdown", udid], { stdio: "inherit" });
   spawnSync("sleep", ["3"], { stdio: "inherit" });
-  const boot = spawnSync("xcrun", ["simctl", "boot", udid], { stdio: "inherit" });
-  if (boot.status !== 0) {
+  const boot = spawnSync("xcrun", ["simctl", "boot", udid], { encoding: "utf-8" });
+  if (boot.stdout) process.stdout.write(boot.stdout);
+  if (boot.stderr) process.stderr.write(boot.stderr);
+  // Shutdown can lose the race with a detached server. "Already booted" is a
+  // usable simulator, not a reason to skip the retry.
+  if (boot.status !== 0 && !alreadyBooted(boot)) {
     console.error(`simctl boot ${udid} failed (status ${boot.status}); skipping retry`);
     return false;
   }
-  const bootstatus = spawnSync("xcrun", ["simctl", "bootstatus", udid, "-b"], { stdio: "inherit" });
+  // No `-b`: on Xcode 27 the boot-and-monitor form can stay blocked after the
+  // device is already Booted.
+  const bootstatus = spawnSync("xcrun", ["simctl", "bootstatus", udid], {
+    stdio: "inherit",
+    timeout: 90_000,
+  });
   if (bootstatus.status !== 0) {
     console.error(`simctl bootstatus ${udid} failed (status ${bootstatus.status}); skipping retry`);
     return false;

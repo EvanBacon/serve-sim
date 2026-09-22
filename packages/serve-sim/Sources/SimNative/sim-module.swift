@@ -23,11 +23,13 @@ private func u32(_ v: Int) -> UInt32 {
 @NodeClass @NodeActor final class SimHID {
     private let injector: HIDInjector
     private let udid: String
+    private let setupTask: Task<Void, Error>
 
-    @NodeConstructor init(_ udid: String) throws {
+    @NodeConstructor init(_ udid: String, _ duoHelper: String) throws {
         self.udid = udid
         injector = HIDInjector()
-        Task { try await injector.setup(deviceUDID: udid) }
+        let injector = self.injector
+        setupTask = Task { try await injector.setup(deviceUDID: udid, duoHelper: duoHelper) }
     }
 
     @NodeMethod func touch(_ type: String, _ x: Double, _ y: Double,
@@ -81,6 +83,26 @@ private func u32(_ v: Int) -> UInt32 {
 
     @NodeMethod func caDebug(_ name: String, _ enabled: Bool) async -> Bool {
         await injector.setCADebugOption(name: name, enabled: enabled)
+    }
+
+    @NodeMethod func isFoldable() async throws -> Bool {
+        try await setupTask.value
+        return await injector.isFoldable()
+    }
+
+    @NodeMethod func close() async {
+        _ = try? await setupTask.value
+        await injector.close()
+    }
+
+    @NodeMethod func pose(_ name: String, _ fromDegrees: Double) async throws -> Bool {
+        try await setupTask.value
+        return await injector.setPose(name, fromDegrees: fromDegrees)
+    }
+
+    @NodeMethod func hinge(_ degrees: Double) async throws -> Bool {
+        try await setupTask.value
+        return await injector.setHingeAngle(degrees: degrees)
     }
 }
 
@@ -141,6 +163,10 @@ private func u32(_ v: Int) -> UInt32 {
             throw Errors.invalidCodec
         }
         return try NodeFunction { await unsubscribe() }
+    }
+
+    @NodeMethod func setPreferredScreenSize(_ width: Int, _ height: Int) async {
+        await engine.setPreferredScreenSize(width: width, height: height)
     }
 
     @NodeMethod func start() async throws {

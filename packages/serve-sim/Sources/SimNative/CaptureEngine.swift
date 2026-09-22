@@ -84,6 +84,10 @@ actor CaptureEngine {
         self.deviceUDID = deviceUDID
     }
 
+    func setPreferredScreenSize(width: Int, height: Int) async {
+        await frameCapture.setPreferredScreenSize(width: width, height: height)
+    }
+
     func start() async throws {
         guard phase == .unstarted else { return }
         phase = .starting

@@ -260,4 +260,11 @@ if (nativeBuild.status !== 0) {
 }
 console.log("dist/native/serve-sim-native.node");
 
+
+
+// Guest HID service for iPhone Duo hinge and hardware keys.
+const duoBuild = spawnSync("bash", [resolve(root, "Sources/SimDuoHID/build.sh"), resolve(distDir, "simduo")], { stdio: "inherit" });
+if (duoBuild.status !== 0) process.exit(duoBuild.status ?? 1);
+const duoRenderBuild = spawnSync("bash", [resolve(root, "Sources/SimDuoRenderer/build.sh"), resolve(distDir, "simduo")], { stdio: "inherit" });
+if (duoRenderBuild.status !== 0) process.exit(duoRenderBuild.status ?? 1);
 console.log("Done.");

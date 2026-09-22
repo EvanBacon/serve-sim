@@ -45,6 +45,8 @@ export const SIMULATOR_SCREENS: Record<string, { width: number; height: number }
   "iPhone 17 Pro": { width: 1206, height: 2622 },
   "iPhone 17": { width: 1206, height: 2622 },
   "iPhone Air": { width: 1260, height: 2736 },
+  // iPhone Duo — cover (Device Hub rest pose). Inner is 2007×2853; chrome follows the live stream.
+  "iPhone Duo": { width: 1398, height: 2034 },
   // iPhone 16 series
   "iPhone 16 Pro Max": { width: 1320, height: 2868 },
   "iPhone 16 Pro": { width: 1206, height: 2622 },
