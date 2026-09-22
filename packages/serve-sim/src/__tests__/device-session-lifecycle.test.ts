@@ -596,3 +596,44 @@ async function serve(session: DeviceSession): Promise<string> {
   const { port } = server.address() as AddressInfo;
   return `http://127.0.0.1:${port}`;
 }
+
+test.each([true, false])("fold frames advance between sparse readbacks and settle on command result %s", async (accepted) => {
+  let frame!: (value: { data: Uint8Array; width: number; height: number }) => Promise<void>;
+  let update!: (state: import("../duo-state").DuoState) => void;
+  let receive!: (data: Buffer) => void;
+  let release!: (accepted: boolean) => void;
+  const angles: number[] = [];
+  const session = new DeviceSession("TEST-UDID", {
+    ...dependencies({ subscribeMjpeg: async (cb) => { frame = cb; return () => {}; } }),
+    hid: { ...dependencies().hid, isFoldable: async () => true,
+      pose: () => new Promise<boolean>((resolve) => { release = resolve; }) },
+    createDuoMonitor: (_udid, onState) => { update = onState; return { close() {}, refreshOrientation() {} }; },
+    createDuoRenderer: () => ({ close() {}, render: async (_jpeg, panel, hingeDegrees) => {
+      angles.push(hingeDegrees);
+      return { jpeg: Buffer.from([1]), projection: { width: 1500, height: 1350, panel, hingeDegrees, pieces: [] } };
+    } }),
+  });
+  await session.start();
+  update({ hingeDegrees: 130, primaryPanel: "inner", orientations: {} });
+  await frame({ data: new Uint8Array([1]), width: 2007, height: 2853 });
+  session.attachHidSocket({ send() {}, close() {}, on(event, cb) { if (event === "message") receive = cb; } });
+  session.handleDuoMjpeg({} as IncomingMessage, new FakeServerResponse() as unknown as ServerResponse);
+  try {
+    await waitFor(() => angles.length > 0);
+    receive(Buffer.concat([Buffer.from([0x0e]), Buffer.from('{"pose":"open"}')]));
+    await waitFor(() => release != null);
+    // No movement before the guest acknowledges the first hinge sample.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(angles.every((angle) => angle === 130)).toBe(true);
+    update({ hingeDegrees: 140, orientations: {} });
+    await waitFor(() => angles.some((angle) => angle > 145 && angle < 180));
+    expect(session.screenConfig().hingeDegrees).toBe(140);
+    // A delayed sample must not rewind the visual trajectory.
+    const last = angles.at(-1)!;
+    update({ hingeDegrees: 141, orientations: {} });
+    await waitFor(() => angles.at(-1)! > last);
+    release(accepted);
+    await waitFor(() => angles.at(-1) === (accepted ? 180 : 141));
+    expect(session.screenConfig().hingeDegrees).toBe(accepted ? 180 : 141);
+  } finally { release?.(false); session.close(); }
+});

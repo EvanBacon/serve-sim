@@ -33,6 +33,11 @@ Use [verification.md](verification.md) for historical validation; its earlier
   Alt exposes the continuous hinge slider.
 - [ ] Pinch must not change the hinge angle. Folding is controlled by pose
   buttons or the Alt slider; two-finger screen input remains available to apps.
+- [ ] Named fold transitions render continuously between hinge-monitor samples.
+  Start the visual clock only after confirmed guest movement; use the same
+  800 ms cubic easing as the native sweep. Sparse or delayed samples must not
+  pause or rewind the model. Continue using guest readback for panel selection,
+  and cancel the clock on command failure or session shutdown.
 - [ ] Folding/unfolding does not introduce an unrelated 90°/180° flip when the
   guest changes orientation or switches the active display. The fold's camera
   centering remains continuous; the closed cover faces the viewer.
@@ -153,7 +158,7 @@ about 48 ms before reuse. Changing app content and moving poses can cost more;
 this is not a measured end-to-end browser frame rate.
 
 Device Hub uses a perspective camera, not a confirmed orthographic camera.
-Hopper inspection found an adjustable focal length and a 36 mm sensor model.
+Its focal length is adjustable and the sensor model is 36 mm.
 Our current 200 mm lens is chosen for the flatter appearance; it is not a claim
 that Device Hub always uses 200 mm. Camera and touch projection must use the
 same field of view.
@@ -175,7 +180,7 @@ xcrun swiftc -O -parse-as-library packages/serve-sim/Sources/SimDuoRenderer/Fast
 /tmp/serve-sim-fast-png-tests
 ```
 
-To check the projection against rendered pixels (requires Pillow):
+To check the projection against rendered pixels:
 
 ```sh
 python3 packages/serve-sim/scripts/verify-duo-projection.py

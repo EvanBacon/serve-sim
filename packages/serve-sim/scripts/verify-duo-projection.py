@@ -4,7 +4,7 @@ import subprocess,struct,json,io,math
 from PIL import Image,ImageDraw
 from pathlib import Path
 import argparse
-# Requires Pillow and a built local renderer; reads the model from selected Xcode.
+# Needs a built local renderer. Reads the model from the selected Xcode.
 package = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--renderer', default=str(package / 'dist/simduo/serve-sim-duo-render'))

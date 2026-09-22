@@ -190,6 +190,8 @@ export class DeviceSession {
   private duoViewOrientation = "portrait";
   private duoViewRoll = 0;
   private duoRotationTimer?: ReturnType<typeof setTimeout>;
+  private duoFoldTimer?: ReturnType<typeof setTimeout>;
+  private duoFold?: { from: number; target: number; began?: number };
 
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
@@ -267,6 +269,8 @@ export class DeviceSession {
     this.phase = "stopped";
     clearTimeout(this.duoSettleTimer);
     clearTimeout(this.duoRotationTimer);
+    clearTimeout(this.duoFoldTimer);
+    this.duoFold = undefined;
     this.duoMonitor?.close();
     this.duoRenderer?.close();
     this.duoResponses.clear();
@@ -293,7 +297,19 @@ export class DeviceSession {
 
   private async applyDuoState(state: DuoState): Promise<void> {
     if (this.isStopped()) return;
-    if (state.hingeDegrees != null) this.hingeDegrees = state.hingeDegrees;
+    if (state.hingeDegrees != null) {
+      this.hingeDegrees = state.hingeDegrees;
+      const fold = this.duoFold;
+      if (fold && fold.began == null && fold.from !== fold.target) {
+        const fraction = (state.hingeDegrees - fold.from) / (fold.target - fold.from);
+        if (fraction > 0 && fraction <= 1) {
+          // Invert the guest's 800 ms cubic ease-out sweep. Starting on its
+          // first sample avoids animating before the HID bridge is ready.
+          fold.began = performance.now() - 800 * (1 - Math.cbrt(1 - fraction));
+          this.tickDuoFold();
+        }
+      }
+    }
     if (state.primaryPanel) this.primaryDuoPanel = state.primaryPanel;
     const size = displaySizeForHingeDegrees(this.primaryDuoPanel ? (this.primaryDuoPanel === "cover" ? 0 : 180) : this.hingeDegrees ?? 0);
     if ((state.hingeDegrees != null || state.primaryPanel) && size.coverActive !== this.followedPanel) {
@@ -342,7 +358,7 @@ export class DeviceSession {
     // Guest orientation and active display can change during folding. Keep the
     // physical model stable; only an explicit Rotate command changes its roll.
     const roll = this.duoViewRoll;
-    void renderer.render(jpeg, panel, this.hingeDegrees, roll, fullResolution).then(({ jpeg: rendered, projection }) => {
+    void renderer.render(jpeg, panel, this.duoFoldAngle(), roll, fullResolution).then(({ jpeg: rendered, projection }) => {
       if (this.isStopped() || this.duoRenderer !== renderer) return;
       if (JSON.stringify(this.duoProjection) !== JSON.stringify(projection)) {
         this.duoProjection = projection;
@@ -362,6 +378,23 @@ export class DeviceSession {
       this.duoRenderBusy = false;
       if (this.duoRenderPending) this.renderDuoFrame();
     });
+  }
+
+  private duoFoldAngle(): number {
+    const fold = this.duoFold;
+    if (!fold || fold.began == null) return this.hingeDegrees ?? 0;
+    const progress = Math.min(1, Math.max(0, (performance.now() - fold.began) / 800));
+    return fold.from + (fold.target - fold.from) * (1 - (1 - progress) ** 3);
+  }
+
+  private tickDuoFold(): void {
+    clearTimeout(this.duoFoldTimer);
+    if (this.isStopped() || this.duoFold?.began == null) return;
+    this.renderDuoFrame();
+    if (performance.now() < this.duoFold.began + 800) {
+      this.duoFoldTimer = setTimeout(() => this.tickDuoFold(), 16);
+      this.duoFoldTimer.unref?.();
+    }
   }
 
   private animateDuoRotation(orientation: string): void {
@@ -694,13 +727,28 @@ export class DeviceSession {
         this.recordHidEvent(tag, m);
         if (typeof m.pose === "string" && m.pose.trim()) {
           const spec = resolveDevicePose(m.pose);
-          if (spec && await this.hid.pose(m.pose, this.hingeDegrees ?? 0)) {
-            this.hingeDegrees = spec.hingeDegrees;
-            await this.followDuoState({ hingeDegrees: spec.hingeDegrees, orientations: {} });
-            this.duoMonitor?.refreshOrientation();
-            this.broadcastConfig();
-            this.renderDuoFrame();
-            return true;
+          if (spec) {
+            const from = this.hingeDegrees ?? 0;
+            this.duoFold = { from, target: spec.hingeDegrees };
+            let accepted = false;
+            try {
+              accepted = await this.hid.pose(m.pose, from);
+              if (accepted) {
+                clearTimeout(this.duoFoldTimer);
+                this.duoFold = undefined;
+                await this.followDuoState({ hingeDegrees: spec.hingeDegrees, orientations: {} });
+                this.duoMonitor?.refreshOrientation();
+                this.broadcastConfig();
+                this.renderDuoFrame();
+                return true;
+              }
+            } finally {
+              clearTimeout(this.duoFoldTimer);
+              this.duoFold = undefined;
+              // Failed commands return to confirmed guest state; close() is
+              // guarded by renderDuoFrame and cannot restart the animation.
+              if (!accepted) this.renderDuoFrame();
+            }
           }
         } else if (typeof m.hinge === "number" && Number.isFinite(m.hinge) && m.hinge >= 0 && m.hinge <= 180) {
           if (!await this.hid.hinge(m.hinge)) break;
