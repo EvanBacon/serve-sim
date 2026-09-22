@@ -68,7 +68,7 @@ Power, camera, and volume controls follow the device's physical edges, fade in
 when the cursor is nearby, and stay hidden during pose animation. They support
 press-and-hold. The main control bar has no volume menu or 2D/3D mode toggle.
 
-See the [feature contract and regression checklist](docs/duo/expected-behavior.md)
+See the [feature contract and regression checklist](../../.agents/skills/serve-sim-duo-verification/references/expected-behavior.md)
 for appearance, folding, rotation, controls, screenshot, and performance checks.
 
 The preview follows hinge changes made in Device Hub. Closed (0°), Tent (80°),

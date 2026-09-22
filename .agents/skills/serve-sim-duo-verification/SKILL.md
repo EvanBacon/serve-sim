@@ -6,9 +6,9 @@ description: Verify serve-sim Duo folding, guest orientation, and model rotation
 # Duo verification
 
 Run commands from the repository root. Read the relevant checks in
-[expected behavior](../../../packages/serve-sim/docs/duo/expected-behavior.md)
+[expected behavior](references/expected-behavior.md)
 before choosing a test. Historical results live in
-[verification](../../../packages/serve-sim/docs/duo/verification.md).
+[verification](references/verification.md).
 Keep reusable agent verification helpers in this skill's `scripts/` directory.
 
 ## Local setup

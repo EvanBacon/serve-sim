@@ -73,7 +73,7 @@ The full camera/permissions E2E suite is not included in these results.
 
 ## Repeating a check
 
-Use the repository's [Duo verification skill](../../../../.agents/skills/serve-sim-duo-verification/SKILL.md)
+Use the repository's [Duo verification skill](../SKILL.md)
 for live-check prerequisites, commands, and the rotation verifier. Reusable agent
 verification scripts and procedures belong with that skill; this document keeps
 historical results. The current regression contract remains in

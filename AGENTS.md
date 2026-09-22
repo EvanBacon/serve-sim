@@ -62,5 +62,5 @@ off disk to verify (see the path under "agent-browser" above).
 ## Duo regression contract
 
 - For changes to Duo rendering, input, controls, or capture, consult
-  [the expected-behavior checklist](packages/serve-sim/docs/duo/expected-behavior.md).
+  [the expected-behavior checklist](.agents/skills/serve-sim-duo-verification/references/expected-behavior.md).
   Update it when intended behavior changes and validate the relevant checks.

@@ -131,7 +131,7 @@ Use [verification.md](verification.md) for historical validation; its earlier
    for actual app content, dimensions, and colors; do not accept exit code alone.
 8. Restart the server with the preview open and verify stream recovery.
 
-Relevant automated suites in `src/__tests__`:
+Relevant automated suites in `packages/serve-sim/src/__tests__`:
 
 | Area | Suites |
 | --- | --- |
