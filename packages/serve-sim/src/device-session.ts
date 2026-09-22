@@ -1,5 +1,6 @@
 import { warnDeviceHubInput } from "./device-hub-input";
-import { DuoRenderer, type DuoProjection } from "./duo-renderer";
+import { DuoRenderer } from "./duo-renderer";
+import { DuoPreview } from "./duo-preview";
 /**
  * In-process device session — the replacement for the spawned serve-sim-bin
  * helper. One session per booted simulator owns a NativeCapture + NativeHid and
@@ -15,10 +16,11 @@ import { DuoRenderer, type DuoProjection } from "./duo-renderer";
  *
  * Replaces the helper's HTTP/client layer; the framing here mirrors the
  * original byte-for-byte so the existing browser client is unchanged.
+ * Duo's 3D preview, fold clock, and rotation clock live on DuoPreview.
  */
 import { DuoStateMonitor, type DuoState } from "./duo-state";
 import type { IncomingMessage, ServerResponse } from "http";
-import { displaySizeForHingeDegrees, resolveDevicePose } from "./device-pose";
+import { displaySizeForPanel, duoPanel, resolveDevicePose, type DuoPanel } from "./device-pose";
 import {
   NativeCapture,
   NativeHid,
@@ -61,8 +63,6 @@ const MJPEG_TRAILER = Buffer.from("\r\n", "ascii");
 // 2s liveness window instead of re-encoding identical pixels in Swift.
 const MJPEG_IDLE_REPLAY_MS = 1_000;
 const TOUCH_TAP_MAX_DISTANCE = 0.004;
-// Matches the cubic ease-out sweep in HIDInjector.setPose.
-const DUO_FOLD_DURATION_MS = 800;
 
 type TouchGestureLog = {
   eventId?: number;
@@ -97,10 +97,6 @@ function newTouchGesture(payload: { x: number; y: number; edge?: number }): Touc
 
 function mjpegHeader(jpegLength: number): Buffer {
   return Buffer.from(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpegLength}\r\n\r\n`, "ascii");
-}
-
-function duoFrameHeader(frameLength: number): Buffer {
-  return Buffer.from(`--frame\r\nContent-Type: image/png\r\nContent-Length: ${frameLength}\r\n\r\n`, "ascii");
 }
 
 function avccSeed(jpeg: Uint8Array): Buffer {
@@ -189,25 +185,14 @@ export class DeviceSession {
   private width = 0;
   private height = 0;
   private orientation = "portrait";
-  private duoViewOrientation = "portrait";
-  private duoViewRoll = 0;
-  private duoRotationTimer?: ReturnType<typeof setTimeout>;
-  private duoFoldTimer?: ReturnType<typeof setTimeout>;
-  private duoFold?: { from: number; target: number; began?: number };
 
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
   private readonly hidSockets = new Set<HidSocket>();
-  private duoRenderer?: Pick<DuoRenderer, "render" | "close">;
-  private duoProjection?: DuoProjection;
-  private duoRenderBusy = false;
-  private duoRenderPending = false;
-  private duoSettleTimer?: ReturnType<typeof setTimeout>;
-  private readonly duoResponses = new Set<ServerResponse>();
+  private readonly duo: DuoPreview;
   private duoMonitor?: Pick<DuoStateMonitor, "close" | "refreshOrientation">;
-  private hingeDegrees?: number;
-  private followedPanel?: boolean;
-  private primaryDuoPanel?: "cover" | "inner";
+  private followedCover?: boolean;
+  private primaryDuoPanel?: DuoPanel;
   private poseQueue: Promise<void> = Promise.resolve();
   private duoStateQueue: Promise<void> = Promise.resolve();
   private readonly streamResponses = new Set<ServerResponse>();
@@ -216,6 +201,13 @@ export class DeviceSession {
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.hid = dependencies?.hid ?? new NativeHid(udid);
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
+    this.duo = new DuoPreview({
+      createRenderer: () => dependencies?.createDuoRenderer?.() ?? new DuoRenderer(),
+      onProjection: (frame) => {
+        for (const ws of this.hidSockets) ws.send(frame);
+      },
+      onStreamError: (res, error) => this.handleStreamError(res, error),
+    });
   }
 
   /** Begin capture and retain one shared MJPEG subscription. Idempotent. */
