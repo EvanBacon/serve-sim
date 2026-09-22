@@ -47,13 +47,32 @@ export function poseForDisplayRole(role: string): DevicePoseSpec | null {
   return null;
 }
 
+export type DuoPanel = "cover" | "inner";
+
+/**
+ * The live panel. SpringBoard's primary-panel readback wins. The 90° hinge
+ * rule applies only before that readback exists.
+ */
+export function duoPanel(input: { primaryPanel?: DuoPanel | null; hingeDegrees?: number | null }): DuoPanel {
+  if (input.primaryPanel) return input.primaryPanel;
+  return (input.hingeDegrees ?? 0) < DUO_COVER_ACTIVE_BELOW_DEGREES ? "cover" : "inner";
+}
+
+export function displaySizeForPanel(panel: DuoPanel): {
+  coverActive: boolean;
+  width: number;
+  height: number;
+} {
+  const coverActive = panel === "cover";
+  const size = coverActive ? DUO_COVER_SIZE : DUO_INNER_SIZE;
+  return { coverActive, width: size.width, height: size.height };
+}
+
 /** Cover vs inner framebuffer size for a raw hinge angle in degrees. */
 export function displaySizeForHingeDegrees(hingeDegrees: number): {
   coverActive: boolean;
   width: number;
   height: number;
 } {
-  const coverActive = hingeDegrees < DUO_COVER_ACTIVE_BELOW_DEGREES;
-  const size = coverActive ? DUO_COVER_SIZE : DUO_INNER_SIZE;
-  return { coverActive, width: size.width, height: size.height };
+  return displaySizeForPanel(duoPanel({ hingeDegrees }));
 }

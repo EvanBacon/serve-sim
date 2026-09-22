@@ -5,7 +5,7 @@ from PIL import Image,ImageDraw
 from pathlib import Path
 import argparse
 # Needs a built local renderer. Reads the model from the selected Xcode.
-package = Path(__file__).resolve().parents[1]
+package = Path(__file__).resolve().parents[4] / 'packages/serve-sim'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--renderer', default=str(package / 'dist/simduo/serve-sim-duo-render'))
 args = parser.parse_args()

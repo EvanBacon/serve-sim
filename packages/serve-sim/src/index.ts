@@ -814,29 +814,13 @@ async function typeText(
   await sendKeyEventsToWs(state.wsUrl, events);
 }
 
-async function pose(name: string, deviceArg?: string) {
+async function fold(hinge: number, deviceArg?: string) {
   const state = readState(deviceArg);
   if (!state) {
     console.error("No serve-sim server running. Run `serve-sim` first.");
     process.exit(1);
   }
-
-  const hinge = Number(name);
-  if (Number.isFinite(hinge) && (hinge < 0 || hinge > 180 || !name.trim())) {
-    throw new Error("Hinge angle must be between 0 and 180 degrees.");
-  }
-  const payload = Number.isFinite(hinge)
-    ? { hinge }
-    : { pose: name };
-  if (!Number.isFinite(hinge)) {
-    const { resolveDevicePose } = await import("./device-pose");
-    if (!resolveDevicePose(name)) {
-      console.error(
-        "Usage: serve-sim pose <closed|open|book|tent|tabletop|<degrees>> [-d udid]",
-      );
-      process.exit(1);
-    }
-  }
+  const payload = { hinge };
 
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl);
@@ -849,16 +833,16 @@ async function pose(name: string, deviceArg?: string) {
       ws.close();
       if (error) reject(error); else resolve();
     };
-    const timeout = setTimeout(() => finish(new Error("Timed out waiting for the simulator pose.")), 10000);
+    const timeout = setTimeout(() => finish(new Error("Timed out waiting for the simulator fold.")), 10000);
     ws.onmessage = ({ data }) => {
       const frame = Buffer.from(data as ArrayBuffer);
       if (frame[0] !== 0x0e) return;
       try {
         const reply = JSON.parse(frame.subarray(1).toString());
-        finish(reply.ok === true ? undefined : new Error("Simulator rejected the pose. An iPhone Duo with guest HID support is required."));
+        finish(reply.ok === true ? undefined : new Error("Simulator rejected the fold. An iPhone Duo with guest HID support is required."));
       } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     };
-    ws.onclose = () => finish(new Error("Connection closed before the simulator acknowledged the pose."));
+    ws.onclose = () => finish(new Error("Connection closed before the simulator acknowledged the fold."));
 
     ws.onopen = () => {
       const json = new TextEncoder().encode(JSON.stringify(payload));
@@ -1912,13 +1896,17 @@ program
   });
 
 program
-  .command("pose")
-  .description(
-    "Set iPhone Duo fold pose (closed|open|book|tent|tabletop) or a hinge angle in degrees",
-  )
-  .argument("<pose>")
+  .command("fold")
+  .description("Set the iPhone Duo hinge angle in degrees (0 closed, 180 fully open)")
+  .argument("<deg>", "Hinge angle from 0 to 180", (raw: string) => {
+    const degrees = Number(raw);
+    if (!raw.trim() || !Number.isFinite(degrees) || degrees < 0 || degrees > 180) {
+      throw new InvalidArgumentError("Hinge angle must be between 0 and 180 degrees.");
+    }
+    return degrees;
+  })
   .option(...deviceOpt)
-  .action((name: string, opts) => pose(name, opts.device));
+  .action((degrees: number, opts) => fold(degrees, opts.device));
 
 program
   .command("ca-debug")

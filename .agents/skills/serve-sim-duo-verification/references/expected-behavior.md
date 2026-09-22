@@ -175,7 +175,7 @@ xcrun swiftc -O -parse-as-library packages/serve-sim/Sources/SimDuoRenderer/Fast
 To check the projection against rendered pixels:
 
 ```sh
-python3 packages/serve-sim/scripts/verify-duo-projection.py
+python3 .agents/skills/serve-sim-duo-verification/scripts/verify-duo-projection.py
 ```
 
 This renders colored markers on both inner leaves at 100°, 130°, 170°, and 180°,

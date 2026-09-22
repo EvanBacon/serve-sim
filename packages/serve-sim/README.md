@@ -46,10 +46,10 @@ the simulator's hinge and follows the active panel's framebuffer. Touches use th
 integrated digitizer; volume and power controls use a guest HID service.
 
 ```sh
-serve-sim pose closed -d <udid>
-serve-sim pose open -d <udid>      # flat, 180°
-serve-sim pose book -d <udid>      # 130°
-serve-sim pose 100 -d <udid>
+serve-sim fold 0 -d <udid>
+serve-sim fold 180 -d <udid>      # flat, 180°
+serve-sim fold 130 -d <udid>      # 130°
+serve-sim fold 100 -d <udid>
 ```
 
 Commands wait for the guest to acknowledge dispatch. Invalid angles and failed
@@ -103,7 +103,7 @@ serve-sim rotate <orientation> [-d udid]
 serve-sim ca-debug <option> <on|off> [-d udid]
                                       Toggle a CoreAnimation debug flag
                                       (blended|copies|misaligned|offscreen|slow-animations)
-serve-sim pose <name|degrees> [-d udid]  Set a Duo fold pose or angle (0–180)
+serve-sim fold <deg> [-d udid]  Set a Duo hinge angle (0–180)
 serve-sim repair-input [-d udid]         Repair Device Hub input (restarts apps)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events

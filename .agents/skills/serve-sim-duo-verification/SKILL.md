@@ -49,15 +49,15 @@ physical, UI, and model orientations before retrying.
 ## Fold and panel selection
 
 ```sh
-node packages/serve-sim/dist/serve-sim.js pose open -d <udid>
-node packages/serve-sim/dist/serve-sim.js pose book -d <udid>
+node packages/serve-sim/dist/serve-sim.js fold 180 -d <udid>
+node packages/serve-sim/dist/serve-sim.js fold 130 -d <udid>
 xcrun devicectl device motion hinge-angle --device <udid> --timeout 5
 xcrun simctl io <udid> enumerate
 ```
 
 Compare the preview's selected display with the latest SpringBoard
 `DisplayContentMode` event containing `.cover:pri` or `.inner:pri`. Repeat after
-`pose closed` to check the opposite direction. Follow guest panel readback;
+`fold 0` to check the opposite direction. Follow guest panel readback;
 do not infer primary-panel selection solely from hinge angle.
 
 If Device Hub shadows input, consult the explicit `repair-input` procedure in
@@ -65,3 +65,17 @@ the package README. Repair can restart SpringBoard; do not run it as routine
 verification setup. Numeric rotation checks do not establish visual smoothness,
 color fidelity, or control alignment; check those in the in-app Codex browser
 when available and report any unverified behavior.
+
+## Rendered projection checks
+
+With the local renderer built and Python Pillow available, run:
+
+```sh
+python3 .agents/skills/serve-sim-duo-verification/scripts/verify-duo-projection.py
+```
+
+This uses the selected Xcode's V68 model and the local renderer without changing
+simulator state. It checks screen marker projection and physical button anchors
+across 20 fold/rotation combinations. Use `--renderer <path>` to override the
+local renderer binary. Marker centers must land within two output pixels of
+their rendered centers; hardware anchors must land on opaque model pixels.
