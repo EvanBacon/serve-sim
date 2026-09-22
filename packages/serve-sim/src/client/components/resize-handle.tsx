@@ -21,12 +21,11 @@ export function ResizeHandle({
   const [active, setActive] = useState(false);
   const hot = hover || active;
 
-  // A right-edge panel sits at right:12 — its draggable (left) border is at
-  // right:(12 + panelWidth - 1). The flush left sidebar sits at left:0, so its
-  // draggable right border is at left:(panelWidth - 1). Center the 16px hit
-  // target on whichever border is interior.
-  const handleOffset = (side === "left" ? 0 : 12) + panelWidth - 9;
-  const edgeClass = side === "left" ? "top-0 bottom-0" : "top-3 bottom-3";
+  // Both floating panels inset 12px from the viewport edge. Their draggable
+  // interior border sits at edgeInset + panelWidth - 1, so center the 16px hit
+  // target there.
+  const handleOffset = 12 + panelWidth - 9;
+  const edgeClass = "top-3 bottom-3";
   return (
     <div
       role="separator"
