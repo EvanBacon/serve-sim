@@ -3,6 +3,7 @@ import { SimulatorToolbar } from "../simulator";
 import { bindAltHeld } from "../utils/bind-alt-held";
 import type { SimulatorOrientation } from "../types";
 import { DeviceGlyph } from "./device-glyph";
+import { Slider } from "./slider";
 
 const poses = [
   { id: "closed", label: "Folded", angle: 0 },
@@ -40,11 +41,11 @@ export function DeviceHingeControls({ angle, onChange, onPose, orientation = "po
   useEffect(() => bindAltHeld(window, setAltHeld), []);
   return <div role="group" aria-label="Fold pose" className="flex items-center">
     {altHeld ? <div className="flex w-36 items-center gap-1.5 px-1">
-      <input aria-label="Hinge angle" aria-valuetext={`${angle.toFixed(1)} degrees`} type="range"
-        min="0" max="180" step="0.1" value={angle}
+      <Slider aria-label="Hinge angle" aria-valuetext={`${Math.round(angle)} degrees`}
+        min={0} max={180} step={0.1} value={angle}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
-        className="h-7 min-w-0 flex-1 cursor-ew-resize accent-[#0a84ff]" />
-      <output className="w-11 text-right text-[11px] tabular-nums text-white/90">{angle.toFixed(1)}°</output>
+        className="min-w-0 flex-1" />
+      <output className="w-11 text-right text-[11px] tabular-nums text-white/90">{Math.round(angle)}°</output>
     </div> : poses.map((pose) => {
       const selected = Math.abs(angle - pose.angle) < 0.6;
       return <SimulatorToolbar.Button key={pose.id}

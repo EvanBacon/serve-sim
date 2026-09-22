@@ -38,13 +38,27 @@ Use [verification.md](verification.md) for historical validation; its earlier
   centering remains continuous; the closed cover faces the viewer.
 - [ ] Rotate works on a static screen in all four orientations. The model
   animates along the shortest turn, rather than snapping or taking a long spin.
-  Current rotation duration is approximately 300 ms.
+  Current rotation duration is approximately 300 ms. The same action changes
+  the guest's physical orientation through the Duo vendor HID orientation event;
+  it must rotate the app UI as well as the rendered model, in the matching
+  direction so screen content stays upright after either quarter-turn. The
+  screen/UI landscape names map to the opposite CoreDevice physical names.
+  Check closed, book,
+  and open poses. Guest UI orientation comes from panel readback, not the model
+  target (the inner panel's natural axis differs from the cover).
+  With Safari foreground, run `bun packages/serve-sim/scripts/verify-duo-rotation.ts <udid> [port]`
+  to verify all four physical orientations and app UI rotation in all three poses.
+  Apps retain their supported-orientation policy: for example, Safari excludes
+  upside-down portrait on the cover, and Settings stays portrait on the cover.
 - [ ] Repeated rotation requests can retarget an in-progress rotation. Rejected
   HID commands do not change the confirmed orientation.
 - [ ] All three fold-state toolbar icons rotate with the device and animate to
   their new orientation. Selection remains attached to the current fold pose.
 - [ ] Touches map to the correct location on both bent screen halves, including
   after rotation and resolution changes. Hardware controls do not send screen taps.
+- [ ] Swipe-to-home works on cover and inner displays in every orientation.
+  Detect the home edge in guest framebuffer coordinates and preserve its edge
+  marker through begin, move, release, and cancellation.
 - [ ] Capture follows the guest's active panel, not just an angle threshold.
   Check closed → book → open → book → closed and changes made in Device Hub.
 
@@ -65,6 +79,19 @@ Use [verification.md](verification.md) for historical validation; its earlier
 - [ ] Keyboard focus can reveal controls; touch devices can access them without
   hover once the model settles. Press-and-hold, release, cancellation, and
   unmount release do not leave a hardware key held down.
+
+## Accessibility inspection
+
+- [ ] Enabling AX Tree shows interactive element highlights on Duo as well as
+  the sidebar tree. Hover and selection stay synchronized.
+- [ ] Highlights follow the projected screen surfaces. V68 AX coordinates are
+  native portrait points at 3× scale; normalize against the active framebuffer,
+  not the app root (which can retain cover dimensions on the inner display).
+  Do not apply guest orientation a second time. Read the model's animated joint
+  transforms when projecting screen planes; a flat-bounds/ideal-hinge
+  approximation drifts on partially folded displays.
+  Elements crossing the hinge split across both leaves rather than spanning the
+  fold as a flat rectangle. Inspection clicks do not become guest screen taps.
 
 ## Connection and screenshots
 
@@ -103,7 +130,7 @@ Relevant automated suites in `src/__tests__`:
 | --- | --- |
 | One-mode preview and pose toolbar | `duo-preview.test.ts`, `device-hinge-controls.test.tsx` |
 | Physical anchors, rotation, pose identity | `duo-controls-position.test.ts` |
-| Bent-screen touch mapping | `duo-projection.test.ts` |
+| Bent-screen touch mapping | `duo-projection.test.ts`, `duo-ax-frame.test.ts`, `duo-home-gesture.test.ts` |
 | Static-frame redraw, rotation interpolation, idle sharpening, lifecycle | `device-session-lifecycle.test.ts` |
 | Panel selection and screenshots | `device-displays.test.ts`, `screenshot-toast.test.tsx` |
 | Stream framing | `mjpeg-frame-parser.test.ts` |
@@ -132,3 +159,26 @@ same field of view.
 The shell material table and object lighting were inspected in Xcode 27.1's
 CoreDevicePopDeviceKitExtension. These private interfaces, material names, and
 screen device names must be rechecked after Xcode/runtime updates.
+
+Performance follow-up: fast lossless PNG export and retained screen textures
+measured about 15 ms per cached frame locally. Rotation-only frames use one
+render pass; hinge changes still allow skinning to settle. Under HTTP backpressure,
+skip obsolete frames instead of building an animation queue. These timings exclude
+browser decoding and are not a claim of sustained 60 fps for changing app content.
+
+The native encoder round-trip test can be run from the repository root:
+
+```sh
+xcrun swiftc -O -parse-as-library packages/serve-sim/Sources/SimDuoRenderer/FastPNG.swift packages/serve-sim/Sources/SimDuoRenderer/Tests/FastPNGTests.swift -o /tmp/serve-sim-fast-png-tests
+/tmp/serve-sim-fast-png-tests
+```
+
+To check the projection against rendered pixels (requires Pillow):
+
+```sh
+python3 packages/serve-sim/scripts/verify-duo-projection.py
+```
+
+This renders colored markers on both inner leaves at 100°, 130°, 170°, and 180°,
+and on the closed cover, in all four rotations. Projected marker centers must
+land within two output pixels of their rendered centers at 1500×1350.

@@ -456,6 +456,14 @@ test("3D attach and hinge updates render cached frames; stale worker failures ca
   expect(workers[0]!.angles).toEqual([130]);
   expect(workers[1]!.closeCalls).toBe(0);
   expect(second.destroyed).toBe(false);
+  const delivered = second.chunks.length;
+  second.writableLength = 1;
+  update({ hingeDegrees: 145, orientations: {} });
+  await waitFor(() => workers[1]!.angles.includes(145));
+  expect(second.chunks.length).toBe(delivered);
+  second.writableLength = 0;
+  update({ hingeDegrees: 150, orientations: {} });
+  await waitFor(() => second.chunks.length > delivered);
   session.close();
   expect(second.destroyed).toBe(true);
 });
@@ -465,11 +473,12 @@ test("Duo rotation redraws a static frame in all four orientations and ignores r
   let update!: (state: import("../duo-state").DuoState) => void;
   let message!: (data: Buffer) => void;
   let accepted = true;
+  const orientationCommands: number[] = [];
   const rolls: number[] = [];
   const qualities: boolean[] = [];
   const session = new DeviceSession("TEST-UDID", {
     ...dependencies({ subscribeMjpeg: async (cb) => { frame = cb; return () => {}; } }),
-    hid: { ...dependencies().hid, isFoldable: async () => true, orientation: async () => accepted },
+    hid: { ...dependencies().hid, isFoldable: async () => true, orientation: async (value) => { orientationCommands.push(value); return accepted; } },
     createDuoMonitor: (_udid, onState) => { update = onState; return { close() {}, refreshOrientation() {} }; },
     createDuoRenderer: () => ({
       close() {},
@@ -495,8 +504,10 @@ test("Duo rotation redraws a static frame in all four orientations and ignores r
       await waitFor(() => rolls.length > count && rolls.at(-1) === roll);
       expect(rolls.slice(count).some((value) => value !== roll)).toBe(true);
       expect(rolls.at(-1)).toBe(roll);
-      expect(session.screenConfig().orientation).toBe(orientation);
+      expect(session.screenConfig().duoViewOrientation).toBe(orientation);
+      expect(session.screenConfig().orientation).toBe("portrait");
     }
+    expect(orientationCommands).toEqual([4, 2, 3, 1]);
     accepted = false;
     message(Buffer.concat([Buffer.from([0x07]), Buffer.from('{"orientation":"landscape_left"}')]));
     await new Promise((resolve) => setTimeout(resolve, 10));

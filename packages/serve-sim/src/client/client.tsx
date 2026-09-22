@@ -1085,8 +1085,10 @@ function AppWithConfig({
         >
           {(() => {
             if (duo3D) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
-              projection={duoProjection} onStreamingChange={setStreaming} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
-              onError={() => toast.error("Device rendering is unavailable. Check the selected Xcode and server log.")} />;
+              projection={duoProjection} screenConfig={activeStreamConfig} onStreamingChange={setStreaming} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
+              onError={() => toast.error("Device rendering is unavailable. Check the selected Xcode and server log.")}>
+              {axOverlayEnabled && duoProjection && <AxDomOverlay projection={duoProjection} screenConfig={activeStreamConfig} />}
+            </DuoThreeDView>;
             const streamView = (
               <SimulatorView
                 url={config.url}

@@ -12,7 +12,7 @@ esac
 # RealityRenderer is available on macOS 15+. Older hosts can still use the 2D stream.
 for arch in "${DUO_ARCHS[@]}"; do
   xcrun swiftc -O -parse-as-library -target "$arch-apple-macos15.0" \
-    "$HERE/DuoRenderer.swift" "$HERE/DuoShellMaterials.swift" "$HERE/main.swift" -o "$OUT_DIR/serve-sim-duo-render-$arch"
+    "$HERE/DuoRenderer.swift" "$HERE/DuoShellMaterials.swift" "$HERE/FastPNG.swift" "$HERE/DuoScreenProjection.swift" "$HERE/main.swift" -o "$OUT_DIR/serve-sim-duo-render-$arch"
 done
 xcrun lipo -create "${DUO_ARCHS[@]/#/$OUT_DIR/serve-sim-duo-render-}" -output "$OUT_DIR/serve-sim-duo-render"
 for arch in "${DUO_ARCHS[@]}"; do rm "$OUT_DIR/serve-sim-duo-render-$arch"; done

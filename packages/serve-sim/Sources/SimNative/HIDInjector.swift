@@ -652,6 +652,10 @@ actor HIDInjector {
     /// Simulator.app itself rotates the device, and how idb's
     /// `FBSimulatorPurpleHID.orientationEvent:` is delivered.
     func sendOrientation(orientation: UInt32) -> Bool {
+        if let duoBridge {
+            guard (1...4).contains(orientation) else { return false }
+            return duoBridge.send("orientation \(orientation)")
+        }
         guard let device = simDevice else {
             fputs("[hid] sendOrientation: no SimDevice (setup not called?)\n", stderr)
             return false

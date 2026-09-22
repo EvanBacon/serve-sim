@@ -19,10 +19,10 @@ import UniformTypeIdentifiers
     private var output: RealityRenderer.CameraOutput { targets[targetIndex].output }
     private let context: CIContext
     private let flatBounds: BoundingBox
-    private let innerBounds: BoundingBox
-    private let coverBounds: BoundingBox
     private let cameraDistance: Float
     private(set) var pieces: [[[Double]]] = []
+    private let coverProjection: DuoScreenProjection
+    private let innerProjection: DuoScreenProjection
     private let cover: (ModelEntity, Int)
     private let inner: (ModelEntity, Int)
     private var screenTextures: [String: TextureResource] = [:]
@@ -51,6 +51,8 @@ import UniformTypeIdentifiers
         self.inner = inner
         // The inner screen's framebuffer is authored a quarter turn around its UVs.
         try Self.rotateTexture(on: inner.0, material: inner.1)
+        coverProjection = try DuoScreenProjection(slot: cover, inner: false)
+        innerProjection = try DuoScreenProjection(slot: inner, inner: true)
         renderer = try RealityRenderer()
         subject.removeFromParent()
         rest.addChild(subject)
@@ -58,8 +60,6 @@ import UniformTypeIdentifiers
         rest.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
         subject.position -= subject.visualBounds(relativeTo: rest).center
         flatBounds = subject.visualBounds(relativeTo: wrapper)
-        innerBounds = Self.screenBounds(inner, relativeTo: wrapper)
-        coverBounds = Self.screenBounds(cover, relativeTo: wrapper)
         cameraDistance = max(flatBounds.extents.x, flatBounds.extents.y) * 1.8 * tan(35 * .pi / 360) / tan(fieldOfView * .pi / 360)
         renderer.entities.append(wrapper)
         let camera = PerspectiveCamera()
@@ -116,34 +116,9 @@ import UniformTypeIdentifiers
         let points: [SIMD3<Float>] = [fold.act([-half, 0, 0]), [0, 0, 0], [half, 0, 0]]
         let xs = points.map { yaw.act($0).x }
         rest.position.x = -((xs.min() ?? 0) + (xs.max() ?? 0)) / 2
-        let rollRotation = wrapper.orientation
-        func project(_ p: SIMD3<Float>, folded: Bool) -> [Double] {
-            var point = yaw.act(folded ? fold.act(p) : p)
-            point.x += rest.position.x
-            point = rollRotation.act(point)
-            let depth = max(0.001, cameraDistance - point.z)
-            let scale: Float = 1 / tan(fieldOfView * .pi / 360)
-            return [Double(0.5 + point.x * scale / depth / (Float(width) / Float(height)) / 2),
-                    Double(0.5 - point.y * scale / depth / 2)]
-        }
-        let b = panel == "cover" ? coverBounds : innerBounds
-        let z = panel == "cover" ? b.min.z : b.max.z
-        let top = b.max.y, bottom = b.min.y
-        if panel == "cover" {
-            // Cover UVs face away in the flat model, and face the viewer after folding.
-            pieces = [[project([b.max.x, top, z], folded: true), project([b.min.x, top, z], folded: true),
-                       project([b.min.x, bottom, z], folded: true), project([b.max.x, bottom, z], folded: true),
-                       [0, 0, 1, 1]]]
-        } else {
-            // Inner UVs are landscape-left: raw top-left is visual top-right.
-            pieces = [[project([0, top, z], folded: false), project([0, bottom, z], folded: false),
-                       project([b.min.x, bottom, z], folded: true), project([b.min.x, top, z], folded: true), [0, 0.5, 1, 0.5]],
-                      [project([b.max.x, top, z], folded: false), project([b.max.x, bottom, z], folded: false),
-                       project([0, bottom, z], folded: false), project([0, top, z], folded: false), [0, 0, 1, 0.5]]]
-        }
         // Advancing the paused clip's time takes an update before skinning settles.
-        // Texture-only frames (same hinge/roll) only need one pass.
-        let poseChanged = lastAngle != angle || lastRoll != roll
+        // Camera rotation and texture-only frames do not change skinning: one pass.
+        let poseChanged = lastAngle != angle
         lastAngle = angle
         lastRoll = roll
         let passes = poseChanged ? 2 : 1
@@ -154,32 +129,13 @@ import UniformTypeIdentifiers
                 } catch { continuation.resume(throwing: error) }
             }
         }
+        pieces = (panel == "cover" ? coverProjection : innerProjection).pieces(cameraDistance: cameraDistance, fieldOfView: fieldOfView, aspect: Float(width) / Float(height))
         // RealityRenderer outputs Display P3; sampling its sRGB Metal texture
         // yields linear values. Let Core Image convert the gamut and
         // encode to sRGB once when exporting, preserving screen colors.
         guard let rendered = CIImage(mtlTexture: texture, options: [.colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!])?.oriented(.downMirrored),
               let cg = context.createCGImage(rendered, from: rendered.extent, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!) else { throw CocoaError(.fileReadUnknown) }
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { throw CocoaError(.fileWriteUnknown) }
-        // Use a single fast PNG filter instead of evaluating all five per row.
-        // The output remains lossless at the larger Retina render size.
-        CGImageDestinationAddImage(destination, cg, [kCGImagePropertyPNGCompressionFilter: IMAGEIO_PNG_FILTER_SUB] as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
-        return data as Data
-    }
-
-    private static func screenBounds(_ slot: (ModelEntity, Int), relativeTo reference: Entity) -> BoundingBox {
-        var box: BoundingBox?
-        for mesh in slot.0.model!.mesh.contents.models {
-            for part in mesh.parts where part.materialIndex == slot.1 {
-                for position in part.positions.elements {
-                    let point = slot.0.convert(position: position, to: reference)
-                    if box == nil { box = BoundingBox(min: point, max: point) }
-                    else { box!.formUnion(BoundingBox(min: point, max: point)) }
-                }
-            }
-        }
-        return box ?? slot.0.visualBounds(relativeTo: reference)
+        return try FastPNG.encode(cg)
     }
 
     private static func screen(in entity: Entity, named name: String) -> (ModelEntity, Int)? {

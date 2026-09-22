@@ -6,8 +6,12 @@ import { pointOnDuoScreen } from "../utils/duo-projection";
 import { duoHardwarePositions, duoPoseKey } from "../utils/duo-controls-position";
 import { duoHardwareKeys, HardwareKey } from "./duo-hardware-controls";
 
-type Point = { x: number; y: number };
-export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError, onHardwarePress, onStreamingChange }: {
+import type { StreamConfig } from "../types";
+import { beginDuoTouch, moveDuoTouch, type DuoTouchPoint } from "../utils/duo-home-gesture";
+type Point = DuoTouchPoint;
+export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError, onHardwarePress, onStreamingChange, screenConfig, children }: {
+  children?: React.ReactNode;
+  screenConfig: StreamConfig;
   onError?: () => void;
   onStreamingChange: (streaming: boolean) => void;
   onHardwarePress: React.ComponentProps<typeof HardwareKey>["onPress"];
@@ -69,8 +73,9 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError,
   return <div aria-label="Interactive 3D iPhone Duo" className="relative w-full h-full bg-transparent select-none" style={{ touchAction: "none", cursor: "pointer", userSelect: "none", WebkitUserSelect: "none" }}
     onPointerDown={(event) => {
       if (event.button !== 0 || points.current.size >= 2) return;
-      const raw = point(event);
-      if (!raw) return;
+      const hit = point(event);
+      if (!hit) return;
+      const raw = beginDuoTouch(hit, screenConfig);
       event.preventDefault();
       const first = [...points.current.values()][0];
       if (first) onTouch({ type: "end", ...first });
@@ -78,17 +83,19 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError,
       event.currentTarget.setPointerCapture(event.pointerId);
       const two = pair();
       if (two) onMultiTouch({ type: "begin", ...two });
-      else onTouch({ type: "begin", ...raw, ...(raw.y > .93 ? { edge: 3 } : {}) });
+      else onTouch({ type: "begin", ...raw });
     }}
     onPointerMove={(event) => {
       if (!points.current.has(event.pointerId)) return;
-      const raw = point(event);
-      if (!raw) return;
+      const hit = point(event);
+      if (!hit) return;
+      const raw = moveDuoTouch(points.current.get(event.pointerId)!, hit);
       points.current.set(event.pointerId, raw);
       const two = pair();
       if (two) onMultiTouch({ type: "move", ...two }); else onTouch({ type: "move", ...raw });
     }} onPointerUp={end} onPointerCancel={end}>
     <img ref={image} onError={onError} alt="Live 3D iPhone Duo" draggable={false} className="block w-full h-full object-contain pointer-events-none bg-transparent" />
+    {children}
     {controlsVisible && hardwarePositions.map((position) => <div
       key={position.key}
       className="duo-hardware-anchor"

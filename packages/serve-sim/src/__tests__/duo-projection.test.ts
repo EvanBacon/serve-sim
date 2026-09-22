@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { pointOnDuoScreen } from "../client/utils/duo-projection";
+import { pointOnDuoScreen, projectDuoRect } from "../client/utils/duo-projection";
 import type { DuoProjection } from "../duo-renderer";
 
 const projection: DuoProjection = { width: 1000, height: 900, panel: "inner", hingeDegrees: 130,
@@ -18,4 +18,21 @@ test("perspective mapping agrees with a known projective transform", () => {
   const [x,y]=project(.3,.7);
   const result=pointOnDuoScreen(shape,x!,y!)!;
   expect(result.x).toBeCloseTo(.3); expect(result.y).toBeCloseTo(.7);
+});
+
+test("AX rectangles project through the same transform as touch and split at the hinge", () => {
+  const projection = { width: 1000, height: 900, panel: "inner", hingeDegrees: 130, pieces: [
+    [[0.1, 0.1], [0.5, 0.2], [0.5, 0.8], [0.1, 0.9], [0, 0, 0.5, 1]],
+    [[0.5, 0.2], [0.9, 0.1], [0.9, 0.9], [0.5, 0.8], [0.5, 0, 0.5, 1]],
+  ] } as DuoProjection;
+  const polygons = projectDuoRect(projection, { x: 0.25, y: 0.25, width: 0.5, height: 0.5 });
+  expect(polygons).toHaveLength(2);
+  for (const [i, polygon] of polygons.entries()) {
+    const expected = i === 0 ? [[0.25, 0.25], [0.5, 0.25], [0.5, 0.75], [0.25, 0.75]] : [[0.5, 0.25], [0.75, 0.25], [0.75, 0.75], [0.5, 0.75]];
+    polygon.forEach(([x, y], corner) => {
+      const point = pointOnDuoScreen(projection, x!, y!)!;
+      expect(point.x).toBeCloseTo(expected[corner]![0]!, 6);
+      expect(point.y).toBeCloseTo(expected[corner]![1]!, 6);
+    });
+  }
 });

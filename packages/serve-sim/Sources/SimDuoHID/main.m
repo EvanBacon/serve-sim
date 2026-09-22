@@ -1,4 +1,4 @@
-// Guest HID transport for hinge angles and hardware buttons.
+// Guest HID transport for hinge angles, physical orientation, and hardware buttons.
 // Spawned inside iOS Simulator; one command/reply per line until EOF.
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
@@ -23,9 +23,9 @@ static void header(NSMutableData *data, uint32_t count, uint8_t type) {
     uint8_t bytes[] = {count & 255, (count >> 8) & 255, (count >> 16) & 255, type};
     [data appendBytes:bytes length:4];
 }
-static void string(NSMutableData *data, const char *text, BOOL key) {
+static void string(NSMutableData *data, const char *text, BOOL key, BOOL last) {
     size_t length = strlen(text) + (key ? 1 : 0);
-    header(data, (uint32_t)length, key ? 8 : 9);
+    header(data, (uint32_t)length, (key ? 8 : 9) | (last ? 0x80 : 0));
     [data appendBytes:text length:length];
     while (data.length % 4) { uint8_t zero = 0; [data appendBytes:&zero length:1]; }
 }
@@ -33,11 +33,33 @@ static NSData *hingePayload(double degrees) {
     NSMutableData *data = [NSMutableData data];
     header(data, 0xd3, 0);
     header(data, 4, 0x81);
-    string(data, "provider", YES); string(data, "com.apple.Virtualization.VirtualMachines", NO);
-    string(data, "source", YES); string(data, "hinge-slider-control", NO);
-    string(data, "type", YES); string(data, "range", NO);
-    string(data, "value", YES); header(data, 0x3f, 0x84);
+    string(data, "provider", YES, NO); string(data, "com.apple.Virtualization.VirtualMachines", NO, NO);
+    string(data, "source", YES, NO); string(data, "hinge-slider-control", NO, NO);
+    string(data, "type", YES, NO); string(data, "range", NO, NO);
+    string(data, "value", YES, NO); header(data, 0x3f, 0x84);
     [data appendBytes:&degrees length:sizeof(degrees)];
+    return data;
+}
+// Captured from Device Hub's 0xff61/0x5b vendor event. Duo's motion
+// controller consumes this enum; the legacy PurpleWorkspace GSEvent is ignored.
+static NSData *orientationPayload(unsigned orientation) {
+    const char *value;
+    switch (orientation) {
+        case 1: value = "portrait"; break;
+        case 2: value = "pud"; break;
+        // Incoming values use the existing screen/UI orientation convention.
+        // CoreDevice's physical-device landscape names are the opposite.
+        case 3: value = "landscape-left"; break;
+        case 4: value = "landscape-right"; break;
+        default: return nil;
+    }
+    NSMutableData *data = [NSMutableData data];
+    header(data, 0xd3, 0);
+    header(data, 4, 0x81);
+    string(data, "provider", YES, NO); string(data, "com.apple.Virtualization.VirtualMachines", NO, NO);
+    string(data, "source", YES, NO); string(data, "orientation-picker-control", NO, NO);
+    string(data, "type", YES, NO); string(data, "enum", NO, NO);
+    string(data, "value", YES, NO); string(data, value, NO, YES);
     return data;
 }
 static id service(uint32_t page, uint32_t usage, BOOL builtIn) {
@@ -77,7 +99,7 @@ int main(void) {
         char *line = NULL; size_t capacity = 0;
         while (getline(&line, &capacity, stdin) > 0) {
             @autoreleasepool {
-                double angle, from, milliseconds; unsigned page, usage, down; char extra;
+                double angle, from, milliseconds; unsigned page, usage, down, orientation; char extra;
                 BOOL ok = NO;
                 if (sscanf(line, "angle %lf %c", &angle, &extra) == 1 && isfinite(angle) && angle >= 0 && angle <= 180) {
                     NSData *payload = hingePayload(angle);
@@ -97,6 +119,9 @@ int main(void) {
                         }
                         if (i < frames) usleep((useconds_t)(milliseconds * 1000 / frames));
                     }
+                } else if (sscanf(line, "orientation %u %c", &orientation, &extra) == 1) {
+                    NSData *payload = orientationPayload(orientation);
+                    if (payload) ok = sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
                 } else if (sscanf(line, "key %u %u %u %c", &page, &usage, &down, &extra) == 3 && page <= 65535 && usage <= 65535 && down <= 1) {
                     ok = sendEvent(buttons, keyboard(NULL, mach_absolute_time(), page, usage, down, 0));
                 }

@@ -350,7 +350,7 @@ export class DeviceSession {
         for (const ws of this.hidSockets) ws.send(config);
       }
       for (const response of this.duoResponses) {
-        if (!response.destroyed && !response.writableEnded && response.writableLength < 1024 * 1024) this.writeDuoFrame(response, rendered);
+        if (!response.destroyed && !response.writableEnded && response.writableLength === 0) this.writeDuoFrame(response, rendered);
       }
     }).catch((error) => {
       if (this.duoRenderer !== renderer) return;
@@ -632,9 +632,13 @@ export class DeviceSession {
         if (value != null && await this.hid.orientation(value)) {
           this.recordHidEvent(tag, m);
           if (m.orientation !== this.orientation || m.orientation !== this.duoViewOrientation) {
-            this.orientation = m.orientation;
+            // Duo physical orientation and the active panel's UI orientation
+            // differ (the inner panel's natural axis is rotated). Let the
+            // monitor report the guest UI; never overwrite it with view state.
+            if (this.hingeDegrees == null) this.orientation = m.orientation;
             this.duoViewOrientation = m.orientation;
             this.animateDuoRotation(m.orientation);
+            this.duoMonitor?.refreshOrientation();
             this.broadcastConfig();
             this.renderDuoFrame();
           }
