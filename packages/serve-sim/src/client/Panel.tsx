@@ -14,12 +14,12 @@ export function Panel({
   style?: CSSProperties;
   side?: "left" | "right";
 }) {
+  // Both sides float 12px off the viewport. The extra 24px (inset + margin)
+  // clears that inset so a closed panel doesn't leave a sliver on screen.
   const closedTransform =
-    side === "left" ? "translateX(-100%)" : "translateX(calc(100% + 24px))";
-  const chromeClass =
-    side === "left"
-      ? "top-0 bottom-0 left-0 rounded-none border-0 border-r border-white/10 shadow-[8px_0_32px_rgba(0,0,0,0.35)]"
-      : "top-3 bottom-3 right-3 rounded-[14px] border border-white/10 shadow-[0_12px_40px_rgba(0,0,0,0.55)]";
+    side === "left" ? "translateX(calc(-100% - 24px))" : "translateX(calc(100% + 24px))";
+  const edgeClass = side === "left" ? "left-3" : "right-3";
+  const chromeClass = `top-3 bottom-3 ${edgeClass} rounded-[14px] border border-white/10 shadow-[0_12px_40px_rgba(0,0,0,0.55)]`;
 
   return (
     <aside
