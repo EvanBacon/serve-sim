@@ -363,11 +363,10 @@ function App() {
       />
     );
   } else {
-    const leftPad = gridOpen ? gridPanelWidth + 36 : 24;
     mainView = (
       <div
         className="h-screen flex flex-col items-center justify-center gap-3 bg-page font-system box-border [transition:padding_0.25s_ease]"
-        style={{ paddingLeft: leftPad, paddingRight: 24 }}
+        style={{ paddingLeft: 24, paddingRight: 24 }}
       >
         {selectedDevice ? (
           <DevicePlaceholder
@@ -1016,14 +1015,13 @@ function AppWithConfig({
     return shiftNeeded <= panelWidthPx + PANEL_GAP ? shiftNeeded : 0;
   };
   const shiftForRightPanel = foldable ? rightPanelWidthPx : shiftToClear(rightPanelWidthPx);
-  const shiftForLeftPanel = foldable ? (gridOpen ? gridPanelWidth : 0) : shiftToClear(gridOpen ? gridPanelWidth : 0);
 
   return (
     <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
     <div
       className="flex flex-col items-center justify-center h-screen bg-page py-6 gap-3 font-system box-border"
       style={{
-        paddingLeft: 24 + shiftForLeftPanel,
+        paddingLeft: 24,
         paddingRight: 24 + shiftForRightPanel,
         transition:
           simulatorResize.isResizing || simulatorResize.isInertia ? "none" : SIMULATOR_RESIZE_PAGE_TRANSITION,
