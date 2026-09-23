@@ -390,22 +390,25 @@ describeIf("SimCameraHelper shm probe", () => {
 
   test("shutdown unmaps shm so a fresh shm_open returns -1 (ENOENT)", async () => {
     if (!helper) return;
-    const exited = new Promise<number | null>((resolve) => {
-      helper!.once("exit", (code) => resolve(code ?? null));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      helper!.once("exit", (code, signal) => resolve({ code, signal }));
     });
     try {
       await sendHelperCommand(SOCKET_PATH, { action: "shutdown" });
     } catch {}
-    const exitCode = await Promise.race([
+    const exit = await Promise.race([
       exited,
       new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 3000)),
     ]);
-    expect(exitCode).not.toBe("timeout");
+    expect(exit).not.toBe("timeout");
     // A non-zero/signal exit means shutdown cleanup crashed — in that case the
     // shm name may legitimately still exist, so fail with the real cause.
-    if (exitCode !== 0) {
+    if (exit === "timeout" || exit.code !== 0) {
+      const detail = exit === "timeout"
+        ? "timeout"
+        : `${exit.code} signal=${exit.signal ?? "none"}`;
       throw new Error(
-        `helper exited with ${exitCode} (expected 0)\n` +
+        `helper exited with ${detail} (expected 0)\n` +
           `helper stderr (last 600 chars):\n${helperStderr.slice(-600)}`,
       );
     }
