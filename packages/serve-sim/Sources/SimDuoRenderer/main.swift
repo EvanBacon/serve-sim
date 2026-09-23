@@ -36,7 +36,8 @@ private func readRequest() throws -> (Request, Data)? {
             guard CommandLine.arguments.count == 2 else { throw CocoaError(.fileReadInvalidFileName) }
             let renderer = try await DuoRenderer(modelURL: URL(fileURLWithPath: CommandLine.arguments[1]))
             while let (request, jpeg) = try await Task.detached(operation: { try readRequest() }).value {
-                let rendered = try await renderer.render(jpeg: jpeg, panel: request.panel, angle: request.hingeDegrees, roll: request.rollDegrees, fullResolution: request.fullResolution ?? true)
+                // Omitted fullResolution stays on the fast target. True is the 1500px settle sharpen.
+                let rendered = try await renderer.render(jpeg: jpeg, panel: request.panel, angle: request.hingeDegrees, roll: request.rollDegrees, fullResolution: request.fullResolution ?? false)
                 let header = try JSONSerialization.data(withJSONObject: [
                     "jpegLength": rendered.count, "width": renderer.width, "height": renderer.height,
                     "pieces": renderer.pieces, "hardware": renderer.hardware, "panel": request.panel, "hingeDegrees": request.hingeDegrees,

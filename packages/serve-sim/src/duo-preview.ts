@@ -5,8 +5,23 @@ import type { DuoPanel } from "./device-pose";
 /** Matches the cubic ease-out sweep in the Duo guest HID helper. */
 export const DUO_FOLD_DURATION_MS = 800;
 const DUO_ROTATION_MS = 300;
-const DUO_SETTLE_MS = 180;
+/** Quiet period before the single 1500px sharpen. Motion resets it; a sharpened frame does not. */
+export const DUO_SETTLE_MS = 180;
 const FRAME_TRAILER = Buffer.from("\r\n", "ascii");
+
+function copyBytes(jpeg: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(jpeg.byteLength);
+  copy.set(jpeg);
+  return copy;
+}
+
+/** Capture reuses one JPEG buffer in place, so identity is not enough. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  return Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(
+    Buffer.from(b.buffer, b.byteOffset, b.byteLength),
+  );
+}
 
 export type DuoPreviewRenderer = Pick<DuoRenderer, "render" | "close">;
 
@@ -31,7 +46,11 @@ export class DuoPreview {
   private projection?: DuoProjection;
   private busy = false;
   private pending = false;
+  private pendingSharpen = false;
   private settleTimer?: ReturnType<typeof setTimeout>;
+  private rendering?: { jpeg: Uint8Array; panel: DuoPanel; angle: number; roll: number };
+  private cached?: { jpeg: Uint8Array; panel: DuoPanel; angle: number; roll: number; png: Uint8Array; sharpened: boolean };
+  private delivered = new WeakSet<ServerResponse>();
   private foldTimer?: ReturnType<typeof setTimeout>;
   private rotationTimer?: ReturnType<typeof setTimeout>;
   private fold?: Fold;
@@ -138,6 +157,7 @@ export class DuoPreview {
     this.responses.delete(res);
     if (this.responses.size) return;
     clearTimeout(this.settleTimer);
+    this.settleTimer = undefined;
     this.renderer?.close();
     this.renderer = undefined;
   }
@@ -145,40 +165,67 @@ export class DuoPreview {
   close(): void {
     this.closed = true;
     clearTimeout(this.settleTimer);
+    this.settleTimer = undefined;
     clearTimeout(this.foldTimer);
     clearTimeout(this.rotationTimer);
     this.fold = undefined;
+    this.cached = undefined;
     this.renderer?.close();
     this.renderer = undefined;
     this.responses.clear();
   }
 
-  requestFrame(fullResolution = false): void {
+  requestFrame(sharpen = false): void {
     const renderer = this.renderer;
     const jpeg = this.jpeg;
     if (this.closed || !this.responses.size || !renderer || !jpeg || (this.hingeDegrees == null && !this.fold)) return;
-    if (!fullResolution) {
+    const panel = this.panel;
+    const roll = this.viewRoll;
+    const angle = this.displayAngle();
+    const same = this.sameFrame(jpeg, panel, angle, roll, this.cached) || this.sameFrame(jpeg, panel, angle, roll, this.rendering);
+    const sharpened = this.cached?.sharpened === true && this.sameFrame(jpeg, panel, angle, roll, this.cached);
+    // Motion stays on the fast target. One sharpen follows, then identical
+    // inputs reuse that PNG instead of sharpening again on every settle.
+    if (sharpened) {
+      clearTimeout(this.settleTimer);
+      this.settleTimer = undefined;
+    } else if (!sharpen && !same) {
       clearTimeout(this.settleTimer);
       this.settleTimer = setTimeout(() => this.requestFrame(true), DUO_SETTLE_MS);
       this.settleTimer.unref?.();
+    } else if (!sharpen && !this.settleTimer) {
+      this.settleTimer = setTimeout(() => this.requestFrame(true), DUO_SETTLE_MS);
+      this.settleTimer.unref?.();
+    }
+    if (!this.busy && this.sameFrame(jpeg, panel, angle, roll, this.cached) && (sharpened || !sharpen)) {
+      this.publishCached();
+      return;
     }
     if (this.busy) {
       this.pending = true;
+      if (sharpen) this.pendingSharpen = true;
+      else if (!same) this.pendingSharpen = false;
       return;
     }
     this.busy = true;
     this.pending = false;
-    const panel = this.panel;
-    const roll = this.viewRoll;
-    void renderer.render(jpeg, panel, this.displayAngle(), roll, fullResolution).then(({ jpeg: rendered, projection }) => {
+    this.pendingSharpen = false;
+    if (sharpen) {
+      clearTimeout(this.settleTimer);
+      this.settleTimer = undefined;
+    }
+    // Copy before the await. DeviceSession mutates its JPEG buffer in place.
+    const snapshot = copyBytes(jpeg);
+    this.rendering = { jpeg: snapshot, panel, angle, roll };
+    void renderer.render(snapshot, panel, angle, roll, sharpen).then(({ jpeg: rendered, projection }) => {
       if (this.closed || this.renderer !== renderer) return;
       if (JSON.stringify(this.projection) !== JSON.stringify(projection)) {
         this.projection = projection;
         this.options.onProjection(Buffer.concat([Buffer.from([0x83]), Buffer.from(JSON.stringify(projection))]));
       }
-      for (const response of this.responses) {
-        if (!response.destroyed && !response.writableEnded && response.writableLength === 0) this.writeFrame(response, rendered);
-      }
+      this.cached = { jpeg: snapshot, panel, angle, roll, png: rendered, sharpened: sharpen };
+      this.delivered = new WeakSet();
+      this.publishCached();
     }).catch((error) => {
       if (this.renderer !== renderer) return;
       for (const response of this.responses) this.options.onStreamError(response, error);
@@ -186,9 +233,31 @@ export class DuoPreview {
       this.renderer = undefined;
     }).finally(() => {
       if (this.renderer !== renderer) return;
+      this.rendering = undefined;
       this.busy = false;
-      if (this.pending) this.requestFrame();
+      if (this.pending) {
+        const nextSharpen = this.pendingSharpen;
+        this.pending = false;
+        this.pendingSharpen = false;
+        this.requestFrame(nextSharpen);
+      }
     });
+  }
+
+  private sameFrame(jpeg: Uint8Array, panel: DuoPanel, angle: number, roll: number, frame?: { jpeg: Uint8Array; panel: DuoPanel; angle: number; roll: number }): boolean {
+    return frame != null && frame.panel === panel && frame.angle === angle && frame.roll === roll && sameBytes(frame.jpeg, jpeg);
+  }
+
+  private publishCached(): void {
+    const png = this.cached?.png;
+    if (!png) return;
+    for (const response of this.responses) {
+      if (this.delivered.has(response)) continue;
+      if (!response.destroyed && !response.writableEnded && response.writableLength === 0) {
+        this.writeFrame(response, png);
+        this.delivered.add(response);
+      }
+    }
   }
 
   private tickFold(now = performance.now()): void {

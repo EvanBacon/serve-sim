@@ -48,6 +48,7 @@ export class DuoRenderer {
     });
   }
 
+  /** `fullResolution` selects the one-shot 1500×1350 settle target. Motion passes false (1000×900). */
   render(jpeg: Uint8Array, panel: "cover" | "inner", hingeDegrees: number, rollDegrees: number, fullResolution = false): Promise<{ jpeg: Buffer; projection: DuoProjection }> {
     if (this.closed || this.pending) return Promise.reject(new Error("Duo renderer is unavailable or busy"));
     return new Promise((resolve, reject) => {

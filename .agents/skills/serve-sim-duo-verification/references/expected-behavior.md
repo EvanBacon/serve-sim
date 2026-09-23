@@ -1,6 +1,6 @@
 # iPhone Duo feature contract and regression checklist
 
-Updated September 21, 2026. These are the expected behaviors to preserve when
+Updated September 23, 2026. These are the expected behaviors to preserve when
 changing rendering, capture, gestures, hardware controls, or toolbar layout.
 Use [verification.md](verification.md) for historical validation; its earlier
 2D-mode descriptions and instant-angle matrix do not define the current UI.
@@ -21,9 +21,12 @@ Use [verification.md](verification.md) for historical validation; its earlier
 - [ ] The camera has restrained perspective, resembling Device Hub. The 130°
   book pose is centered around its hinge with equal left/right foreshortening.
 - [ ] The background around the device stays transparent.
-- [ ] Fine UI text is sharp after motion settles. Current targets are 1500×1350
-  during activity and 3000×2700 after about 180 ms idle. Switching targets must
-  not change framing, touch coordinates, or count as a new pose animation.
+- [ ] Motion uses a 1000×900 target with MSAA off. About 180 ms after motion
+  stops, one frame sharpens to 1500×1350 and then stops. It must not allocate
+  a 3000×2700 target, enable 4× MSAA, or sharpen again while jpeg and pose are
+  unchanged. The sharper frame must not count as a new pose. On a Mac, confirm
+  Retina screen text is legible after that settle frame; shell aliasing without
+  MSAA is a visual check, not a reason to turn MSAA back on for the stream.
 - [ ] The simulator surface cannot be text-selected or image-dragged by the
   browser. Clicking, dragging, and pinching still reach the simulator.
 
@@ -123,8 +126,10 @@ Use [verification.md](verification.md) for historical validation; its earlier
    active-display changes never spin the model.
 4. Rotate through all four orientations on a static screen and during motion.
    Check toolbar icons, hidden controls, final control locations, and touch taps.
-5. Scroll an app, then stop. Check responsive motion and the return to sharp text
-   without a size jump. Resize the browser and open/close its side panels.
+5. Scroll an app, then stop. Motion should stay responsive. After it settles,
+   one sharper frame may arrive (1500×1350, not 3000×2700) and must not repeat.
+   On a Retina display, read screen text in that settled frame. Resize the
+   browser and open/close its side panels.
 6. Hover near each physical button edge, move away, hold/release each control,
    and begin a fold while hovering. Repeat after rotation and on the cover.
 7. Screenshot inner and cover in portrait and landscape. Inspect the saved PNGs
@@ -138,7 +143,7 @@ Relevant automated suites in `packages/serve-sim/src/__tests__`:
 | One-mode preview and pose toolbar | `duo-preview.test.ts`, `device-hinge-controls.test.tsx` |
 | Physical anchors, rotation, pose identity | `duo-controls-position.test.ts` |
 | Bent-screen touch mapping | `duo-projection.test.ts`, `duo-ax-frame.test.ts`, `duo-home-gesture.test.ts` |
-| Static-frame redraw, rotation interpolation, idle sharpening, lifecycle | `device-session-lifecycle.test.ts` |
+| Static-frame redraw, rotation, one-shot ≤1500 settle sharpen, lifecycle | `device-session-lifecycle.test.ts`, `duo-preview-stream.test.ts` |
 | Panel selection and screenshots | `device-displays.test.ts`, `screenshot-toast.test.tsx` |
 | Stream framing | `mjpeg-frame-parser.test.ts`, `duo-frame-parser.test.ts` |
 
@@ -148,9 +153,14 @@ framing, animation smoothness, hover fades, or actual guest screenshot content.
 ## Known limits and implementation reference
 
 The PNG rendering pipeline remains slower than Device Hub's native composition.
-Retain full-resolution idle rendering, per-panel screen textures, and skip
-decoding/uploading unchanged frames during pose animation. Rotation-only frames
-use one render pass; hinge changes still allow skinning to settle. Under HTTP
+Motion stays at 1000×900 with MSAA off. One settle frame may use 1500×1350,
+also with MSAA off, so Retina screen text can sharpen without a 3000×2700
+target or 4× MSAA. Do not restore either of those. Retina legibility after
+settle is a manual Mac check. Retain per-panel screen textures, and skip
+decoding/uploading unchanged frames during pose animation. When the
+jpeg and pose are unchanged, reuse the last PNG instead of rendering or
+sharpening again.
+Rotation-only frames use one render pass; hinge changes still allow skinning to settle. Under HTTP
 backpressure, skip obsolete frames instead of building an animation queue.
 Native timings below exclude browser decoding and do not guarantee sustained
 60 fps for changing app content. Remeasure after renderer changes.
@@ -180,7 +190,7 @@ python3 .agents/skills/serve-sim-duo-verification/scripts/verify-duo-projection.
 
 This renders colored markers on both inner leaves at 100°, 130°, 170°, and 180°,
 and on the closed cover, in all four rotations. Projected marker centers must
-land within two output pixels of their rendered centers at 1500×1350.
+land within two output pixels of their rendered centers at the 1000×900 preview.
 
 ### Performance regression checks
 
@@ -189,8 +199,17 @@ land within two output pixels of their rendered centers at 1500×1350.
 - PNG encoding preserves RGBA and sRGB, vectorizes unpremultiplication/filtering,
   and compresses four independent DEFLATE stripes in parallel. Check images with
   partial alpha, padded rows, small widths, and stripe boundaries.
-- Local 1500×1350 synthetic-screen benchmark (30 measured frames per motion):
-  median rotation frame time improved from about 22 ms to 15 ms; folding from
-  25 ms to 19 ms. PNG size stayed approximately 342 KiB for rotation and
-  135–136 KiB for folding. These are native round-trip measurements, not a
-  browser frame-rate guarantee; retain full-resolution idle rendering.
+- Motion frames use the 1000×900 target. After settle, at most one 1500×1350
+  frame is encoded, and identical jpeg/pose input must not sharpen again.
+  Do not put a 3000×2700 target or 4× MSAA back on the streaming path. On a
+  Mac, motion frames should stay well under ~200 KB, the settled frame should
+  be the 1500px size rather than ~486 KB, and `serve-sim-duo-render` CPU
+  should stay well below the 15–50% seen with 3000px + MSAA. Also read screen
+  text on a Retina display after settle.
+- Historical 1500×1350 synthetic-screen benchmark (30 measured frames per
+  motion, from the previous always-1500 path): median rotation frame time
+  improved from about 22 ms to 15 ms; folding from 25 ms to 19 ms. PNG size
+  stayed approximately 342 KiB for rotation and 135–136 KiB for folding.
+  Those figures describe a 1500px encode, which is now only the one-shot
+  settle frame. They are native round-trip measurements, not a browser
+  frame-rate guarantee.
