@@ -52,6 +52,9 @@ static uint32_t gWidth = SIMCAM_DEFAULT_WIDTH;
 static uint32_t gHeight = SIMCAM_DEFAULT_HEIGHT;
 static const char *gShmName = NULL;
 static volatile sig_atomic_t gShouldExit = 0;
+// Set on the way out so a SwitchSource already queued behind shutdown
+// cannot start another timer after stop and before ReleaseSurfaces.
+static atomic_bool gShuttingDown = false;
 static atomic_uint_fast64_t gFrameSeq = 0;
 
 static uint64_t MachAbsToNs(uint64_t t) {
@@ -82,16 +85,18 @@ static void PublishFrame(const uint8_t *bgra) {
     BOOL found = NO;
     for (uint32_t tries = 0; tries < count; tries++) {
         idx = (idx + 1) % count;
-        if (idx == latest) continue;
+        if (idx == latest || !gSurfaces[idx]) continue;
         if (!IOSurfaceIsInUse(gSurfaces[idx])) {
             found = YES;
             break;
         }
     }
     if (!found) return;
-    gWriteIndex = idx;
-
     IOSurfaceRef surface = gSurfaces[idx];
+    // A source can still be inside PublishFrame while shutdown releases the
+    // ring. Bail rather than locking a freed surface (SIGSEGV, exit code null).
+    if (!surface) return;
+    gWriteIndex = idx;
     IOSurfaceLock(surface, 0, NULL);
     uint8_t *dst = (uint8_t *)IOSurfaceGetBaseAddress(surface);
     size_t dstStride = IOSurfaceGetBytesPerRow(surface);
@@ -125,6 +130,10 @@ typedef NS_ENUM(NSInteger, SimCamSourceKind) {
 static SimCamSourceKind gActiveSource = SimCamSourceNone;
 static dispatch_queue_t gSourceQueue;        // serial — owns source lifecycle
 static dispatch_source_t gPlaceholderTimer;
+// Signaled from the timer's cancel handler, which runs only after any
+// in-flight PublishFrame has returned. Stop waits on this before the
+// source's last retain is dropped.
+static dispatch_semaphore_t gPlaceholderStopped;
 static AVCaptureSession *gWebcamSession;
 static SimCamSourceKind gPendingSource;     // for status reporting
 static NSString *gActiveArg = nil;          // selected camera name, image path
@@ -315,25 +324,41 @@ static void StartPlaceholderSource(void) {
     RenderPlaceholderFrame(buf, frameIdx++);
     PublishFrame(buf);
 
-    gPlaceholderTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+    // Install the cancel handler before resume. On a strict source, changing
+    // handlers after activation aborts the process.
+    dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
         dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     uint64_t intervalNs = NSEC_PER_SEC / 30;
-    dispatch_source_set_timer(gPlaceholderTimer,
+    dispatch_source_set_timer(timer,
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)intervalNs), intervalNs, intervalNs / 10);
-    dispatch_source_set_event_handler(gPlaceholderTimer, ^{
+    dispatch_source_set_event_handler(timer, ^{
         RenderPlaceholderFrame(buf, frameIdx++);
         PublishFrame(buf);
     });
-    dispatch_resume(gPlaceholderTimer);
+    dispatch_source_set_cancel_handler(timer, ^{
+        dispatch_semaphore_signal(stopped);
+    });
+    dispatch_resume(timer);
+    gPlaceholderStopped = stopped;
+    gPlaceholderTimer = timer;
     fprintf(stderr, "[serve-sim-camera] placeholder source running @ 30fps (%ux%u, first frame seq=%llu)\n",
         gWidth, gHeight, (unsigned long long)atomic_load(&gFrameSeq));
 }
 
 static void StopPlaceholderSource(void) {
-    if (gPlaceholderTimer) {
-        dispatch_source_cancel(gPlaceholderTimer);
-        gPlaceholderTimer = NULL;
-    }
+    dispatch_source_t timer = gPlaceholderTimer;
+    if (!timer) return;
+    // Drop the global before waiting so a re-entrant start cannot observe a
+    // source we are cancelling. The local retain keeps ARC from freeing it
+    // until the in-flight event handler has returned: cancel + nil without
+    // that wait use-after-frees inside IOSurfaceLock and the helper dies
+    // with a signal (exit code null) instead of exit 0.
+    dispatch_semaphore_t done = gPlaceholderStopped;
+    gPlaceholderTimer = NULL;
+    gPlaceholderStopped = NULL;
+    dispatch_source_cancel(timer);
+    if (done) dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 }
 
 #pragma mark Webcam source
@@ -600,12 +625,18 @@ static BOOL StartVideoSource(NSString *path, NSString **err) {
     return YES;
 }
 
-static void StopVideoSource(void) {
+// SwitchSource uses a 1s cap so a wedged decoder cannot stall a hot-swap.
+// Process shutdown waits until RunVideoLoop can no longer PublishFrame,
+// otherwise ReleaseSurfaces races an in-flight IOSurface.
+static void StopVideoSourceWaiting(dispatch_time_t deadline) {
     if (!gVideoStopped) return;
     atomic_store(&gVideoCancelled, true);
-    // Wait up to 1s for the decode loop to bail.
-    dispatch_semaphore_wait(gVideoStopped, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
+    dispatch_semaphore_wait(gVideoStopped, deadline);
     gVideoStopped = nil;
+}
+
+static void StopVideoSource(void) {
+    StopVideoSourceWaiting(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
 }
 
 #pragma mark Source switch entry point
@@ -614,6 +645,10 @@ static BOOL SwitchSource(SimCamSourceKind kind, NSString *arg, NSString **errOut
     __block BOOL ok = NO;
     __block NSString *err = nil;
     dispatch_sync(gSourceQueue, ^{
+        if (atomic_load(&gShuttingDown)) {
+            err = @"shutting down";
+            return;
+        }
         switch (gActiveSource) {
             case SimCamSourcePlaceholder: StopPlaceholderSource(); break;
             case SimCamSourceWebcam:      StopWebcamSource(); break;
@@ -658,6 +693,8 @@ static NSString *SourceName(SimCamSourceKind k) {
 
 static int gControlListenFd = -1;
 static dispatch_source_t gAcceptSource;
+// Captured by the accept source's cancel handler (installed before resume).
+static dispatch_semaphore_t gAcceptCancelled;
 
 static NSData *EncodeReply(NSDictionary *dict) {
     NSMutableDictionary *m = dict.mutableCopy;
@@ -764,14 +801,43 @@ static int OpenControlSocket(const char *path) {
     if (listen(fd, 4) < 0) { perror("listen"); close(fd); return -1; }
     chmod(path, 0600);
     gControlListenFd = fd;
-    gAcceptSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,
+    // Close the listen fd from the cancel handler, after kevent has dropped
+    // it. close() while the READ source is still registered delivers
+    // EV_VANISHED; strict sources turn that into DISPATCH_CLIENT_CRASH
+    // (abort, no stderr, ChildProcess exit code null).
+    dispatch_semaphore_t cancelled = dispatch_semaphore_create(0);
+    dispatch_source_t acceptSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,
         fd, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
-    dispatch_source_set_event_handler(gAcceptSource, ^{
+    dispatch_source_set_event_handler(acceptSource, ^{
         int client = accept(fd, NULL, NULL);
         if (client >= 0) HandleClient(client);
     });
-    dispatch_resume(gAcceptSource);
+    dispatch_source_set_cancel_handler(acceptSource, ^{
+        close(fd);
+        dispatch_semaphore_signal(cancelled);
+    });
+    dispatch_resume(acceptSource);
+    gAcceptCancelled = cancelled;
+    gAcceptSource = acceptSource;
     return fd;
+}
+
+// Cancel the accept source and wait until the listen fd is closed. Safe to
+// call when the socket was never opened.
+static void StopAcceptSource(const char *socketPath) {
+    dispatch_source_t source = gAcceptSource;
+    dispatch_semaphore_t done = gAcceptCancelled;
+    gAcceptSource = NULL;
+    gAcceptCancelled = NULL;
+    if (source) {
+        dispatch_source_cancel(source);
+        if (done) dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+        gControlListenFd = -1; // closed inside the cancel handler
+    } else if (gControlListenFd >= 0) {
+        close(gControlListenFd);
+        gControlListenFd = -1;
+    }
+    if (socketPath) unlink(socketPath);
 }
 
 #pragma mark - Listing / shm setup / main
@@ -914,6 +980,13 @@ int main(int argc, const char *argv[]) {
             (void)SwitchSource(SimCamSourcePlaceholder, nil, NULL);
         }
 
+        // A client that closes before write() finishes must not kill the
+        // process. The default SIGPIPE disposition terminates with no crash
+        // report and a null ChildProcess exit code.
+        signal(SIGPIPE, SIG_IGN);
+        signal(SIGINT, HandleSig);
+        signal(SIGTERM, HandleSig);
+
         if (socketPath) {
             if (OpenControlSocket(socketPath) < 0) {
                 fprintf(stderr, "[serve-sim-camera] control socket open failed: %s\n", socketPath);
@@ -922,23 +995,32 @@ int main(int argc, const char *argv[]) {
             }
         }
 
-        signal(SIGINT, HandleSig);
-        signal(SIGTERM, HandleSig);
-
         fprintf(stderr, "[serve-sim-camera] running — Ctrl+C to stop\n");
         while (!gShouldExit) {
             [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
         }
-        if (gAcceptSource) dispatch_source_cancel(gAcceptSource);
-        if (gControlListenFd >= 0) { close(gControlListenFd); if (socketPath) unlink(socketPath); }
         // Unlink the shm name before stopping capture sources: if a source
         // teardown crashes, the name must not stay resolvable forever.
         if (gShmName) shm_unlink(gShmName);
-        StopPlaceholderSource();
+        atomic_store(&gShuttingDown, true);
+        // Join capture on the source queue so an in-flight SwitchSource
+        // finishes before we drop the timer. stopRunning stays on this
+        // thread: AVCaptureSession drains onto the main queue, and calling
+        // it from gSourceQueue while this thread is blocked deadlocks.
+        if (gSourceQueue) {
+            dispatch_sync(gSourceQueue, ^{
+                StopPlaceholderSource();
+                StopVideoSourceWaiting(DISPATCH_TIME_FOREVER);
+            });
+        } else {
+            StopPlaceholderSource();
+            StopVideoSourceWaiting(DISPATCH_TIME_FOREVER);
+        }
         StopWebcamSource();
-        StopVideoSource();
+        StopAcceptSource(socketPath);
         ReleaseSurfaces();
         fprintf(stderr, "[serve-sim-camera] stopped\n");
+        fflush(stderr);
         return 0;
     }
 }
