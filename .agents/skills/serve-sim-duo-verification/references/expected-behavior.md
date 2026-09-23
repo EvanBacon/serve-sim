@@ -1,6 +1,6 @@
 # iPhone Duo feature contract and regression checklist
 
-Updated September 21, 2026. These are the expected behaviors to preserve when
+Updated September 23, 2026. These are the expected behaviors to preserve when
 changing rendering, capture, gestures, hardware controls, or toolbar layout.
 Use [verification.md](verification.md) for historical validation; its earlier
 2D-mode descriptions and instant-angle matrix do not define the current UI.
@@ -21,9 +21,10 @@ Use [verification.md](verification.md) for historical validation; its earlier
 - [ ] The camera has restrained perspective, resembling Device Hub. The 130°
   book pose is centered around its hinge with equal left/right foreshortening.
 - [ ] The background around the device stays transparent.
-- [ ] Fine UI text is sharp after motion settles. Current targets are 1500×1350
-  during activity and 3000×2700 after about 180 ms idle. Switching targets must
-  not change framing, touch coordinates, or count as a new pose animation.
+- [ ] The live preview is one 1000×900 target with MSAA off. It does not
+  allocate a 3000×2700 buffer or sharpen to that size after idle. Framing and
+  touch coordinates stay on the normalized projection, so they must not move
+  when the preview size changes, and a size change must not count as a new pose.
 - [ ] The simulator surface cannot be text-selected or image-dragged by the
   browser. Clicking, dragging, and pinching still reach the simulator.
 
@@ -123,8 +124,8 @@ Use [verification.md](verification.md) for historical validation; its earlier
    active-display changes never spin the model.
 4. Rotate through all four orientations on a static screen and during motion.
    Check toolbar icons, hidden controls, final control locations, and touch taps.
-5. Scroll an app, then stop. Check responsive motion and the return to sharp text
-   without a size jump. Resize the browser and open/close its side panels.
+5. Scroll an app, then stop. Motion should stay responsive, and stopping must
+   not swap in a larger frame. Resize the browser and open/close its side panels.
 6. Hover near each physical button edge, move away, hold/release each control,
    and begin a fold while hovering. Repeat after rotation and on the cover.
 7. Screenshot inner and cover in portrait and landscape. Inspect the saved PNGs
@@ -138,7 +139,7 @@ Relevant automated suites in `packages/serve-sim/src/__tests__`:
 | One-mode preview and pose toolbar | `duo-preview.test.ts`, `device-hinge-controls.test.tsx` |
 | Physical anchors, rotation, pose identity | `duo-controls-position.test.ts` |
 | Bent-screen touch mapping | `duo-projection.test.ts`, `duo-ax-frame.test.ts`, `duo-home-gesture.test.ts` |
-| Static-frame redraw, rotation interpolation, idle sharpening, lifecycle | `device-session-lifecycle.test.ts` |
+| Static-frame redraw, rotation interpolation, no idle 3000 sharpen, lifecycle | `device-session-lifecycle.test.ts`, `duo-preview-stream.test.ts` |
 | Panel selection and screenshots | `device-displays.test.ts`, `screenshot-toast.test.tsx` |
 | Stream framing | `mjpeg-frame-parser.test.ts`, `duo-frame-parser.test.ts` |
 
@@ -148,9 +149,11 @@ framing, animation smoothness, hover fades, or actual guest screenshot content.
 ## Known limits and implementation reference
 
 The PNG rendering pipeline remains slower than Device Hub's native composition.
-Retain full-resolution idle rendering, per-panel screen textures, and skip
-decoding/uploading unchanged frames during pose animation. Rotation-only frames
-use one render pass; hinge changes still allow skinning to settle. Under HTTP
+Keep the live preview at 1000×900 with MSAA off. Do not restore a 3000×2700
+idle sharpen target or 4× MSAA on this path. Retain per-panel screen textures,
+and skip decoding/uploading unchanged frames during pose animation. When the
+jpeg and pose are unchanged, reuse the last PNG instead of rendering again.
+Rotation-only frames use one render pass; hinge changes still allow skinning to settle. Under HTTP
 backpressure, skip obsolete frames instead of building an animation queue.
 Native timings below exclude browser decoding and do not guarantee sustained
 60 fps for changing app content. Remeasure after renderer changes.
@@ -180,7 +183,7 @@ python3 .agents/skills/serve-sim-duo-verification/scripts/verify-duo-projection.
 
 This renders colored markers on both inner leaves at 100°, 130°, 170°, and 180°,
 and on the closed cover, in all four rotations. Projected marker centers must
-land within two output pixels of their rendered centers at 1500×1350.
+land within two output pixels of their rendered centers at the 1000×900 preview.
 
 ### Performance regression checks
 
@@ -189,8 +192,13 @@ land within two output pixels of their rendered centers at 1500×1350.
 - PNG encoding preserves RGBA and sRGB, vectorizes unpremultiplication/filtering,
   and compresses four independent DEFLATE stripes in parallel. Check images with
   partial alpha, padded rows, small widths, and stripe boundaries.
-- Local 1500×1350 synthetic-screen benchmark (30 measured frames per motion):
-  median rotation frame time improved from about 22 ms to 15 ms; folding from
-  25 ms to 19 ms. PNG size stayed approximately 342 KiB for rotation and
-  135–136 KiB for folding. These are native round-trip measurements, not a
-  browser frame-rate guarantee; retain full-resolution idle rendering.
+- Live preview stays a single 1000×900 target with MSAA off. Do not put a
+  3000×2700 idle sharpen, or 4× MSAA, back on the streaming path. On a Mac,
+  idle 3D frames should stay well under ~200 KB and `serve-sim-duo-render`
+  CPU well below the 15–50% seen with the 1500/3000 + MSAA path.
+- Historical 1500×1350 synthetic-screen benchmark (30 measured frames per
+  motion, before this preview budget): median rotation frame time improved
+  from about 22 ms to 15 ms; folding from 25 ms to 19 ms. PNG size stayed
+  approximately 342 KiB for rotation and 135–136 KiB for folding. Those
+  figures are not the current live-preview target. They are native round-trip
+  measurements, not a browser frame-rate guarantee.

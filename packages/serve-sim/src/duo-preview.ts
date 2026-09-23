@@ -5,8 +5,21 @@ import type { DuoPanel } from "./device-pose";
 /** Matches the cubic ease-out sweep in the Duo guest HID helper. */
 export const DUO_FOLD_DURATION_MS = 800;
 const DUO_ROTATION_MS = 300;
-const DUO_SETTLE_MS = 180;
 const FRAME_TRAILER = Buffer.from("\r\n", "ascii");
+
+function copyBytes(jpeg: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(jpeg.byteLength);
+  copy.set(jpeg);
+  return copy;
+}
+
+/** Capture reuses one JPEG buffer in place, so identity is not enough. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  return Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(
+    Buffer.from(b.buffer, b.byteOffset, b.byteLength),
+  );
+}
 
 export type DuoPreviewRenderer = Pick<DuoRenderer, "render" | "close">;
 
@@ -31,7 +44,8 @@ export class DuoPreview {
   private projection?: DuoProjection;
   private busy = false;
   private pending = false;
-  private settleTimer?: ReturnType<typeof setTimeout>;
+  private cached?: { jpeg: Uint8Array; panel: DuoPanel; angle: number; roll: number; png: Uint8Array };
+  private delivered = new WeakSet<ServerResponse>();
   private foldTimer?: ReturnType<typeof setTimeout>;
   private rotationTimer?: ReturnType<typeof setTimeout>;
   private fold?: Fold;
@@ -137,30 +151,33 @@ export class DuoPreview {
   detach(res: ServerResponse): void {
     this.responses.delete(res);
     if (this.responses.size) return;
-    clearTimeout(this.settleTimer);
     this.renderer?.close();
     this.renderer = undefined;
   }
 
   close(): void {
     this.closed = true;
-    clearTimeout(this.settleTimer);
     clearTimeout(this.foldTimer);
     clearTimeout(this.rotationTimer);
     this.fold = undefined;
+    this.cached = undefined;
     this.renderer?.close();
     this.renderer = undefined;
     this.responses.clear();
   }
 
-  requestFrame(fullResolution = false): void {
+  requestFrame(): void {
     const renderer = this.renderer;
     const jpeg = this.jpeg;
     if (this.closed || !this.responses.size || !renderer || !jpeg || (this.hingeDegrees == null && !this.fold)) return;
-    if (!fullResolution) {
-      clearTimeout(this.settleTimer);
-      this.settleTimer = setTimeout(() => this.requestFrame(true), DUO_SETTLE_MS);
-      this.settleTimer.unref?.();
+    const panel = this.panel;
+    const roll = this.viewRoll;
+    const angle = this.displayAngle();
+    // Idle used to re-render at 3000px after 180 ms. Skip that, and skip the
+    // native render entirely when this frame's inputs are already encoded.
+    if (!this.busy && this.matchesCached(jpeg, panel, angle, roll)) {
+      this.publishCached();
+      return;
     }
     if (this.busy) {
       this.pending = true;
@@ -168,17 +185,17 @@ export class DuoPreview {
     }
     this.busy = true;
     this.pending = false;
-    const panel = this.panel;
-    const roll = this.viewRoll;
-    void renderer.render(jpeg, panel, this.displayAngle(), roll, fullResolution).then(({ jpeg: rendered, projection }) => {
+    // Copy before the await. DeviceSession mutates its JPEG buffer in place.
+    const snapshot = copyBytes(jpeg);
+    void renderer.render(snapshot, panel, angle, roll, false).then(({ jpeg: rendered, projection }) => {
       if (this.closed || this.renderer !== renderer) return;
       if (JSON.stringify(this.projection) !== JSON.stringify(projection)) {
         this.projection = projection;
         this.options.onProjection(Buffer.concat([Buffer.from([0x83]), Buffer.from(JSON.stringify(projection))]));
       }
-      for (const response of this.responses) {
-        if (!response.destroyed && !response.writableEnded && response.writableLength === 0) this.writeFrame(response, rendered);
-      }
+      this.cached = { jpeg: snapshot, panel, angle, roll, png: rendered };
+      this.delivered = new WeakSet();
+      this.publishCached();
     }).catch((error) => {
       if (this.renderer !== renderer) return;
       for (const response of this.responses) this.options.onStreamError(response, error);
@@ -189,6 +206,23 @@ export class DuoPreview {
       this.busy = false;
       if (this.pending) this.requestFrame();
     });
+  }
+
+  private matchesCached(jpeg: Uint8Array, panel: DuoPanel, angle: number, roll: number): boolean {
+    const cached = this.cached;
+    return cached != null && cached.panel === panel && cached.angle === angle && cached.roll === roll && sameBytes(cached.jpeg, jpeg);
+  }
+
+  private publishCached(): void {
+    const png = this.cached?.png;
+    if (!png) return;
+    for (const response of this.responses) {
+      if (this.delivered.has(response)) continue;
+      if (!response.destroyed && !response.writableEnded && response.writableLength === 0) {
+        this.writeFrame(response, png);
+        this.delivered.add(response);
+      }
+    }
   }
 
   private tickFold(now = performance.now()): void {
