@@ -21,10 +21,12 @@ Use [verification.md](verification.md) for historical validation; its earlier
 - [ ] The camera has restrained perspective, resembling Device Hub. The 130°
   book pose is centered around its hinge with equal left/right foreshortening.
 - [ ] The background around the device stays transparent.
-- [ ] The live preview is one 1000×900 target with MSAA off. It does not
-  allocate a 3000×2700 buffer or sharpen to that size after idle. Framing and
-  touch coordinates stay on the normalized projection, so they must not move
-  when the preview size changes, and a size change must not count as a new pose.
+- [ ] Motion uses a 1000×900 target with MSAA off. About 180 ms after motion
+  stops, one frame sharpens to 1500×1350 and then stops. It must not allocate
+  a 3000×2700 target, enable 4× MSAA, or sharpen again while jpeg and pose are
+  unchanged. The sharper frame must not count as a new pose. On a Mac, confirm
+  Retina screen text is legible after that settle frame; shell aliasing without
+  MSAA is a visual check, not a reason to turn MSAA back on for the stream.
 - [ ] The simulator surface cannot be text-selected or image-dragged by the
   browser. Clicking, dragging, and pinching still reach the simulator.
 
@@ -124,8 +126,10 @@ Use [verification.md](verification.md) for historical validation; its earlier
    active-display changes never spin the model.
 4. Rotate through all four orientations on a static screen and during motion.
    Check toolbar icons, hidden controls, final control locations, and touch taps.
-5. Scroll an app, then stop. Motion should stay responsive, and stopping must
-   not swap in a larger frame. Resize the browser and open/close its side panels.
+5. Scroll an app, then stop. Motion should stay responsive. After it settles,
+   one sharper frame may arrive (1500×1350, not 3000×2700) and must not repeat.
+   On a Retina display, read screen text in that settled frame. Resize the
+   browser and open/close its side panels.
 6. Hover near each physical button edge, move away, hold/release each control,
    and begin a fold while hovering. Repeat after rotation and on the cover.
 7. Screenshot inner and cover in portrait and landscape. Inspect the saved PNGs
@@ -139,7 +143,7 @@ Relevant automated suites in `packages/serve-sim/src/__tests__`:
 | One-mode preview and pose toolbar | `duo-preview.test.ts`, `device-hinge-controls.test.tsx` |
 | Physical anchors, rotation, pose identity | `duo-controls-position.test.ts` |
 | Bent-screen touch mapping | `duo-projection.test.ts`, `duo-ax-frame.test.ts`, `duo-home-gesture.test.ts` |
-| Static-frame redraw, rotation interpolation, no idle 3000 sharpen, lifecycle | `device-session-lifecycle.test.ts`, `duo-preview-stream.test.ts` |
+| Static-frame redraw, rotation, one-shot ≤1500 settle sharpen, lifecycle | `device-session-lifecycle.test.ts`, `duo-preview-stream.test.ts` |
 | Panel selection and screenshots | `device-displays.test.ts`, `screenshot-toast.test.tsx` |
 | Stream framing | `mjpeg-frame-parser.test.ts`, `duo-frame-parser.test.ts` |
 
@@ -149,10 +153,13 @@ framing, animation smoothness, hover fades, or actual guest screenshot content.
 ## Known limits and implementation reference
 
 The PNG rendering pipeline remains slower than Device Hub's native composition.
-Keep the live preview at 1000×900 with MSAA off. Do not restore a 3000×2700
-idle sharpen target or 4× MSAA on this path. Retain per-panel screen textures,
-and skip decoding/uploading unchanged frames during pose animation. When the
-jpeg and pose are unchanged, reuse the last PNG instead of rendering again.
+Motion stays at 1000×900 with MSAA off. One settle frame may use 1500×1350,
+also with MSAA off, so Retina screen text can sharpen without a 3000×2700
+target or 4× MSAA. Do not restore either of those. Retina legibility after
+settle is a manual Mac check. Retain per-panel screen textures, and skip
+decoding/uploading unchanged frames during pose animation. When the
+jpeg and pose are unchanged, reuse the last PNG instead of rendering or
+sharpening again.
 Rotation-only frames use one render pass; hinge changes still allow skinning to settle. Under HTTP
 backpressure, skip obsolete frames instead of building an animation queue.
 Native timings below exclude browser decoding and do not guarantee sustained
@@ -192,13 +199,17 @@ land within two output pixels of their rendered centers at the 1000×900 preview
 - PNG encoding preserves RGBA and sRGB, vectorizes unpremultiplication/filtering,
   and compresses four independent DEFLATE stripes in parallel. Check images with
   partial alpha, padded rows, small widths, and stripe boundaries.
-- Live preview stays a single 1000×900 target with MSAA off. Do not put a
-  3000×2700 idle sharpen, or 4× MSAA, back on the streaming path. On a Mac,
-  idle 3D frames should stay well under ~200 KB and `serve-sim-duo-render`
-  CPU well below the 15–50% seen with the 1500/3000 + MSAA path.
+- Motion frames use the 1000×900 target. After settle, at most one 1500×1350
+  frame is encoded, and identical jpeg/pose input must not sharpen again.
+  Do not put a 3000×2700 target or 4× MSAA back on the streaming path. On a
+  Mac, motion frames should stay well under ~200 KB, the settled frame should
+  be the 1500px size rather than ~486 KB, and `serve-sim-duo-render` CPU
+  should stay well below the 15–50% seen with 3000px + MSAA. Also read screen
+  text on a Retina display after settle.
 - Historical 1500×1350 synthetic-screen benchmark (30 measured frames per
-  motion, before this preview budget): median rotation frame time improved
-  from about 22 ms to 15 ms; folding from 25 ms to 19 ms. PNG size stayed
-  approximately 342 KiB for rotation and 135–136 KiB for folding. Those
-  figures are not the current live-preview target. They are native round-trip
-  measurements, not a browser frame-rate guarantee.
+  motion, from the previous always-1500 path): median rotation frame time
+  improved from about 22 ms to 15 ms; folding from 25 ms to 19 ms. PNG size
+  stayed approximately 342 KiB for rotation and 135–136 KiB for folding.
+  Those figures describe a 1500px encode, which is now only the one-shot
+  settle frame. They are native round-trip measurements, not a browser
+  frame-rate guarantee.

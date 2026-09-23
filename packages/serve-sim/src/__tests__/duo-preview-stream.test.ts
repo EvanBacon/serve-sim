@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { ServerResponse } from "http";
 import { join } from "node:path";
-import { DuoPreview } from "../duo-preview";
+import { DuoPreview, DUO_SETTLE_MS } from "../duo-preview";
 import type { DuoProjection } from "../duo-renderer";
 
 class FakeResponse {
@@ -51,16 +51,22 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("Duo live preview stream", () => {
-  test("does not sharpen to a second target after idle", async () => {
+  test("motion uses the fast target and sharpens once after settle", async () => {
     const { preview, calls } = harness();
     const response = new FakeResponse();
     preview.noteHinge(180);
     preview.attach(response as unknown as ServerResponse);
     preview.onCapturedFrame(new Uint8Array([1, 2, 3]));
     await waitFor(() => calls.length === 1);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    expect(calls).toHaveLength(1);
     expect(calls[0]!.fullResolution).toBe(false);
+    await waitFor(() => calls.length === 2);
+    expect(calls[1]!.fullResolution).toBe(true);
+    expect(calls.filter((call) => call.fullResolution)).toHaveLength(1);
+    const settled = calls.length;
+    preview.onCapturedFrame(new Uint8Array([1, 2, 3]));
+    preview.requestFrame();
+    await new Promise((resolve) => setTimeout(resolve, DUO_SETTLE_MS + 80));
+    expect(calls).toHaveLength(settled);
     expect(response.chunks.some((chunk) => chunk.includes(Buffer.from("image/png")))).toBe(true);
     preview.close();
   });
@@ -98,6 +104,25 @@ describe("Duo live preview stream", () => {
     preview.close();
   });
 
+  test("a changed screen sharpens once and does not keep sharpening", async () => {
+    const { preview, calls } = harness();
+    preview.noteHinge(180);
+    preview.attach(new FakeResponse() as unknown as ServerResponse);
+    preview.onCapturedFrame(new Uint8Array([1]));
+    await waitFor(() => calls.some((call) => call.fullResolution));
+    const firstSharpen = calls.filter((call) => call.fullResolution).length;
+    expect(firstSharpen).toBe(1);
+    preview.onCapturedFrame(new Uint8Array([2]));
+    await waitFor(() => calls.filter((call) => !call.fullResolution).length >= 2);
+    expect(calls.at(-1)!.fullResolution).toBe(false);
+    await waitFor(() => calls.filter((call) => call.fullResolution).length === 2);
+    expect(calls.filter((call) => call.fullResolution)).toHaveLength(2);
+    const done = calls.length;
+    await new Promise((resolve) => setTimeout(resolve, DUO_SETTLE_MS + 80));
+    expect(calls).toHaveLength(done);
+    preview.close();
+  });
+
   test("sees a capture buffer that is mutated in place", async () => {
     const { preview, calls } = harness();
     preview.noteHinge(180);
@@ -114,16 +139,21 @@ describe("Duo live preview stream", () => {
     preview.close();
   });
 
-  test("native preview target is 1000×900 with MSAA off and no 3000 sharpen", () => {
+  test("native motion target is 1000×900 and the settle sharpen is ≤1500 without MSAA", () => {
     const source = readFileSync(join(import.meta.dir, "../../Sources/SimDuoRenderer/DuoRenderer.swift"), "utf8");
     expect(source).toContain("static let previewWidth = 1000");
     expect(source).toContain("static let previewHeight = 900");
-    expect(source).toContain("width: Self.previewWidth, height: Self.previewHeight");
+    expect(source).toContain("static let sharpenWidth = 1500");
+    expect(source).toContain("static let sharpenHeight = 1350");
+    expect(source).toContain("(Self.previewWidth, Self.previewHeight), (Self.sharpenWidth, Self.sharpenHeight)");
     expect(source).toContain("antialiasing = .none");
     expect(source).not.toContain("multisample4X");
-    expect(source).not.toContain("fullResolution ? 1 : 0");
+    expect(source).toContain("targetIndex = fullResolution ? 1 : 0");
     expect(source).not.toMatch(/\[\s*1500\s*,\s*3000\s*\]/);
-    expect(source).toContain("targetIndex = 0");
+    expect(source).not.toMatch(/sharpenWidth = 3000|width: 3000|3000 \* 9/);
+    const widths = [...source.matchAll(/static let (?:preview|sharpen)Width = (\d+)/g)].map((match) => Number(match[1]));
+    expect(widths).toEqual([1000, 1500]);
+    expect(Math.max(...widths)).toBeLessThanOrEqual(1500);
     const worker = readFileSync(join(import.meta.dir, "../../Sources/SimDuoRenderer/main.swift"), "utf8");
     expect(worker).toContain("fullResolution: request.fullResolution ?? false");
     expect(worker).not.toContain("fullResolution ?? true");

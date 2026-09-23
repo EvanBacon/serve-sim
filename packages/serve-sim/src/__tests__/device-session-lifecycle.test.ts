@@ -532,8 +532,9 @@ test("Duo rotation redraws a static frame in all four orientations and ignores r
     const countBeforeFrame = qualities.length;
     await frame({ data: new Uint8Array([2]), width: 2007, height: 2853 });
     await waitFor(() => qualities.length > countBeforeFrame);
+    // A new capture is a motion frame. The one-shot settle sharpen is covered
+    // in duo-preview-stream.test.ts and must not be the frame just requested.
     expect(qualities.at(-1)).toBe(false);
-    expect(qualities.every((fullResolution) => fullResolution === false)).toBe(true);
   } finally { session.close(); }
 });
 

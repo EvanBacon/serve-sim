@@ -8,12 +8,13 @@ import UniformTypeIdentifiers
 
 /// Renders Apple's installed V68 asset; no Apple asset is copied into the package.
 @MainActor final class DuoRenderer {
-    /// Steady live-preview size. 10:9 matches the old 1500×1350 and 3000×2700
-    /// targets, so normalized touch and hardware anchors stay put.
-    /// #156's dual targets plus 4× MSAA, then an idle sharpen to 3000px,
-    /// dropped Apple Silicon to ~6–7 fps with ~486 KB PNGs and 15–50% duo-render CPU.
+    /// Motion target. 10:9 matches the sharpen target, so normalized anchors stay put.
     static let previewWidth = 1000
     static let previewHeight = 900
+    /// One-shot settle target for Retina screen text. Never 3000, and MSAA stays off:
+    /// 4× MSAA plus a 3000px idle target was the Apple Silicon CPU regression.
+    static let sharpenWidth = 1500
+    static let sharpenHeight = 1350
     private let renderer: RealityRenderer
     private let wrapper = Entity()
     private let rest = Entity()
@@ -36,7 +37,7 @@ import UniformTypeIdentifiers
     private var screenTextures: [String: TextureResource] = [:]
     private var screenFrames: [String: Data] = [:]
     private var lastAngle: Double = .nan
-    // Reported size is the single 1000×900 preview target. MSAA stays off.
+    // Active target: 1000×900 while moving, 1500×1350 after the one-shot sharpen.
     var width: Int { texture.width }
     var height: Int { texture.height }
     // Use Device Hub's 36 mm sensor model with a longer lens to flatten depth.
@@ -78,22 +79,25 @@ import UniformTypeIdentifiers
         renderer.entities.append(camera)
         renderer.activeCamera = camera
         renderer.lighting.resource = EnvironmentResource.duoObjectLighting()
+        // Preserve screen detail after settle with a second target, not MSAA.
+        // Antialiasing the shell at 4× was too expensive for the live stream.
         renderer.cameraSettings.antialiasing = .none
         renderer.cameraSettings.colorBackground = .color(CGColor(red: 0, green: 0, blue: 0, alpha: 0))
-        // One preview target. A second buffer existed only to sharpen after idle.
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: Self.previewWidth, height: Self.previewHeight, mipmapped: false)
-        descriptor.storageMode = .shared
-        descriptor.usage = [.renderTarget, .shaderRead]
-        guard let texture = device.makeTexture(descriptor: descriptor) else { throw CocoaError(.fileReadUnknown) }
-        targets = [(texture, try RealityRenderer.CameraOutput(.singleProjection(colorTexture: texture)))]
+        // Keep both targets allocated: resizing during gestures would stall Metal.
+        targets = try [(Self.previewWidth, Self.previewHeight), (Self.sharpenWidth, Self.sharpenHeight)].map { width, height in
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
+            descriptor.storageMode = .shared
+            descriptor.usage = [.renderTarget, .shaderRead]
+            guard let texture = device.makeTexture(descriptor: descriptor) else { throw CocoaError(.fileReadUnknown) }
+            return (texture, try RealityRenderer.CameraOutput(.singleProjection(colorTexture: texture)))
+        }
         context = CIContext(mtlDevice: device)
         controller = subject.playAnimation(clip, transitionDuration: 0, startsPaused: true)
     }
 
-    func render(jpeg: Data, panel: String, angle: Double, roll: Double, fullResolution _: Bool = false) async throws -> Data {
-        // `fullResolution` stays on the worker protocol and is ignored. It used
-        // to select a 3000px target about 180 ms after motion stopped.
-        targetIndex = 0
+    func render(jpeg: Data, panel: String, angle: Double, roll: Double, fullResolution: Bool = false) async throws -> Data {
+        // False is the fast motion target. True is the one-shot 1500px settle frame.
+        targetIndex = fullResolution ? 1 : 0
         guard angle.isFinite, (0...180).contains(angle), roll.isFinite else { throw CocoaError(.fileReadCorruptFile) }
         // Hinge and rotation updates often reuse the same screen image.
         // Keep both panel textures alive and skip image decoding/upload entirely.

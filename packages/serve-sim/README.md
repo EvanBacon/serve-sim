@@ -59,7 +59,7 @@ runs inside the simulator and exits with the device session.
 Duo uses one interactive RealityKit preview of the installed Xcode model, with
 live screen textures and touches mapped to each bent screen half. Apple's model
 stays in Xcode; it is not redistributed. Rotate animates the device and pose
-icons together. Motion uses a faster render target and sharpens when settled.
+icons together. Motion uses a faster 1000×900 render target and sharpens once to 1500×1350 when settled.
 Screenshots capture the active app framebuffer, including the unfolded inner display.
 
 Use the pose buttons or hold **Alt** to reveal the continuous hinge slider.
