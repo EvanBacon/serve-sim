@@ -82,6 +82,7 @@
     "bun-plugin-tailwind": "^0.1.2",
     "commander": "^14.0.1",
     "debug": "^4.4.3",
+    "happy-dom": "^20.14.5",
     "lucide-react": "^1.20.0",
     "node-swift": "1.5.1",
     "preact": "^10.29.1",

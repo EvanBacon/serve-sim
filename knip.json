@@ -11,7 +11,8 @@
     ".": {},
     "packages/serve-sim": {
       "ignoreDependencies": [
-        "preact"
+        "preact",
+        "happy-dom"
       ],
       "entry": [
         "src/index.ts",

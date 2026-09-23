@@ -92,7 +92,8 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
           onResume={resumeDismiss}
         />
       ),
-      { id: next.id, duration: Infinity },
+      // This toast draws its own panel. Leave Sonner's chrome for plain toasts.
+      { id: next.id, duration: Infinity, unstyled: true },
     );
     if (Number.isFinite(duration)) scheduleDismiss(duration);
     else {

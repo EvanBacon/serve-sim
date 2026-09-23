@@ -1,5 +1,34 @@
+import type { CSSProperties } from "react";
 import { Toaster } from "sonner";
 import type { UploadToast } from "../hooks/use-upload-toasts";
+
+// Sonner paints its panel only when `data-styled` is true. `toast.custom()`
+// (uploads, screenshots) opts out per call. A toaster-wide `unstyled: true`
+// also opts out `toast.error` / `toast.success`, which drops the panel,
+// width, and wrap and leaves a bare icon on the black canvas.
+const toasterStyle = {
+  zIndex: 2147483647,
+  "--normal-bg": "#1c1c1e",
+  "--normal-border": "rgba(255, 255, 255, 0.12)",
+  "--normal-text": "rgba(255, 255, 255, 0.9)",
+  "--border-radius": "8px",
+  "--width": "320px",
+} as CSSProperties;
+
+function StatusDot({ color }: { color: string }) {
+  return (
+    <span
+      data-testid="plain-toast-dot"
+      style={{
+        display: "block",
+        width: 6,
+        height: 6,
+        borderRadius: 999,
+        background: color,
+      }}
+    />
+  );
+}
 
 export function ServeSimToaster() {
   return (
@@ -9,8 +38,14 @@ export function ServeSimToaster() {
       visibleToasts={4}
       gap={8}
       offset={{ bottom: 24 }}
-      toastOptions={{ unstyled: true }}
-      style={{ zIndex: 2147483647 }}
+      className="serve-sim-toaster"
+      icons={{
+        error: <StatusDot color="#f87171" />,
+        success: <StatusDot color="#4ade80" />,
+        warning: <StatusDot color="#fbbf24" />,
+        info: <StatusDot color="#a5b4fc" />,
+      }}
+      style={toasterStyle}
       containerAriaLabel="serve-sim notifications"
     />
   );
