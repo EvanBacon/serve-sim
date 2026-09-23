@@ -27,7 +27,8 @@ export function useUploadToasts() {
   const render = useCallback((toast: UploadToast, duration = Infinity) => {
     sonnerToast.custom(
       () => <UploadToastContent toast={toast} />,
-      { id: toast.id, duration },
+      // This toast draws its own panel. Leave Sonner's chrome for plain toasts.
+      { id: toast.id, duration, unstyled: true },
     );
   }, []);
 
