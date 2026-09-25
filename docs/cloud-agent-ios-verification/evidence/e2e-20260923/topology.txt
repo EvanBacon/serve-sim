@@ -1,0 +1,5 @@
+Linux cloud agent --HTTPS/WSS--> ephemeral tunnel (URL not retained)
+  --> 127.0.0.1:3399 serve-sim
+  --> iPhone 16e (UDID recorded in verify-A-mac-port.json)
+Existing Duo serve-sim remained on 127.0.0.1:3200 — untouched
+Client: small WebSocket client on Linux (not shipped). Stock Agent Skill has no --url.

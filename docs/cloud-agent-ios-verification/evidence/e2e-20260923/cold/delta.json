@@ -1,0 +1,9 @@
+{
+  "label": "cold",
+  "beforeBytes": 178748,
+  "afterBytes": 215734,
+  "beforeSha": "6ae2b63655db85ec",
+  "afterSha": "a2002f6820081472",
+  "identical": false,
+  "visualDelta": true
+}

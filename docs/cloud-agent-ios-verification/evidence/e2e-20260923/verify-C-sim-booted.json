@@ -1,0 +1,11 @@
+{
+  "udid": "71422B06-5CB1-4F1A-9061-701686017025",
+  "device": "iPhone 16e",
+  "booted": true,
+  "app": "host.exp.Exponent",
+  "tab": "Home",
+  "jpeg": "cold/home.jpg",
+  "bytes": 178748,
+  "result": "PASS",
+  "note": "Original verify-C JPEG was byte-identical to cold/home.jpg and is not duplicated."
+}
