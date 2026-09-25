@@ -1,0 +1,26 @@
+{
+  "timezone": "America/Los_Angeles",
+  "rerunOf": "e2e-20260923",
+  "serveSimDetachMs": 775,
+  "serveSimReadyAfterSec": 1,
+  "notes": "Cold bring-up: fresh serve-sim --detach -p 3399 plus an ephemeral tunnel. Duo on :3200 left alone. Initial Settings alert dismissed before Home/Settings.",
+  "firstFrameMs": 589,
+  "firstFrameSource": "first-frame.jpg via GET /helper/<udid>/stream.mjpeg?raw=1 over the tunnel",
+  "healthWallMs": 494,
+  "configWallMs": 530,
+  "tapRttMs": {
+    "cold_home": 508,
+    "cold_settings": 527,
+    "warm_home": 468,
+    "warm_settings": 503
+  },
+  "coldVsWarm": {
+    "coldSettingsTapMs": 527,
+    "warmSettingsTapMs": 503,
+    "deltaMs": -24,
+    "coldVisualDelta": true,
+    "warmVisualDelta": true
+  },
+  "drivePassesVisualConfirm": 2,
+  "hidRepair": "repair-input reported Input not shadowed; restart still performed once after identical pre-alert shots; HID worked after Cancel dismiss"
+}
