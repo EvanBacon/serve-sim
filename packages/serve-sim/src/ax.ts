@@ -9,7 +9,7 @@ const POLL_INTERVAL_MS = 500;
 const MAX_POLL_INTERVAL_MS = 2000;
 const UNAVAILABLE_RETRY_INTERVAL_MS = 15_000;
 
-interface RawAxeNode {
+export interface RawAxeNode {
   AXUniqueId: string | null;
   AXLabel: string | null;
   AXValue: string | null;
@@ -38,7 +38,7 @@ function sameRect(a: AxRect, b: AxRect) {
   );
 }
 
-function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
+export function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   const screen = chooseScreenFrame(roots);
   const elements: AxElement[] = [];
 

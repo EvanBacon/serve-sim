@@ -107,6 +107,7 @@ serve-sim fold <deg> [-d udid]  Set a Duo hinge angle (0–180)
 serve-sim repair-input [-d udid]         Repair Device Hub input (restarts apps)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events
+serve-sim ax [-d udid]                Dump the accessibility tree as JSON
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
