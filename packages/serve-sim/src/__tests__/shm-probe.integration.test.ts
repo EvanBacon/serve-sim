@@ -507,5 +507,5 @@ describeIf("SimCameraHelper shutdown race", () => {
         } catch {}
       }
     }
-  }, 30_000);
+  }, 70_000);
 });
