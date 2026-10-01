@@ -2,12 +2,12 @@
 
 Design only. No SDK, exporter, or runtime change is implied by this document.
 
-serve-sim is a local Mac process that streams a simulator and injects input. The failures that have cost time are silent: a command exits 0, `--list` says `running: true`, or the preview says Connecting while the capture side is still producing frames. The useful record is the fields that distinguish those cases, plus timings on the paths we have already had to measure by hand.
+serve-sim is a local Mac process that streams a simulator and injects input. The failures that have cost time are silent: a command exits 0, `--list` says `running: true`, or the preview says Connecting while the capture side is still producing frames. A later class is just as silent: the touch is delivered, and the screenshot is unchanged because the point was in the wrong frame. The useful record is the fields that distinguish those cases, plus timings on the paths we have already had to measure by hand.
 
 ## Goals
 
-1. **Error reproduction.** Each event below is a field that was missing from a real report. With it, a log line is enough to tell injector-sent from guest-unchanged, signal from exit 0, and a dead consumer from a dead producer.
-2. **Performance timing.** Spans for the hot paths where a fix already depended on a number: first frame, inject send, camera frame interval, helper startup/shutdown, reconnect.
+1. **Error reproduction.** Each event below is a field that was missing from a real report. With it, a log line is enough to tell injector-sent from guest-unchanged, a coordinate miss from a dead injector, signal from exit 0, and a dead consumer from a dead producer.
+2. **Performance timing.** Spans for the hot paths where a fix already depended on a number: first frame, inject send, camera frame interval, helper startup/shutdown, reconnect. Spans carry the same error-repro attributes so a fast send is not read as a successful tap.
 
 Both stay on the machine unless someone opts into export.
 
@@ -70,7 +70,7 @@ Present on every event and span:
 
 | Issue | What the report could not show | Event |
 |---|---|---|
-| [#153](https://github.com/EvanBacon/serve-sim/issues/153) | Touch exits 0 and HID debug prints, screenshots identical, lock works. Missing injector health vs guest effect, runtime, UI host, client connected, send ack, coordinate space, version. | `input.inject` |
+| [#153](https://github.com/EvanBacon/serve-sim/issues/153) | Touch exits 0, screenshots identical. 2026-09-30 repro: headless portrait taps land on iPad and iPhone; `landscape_left` misses because CLI/server pass display-normalized points into the native portrait frame. Web client already remaps. Missing orientation, frame, and whether a remap ran, so a coordinate miss looked like a dead injector. | `input.inject` |
 | [#136](https://github.com/EvanBacon/serve-sim/issues/136) | HID died; button, tap, and gesture still exit 0; `--list` stays `running: true`. | `hid.health` + `input.inject` |
 | [#143](https://github.com/EvanBacon/serve-sim/issues/143) | Helper exit was null (signal) under `--max-concurrency=1`. Missing signal vs code, last log, shutdown phase, placeholder-timer vs socket-close timing. | `camera.helper.exit` |
 | [#103](https://github.com/EvanBacon/serve-sim/issues/103) | Preview live for 1–2s, then Connecting forever on 0.1.40+. Missing state transitions, last frame time, WS close reason, first-frame vs later stall, whether it recovered. | `stream.state` |
@@ -79,7 +79,7 @@ Present on every event and span:
 
 ### `input.inject`
 
-One event per touch phase, button, or gesture step. This is the record [#153](https://github.com/EvanBacon/serve-sim/issues/153) and [#136](https://github.com/EvanBacon/serve-sim/issues/136) needed: `button lock` goes through `IndigoHIDMessageForButton` (target hardware, `0x33`) and can succeed while digitizer touch (`0x32`, `IndigoHIDMessageForMouseNSEvent`) is built and sent into a session with no UI host.
+One event per touch phase, button, or gesture step. This is the record [#153](https://github.com/EvanBacon/serve-sim/issues/153) and [#136](https://github.com/EvanBacon/serve-sim/issues/136) needed: `button lock` goes through `IndigoHIDMessageForButton` (target hardware, `0x33`) and can succeed while digitizer touch (`0x32`, `IndigoHIDMessageForMouseNSEvent`) is built and sent into a session with no UI host — or into the wrong coordinate frame.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -92,6 +92,9 @@ One event per touch phase, button, or gesture step. This is the record [#153](ht
 | `inject.ack_ms` | int, ms | omitted while `inject.ack=none` |
 | `inject.guest_effect` | enum | `not_checked` by default. Opt-in local `--verify` may set `changed` \| `unchanged` and then discard the frames |
 | `input.coord_space` | enum | `normalized_0_1` |
+| `input.orientation` | enum | `portrait` \| `portrait_upside_down` \| `landscape_left` \| `landscape_right` \| `unknown`. Device orientation at send, not the caller's assumption |
+| `input.frame` | enum | `display` (rotated screenshot / what `serve-sim tap` is given) \| `native_portrait` (what `SimHID.touch` consumes) |
+| `input.remapped` | bool | true if this process applied `rawPointForDisplayPoint` before send |
 | `input.screen_w` | int, px | width passed into the injector |
 | `input.screen_h` | int, px | height passed into the injector |
 | `input.target` | enum | `digitizer` \| `hardware_button` |
@@ -100,6 +103,8 @@ One event per touch phase, button, or gesture step. This is the record [#153](ht
 | `cli.exit_code` | int | `0` only when `inject.result=sent` and `hid.state=ok`. `no_client`, `nil_message`, `gone`, and `throw` exit non-zero |
 
 Today's `tap` is fire-and-forget: the socket open succeeds, `begin`/`end` are written, and the process exits 0 with no reply handler. The event records that as `inject.result=sent`, `inject.ack=none`, `inject.guest_effect=not_checked`. A sent digitizer event and a delivered one stop looking the same once `hid.client`, `sim.ui_host`, and `input.target` are on the line.
+
+A 2026-09-30 repro on [#153](https://github.com/EvanBacon/serve-sim/issues/153) (macOS 27 / Xcode 27.0 (27A266a) / iOS 27, headless `simctl boot`, no Simulator.app or Device Hub, `dtuhidd.active=0`) showed portrait taps opening Settings on both iPad Pro 13-inch (M5) and iPhone 18 Pro. The same `landscape_left` point (`0.715, 0.343` in the rotated frame) left the screenshot unchanged until it was rewritten with the web client's map `{ x: y, y: 1 - x }`, which is `rawPointForDisplayPoint` in `orientation.ts`. `w`/`h` do not move the target except on Duo. The distinguishing record is `sim.ui_host=none`, `hid.state=ok`, `inject.result=sent`, `input.orientation=landscape_left`, `input.frame=display`, `input.remapped=false`, `inject.guest_effect=unchanged`. That is a coordinate miss, not a dead HID client (`hid.client=missing`) and not the [#136](https://github.com/EvanBacon/serve-sim/issues/136) `hid.state=gone` case. `input.x` / `input.y` stay local-only; remote export keeps the enums. A fix that remaps CLI `tap` and other direct `0x03` writers should set `input.remapped=true` and `input.frame=native_portrait` after the map.
 
 ### `hid.health`
 
@@ -150,7 +155,7 @@ Emitted on transition and included in `--list`. [#136](https://github.com/EvanBa
 
 ### `stream.stall`
 
-[#128](https://github.com/EvanBacon/serve-sim/issues/128) fired the overlay "Stream is not producing frames" after rotation. The native `<img src=stream.mjpeg>` and a parallel `fetch()` watchdog are separate consumers; either can time out while the other, and the helper, are healthy. The startup watchdog in `SimulatorView` is 6000 ms and keys off MJPEG `--frame` boundaries. Relay mode treats 2000 ms without a frame as stale. The event records which detector fired and whether the producer was still moving.
+[#128](https://github.com/EvanBacon/serve-sim/issues/128) fired the overlay "Stream is not producing frames" after rotation. The native `<img src=stream.mjpeg>` and a parallel `fetch()` watchdog are separate consumers; either can time out while the other, and the helper, are healthy. The startup watchdog in `SimulatorView` is 6000 ms and keys off MJPEG `--frame` boundaries. Relay mode treats 2000 ms without a frame as stale. The event records which detector fired and whether the producer was still moving. Join `stream.orientation` with `input.orientation` when a rotation and a tap land in the same session: a false stall (#128) and a coordinate miss (#153) can share a rotate and must not be one event.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -176,20 +181,20 @@ Emitted on transition and included in `--list`. [#136](https://github.com/EvanBa
 
 ## Performance timing
 
-Durations are milliseconds. Histograms are for a later exporter; local events just store the number. Suggested buckets are upper bounds in ms.
+Durations are milliseconds. Histograms are for a later exporter; local events just store the number. Suggested buckets are upper bounds in ms. Every span below also carries the common attributes, and inject spans carry `input.orientation`, `input.frame`, and `input.remapped` so a landscape miss is not bucketed with a portrait hit.
 
 | Span | Start → end | Fields | Buckets |
 |---|---|---|---|
 | `stream.startup` (`stream.ttff_ms`) | stream request accepted → first JPEG or AVCC frame delivered to that subscriber | `boot_ms` (sim already booted, else time until Booted), `ws_ms` (socket open), `indigo_ms` (first framebuffer/Indigo snapshot), `first_jpeg_ms` (encode + first byte to the subscriber). Sum is `stream.ttff_ms` | 50, 100, 250, 500, 1000, 2000, 5000 |
-| `input.send` (`input.send_ms`) | handler entered → `rawSend` returned | `inject.kind`, `inject.result` | 1, 5, 10, 25, 50, 100, 250 |
-| `input.roundtrip` (`input.roundtrip_ms`) | `rawSend` → ack | emitted only once `inject.ack` is `ok` or `timeout` | 5, 10, 25, 50, 100, 250, 500, 1000 |
+| `input.send` (`input.send_ms`) | handler entered → `rawSend` returned | `inject.kind`, `inject.result`, `input.orientation`, `input.frame`, `input.remapped` | 1, 5, 10, 25, 50, 100, 250 |
+| `input.roundtrip` (`input.roundtrip_ms`) | `rawSend` → ack | emitted only once `inject.ack` is `ok` or `timeout`. Same orientation fields as `input.send` | 5, 10, 25, 50, 100, 250, 500, 1000 |
 | `camera.frame` (`camera.frame_interval_ms`) | `PublishFrame` n → n+1 | `camera.source` | 16, 33, 50, 100, 250, 1000 |
 | `camera.shm_map` (`camera.shm_map_ms`) | `shm_open` → mapped header readable | `camera.shm_map_result` enum `ok` \| `enoent` \| `error` | 1, 5, 10, 50, 100, 500 |
 | `camera.helper_startup` (`camera.helper_startup_ms`) | process start → first frame seq published | `camera.source` | 10, 50, 100, 250, 500, 1000, 5000 |
 | `camera.helper_shutdown` (`camera.helper_shutdown_ms`) | shutdown action or signal → process exit | `camera.placeholder_join_ms`, `camera.socket_close_ms`, `camera.helper_exit_code`, `camera.helper_signal` | 10, 50, 100, 500, 1000, 5000 |
-| `stream.reconnect` (`stream.reconnect_ms`) | leave `live` → return to `live` | `stream.reconnect_attempt` (int, starts at 1), `stream.stall_reason` | 100, 250, 500, 1000, 2000, 5000 |
+| `stream.reconnect` (`stream.reconnect_ms`) | leave `live` → return to `live` | `stream.reconnect_attempt` (int, starts at 1), `stream.stall_reason`, `stream.orientation` | 100, 250, 500, 1000, 2000, 5000 |
 
-`stream.ttff_ms` is the number the idle-floor test already budgets by hand (first JPEG after `stream.mjpeg` is opened). `camera.helper_shutdown_ms` split into placeholder-join and socket-close is the number [#143](https://github.com/EvanBacon/serve-sim/issues/143) was missing when the helper died between "running" and exit 0. `input.send_ms` without `input.roundtrip_ms` is an honest measurement of today's fire-and-forget path; round-trip appears only when an ack exists.
+`stream.ttff_ms` is the number the idle-floor test already budgets by hand (first JPEG after `stream.mjpeg` is opened). `camera.helper_shutdown_ms` split into placeholder-join and socket-close is the number [#143](https://github.com/EvanBacon/serve-sim/issues/143) was missing when the helper died between "running" and exit 0. `input.send_ms` without `input.roundtrip_ms` is an honest measurement of today's fire-and-forget path; round-trip appears only when an ack exists. `input.send_ms` is not a proxy for guest effect: the landscape miss and the portrait hit in the #153 table have the same send duration. The orientation fields are what separate them. No remap span: `rawPointForDisplayPoint` is a handful of arithmetic and must not show up as its own histogram.
 
 Crashes in our own process add `error.code` plus a stack trimmed to serve-sim frames, with home directories stripped. No media, no request bodies.
 
