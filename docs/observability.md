@@ -198,6 +198,40 @@ Durations are milliseconds. Histograms are for a later exporter; local events ju
 
 Crashes in our own process add `error.code` plus a stack trimmed to serve-sim frames, with home directories stripped. No media, no request bodies.
 
+## Worked records
+
+Same session, two taps, one span. These are the lines a later implementation should emit when telemetry is `local`. Remote export drops `input.x` / `input.y` and replaces `device.id_hash` only (already hashed).
+
+### Error reproduction — #153 landscape miss vs portrait hit
+
+Headless iPad, `sim.ui_host=none`, HID client up. Portrait tap opens Settings. The same display point in `landscape_left` is sent unmapped and the screenshot does not change.
+
+```json
+{"event":"input.inject","serve_sim.version":"0.1.47","sim.ui_host":"none","hid.client":"created","hid.state":"ok","inject.kind":"touch","inject.phase":"end","inject.result":"sent","inject.ack":"none","inject.guest_effect":"changed","input.coord_space":"normalized_0_1","input.orientation":"portrait","input.frame":"display","input.remapped":false,"input.target":"digitizer","input.screen_w":1376,"input.screen_h":1032,"input.x":0.715,"input.y":0.343,"cli.exit_code":0}
+{"event":"input.inject","serve_sim.version":"0.1.47","sim.ui_host":"none","hid.client":"created","hid.state":"ok","inject.kind":"touch","inject.phase":"end","inject.result":"sent","inject.ack":"none","inject.guest_effect":"unchanged","input.coord_space":"normalized_0_1","input.orientation":"landscape_left","input.frame":"display","input.remapped":false,"input.target":"digitizer","input.screen_w":1376,"input.screen_h":1032,"input.x":0.715,"input.y":0.343,"cli.exit_code":0}
+```
+
+Signature of the miss: `hid.state=ok` + `inject.result=sent` + `input.frame=display` + `input.remapped=false` + `inject.guest_effect=unchanged`. That is not #136 (`hid.state=gone`, `cli.exit_code` non-zero) and not a missing symbol (`hid.client=missing`). After a CLI remap, the second line should read `input.frame=native_portrait`, `input.remapped=true`, and the local coordinates should be the mapped point (`x=0.343`, `y=0.285` for `{ x: y, y: 1 - x }` on `landscape_left`).
+
+### Error reproduction — #128 false stall after rotate
+
+Producer still publishing, `<img>` watchdog fired. Must not share an event name with the coordinate miss above even if both follow `serve-sim rotate`.
+
+```json
+{"event":"stream.stall","stream.stall_reason":"consumer_stalled_producer_live","stream.stall_threshold_ms":6000,"stream.last_frame_age_ms":6100,"stream.fps":0,"stream.producer_fps":58,"stream.false_positive":true,"stream.orientation":"landscape_left","stream.consumer":"mjpeg_img"}
+```
+
+### Performance timing — inject span carries the repro fields
+
+`input.send_ms` is the same on the hit and the miss. The orientation fields are the bucket key. No `input.roundtrip` line: `inject.ack` is still `none`.
+
+```json
+{"span":"input.send","input.send_ms":4,"inject.kind":"touch","inject.result":"sent","input.orientation":"landscape_left","input.frame":"display","input.remapped":false}
+{"span":"stream.reconnect","stream.reconnect_ms":420,"stream.reconnect_attempt":1,"stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"landscape_left"}
+```
+
+`stream.reconnect` is omitted when the consumer never returns to `live` (#103). `camera.helper_shutdown` is the #143 canary: `camera.helper_signal=11` with `camera.shutdown_phase=release_surfaces` and `camera.placeholder_joined=false` is the race #161 closed; a regression should show that triple, not `exited with null`.
+
 ## Phased rollout
 
 1. **Local events.** Structured JSON-lines when telemetry is `local`. Same schema as the tables above. `--list` grows `hid.state`, `hid.last_ok_at_ms`, and `stream.last_frame_age_ms` so an agent can see a dead injector without enabling telemetry. No new dependency.
