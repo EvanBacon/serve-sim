@@ -1,0 +1,166 @@
+=== RERUN START 2026-09-23T10:32:32-0700 PT ===
+BASE=<ephemeral tunnel URL, not retained>
+UDID=71422B06-5CB1-4F1A-9061-701686017025
+PORT=3399
+=== VERIFY-B health ===
+{
+  "status": "ok",
+  "wallMs": 494
+}
+healthWallMs=703
+=== VERIFY-B config ===
+{
+  "width": 1170,
+  "height": 2532,
+  "orientation": "portrait",
+  "wallMs": 530
+}
+configWallMs=699
+=== FIRST FRAME ===
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/first-frame.jpg",
+  "bytes": 209387,
+  "firstFrameMs": 589,
+  "wallMs": 590
+}
+=== COLD PASS: before shot ===
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/verify-D-interaction-before.jpg",
+  "bytes": 209387,
+  "firstFrameMs": 638,
+  "wallMs": 639
+}
+=== COLD PASS: tap Settings 0.815 0.938 ===
+{
+  "ok": true,
+  "rttMs": 505,
+  "x": 0.815,
+  "y": 0.938,
+  "wallMs": 505
+}
+=== COLD PASS: after shot ===
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/verify-D-interaction-after.jpg",
+  "bytes": 209387,
+  "firstFrameMs": 656,
+  "wallMs": 657
+}
+=== DISMISS ALERT + NAV 2026-09-23T10:33:13-0700 ===
+Note: pre-tap screen was already Settings + Open-in-example alert; identical shots expected
+=== AX ===
+HTTP 503 /ax: {"error":"ax_unavailable","message":"noFrontmostApplication"}
+
+=== TAP Cancel ~0.32 0.52 ===
+{
+  "ok": true,
+  "rttMs": 518,
+  "x": 0.32,
+  "y": 0.52,
+  "wallMs": 518
+}
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/after-dismiss-attempt.jpg",
+  "bytes": 215739,
+  "firstFrameMs": 579,
+  "wallMs": 579
+}
+=== COLD: Home tap 0.125 0.938 ===
+{
+  "ok": true,
+  "rttMs": 508,
+  "x": 0.125,
+  "y": 0.938,
+  "wallMs": 508
+}
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/cold/home.jpg",
+  "bytes": 178748,
+  "firstFrameMs": 627,
+  "wallMs": 628
+}
+=== COLD: Settings tap 0.815 0.938 ===
+{
+  "ok": true,
+  "rttMs": 527,
+  "x": 0.815,
+  "y": 0.938,
+  "wallMs": 527
+}
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/cold/settings.jpg",
+  "bytes": 215734,
+  "firstFrameMs": 617,
+  "wallMs": 617
+}
+{
+  "label": "cold",
+  "beforeBytes": 178748,
+  "afterBytes": 215734,
+  "beforeSha": "6ae2b63655db85ec",
+  "afterSha": "a2002f6820081472",
+  "identical": false,
+  "visualDelta": true
+}
+=== WARM PASS 1: Home ===
+{
+  "ok": true,
+  "rttMs": 468,
+  "x": 0.125,
+  "y": 0.938,
+  "wallMs": 468
+}
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/warm/home.jpg",
+  "bytes": 178748,
+  "firstFrameMs": 584,
+  "wallMs": 584
+}
+=== WARM PASS 1: Settings ===
+{
+  "ok": true,
+  "rttMs": 503,
+  "x": 0.815,
+  "y": 0.938,
+  "wallMs": 503
+}
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/warm/settings.jpg",
+  "bytes": 215628,
+  "firstFrameMs": 624,
+  "wallMs": 624
+}
+{
+  "label": "warm",
+  "beforeBytes": 178748,
+  "afterBytes": 215628,
+  "beforeSha": "6ae2b63655db85ec",
+  "afterSha": "d43a79549cada3a7",
+  "identical": false,
+  "visualDelta": true
+}
+=== GESTURE ===
+{
+  "ok": true,
+  "rttMs": 552,
+  "kind": "swipe",
+  "x": 0.5,
+  "y1": 0.35,
+  "y2": 0.75,
+  "wallMs": 553
+}
+{
+  "ok": true,
+  "path": "evidence/e2e-20260923/verify-D-after-gesture.jpg",
+  "bytes": 219721,
+  "firstFrameMs": 607,
+  "wallMs": 607
+}
+=== CLEANUP 2026-09-23T10:34:48-0700 — 3399/ngrok stopped; 3200 untouched ===

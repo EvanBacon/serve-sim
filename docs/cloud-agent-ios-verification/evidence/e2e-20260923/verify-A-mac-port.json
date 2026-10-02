@@ -1,0 +1,22 @@
+{
+  "timezone": "America/Los_Angeles",
+  "capturedAtPT": "2026-09-23T10:34:03-0700",
+  "port": 3399,
+  "serveSimPid": 77681,
+  "serveSimCmd": "bun",
+  "listen": "127.0.0.1:3399",
+  "duoPort3200LeftAlone": true,
+  "duoPid": 68775,
+  "udid": "71422B06-5CB1-4F1A-9061-701686017025",
+  "device": "iPhone 16e",
+  "health": {
+    "status": "ok"
+  },
+  "config": {
+    "width": 1170,
+    "height": 2532,
+    "orientation": "portrait"
+  },
+  "result": "PASS",
+  "tunnel": "ephemeral; URL not retained"
+}
