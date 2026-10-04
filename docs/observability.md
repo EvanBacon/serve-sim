@@ -9,7 +9,7 @@ serve-sim is a local Mac process that streams a simulator and injects input. The
 1. **Error reproduction.** Each event below is a field that was missing from a real report. With it, a log line is enough to tell injector-sent from guest-unchanged, a coordinate miss from a dead injector, signal from exit 0, and a dead consumer from a dead producer.
 2. **Performance timing.** Spans for the hot paths where a fix already depended on a number: first frame, inject send, camera frame interval, helper startup/shutdown, reconnect. Spans carry the same error-repro attributes so a fast send is not read as a successful tap.
 
-Both stay on the machine unless someone opts into export.
+Both stay on the machine unless someone opts into export. An attempt's event and its span share `trace.id` so a 4 ms send is not read apart from the coordinate miss it belongs to.
 
 ## Non-goals
 
@@ -231,6 +231,47 @@ Producer still publishing, `<img>` watchdog fired. Must not share an event name 
 ```
 
 `stream.reconnect` is omitted when the consumer never returns to `live` (#103). `camera.helper_shutdown` is the #143 canary: `camera.helper_signal=11` with `camera.shutdown_phase=release_surfaces` and `camera.placeholder_joined=false` is the race #161 closed; a regression should show that triple, not `exited with null`.
+
+## Joining an error record to its span
+
+An `input.inject` line and an `input.send` span are the same attempt. Without a shared id, a landscape miss (`inject.guest_effect=unchanged`) and a 4 ms send look like two unrelated facts. Every event and span in one attempt carries the same `trace.id`. The span also has `span.id`. Child spans set `parent.span_id`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `trace.id` | string | 16 hex chars, new per attempt (one tap, one helper shutdown, one consumer stall). Not the session id |
+| `span.id` | string | 8 hex chars. Spans only |
+| `parent.span_id` | string | set on a child span. Omitted on a root |
+| `span.status` | enum | `ok` \| `error` \| `unset`. Derived, not a second opinion |
+
+`span.status` is not `inject.result`. Map:
+
+| Condition | `span.status` |
+|---|---|
+| `inject.result=sent` and `hid.state=ok` | `ok`, even when `inject.guest_effect=unchanged` (the send succeeded; the miss is an attribute) |
+| `inject.result` in `nil_message` \| `no_client` \| `throw`, or `hid.state=gone` | `error`, and set `error.code` |
+| `inject.ack=timeout` on `input.roundtrip` | `error` |
+| `stream.false_positive=true` on `stream.stall` | `unset` (detector fired, producer was live; not a failed send) |
+| `camera.helper_signal` non-null | `error` |
+
+A coordinate miss must stay `span.status=ok` with `input.remapped=false`. Marking it `error` would bucket it with #136, which is the mistake the fields exist to prevent.
+
+`stream.startup` is the parent of the first `camera.frame` after subscribe. `camera.helper_shutdown` is the parent of the placeholder-join and socket-close waits; those stay fields on the parent (`camera.placeholder_join_ms`, `camera.socket_close_ms`), not their own spans. `input.roundtrip` parents to `input.send` and is omitted while `inject.ack=none`.
+
+Worked join for the #153 landscape miss. Same `trace.id` on the event and the span. `input.send_ms` stays 4. Status stays `ok`.
+
+```json
+{"event":"input.inject","trace.id":"a1b2c3d4e5f60718","serve_sim.version":"0.1.47","sim.ui_host":"none","hid.state":"ok","inject.kind":"touch","inject.phase":"end","inject.result":"sent","inject.ack":"none","inject.guest_effect":"unchanged","input.orientation":"landscape_left","input.frame":"display","input.remapped":false,"cli.exit_code":0}
+{"span":"input.send","trace.id":"a1b2c3d4e5f60718","span.id":"9f8e7d6c","span.status":"ok","input.send_ms":4,"inject.kind":"touch","inject.result":"sent","input.orientation":"landscape_left","input.frame":"display","input.remapped":false}
+```
+
+The #128 false stall is a different trace. It does not parent to the tap, even when both follow a rotate.
+
+```json
+{"event":"stream.stall","trace.id":"0011223344556677","span.status":"unset","stream.stall_reason":"consumer_stalled_producer_live","stream.false_positive":true,"stream.orientation":"landscape_left","stream.producer_fps":58}
+{"span":"stream.reconnect","trace.id":"0011223344556677","span.id":"aabbccdd","parent.span_id":"","span.status":"ok","stream.reconnect_ms":420,"stream.reconnect_attempt":1,"stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"landscape_left"}
+```
+
+`parent.span_id` is omitted on that reconnect (it is the root of its trace). Histogram buckets are unchanged. `trace.id` is not a bucket key.
 
 ## Phased rollout
 
