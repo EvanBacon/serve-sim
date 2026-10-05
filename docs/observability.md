@@ -273,6 +273,43 @@ The #128 false stall is a different trace. It does not parent to the tap, even w
 
 `parent.span_id` is omitted on that reconnect (it is the root of its trace). Histogram buckets are unchanged. `trace.id` is not a bucket key.
 
+## Span exemplars
+
+The tables above say which fields a span carries. These lines are the join: the error-repro enums sit on the timing span for the same attempt, sharing `trace.id` with the event. `span.status` is about the span's own contract (did send return, did the first frame arrive, did shutdown finish), not about guest effect.
+
+### `stream.startup` — #103 is not a slow TTFF
+
+Preview went live, then stuck on Connecting while `/stream.mjpeg` kept transferring. First-frame delivery succeeded. The stuck overlay is a later `stream.state` on the same trace, not a `stream.ttff_ms` in the 5000 bucket.
+
+```json
+{"span":"stream.startup","trace.id":"aabbccddeeff0011","span.id":"11001100","parent.span_id":"","span.status":"ok","stream.ttff_ms":180,"boot_ms":0,"ws_ms":40,"indigo_ms":90,"first_jpeg_ms":50,"stream.consumer":"mjpeg_img","stream.saw_first_frame":true}
+{"event":"stream.state","trace.id":"aabbccddeeff0011","span.id":"11001100","stream.state":"connecting","stream.prev_state":"live","stream.saw_first_frame":true,"stream.last_frame_age_ms":1400,"stream.producer_ok":true,"stream.consumer":"mjpeg_img","stream.ws_close_code":0,"stream.ws_close_reason":"","stream.recovered":false}
+```
+
+Read: `span.status=ok` and `stream.ttff_ms=180` with `stream.saw_first_frame=true` and `stream.producer_ok=true` is the #103 consumer regression. A never-connected preview is a different line: `span.status=error`, `stream.saw_first_frame=false`, `stream.ttff_ms` omitted, `stream.last_frame_age_ms=-1`. Do not bucket that with the 180 ms success.
+
+### `camera.helper_shutdown` — #143 signal vs exit 0
+
+The number #143 was missing is how long shutdown took, and whether it ended in a signal. `camera.placeholder_join_ms` and `camera.socket_close_ms` are attributes of this span, not their own histograms.
+
+```json
+{"event":"camera.helper.exit","trace.id":"bbccddeeff001122","span.id":"22002200","error.code":"helper_signaled","camera.helper_exit_code":null,"camera.helper_signal":11,"camera.shutdown_phase":"release_surfaces","camera.placeholder_joined":false,"camera.source":"placeholder"}
+{"span":"camera.helper_shutdown","trace.id":"bbccddeeff001122","span.id":"22002200","parent.span_id":"","span.status":"error","camera.helper_shutdown_ms":48,"camera.placeholder_join_ms":0,"camera.socket_close_ms":12,"camera.helper_exit_code":null,"camera.helper_signal":11}
+```
+
+`span.status=error` only when `camera.helper_signal` is set or `camera.helper_exit_code` is non-zero. After #161 the regression canary is the same span with `span.status=ok`, `camera.helper_signal=null`, `camera.placeholder_joined=true`, and a non-zero `camera.placeholder_join_ms` (the cancel handler actually ran). A 48 ms shutdown that signaled is not the same bucket story as a 48 ms clean exit: the status and signal are the split, the duration is not.
+
+### `input.send` — same duration, different repro
+
+Restated so the span line is not only implied by the event. Portrait hit and landscape miss share `input.send_ms`. Guest effect stays on the event (`inject.guest_effect`); the span stays `ok` while `hid.state=ok` and `inject.result=sent`.
+
+```json
+{"span":"input.send","trace.id":"c0ffee00c0ffee00","span.id":"c0ffee01","parent.span_id":"","span.status":"ok","input.send_ms":4,"inject.kind":"touch","inject.result":"sent","hid.state":"ok","input.orientation":"landscape_left","input.frame":"display","input.remapped":false}
+{"event":"input.inject","trace.id":"c0ffee00c0ffee00","span.id":"c0ffee01","hid.state":"ok","inject.result":"sent","inject.ack":"none","inject.guest_effect":"unchanged","input.orientation":"landscape_left","input.frame":"display","input.remapped":false,"cli.exit_code":0}
+```
+
+#136 is the other 4 ms: `hid.state=gone` forces `span.status=error` and a non-zero `cli.exit_code` on the event. No `input.roundtrip` span is emitted while `inject.ack=none`.
+
 ## Phased rollout
 
 1. **Local events.** Structured JSON-lines when telemetry is `local`. Same schema as the tables above. `--list` grows `hid.state`, `hid.last_ok_at_ms`, and `stream.last_frame_age_ms` so an agent can see a dead injector without enabling telemetry. No new dependency.
