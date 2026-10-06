@@ -192,7 +192,7 @@ Durations are milliseconds. Histograms are for a later exporter; local events ju
 | `camera.shm_map` (`camera.shm_map_ms`) | `shm_open` → mapped header readable | `camera.shm_map_result` enum `ok` \| `enoent` \| `error` | 1, 5, 10, 50, 100, 500 |
 | `camera.helper_startup` (`camera.helper_startup_ms`) | process start → first frame seq published | `camera.source` | 10, 50, 100, 250, 500, 1000, 5000 |
 | `camera.helper_shutdown` (`camera.helper_shutdown_ms`) | shutdown action or signal → process exit | `camera.placeholder_join_ms`, `camera.socket_close_ms`, `camera.helper_exit_code`, `camera.helper_signal` | 10, 50, 100, 500, 1000, 5000 |
-| `stream.reconnect` (`stream.reconnect_ms`) | leave `live` → return to `live` | `stream.reconnect_attempt` (int, starts at 1), `stream.stall_reason`, `stream.orientation` | 100, 250, 500, 1000, 2000, 5000 |
+| `stream.reconnect` (`stream.reconnect_ms`) | leave `live` → return to `live`. Omit the span when `stream.false_positive=true`. Omit `stream.reconnect_ms` if it never returns | `stream.reconnect_attempt` (int, starts at 1), `stream.stall_reason`, `stream.orientation`, `stream.false_positive`, `stream.saw_first_frame`, `stream.producer_ok`, `stream.recovered` | 100, 250, 500, 1000, 2000, 5000 |
 
 `stream.ttff_ms` is the number the idle-floor test already budgets by hand (first JPEG after `stream.mjpeg` is opened). `camera.helper_shutdown_ms` split into placeholder-join and socket-close is the number [#143](https://github.com/EvanBacon/serve-sim/issues/143) was missing when the helper died between "running" and exit 0. `input.send_ms` without `input.roundtrip_ms` is an honest measurement of today's fire-and-forget path; round-trip appears only when an ack exists. `input.send_ms` is not a proxy for guest effect: the landscape miss and the portrait hit in the #153 table have the same send duration. The orientation fields are what separate them. No remap span: `rawPointForDisplayPoint` is a handful of arithmetic and must not show up as its own histogram.
 
@@ -309,6 +309,21 @@ Restated so the span line is not only implied by the event. Portrait hit and lan
 ```
 
 #136 is the other 4 ms: `hid.state=gone` forces `span.status=error` and a non-zero `cli.exit_code` on the event. No `input.roundtrip` span is emitted while `inject.ack=none`.
+
+### `stream.reconnect` — #128 false stall is not a slow reconnect
+
+`stream.reconnect_ms` is only recorded when the consumer returns to `live`. A false stall must not close that span and must not land in the reconnect histogram.
+
+[#128](https://github.com/EvanBacon/serve-sim/issues/128) is `stream.false_positive=true`: the producer was still publishing (`stream.producer_fps` > 0) and the `<img>` watchdog fired after rotation. Emit `stream.stall` (already exemplified above). Do **not** emit `stream.reconnect`. If a rotate started the trace, the stall span may share `trace.id` with `input.inject`; it still does not parent a reconnect span. `span.status` stays `unset` so a 6100 ms consumer age is not a 6100 ms reconnect.
+
+[#103](https://github.com/EvanBacon/serve-sim/issues/103) after a good frame is the opposite. Leave `live`, never return. The span stays open until the consumer is stopped or the process exits, then ends `span.status=error` and **omits** `stream.reconnect_ms`. A missing duration is the stuck Connecting, not a 0. Carry `stream.saw_first_frame=true` and `stream.producer_ok=true` so this is not bucketed with a never-connected `stream.startup` (`span.status=error`, no `stream.ttff_ms`). A later recovery ends a new span `ok` with `stream.reconnect_ms` set and `stream.recovered=true`.
+
+```json
+{"span":"stream.stall","trace.id":"128f0000128f0000","span.id":"128f0001","span.status":"unset","stream.false_positive":true,"stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"landscape_left","stream.producer_fps":58,"stream.last_frame_age_ms":6100}
+{"span":"stream.reconnect","trace.id":"103c0000103c0000","span.id":"103c0002","parent.span_id":"103c0001","span.status":"error","stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"portrait","stream.saw_first_frame":true,"stream.producer_ok":true,"stream.reconnect_attempt":1,"stream.recovered":false}
+```
+
+The second line has no `stream.reconnect_ms`. `camera.frame` stays a separate histogram: a helper that died on a signal is `camera.helper_shutdown` with `camera.helper_signal` set, not a long `camera.frame_interval_ms`.
 
 ## Phased rollout
 
