@@ -188,7 +188,7 @@ Durations are milliseconds. Histograms are for a later exporter; local events ju
 | `stream.startup` (`stream.ttff_ms`) | stream request accepted → first JPEG or AVCC frame delivered to that subscriber | `boot_ms` (sim already booted, else time until Booted), `ws_ms` (socket open), `indigo_ms` (first framebuffer/Indigo snapshot), `first_jpeg_ms` (encode + first byte to the subscriber). Sum is `stream.ttff_ms` | 50, 100, 250, 500, 1000, 2000, 5000 |
 | `input.send` (`input.send_ms`) | handler entered → `rawSend` returned | `inject.kind`, `inject.result`, `input.orientation`, `input.frame`, `input.remapped` | 1, 5, 10, 25, 50, 100, 250 |
 | `input.roundtrip` (`input.roundtrip_ms`) | `rawSend` → ack | emitted only once `inject.ack` is `ok` or `timeout`. Same orientation fields as `input.send` | 5, 10, 25, 50, 100, 250, 500, 1000 |
-| `camera.frame` (`camera.frame_interval_ms`) | `PublishFrame` n → n+1 | `camera.source` | 16, 33, 50, 100, 250, 1000 |
+| `camera.frame` (`camera.frame_interval_ms`) | `PublishFrame` n → n+1. Omit the span when the producer is silent (`stream.producer_fps=0`) | `camera.source`, `stream.producer_fps`, `stream.false_positive` | 16, 33, 50, 100, 250, 1000 |
 | `camera.shm_map` (`camera.shm_map_ms`) | `shm_open` → mapped header readable | `camera.shm_map_result` enum `ok` \| `enoent` \| `error` | 1, 5, 10, 50, 100, 500 |
 | `camera.helper_startup` (`camera.helper_startup_ms`) | process start → first frame seq published | `camera.source` | 10, 50, 100, 250, 500, 1000, 5000 |
 | `camera.helper_shutdown` (`camera.helper_shutdown_ms`) | shutdown action or signal → process exit | `camera.placeholder_join_ms`, `camera.socket_close_ms`, `camera.helper_exit_code`, `camera.helper_signal` | 10, 50, 100, 500, 1000, 5000 |
@@ -227,10 +227,10 @@ Producer still publishing, `<img>` watchdog fired. Must not share an event name 
 
 ```json
 {"span":"input.send","input.send_ms":4,"inject.kind":"touch","inject.result":"sent","input.orientation":"landscape_left","input.frame":"display","input.remapped":false}
-{"span":"stream.reconnect","stream.reconnect_ms":420,"stream.reconnect_attempt":1,"stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"landscape_left"}
+{"span":"camera.frame","camera.frame_interval_ms":17,"camera.source":"placeholder","stream.producer_fps":58,"stream.false_positive":true}
 ```
 
-`stream.reconnect` is omitted when the consumer never returns to `live` (#103). `camera.helper_shutdown` is the #143 canary: `camera.helper_signal=11` with `camera.shutdown_phase=release_surfaces` and `camera.placeholder_joined=false` is the race #161 closed; a regression should show that triple, not `exited with null`.
+The second line is the timing record for a #128 false stall: the producer interval stays in the 16 ms bucket while the consumer watchdog fires. Do not emit `stream.reconnect` for that case. `stream.reconnect` is omitted when `stream.false_positive=true`, and also when the consumer never returns to `live` (#103). `camera.helper_shutdown` is the #143 canary: `camera.helper_signal=11` with `camera.shutdown_phase=release_surfaces` and `camera.placeholder_joined=false` is the race #161 closed; a regression should show that triple, not `exited with null`.
 
 ## Joining an error record to its span
 
@@ -251,6 +251,8 @@ An `input.inject` line and an `input.send` span are the same attempt. Without a 
 | `inject.result` in `nil_message` \| `no_client` \| `throw`, or `hid.state=gone` | `error`, and set `error.code` |
 | `inject.ack=timeout` on `input.roundtrip` | `error` |
 | `stream.false_positive=true` on `stream.stall` | `unset` (detector fired, producer was live; not a failed send) |
+| `camera.frame` with `stream.producer_fps>0` | `ok`, even when a consumer stall is on the same trace |
+| `camera.frame` omitted, `stream.producer_fps=0` | no span; the stall event is `span.status=error` |
 | `camera.helper_signal` non-null | `error` |
 
 A coordinate miss must stay `span.status=ok` with `input.remapped=false`. Marking it `error` would bucket it with #136, which is the mistake the fields exist to prevent.
@@ -264,14 +266,14 @@ Worked join for the #153 landscape miss. Same `trace.id` on the event and the sp
 {"span":"input.send","trace.id":"a1b2c3d4e5f60718","span.id":"9f8e7d6c","span.status":"ok","input.send_ms":4,"inject.kind":"touch","inject.result":"sent","input.orientation":"landscape_left","input.frame":"display","input.remapped":false}
 ```
 
-The #128 false stall is a different trace. It does not parent to the tap, even when both follow a rotate.
+The #128 false stall is a different trace. It does not parent to the tap, even when both follow a rotate. It also does not emit `stream.reconnect`: the producer is still publishing, so the timing span on that trace is `camera.frame`, not a reconnect.
 
 ```json
-{"event":"stream.stall","trace.id":"0011223344556677","span.status":"unset","stream.stall_reason":"consumer_stalled_producer_live","stream.false_positive":true,"stream.orientation":"landscape_left","stream.producer_fps":58}
-{"span":"stream.reconnect","trace.id":"0011223344556677","span.id":"aabbccdd","parent.span_id":"","span.status":"ok","stream.reconnect_ms":420,"stream.reconnect_attempt":1,"stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"landscape_left"}
+{"event":"stream.stall","trace.id":"0011223344556677","span.status":"unset","stream.stall_reason":"consumer_stalled_producer_live","stream.false_positive":true,"stream.orientation":"landscape_left","stream.producer_fps":58,"stream.last_frame_age_ms":6100}
+{"span":"camera.frame","trace.id":"0011223344556677","span.id":"aabbccdd","span.status":"ok","camera.frame_interval_ms":17,"camera.source":"placeholder","stream.producer_fps":58,"stream.false_positive":true}
 ```
 
-`parent.span_id` is omitted on that reconnect (it is the root of its trace). Histogram buckets are unchanged. `trace.id` is not a bucket key.
+`span.status=ok` on that 17 ms interval is the proof the overlay was a consumer false positive. A producer that actually stopped is a different span: `span.status=error`, `camera.frame_interval_ms` omitted, `stream.producer_fps=0`, `stream.false_positive=false`. Histogram buckets are unchanged. `trace.id` is not a bucket key.
 
 ## Span exemplars
 
@@ -319,11 +321,12 @@ Restated so the span line is not only implied by the event. Portrait hit and lan
 [#103](https://github.com/EvanBacon/serve-sim/issues/103) after a good frame is the opposite. Leave `live`, never return. The span stays open until the consumer is stopped or the process exits, then ends `span.status=error` and **omits** `stream.reconnect_ms`. A missing duration is the stuck Connecting, not a 0. Carry `stream.saw_first_frame=true` and `stream.producer_ok=true` so this is not bucketed with a never-connected `stream.startup` (`span.status=error`, no `stream.ttff_ms`). A later recovery ends a new span `ok` with `stream.reconnect_ms` set and `stream.recovered=true`.
 
 ```json
-{"span":"stream.stall","trace.id":"128f0000128f0000","span.id":"128f0001","span.status":"unset","stream.false_positive":true,"stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"landscape_left","stream.producer_fps":58,"stream.last_frame_age_ms":6100}
-{"span":"stream.reconnect","trace.id":"103c0000103c0000","span.id":"103c0002","parent.span_id":"103c0001","span.status":"error","stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"portrait","stream.saw_first_frame":true,"stream.producer_ok":true,"stream.reconnect_attempt":1,"stream.recovered":false}
+{"event":"stream.stall","trace.id":"128f0000128f0000","span.status":"unset","stream.false_positive":true,"stream.stall_reason":"consumer_stalled_producer_live","stream.orientation":"landscape_left","stream.producer_fps":58,"stream.last_frame_age_ms":6100}
+{"span":"camera.frame","trace.id":"128f0000128f0000","span.id":"128f0001","span.status":"ok","camera.frame_interval_ms":17,"camera.source":"placeholder","stream.producer_fps":58,"stream.false_positive":true}
+{"span":"stream.reconnect","trace.id":"103c0000103c0000","span.id":"103c0002","parent.span_id":"103c0001","span.status":"error","stream.stall_reason":"producer_silent","stream.orientation":"portrait","stream.saw_first_frame":true,"stream.producer_ok":true,"stream.reconnect_attempt":1,"stream.recovered":false}
 ```
 
-The second line has no `stream.reconnect_ms`. `camera.frame` stays a separate histogram: a helper that died on a signal is `camera.helper_shutdown` with `camera.helper_signal` set, not a long `camera.frame_interval_ms`.
+The #128 trace has a 17 ms `camera.frame` and no `stream.reconnect`. The #103 line has no `stream.reconnect_ms`. A helper that died on a signal is `camera.helper_shutdown` with `camera.helper_signal` set, not a long `camera.frame_interval_ms` (that span is omitted when `stream.producer_fps=0`).
 
 ## Phased rollout
 
