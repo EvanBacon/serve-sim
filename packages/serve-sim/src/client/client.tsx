@@ -274,7 +274,10 @@ function App() {
       next = proxyPreviewConfigForBrowser(streamConfigFrom(next), window.location);
       if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
       if (next) {
-        window.__SIM_PREVIEW__ = next;
+        // `/api` and `/api/events` never carry the exec token; keep the one
+        // the loopback page was served with.
+        const execToken = window.__SIM_PREVIEW__?.execToken;
+        window.__SIM_PREVIEW__ = execToken && !next.execToken ? { ...next, execToken } : next;
       } else if (window.__SIM_PREVIEW__) {
         // Keep the minimal injection: the empty state still routes through
         // simEndpoint (basePath) and authenticates /exec (execToken).
