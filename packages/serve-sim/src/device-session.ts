@@ -44,11 +44,7 @@ export interface HidSocket {
   close(): void;
 }
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+
 
 // AVCC seed tag (StreamFormat.AVCCEnvelope.seedTag). description/keyframe/delta
 // envelopes are framed natively; only the on-connect JPEG seed is built here.
@@ -347,7 +343,7 @@ export class DeviceSession {
       if (res.destroyed || res.writableEnded) return;
       if (!await this.hid.isFoldable?.()) { this.sendJson(res, 400, { error: "This device has no Duo model" }); return; }
       const raw = new URL(req.url ?? "", "http://x").searchParams.get("raw") === "1";
-      res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store", ...CORS });
+      res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store" });
       this.trackStreamResponse(res);
       this.duo.setPanel(this.activePanel());
       this.duo.attach(res);
@@ -368,7 +364,6 @@ export class DeviceSession {
       "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame",
       "Cache-Control": "no-cache, no-store",
       Connection: "keep-alive",
-      ...CORS,
     });
     if (!this.trackStreamResponse(res)) return;
 
@@ -431,7 +426,6 @@ export class DeviceSession {
       "Content-Type": "application/octet-stream",
       "Cache-Control": "no-cache, no-store",
       Connection: "keep-alive",
-      ...CORS,
     });
     if (!this.trackStreamResponse(res)) return;
 
@@ -864,7 +858,6 @@ export class DeviceSession {
       "Content-Type": "application/json",
       "Cache-Control": "no-cache, no-store",
       "Content-Length": String(buf.length),
-      ...CORS,
     });
     res.end(buf);
   }
