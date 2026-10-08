@@ -29,7 +29,7 @@ describe("/exec auth", () => {
     await withServer(async (origin) => {
       const r = await fetch(`${origin}/exec`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Origin: origin },
         body: JSON.stringify({ command: "echo hi" }),
       });
       expect(r.status).toBe(401);
@@ -40,7 +40,7 @@ describe("/exec auth", () => {
     await withServer(async (origin) => {
       const r = await fetch(`${origin}/exec`, {
         method: "POST",
-        headers: { "Content-Type": "text/plain", Authorization: `Bearer ${TOKEN}` },
+        headers: { "Content-Type": "text/plain", Authorization: `Bearer ${TOKEN}`, Origin: origin },
         body: JSON.stringify({ command: "echo hi" }),
       });
       expect(r.status).toBe(415);
@@ -66,10 +66,39 @@ describe("/exec auth", () => {
     await withServer(async (origin) => {
       const r = await fetch(`${origin}/exec`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer not-the-token" },
+        headers: { "Content-Type": "application/json", Authorization: "Bearer not-the-token", Origin: origin },
         body: JSON.stringify({ command: "echo hi" }),
       });
       expect(r.status).toBe(401);
+    });
+  });
+
+  test("rejects a POST without Origin even with the exec token", async () => {
+    await withServer(async (origin) => {
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ command: "echo hi" }),
+      });
+      expect(r.status).toBe(403);
+    });
+  });
+
+  test("rejects proxied requests even with the exec token and a matching Origin", async () => {
+    await withServer(async (origin) => {
+      for (const header of ["X-Forwarded-For", "Forwarded", "X-Real-IP", "Tailscale-User-Login"]) {
+        const r = await fetch(`${origin}/exec`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${TOKEN}`,
+            Origin: origin,
+            [header]: "203.0.113.7",
+          },
+          body: JSON.stringify({ command: "echo hi" }),
+        });
+        expect(r.status).toBe(403);
+      }
     });
   });
 
