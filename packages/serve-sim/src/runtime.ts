@@ -4,6 +4,7 @@ import { dirname } from "path";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "http";
 import type { Socket } from "net";
 import { createConnection, createServer as createNetServer, type Server as NetServer } from "net";
+import { registerProxiedPeer } from "./request-trust";
 
 export function dirnameOf(metaUrl: string): string {
   return dirname(fileURLToPath(metaUrl));
@@ -92,6 +93,16 @@ function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number):
   socket.on("error", destroyBoth);
   upstream.on("error", destroyBoth);
   upstream.on("connect", () => {
+    // The internal server sees this pipe as a loopback client. Record the real
+    // peer so the middleware's trust checks don't treat a LAN or tunnel client
+    // as loopback (see request-trust.ts).
+    // Fail closed: without the mapping the request would look loopback.
+    if (typeof upstream.localPort !== "number") {
+      destroyBoth();
+      return;
+    }
+    const unregister = registerProxiedPeer(upstream.localPort, socket.remoteAddress ?? "unknown");
+    upstream.once("close", unregister);
     upstream.write(firstChunk);
     socket.pipe(upstream);
     upstream.pipe(socket);
