@@ -43,7 +43,11 @@ function connect(token: string): Promise<{
   closed: Promise<void>;
 }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/exec-ws`);
+    // Browsers always send Origin on WebSocket upgrades, and the control
+    // channel requires it (loopback same-origin for shell access).
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/exec-ws`, {
+      headers: { Origin: `http://127.0.0.1:${PORT}` },
+    } as never);
     const queue: Reply[] = [];
     const waiters: Array<(r: Reply) => void> = [];
     let closeResolve: () => void;

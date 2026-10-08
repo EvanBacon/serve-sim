@@ -4,6 +4,7 @@ import { request as httpRequest, type IncomingMessage } from "http";
 import type { Socket } from "net";
 import type { Duplex } from "stream";
 import { WebSocketServer, type WebSocket } from "ws";
+import { isLoopbackSameOrigin, isTrustedLoopback, originCheck } from "./request-trust";
 
 // WebSocket control channel for the preview page. Browsers cap HTTP/1.1 at
 // six connections per origin, and every preview tab used to hold several
@@ -22,6 +23,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 //
 // Wire protocol (all JSON text frames):
 //   client → {token}                  first frame; must match the exec token
+//                                     (loopback page only; remote sockets are
+//                                     authenticated at upgrade and cannot exec)
 //   server → {ready:true}             auth accepted
 //   client → {id, command}            run a shell command
 //   server → {id, stdout, stderr, exitCode}
@@ -68,12 +71,26 @@ interface ExecChannelOptions {
   onUiRequest?: UiRequestHandler;
   /** Optional observer for completed shell commands. */
   onCommandResult?: CommandResultHandler;
+  /**
+   * Whether this upgrade may run shell commands. Defaults to a trusted
+   * loopback peer whose Origin is the same loopback host (see
+   * request-trust.ts). Sockets without shell access skip the exec-token
+   * handshake (the upgrade was already authenticated) and get an error reply
+   * for `{id, command}` frames.
+   */
+  allowShell?: (req: IncomingMessage) => boolean;
+}
+
+function defaultAllowShell(req: IncomingMessage): boolean {
+  return isTrustedLoopback(req) && isLoopbackSameOrigin(req);
 }
 
 function wireExecSocket(
   ws: WebSocket,
   serverPort: number | undefined,
   opts: ExecChannelOptions,
+  shellAllowed: boolean,
+  upstreamHeaders: Record<string, string>,
 ): void {
   let authed = false;
   const subscriptions = new Map<number, { destroy: () => void }>();
@@ -104,12 +121,14 @@ function wireExecSocket(
       send({ sub, end: true, error: "no local port" });
       return;
     }
-    const upstream = httpRequest(
+    let upstream: ReturnType<typeof httpRequest>;
+    try {
+      upstream = httpRequest(
       {
         host: "127.0.0.1",
         port: serverPort,
         path,
-        headers: { accept: "text/event-stream" },
+        headers: { accept: "text/event-stream", ...upstreamHeaders },
       },
       (res) => {
         res.on("data", (chunk: Buffer) => send({ sub, data: chunk.toString("utf-8") }));
@@ -118,7 +137,12 @@ function wireExecSocket(
           send({ sub, end: true });
         });
       },
-    );
+      );
+    } catch {
+      // e.g. a path with characters http.request rejects synchronously.
+      send({ sub, end: true, error: "invalid path" });
+      return;
+    }
     upstream.on("error", () => {
       subscriptions.delete(sub);
       send({ sub, end: true });
@@ -135,7 +159,9 @@ function wireExecSocket(
       return;
     }
     if (!authed) {
-      if (typeof msg.token === "string" && tokensMatch(msg.token, opts.execToken)) {
+      // Shell-capable sockets prove they are the loopback preview page with
+      // the exec token. Non-shell sockets were authenticated at upgrade.
+      if (!shellAllowed || (typeof msg.token === "string" && tokensMatch(msg.token, opts.execToken))) {
         authed = true;
         clearTimeout(authTimer);
         send({ ready: true });
@@ -171,6 +197,10 @@ function wireExecSocket(
       return;
     }
     const { id, command } = msg;
+    if (!shellAllowed) {
+      send({ id, stdout: "", stderr: "exec is only available to loopback clients", exitCode: 126 });
+      return;
+    }
     exec(command, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
       const result = {
         id,
@@ -209,31 +239,42 @@ export function createExecUpgradeHandler(opts: ExecChannelOptions) {
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
     if (url !== opts.path && url !== `${opts.path}/`) return false;
 
-    // Same-origin policy mirrors POST /exec: browsers always send Origin on
-    // WebSocket upgrades, and a cross-origin page's Origin won't match Host.
-    const origin = req.headers.origin;
-    if (origin) {
-      try {
-        if (new URL(origin).host !== req.headers.host) {
-          socket.destroy();
-          return true;
-        }
-      } catch {
-        socket.destroy();
-        return true;
+    // Origin is required: the channel exists for the preview page, and
+    // browsers always send Origin on WebSocket upgrades. A cross-origin page's
+    // Origin won't match Host.
+    if (originCheck(req) !== "same") {
+      socket.destroy();
+      return true;
+    }
+    const shellAllowed = (opts.allowShell ?? defaultAllowShell)(req);
+
+    // Port for SSE loopback requests: prefer the socket's own local port.
+    // Fall back to the Host header (Bun's upgrade socket may not expose it)
+    // only when Host names a loopback address, so a caller can't aim the
+    // loopback request at some other local service.
+    let serverPort = (socket as Socket).localPort ?? (req.socket as Socket | undefined)?.localPort;
+    if (!serverPort) {
+      const host = req.headers.host ?? "";
+      const hostPort = Number(host.split(":").pop());
+      if (/^(127\.0\.0\.1|localhost|\[::1\]):\d+$/i.test(host) && Number.isFinite(hostPort) && hostPort > 0) {
+        serverPort = hostPort;
       }
     }
 
-    // Port for SSE loopback requests: prefer the socket's own local port,
-    // fall back to the Host header (Bun's upgrade socket may not expose it).
-    let serverPort = (socket as Socket).localPort;
-    if (!serverPort) {
-      const hostPort = Number((req.headers.host ?? "").split(":")[1]);
-      if (Number.isFinite(hostPort) && hostPort > 0) serverPort = hostPort;
+    // SSE subscriptions loop back through our own HTTP server. For a socket
+    // that is not trusted loopback, carry its identity and credentials so the
+    // looped-back request is gated (and redacted) exactly like a direct one.
+    const upstreamHeaders: Record<string, string> = {};
+    if (!shellAllowed) {
+      upstreamHeaders["x-forwarded-for"] = req.socket?.remoteAddress ?? "remote";
+      for (const name of ["authorization", "cookie"] as const) {
+        const value = req.headers[name];
+        if (typeof value === "string") upstreamHeaders[name] = value;
+      }
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      wireExecSocket(ws, serverPort, opts);
+      wireExecSocket(ws, serverPort, opts, shellAllowed, upstreamHeaders);
     });
     return true;
   };
