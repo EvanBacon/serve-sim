@@ -1,6 +1,7 @@
 import ApplicationServices
 import AppKit
 import CoreGraphics
+import Darwin
 import Foundation
 import SimNativeSupport
 
@@ -161,7 +162,10 @@ final class DeviceHubKeyboardBridge {
             return nil
         }
 
-        let processIdentifier = application.processIdentifier
+        guard let processIdentifier = Self.processIdentifier(of: application) else {
+            _ = unavailable("Device Hub's process identifier could not be resolved")
+            return nil
+        }
         let route = DeviceHubWindowRouter.route(
             windows: Self.visibleWindows(processIdentifier: processIdentifier),
             processIdentifier: processIdentifier,
@@ -186,7 +190,39 @@ final class DeviceHubKeyboardBridge {
     }
 
     private func isExpectedDeviceHubRunning(processIdentifier: pid_t) -> Bool {
-        runningDeviceHubs().contains { $0.processIdentifier == processIdentifier }
+        runningDeviceHubs().contains { Self.processIdentifier(of: $0) == processIdentifier }
+    }
+
+    private static func processIdentifier(of application: NSRunningApplication) -> pid_t? {
+        DeviceHubProcessResolver.resolve(
+            reportedProcessIdentifier: application.processIdentifier,
+            executableMatches: {
+                guard let executableURL = application.executableURL else { return [] }
+                return processIdentifiers(executablePath: executableURL.resolvingSymlinksInPath().path)
+            }
+        )
+    }
+
+    /// The current user's processes running `executablePath`.
+    private static func processIdentifiers(executablePath: String) -> [pid_t] {
+        let capacity = proc_listallpids(nil, 0)
+        guard capacity > 0 else { return [] }
+        var pids = [pid_t](repeating: 0, count: Int(capacity) + 32)
+        let count = pids.withUnsafeMutableBufferPointer { buffer in
+            proc_listallpids(buffer.baseAddress, Int32(buffer.count * MemoryLayout<pid_t>.stride))
+        }
+        guard count > 0 else { return [] }
+        let uid = getuid()
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        var matches = [pid_t]()
+        for pid in pids.prefix(Int(count)) where pid > 0 {
+            var info = proc_bsdshortinfo()
+            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+            guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size, info.pbsi_uid == uid else { continue }
+            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { continue }
+            if String(cString: path) == executablePath { matches.append(pid) }
+        }
+        return matches
     }
 
     /// Return visible standard Device Hub windows with its key window first.

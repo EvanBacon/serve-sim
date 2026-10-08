@@ -145,3 +145,22 @@ public enum HIDKeyboardMapping {
         0xE4: 62, 0xE5: 60, 0xE6: 61, 0xE7: 54,
     ]
 }
+
+/// Picks the pid that keyboard events for Device Hub should target.
+///
+/// NSRunningApplication can report -1 for a running Device Hub (seen with
+/// Xcode 27.0 on macOS 27.0.1, consistently across relaunches) even though
+/// LaunchServices holds the real pid. AX and CGEvent then address no process
+/// at all. In that case the caller supplies the current user's processes whose
+/// executable is Device Hub's executable, and only an unambiguous match is used:
+/// keystrokes must reach exactly one Device Hub.
+public enum DeviceHubProcessResolver {
+    public static func resolve(
+        reportedProcessIdentifier: Int32,
+        executableMatches: () -> [Int32]
+    ) -> Int32? {
+        if reportedProcessIdentifier > 0 { return reportedProcessIdentifier }
+        let matches = Set(executableMatches().filter { $0 > 0 })
+        return matches.count == 1 ? matches.first : nil
+    }
+}

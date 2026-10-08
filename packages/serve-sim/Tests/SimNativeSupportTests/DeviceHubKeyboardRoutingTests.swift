@@ -4,6 +4,29 @@ import XCTest
 final class DeviceHubKeyboardRoutingTests: XCTestCase {
     private let pid: Int32 = 42
 
+    func testUsesReportedDeviceHubProcessIdentifierWithoutScanning() {
+        var scanned = false
+        let resolved = DeviceHubProcessResolver.resolve(reportedProcessIdentifier: 501) {
+            scanned = true
+            return [777]
+        }
+
+        XCTAssertEqual(resolved, 501)
+        XCTAssertFalse(scanned)
+    }
+
+    func testFallsBackToTheExecutableMatchWhenReportedProcessIdentifierIsInvalid() {
+        // NSRunningApplication reports -1 for Device Hub on macOS 27.0.1 + Xcode 27.0.
+        XCTAssertEqual(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: -1) { [68045] }, 68045)
+        XCTAssertEqual(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: 0) { [68045, 68045] }, 68045)
+    }
+
+    func testRefusesMissingOrAmbiguousExecutableMatches() {
+        XCTAssertNil(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: -1) { [] })
+        XCTAssertNil(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: -1) { [-1, 0] })
+        XCTAssertNil(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: -1) { [68045, 68046] })
+    }
+
     func testKeyboardOptOutRequiresDocumentedValue() {
         XCTAssertTrue(DeviceHubKeyboardConfiguration.isDisabled(environmentValue: "1"))
         for value: String? in [nil, "", "0", "false", "true"] {
