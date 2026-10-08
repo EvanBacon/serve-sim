@@ -11,6 +11,12 @@ make the silent failures ([#153](https://github.com/EvanBacon/serve-sim/issues/1
 log alone, and the exact code hook that produces each field. It is built on the
 log we have -- no span tree, no histograms, no OpenTelemetry SDK is implied.
 
+Timing is the same entries. A duration is an additive key (`input.send_ms`,
+`stream.ttff_ms`, `stream.reconnect_ms`, `camera.frame_interval_ms`,
+`camera.helper_shutdown_ms`). Omit the key when the number would be a lie
+(false stall, stuck Connecting, dead injector). Do not invent a parent span
+to carry it.
+
 The event log is a diagnostic side-channel. It must never fail the input or
 command path (`recordEventLogEvent` already swallows subscriber errors), and it
 is **on by default**; remote export is strictly opt-in (see Privacy below).
@@ -79,6 +85,7 @@ is built -- `recordTouchEvent` / `eventLogEventForHidMessage`):
 | `source` | `cli` \| `web` \| `unknown` | who sent the frame (see below) |
 | `screen` | `{width,height}` | already recorded via `eventLogScreen()` |
 | `screen_changed` | bool | guest-effect signal (see below) |
+| `input.send_ms` | number, omitted on a dead injector | socket write to ack or fire-and-forget close (see Timing) |
 
 **`source` (cli vs web), compatibly.** Both CLI and browser touches arrive over the
 same socket (`attachHidSocket` -> `handleHidMessage`) and are recorded as
@@ -107,6 +114,17 @@ recorded, remember the current seed; when the next frame with a different seed a
 within a short window, `updateEventLogEvent(tapId, { details: { ..., screen_changed: true }})`.
 Store only the boolean (and optionally the seq delta). This is the guest-effect evidence
 that an ack can't provide.
+
+Landscape miss vs portrait hit, same 4 ms send, distinguished only by the repro fields:
+
+```json
+{"kind":"tap","status":"ok","details":{"orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","screen_changed":true,"input.send_ms":4}}
+{"kind":"tap","status":"ok","details":{"orientation":"landscape_left","frame":"display","remapped":false,"hid.state":"ok","inject.result":"sent","screen_changed":false,"input.send_ms":4}}
+```
+
+The miss is `hid.state=ok` + `inject.result=sent` + `frame=display` + `remapped=false` +
+`screen_changed=false`. Status stays `ok`: the injector did what it was asked. A later
+remap expectation is the same entry shape with `frame=native_portrait` and `remapped=true`.
 
 ## What an ack proves (Evan's default: inject waits for ack, exits non-zero on failure)
 
@@ -143,6 +161,18 @@ frame, and exit non-zero when it reports failure. Record the outcome on the entr
   distinguishable; `serve-sim repair-input` is the human-only recovery (it restarts
   SpringBoard and closes apps).
 
+#136 is the other 4 ms, and it is not a send duration. `hid.state=gone` sets
+`status=error` and **omits** `input.send_ms`, so a dead injector is not bucketed with
+the landscape miss:
+
+```json
+{"kind":"tap","status":"error","details":{"hid.state":"gone","inject.result":"threw","ack":"rejected","screen_changed":false}}
+```
+
+Device Hub shadowing is the third look-alike: `hid.state=ok`, `inject.result=sent`,
+`remapped=true`, `screen_changed=false`, plus `input.shadowed=true`. Same omit rule
+does not apply -- the send completed -- but the shadow key is what separates it from #153.
+
 ## Helper lifecycle (#102)
 
 The orphan in #102 was a detached helper still running after the simulator was
@@ -170,6 +200,39 @@ via the native addon; don't name a binary that doesn't exist.)
 
 Keep both as ordinary event-log entries -- no span parenting, no `stream.startup` ->
 `camera.frame` tree, no reconnect histograms.
+
+## Timing on those entries
+
+Durations are measured at the hook that already builds the entry, then written with
+`updateEventLogEvent` if the end is later than the start (ack, next frame, helper
+exit). Units are milliseconds. Missing key means "not a duration", not zero.
+
+| Key | Entry | Record when | Omit when |
+|---|---|---|---|
+| `input.send_ms` | tap / button / gesture | socket write to ack, or to the fire-and-forget close if no ack yet | `hid.state=gone` or `inject.result=threw` (#136). A landscape miss (#153) still records it. |
+| `stream.ttff_ms` | first `stream.frame` | session start to first published frame | never saw a frame (Connecting before any frame, #103 cold). Do not write `0`. |
+| `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | #128 `producer_live=true` (false stall). #103 stuck Connecting after a good frame (`producer_live=true`, never returns). |
+| `camera.frame_interval_ms` | `camera.frame` | gap since previous published camera frame | `producer_fps=0` / capture stopped. A long gap is not an interval. |
+| `camera.helper_shutdown_ms` | `camera.helper.exit` | supervising parent saw exit, including signal | never. A 48 ms SIGTERM is still `status=error`. |
+
+Worked lines (one entry each; no second span line):
+
+```json
+{"kind":"stream.stall","status":"ok","details":{"producer_live":true,"orientation":"landscape_left","producer_fps":58,"last_frame_age_ms":6100,"camera.frame_interval_ms":17}}
+{"kind":"stream.state","status":"error","details":{"producer_live":true,"saw_first_frame":true,"phase":"connecting"}}
+{"kind":"stream.state","status":"ok","details":{"phase":"live","saw_first_frame":true,"stream.reconnect_ms":840}}
+{"kind":"stream.frame","status":"ok","details":{"stream.ttff_ms":180,"saw_first_frame":true}}
+{"kind":"camera.helper.exit","status":"error","details":{"signal":"SIGTERM","exit_code":null,"shutdown_phase":"placeholder","camera.helper_shutdown_ms":48,"placeholder_joined":false}}
+{"kind":"camera.helper.exit","status":"ok","details":{"signal":null,"exit_code":0,"shutdown_phase":"surface_released","camera.helper_shutdown_ms":48,"placeholder_joined":true}}
+```
+
+#128 stays a stall entry. `camera.frame_interval_ms=17` says the producer was fine;
+`stream.reconnect_ms` is absent, so the 6100 ms consumer age is not a reconnect.
+#103 after a good frame is `stream.state` with `status=error` and no `stream.reconnect_ms`
+and no `stream.ttff_ms` (TTFF already happened on the first-frame entry). A later
+recovery is a new `stream.state` with `stream.reconnect_ms` set. #143 records the
+shutdown duration on both the signaled exit and the post-#161 canary; status, not the
+milliseconds, says which one failed.
 
 ## Privacy and export (Evan's defaults)
 
@@ -200,11 +263,14 @@ Prove recordability with unit tests (`bun test`) and the maintainer loop in
 - Extend `src/__tests__/event-log.test.ts`: `eventLogEventForHidMessage("UDID", 0x03,
   {type:"end", x, y, src:"cli"})` records `source:"cli"`; omitting `src` -> `"unknown"`;
   assert `coord_space`, `orientation`, `frame`, `remapped`, and `screen` are present.
+  A landscape miss records `input.send_ms`; `hid.state=gone` omits it.
 - A `device-session` test: record a tap, deliver a differing `onSharedMjpegFrame`
   seed -> `updateEventLogEvent` sets `screen_changed:true`; an identical seed -> `false`.
 - `src/__tests__/device-hub-input.test.ts` already covers `isDeviceHubInputShadowed`;
   add that a shadowed session stamps the shadow state on the session/inject entry.
 - `src/__tests__/helper-lifecycle.test.ts` already covers `classifyStaleState`; assert
   the recycle-after-shutdown path records a `helper.lifecycle` entry.
+- Stream: a `producer_live` stall does not set `stream.reconnect_ms`; a return to
+  `live` does. First frame sets `stream.ttff_ms`; a never-connected preview does not.
 - Read-back: `GET /api/event-log` and `serve-sim event-log --json` return the new
   fields and a `schema_version`.
