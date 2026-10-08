@@ -63,6 +63,10 @@ describe("previewConfigForState", () => {
     });
   });
 
+  test("omits the exec token when none is passed (JSON endpoints)", () => {
+    expect("execToken" in previewConfigForState(states[0]!, "/preview", "", undefined)).toBe(false);
+  });
+
   test("omits codec when none is pinned", () => {
     expect(
       "codec" in previewConfigForState(states[0]!, "/preview", "/bin/serve-sim", "token-xyz"),
