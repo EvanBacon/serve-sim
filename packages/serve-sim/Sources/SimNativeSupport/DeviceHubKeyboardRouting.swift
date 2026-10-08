@@ -164,3 +164,28 @@ public enum DeviceHubProcessResolver {
         return matches.count == 1 ? matches.first : nil
     }
 }
+
+/// The Device Hub process a key sequence is latched to.
+///
+/// Resolving the process can mean walking the whole process table (see
+/// `DeviceHubProcessResolver`), so it happens once at the start of a sequence.
+/// Every later key only re-observes this one pid and checks that it is still
+/// the same executable owned by the same user, which also rejects a pid that
+/// was recycled by an unrelated process.
+public struct DeviceHubProcessIdentity: Equatable {
+    public let processIdentifier: Int32
+    public let executablePath: String
+    public let userIdentifier: UInt32
+
+    public init(processIdentifier: Int32, executablePath: String, userIdentifier: UInt32) {
+        self.processIdentifier = processIdentifier
+        self.executablePath = executablePath
+        self.userIdentifier = userIdentifier
+    }
+
+    /// `observedExecutablePath` / `observedUserIdentifier` describe whatever
+    /// currently runs as `processIdentifier`, or nil when nothing does.
+    public func isSameProcess(observedExecutablePath: String?, observedUserIdentifier: UInt32?) -> Bool {
+        observedExecutablePath == executablePath && observedUserIdentifier == userIdentifier
+    }
+}

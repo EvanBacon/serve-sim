@@ -25,7 +25,7 @@ final class DeviceHubKeyboardBridge {
     private static let minimumXcodeMajorVersion = 27
 
     private struct ActiveTarget {
-        let processIdentifier: pid_t
+        let process: DeviceHubProcessIdentity
     }
 
     private let expectedBundleURL: URL
@@ -108,7 +108,7 @@ final class DeviceHubKeyboardBridge {
         let target: ActiveTarget
         if keyDown {
             if let activeTarget {
-                guard isExpectedDeviceHubRunning(processIdentifier: activeTarget.processIdentifier) else {
+                guard Self.isRunning(activeTarget.process) else {
                     resetSequence()
                     return unavailable("Device Hub exited during a key sequence")
                 }
@@ -121,7 +121,7 @@ final class DeviceHubKeyboardBridge {
         } else {
             // An up event whose down used Indigo must stay on Indigo too.
             guard pressedUsages.contains(usage), let activeTarget else { return false }
-            guard isExpectedDeviceHubRunning(processIdentifier: activeTarget.processIdentifier) else {
+            guard Self.isRunning(activeTarget.process) else {
                 resetSequence()
                 return unavailable("Device Hub exited during a key sequence")
             }
@@ -144,7 +144,7 @@ final class DeviceHubKeyboardBridge {
         }
 
         event.flags = Self.eventFlags(for: nextPressedUsages)
-        event.postToPid(target.processIdentifier)
+        event.postToPid(target.process.processIdentifier)
 
         pressedUsages = nextPressedUsages
         lastUnavailableReason = nil
@@ -162,10 +162,11 @@ final class DeviceHubKeyboardBridge {
             return nil
         }
 
-        guard let processIdentifier = Self.processIdentifier(of: application) else {
+        guard let process = Self.processIdentity(of: application) else {
             _ = unavailable("Device Hub's process identifier could not be resolved")
             return nil
         }
+        let processIdentifier = process.processIdentifier
         let route = DeviceHubWindowRouter.route(
             windows: Self.visibleWindows(processIdentifier: processIdentifier),
             processIdentifier: processIdentifier,
@@ -173,7 +174,7 @@ final class DeviceHubKeyboardBridge {
         )
         switch route {
         case .success:
-            return ActiveTarget(processIdentifier: processIdentifier)
+            return ActiveTarget(process: process)
         case .failure(let failure):
             _ = unavailable(failure.description)
             return nil
@@ -189,22 +190,45 @@ final class DeviceHubKeyboardBridge {
             }
     }
 
-    private func isExpectedDeviceHubRunning(processIdentifier: pid_t) -> Bool {
-        runningDeviceHubs().contains { Self.processIdentifier(of: $0) == processIdentifier }
+    /// Resolve the Device Hub process for a new key sequence. The process
+    /// table is scanned only when NSRunningApplication reports no usable pid.
+    private static func processIdentity(of application: NSRunningApplication) -> DeviceHubProcessIdentity? {
+        guard let executablePath = application.executableURL?.resolvingSymlinksInPath().path else { return nil }
+        let userIdentifier = getuid()
+        let processIdentifier = DeviceHubProcessResolver.resolve(
+            reportedProcessIdentifier: application.processIdentifier,
+            executableMatches: { processIdentifiers(executablePath: executablePath, userIdentifier: userIdentifier) }
+        )
+        guard let processIdentifier else { return nil }
+        let process = DeviceHubProcessIdentity(
+            processIdentifier: processIdentifier,
+            executablePath: executablePath,
+            userIdentifier: userIdentifier
+        )
+        return isRunning(process) ? process : nil
     }
 
-    private static func processIdentifier(of application: NSRunningApplication) -> pid_t? {
-        DeviceHubProcessResolver.resolve(
-            reportedProcessIdentifier: application.processIdentifier,
-            executableMatches: {
-                guard let executableURL = application.executableURL else { return [] }
-                return processIdentifiers(executablePath: executableURL.resolvingSymlinksInPath().path)
-            }
+    /// One direct lookup of the latched pid: constant cost per key.
+    private static func isRunning(_ process: DeviceHubProcessIdentity) -> Bool {
+        let observed = observe(processIdentifier: process.processIdentifier)
+        return process.isSameProcess(
+            observedExecutablePath: observed?.executablePath,
+            observedUserIdentifier: observed?.userIdentifier
         )
     }
 
-    /// The current user's processes running `executablePath`.
-    private static func processIdentifiers(executablePath: String) -> [pid_t] {
+    /// The executable and owner of `processIdentifier`, or nil if no such process.
+    private static func observe(processIdentifier: pid_t) -> (executablePath: String, userIdentifier: UInt32)? {
+        var info = proc_bsdshortinfo()
+        let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
+        guard proc_pidinfo(processIdentifier, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size else { return nil }
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        guard proc_pidpath(processIdentifier, &path, UInt32(path.count)) > 0 else { return nil }
+        return (String(cString: path), info.pbsi_uid)
+    }
+
+    /// The processes owned by `userIdentifier` running `executablePath`.
+    private static func processIdentifiers(executablePath: String, userIdentifier: UInt32) -> [pid_t] {
         let capacity = proc_listallpids(nil, 0)
         guard capacity > 0 else { return [] }
         var pids = [pid_t](repeating: 0, count: Int(capacity) + 32)
@@ -212,17 +236,10 @@ final class DeviceHubKeyboardBridge {
             proc_listallpids(buffer.baseAddress, Int32(buffer.count * MemoryLayout<pid_t>.stride))
         }
         guard count > 0 else { return [] }
-        let uid = getuid()
-        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
-        var matches = [pid_t]()
-        for pid in pids.prefix(Int(count)) where pid > 0 {
-            var info = proc_bsdshortinfo()
-            let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
-            guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size, info.pbsi_uid == uid else { continue }
-            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { continue }
-            if String(cString: path) == executablePath { matches.append(pid) }
+        return pids.prefix(Int(count)).filter { pid in
+            guard pid > 0, let observed = observe(processIdentifier: pid) else { return false }
+            return observed.executablePath == executablePath && observed.userIdentifier == userIdentifier
         }
-        return matches
     }
 
     /// Return visible standard Device Hub windows with its key window first.

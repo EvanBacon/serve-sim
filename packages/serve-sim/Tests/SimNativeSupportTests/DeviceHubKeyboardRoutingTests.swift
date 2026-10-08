@@ -3,6 +3,7 @@ import XCTest
 
 final class DeviceHubKeyboardRoutingTests: XCTestCase {
     private let pid: Int32 = 42
+    private let deviceHubPath = "/Applications/Xcode.app/Contents/Applications/DeviceHub.app/Contents/MacOS/DeviceHub"
 
     func testUsesReportedDeviceHubProcessIdentifierWithoutScanning() {
         var scanned = false
@@ -25,6 +26,22 @@ final class DeviceHubKeyboardRoutingTests: XCTestCase {
         XCTAssertNil(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: -1) { [] })
         XCTAssertNil(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: -1) { [-1, 0] })
         XCTAssertNil(DeviceHubProcessResolver.resolve(reportedProcessIdentifier: -1) { [68045, 68046] })
+    }
+
+    func testLatchedDeviceHubProcessStaysValidWhileUnchanged() {
+        let process = DeviceHubProcessIdentity(processIdentifier: 68045, executablePath: deviceHubPath, userIdentifier: 501)
+
+        XCTAssertTrue(process.isSameProcess(observedExecutablePath: deviceHubPath, observedUserIdentifier: 501))
+    }
+
+    func testLatchedDeviceHubProcessRejectsExitedOrRecycledPid() {
+        let process = DeviceHubProcessIdentity(processIdentifier: 68045, executablePath: deviceHubPath, userIdentifier: 501)
+
+        // Device Hub exited: nothing runs as that pid any more.
+        XCTAssertFalse(process.isSameProcess(observedExecutablePath: nil, observedUserIdentifier: nil))
+        // The pid was recycled by an unrelated executable or another user.
+        XCTAssertFalse(process.isSameProcess(observedExecutablePath: "/usr/bin/login", observedUserIdentifier: 501))
+        XCTAssertFalse(process.isSameProcess(observedExecutablePath: deviceHubPath, observedUserIdentifier: 0))
     }
 
     func testKeyboardOptOutRequiresDocumentedValue() {
