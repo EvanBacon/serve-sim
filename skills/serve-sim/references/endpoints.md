@@ -23,38 +23,36 @@ This is the per-device binary started for each booted simulator. It serves the v
 | `GET` | `/ax` | JSON accessibility tree (axe-compatible flat-array shape). |
 | `GET` | `/foreground` | JSON `{bundleId: string, pid: number}` of the frontmost app. |
 
-CORS is wide-open (`Access-Control-Allow-Origin: *`) on this server.
+The helper routes are served in-process by the preview server, which applies the auth and origin checks below. (Older standalone helper processes set a wildcard `Access-Control-Allow-Origin: *`; the current in-process server does not, and sends a reflected CORS header only to a trusted loopback page on another port.)
 
 ### WebSocket message types
 
-The `/ws` endpoint accepts binary frames. Two formats are in use today:
-
-**Touch (prefix `0x10`)** — 12 or 13 bytes:
+The `/ws` endpoint accepts binary frames. **Every frame is one tag byte followed by UTF-8 JSON** — there is no packed binary-struct format (no `0x10`/`0x11`), and no `serve-sim-client/touch-codec` package to import; build the frame yourself:
 
 ```
-[0x10] [subtype:u8] [x:f32] [y:f32] [seq:u16] [edge:u8?]
+[tag:u8] [JSON bytes...]
 ```
 
-- `subtype`: 0 = begin, 1 = move, 2 = end
-- `x`, `y`: normalized floats in `[0, 1]`
-- `seq`: monotonic 16-bit counter the server uses to coalesce frames
-- `edge`: optional, 0–4 as in [gestures.md](gestures.md)
+Tags the server handles (see `handleHidMessage` in `device-session.ts`):
 
-**Multi-touch (prefix `0x11`)** — 20 bytes:
+| Tag | Meaning | JSON body |
+|---|---|---|
+| `0x03` | Touch | `{type: "begin"\|"move"\|"end", x, y, edge?}` — `x`,`y` normalized `0..1`; `edge` 0–4 as in [gestures.md](gestures.md) |
+| `0x04` | Button | `{button}` (e.g. `"home"`); hardware buttons also take `{page, usage, phase}` |
+| `0x05` | Multi-touch | `{type, x1, y1, x2, y2}` |
+| `0x06` | Keyboard | `{type: "down"\|"up", usage}` (USB HID Usage Page 0x07) |
+| `0x07` | Orientation | `{orientation: "portrait"\|"portrait_upside_down"\|"landscape_left"\|"landscape_right"}` |
+| `0x08` | CoreAnimation debug | `{option, enabled}` |
+| `0x09` | Memory warning | empty body |
+| `0x0a` | Digital crown | `{delta}` |
+| `0x0b` | Scroll | `{dx, dy, x?, y?}` (deltas are a fraction of the display) |
+| `0x0c` | Software keyboard toggle | empty body |
+| `0x0d` | Preferred screen size | `{width, height}` |
+| `0x0e` | Duo pose / hinge | `{pose?, hinge?}` |
 
-```
-[0x11] [subtype:u8] [x1:f32] [y1:f32] [x2:f32] [y2:f32] [seq:u16]
-```
+A tap is `0x03 begin` then `0x03 end` on the same socket ~40 ms apart.
 
-A JSON channel also exists with these message-type bytes; refer to the helper source if you need them:
-
-- `0x03` — JSON touch event (legacy)
-- `0x04` — JSON button event
-- `0x05` — JSON multi-touch event (legacy)
-- `0x06` — JSON keyboard event (`{type: down|up, usage: u32}`, USB HID Usage Page 0x07)
-- `0x07` — JSON orientation event
-- `0x08` — JSON CoreAnimation debug toggle
-- `0x09` — empty body, triggers memory warning
+**Frames the server sends you:** a config frame with first byte `0x82` and body `{width, height, orientation, ...}`, pushed on connect and whenever the display changes. (Duo sessions also send a projection frame.) Read `0x82` for live dimensions; ignore other inbound frames if you don't need them.
 
 For most agents, the CLI is the right entry point. Use the WebSocket directly only when you need sub-CLI-latency input streams (drag animations, multi-finger gestures).
 
@@ -67,7 +65,7 @@ This is a Node middleware that serves the preview UI and proxies state. It can b
 | `GET` | `/.sim` | The preview HTML page (React UI showing the simulator stream). |
 | `GET` | `/.sim/api` | JSON state: `{device, pid, port, url, streamUrl, wsUrl}`. |
 | `GET` | `/.sim/ax` | SSE stream of accessibility tree snapshots. |
-| `POST` | `/.sim/exec` | Run a shell command on the host. **Requires a bearer token.** |
+| `POST` | `/.sim/exec` | Run a shell command on the host. **Loopback same-origin only**, and must carry the per-process exec token. Never available to a remote/tunneled or cross-origin caller, token or not. |
 | `POST` | `/.sim/appstate` | SSE-like stream of frontmost-app changes. |
 | `GET` | `/.sim/devtools` | WebKit Inspector bridge for in-app web views. |
 | `POST` | `/grid/api` | List running devices. |
@@ -84,8 +82,11 @@ app.use(simMiddleware({ basePath: "/.sim" }));
 
 ## Authentication
 
-- The Swift stream server has no authentication. It listens on `0.0.0.0` by default — be careful when tunneling.
-- The preview middleware's `/.sim/exec` endpoint requires a bearer token. The token is printed when `serve-sim` starts and is stored in the per-device state file under `$TMPDIR/serve-sim/server-{udid}.json`. Use `Authorization: Bearer <token>`.
+serve-sim distinguishes a **trusted loopback** request (loopback TCP peer, no proxy/forwarding headers, loopback `Host`) from everything else (LAN, tunnel, reverse proxy, or a rebound `Host` — all "remote").
+
+- **Exec token (`/exec`, and shell commands over the `/exec-ws` control socket).** A per-process random token, injected only into the preview page served to a trusted loopback same-origin browser. `/exec` runs a command only for a trusted loopback request whose `Origin` matches its loopback `Host` and that presents this token. A remote caller can never run a shell command, even with the auth token below.
+- **Auth token (`--auth-token <token>` / `SERVE_SIM_AUTH_TOKEN`).** Gates *all* non-loopback access: the API, the stream and helper routes, `/config`, `/ax`, DevTools, the HID/stream WebSockets, and the grid routes. A remote request without it gets 401/403. Send it as `Authorization: Bearer <token>` (or let a browser pick up the `serve_sim_auth` cookie via the one-time `<url>/?token=...` redirect). This token does **not** unlock `/exec`.
+- The exec token lives only in the trusted-loopback preview page's injected config (`window.__SIM_PREVIEW__.execToken`). It is **not** written to the state file under `$TMPDIR/serve-sim/server-{udid}.json`; `GET /api`, `GET /api/events`, and a remote preview page never return it.
 
 ## Discovering the live URLs
 

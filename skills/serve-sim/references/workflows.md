@@ -146,39 +146,40 @@ The full erase is destructive — only do it when the user explicitly asks.
 
 ## Workflow 6: Drive a multi-step gesture reliably
 
-For a complex gesture (long drag, multi-finger choreography), the CLI's `gesture` subcommand is unreliable because each call opens a fresh WebSocket. The reliable path is one persistent WebSocket connection.
+For a complex gesture (long drag, multi-finger choreography), the CLI's `gesture` subcommand is unreliable because each call opens a fresh WebSocket. The reliable path is one persistent WebSocket connection that you feed frames.
+
+The wire format is simple: each message is **one binary frame** of a 1-byte tag followed by UTF-8 JSON. Touches are tag `0x03` (`begin`/`move`/`end`), multi-touch is `0x05`. There is no packed binary struct and no `serve-sim-client` package to import — you build the frames yourself. See [endpoints.md](endpoints.md#websocket-message-types) for every tag.
+
+Discover the WebSocket URL with `serve-sim --list -q` (the `wsUrl` field); locally it looks like `ws://127.0.0.1:<port>/helper/<udid>/ws`. When driving a remote Mac over a tunnel, use the tunnel URL and send `Authorization: Bearer <token>` (see [the cloud-agent guide](../../../docs/cloud-agent-ios-verification/README.md)).
 
 In a Node agent:
 
 ```js
 import WebSocket from "ws";
-import { encodeSingleTouch, encodeMultiTouch } from "serve-sim-client/touch-codec";
 
-// 3100 is the default stream port — discover the real one with
-// `serve-sim --list -q` (.streamUrl) when it may differ.
-const ws = new WebSocket("ws://localhost:3100/ws");
+// Build one frame: 1-byte tag + UTF-8 JSON.
+function frame(tag, payload) {
+  const json = Buffer.from(JSON.stringify(payload));
+  return Buffer.concat([Buffer.from([tag]), json]);
+}
+const touch = (type, x, y) => frame(0x03, { type, x, y });
+
+// `serve-sim --list -q` -> .wsUrl. Add { headers: { Authorization: `Bearer ${token}` } } for a remote server.
+const ws = new WebSocket("ws://127.0.0.1:<port>/helper/<udid>/ws");
 await new Promise((r) => ws.once("open", r));
 
-let seq = 0;
-function send(data) {
-  const buf = data.x1 !== undefined
-    ? encodeMultiTouch(data, seq++)
-    : encodeSingleTouch(data, seq++);
-  ws.send(buf);
-}
-
-// Long vertical drag
-send({ type: "begin", x: 0.5, y: 0.2 });
+// Long vertical drag on one socket.
+ws.send(touch("begin", 0.5, 0.2));
 for (let i = 1; i <= 30; i++) {
-  send({ type: "move", x: 0.5, y: 0.2 + (0.6 * i) / 30 });
+  ws.send(touch("move", 0.5, 0.2 + (0.6 * i) / 30));
   await new Promise((r) => setTimeout(r, 16));
 }
-send({ type: "end", x: 0.5, y: 0.8 });
+ws.send(touch("end", 0.5, 0.8));
 
 ws.close();
 ```
 
-If you do not want a Node dependency, you can build the same frames in any language — the binary format is documented in [endpoints.md](endpoints.md).
+The server sends you frames too: a config frame (first byte `0x82`, body `{width,height,orientation,...}`) on connect and whenever the display changes. Read it if you need live dimensions; otherwise ignore inbound frames.
 
 ## Workflow 7: Show the simulator stream in the host's preview
 

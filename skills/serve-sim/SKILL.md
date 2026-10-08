@@ -12,6 +12,7 @@ Drive an Apple Simulator (iOS, iPad, Apple Watch) from an agent using the [serve
 
 - The user wants an agent to **tap, swipe, drag, pinch, or send hardware buttons** to a running Apple Simulator.
 - The user wants to **stream a simulator** to a browser (local, LAN, or tunneled) for review or remote control.
+- An agent that is **not on the Mac** (a Linux cloud agent, CI) needs to drive a Mac simulator over an authenticated tunnel — see [the cloud-agent guide](../../docs/cloud-agent-ios-verification/README.md).
 - The user wants to **inject a synthetic camera feed** (file, webcam, or animated placeholder) into a specific app on the simulator.
 - The user wants to **toggle CoreAnimation debug overlays** (off-screen rendering, blended layers, slow animations) for performance work.
 - The user wants to **simulate a memory warning** or **rotate the device** programmatically.
@@ -176,3 +177,4 @@ Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
 - [references/ca-debug.md](references/ca-debug.md) — the five CoreAnimation debug flags and when each one helps.
 - [references/endpoints.md](references/endpoints.md) — HTTP and WebSocket endpoints for agents that bypass the CLI.
 - [references/workflows.md](references/workflows.md) — end-to-end recipes for UI automation, camera testing, deep-link flows.
+- [../../docs/cloud-agent-ios-verification/README.md](../../docs/cloud-agent-ios-verification/README.md) — driving a Mac simulator from a Linux/remote agent over an authenticated tunnel (`--auth-token` / `--url`).
