@@ -13,9 +13,9 @@ log we have -- no span tree, no histograms, no OpenTelemetry SDK is implied.
 
 Timing is the same entries. A duration is an additive key (`input.send_ms`,
 `stream.ttff_ms`, `stream.reconnect_ms`, `camera.frame_interval_ms`,
-`camera.helper_shutdown_ms`). Omit the key when the number would be a lie
-(false stall, stuck Connecting, dead injector). Do not invent a parent span
-to carry it.
+`camera.helper_shutdown_ms`, `helper.uptime_ms`). Omit the key when the number
+would be a lie (false stall, stuck Connecting, dead injector, still-booted
+helper). Do not invent a parent span to carry it.
 
 The event log is a diagnostic side-channel. It must never fail the input or
 command path (`recordEventLogEvent` already swallows subscriber errors), and it
@@ -115,16 +115,17 @@ within a short window, `updateEventLogEvent(tapId, { details: { ..., screen_chan
 Store only the boolean (and optionally the seq delta). This is the guest-effect evidence
 that an ack can't provide.
 
-Landscape miss vs portrait hit, same 4 ms send, distinguished only by the repro fields:
+Landscape miss vs portrait hit, same 4 ms send, distinguished only by the repro fields.
+`source` is part of the signature: today's miss is the CLI/server path, not the web client.
 
 ```json
-{"kind":"tap","status":"ok","details":{"orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","screen_changed":true,"input.send_ms":4}}
-{"kind":"tap","status":"ok","details":{"orientation":"landscape_left","frame":"display","remapped":false,"hid.state":"ok","inject.result":"sent","screen_changed":false,"input.send_ms":4}}
+{"kind":"tap","status":"ok","details":{"source":"web","orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","screen_changed":true,"input.send_ms":4}}
+{"kind":"tap","status":"ok","details":{"source":"cli","orientation":"landscape_left","frame":"display","remapped":false,"hid.state":"ok","inject.result":"sent","screen_changed":false,"input.send_ms":4}}
 ```
 
 The miss is `hid.state=ok` + `inject.result=sent` + `frame=display` + `remapped=false` +
-`screen_changed=false`. Status stays `ok`: the injector did what it was asked. A later
-remap expectation is the same entry shape with `frame=native_portrait` and `remapped=true`.
+`screen_changed=false` + `source=cli`. Status stays `ok`: the injector did what it was asked.
+A later remap expectation is the same entry shape with `frame=native_portrait` and `remapped=true`.
 
 ## What an ack proves (Evan's default: inject waits for ack, exits non-zero on failure)
 
@@ -166,12 +167,16 @@ frame, and exit non-zero when it reports failure. Record the outcome on the entr
 the landscape miss:
 
 ```json
-{"kind":"tap","status":"error","details":{"hid.state":"gone","inject.result":"threw","ack":"rejected","screen_changed":false}}
+{"kind":"tap","status":"error","details":{"source":"cli","hid.state":"gone","inject.result":"threw","ack":"rejected","screen_changed":false}}
 ```
 
-Device Hub shadowing is the third look-alike: `hid.state=ok`, `inject.result=sent`,
-`remapped=true`, `screen_changed=false`, plus `input.shadowed=true`. Same omit rule
-does not apply -- the send completed -- but the shadow key is what separates it from #153.
+Device Hub shadowing is the third look-alike: the send completed, so `input.send_ms`
+stays. `input.shadowed=true` is what separates it from #153 (which has `remapped=false`
+and `input.shadowed` absent or false):
+
+```json
+{"kind":"tap","status":"ok","details":{"source":"cli","orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","input.shadowed":true,"screen_changed":false,"input.send_ms":4}}
+```
 
 ## Helper lifecycle (#102)
 
@@ -183,6 +188,10 @@ The orphan in #102 was a detached helper still running after the simulator was
 decides to recycle/exit after shutdown, carrying `sim.booted` and helper uptime.
 (There is no separate `serve-sim-bin` process today -- HID and capture run in-process
 via the native addon; don't name a binary that doesn't exist.)
+
+`classifyStaleState` returning `keep` does **not** emit the entry and does not record
+`helper.uptime_ms`. A still-booted sim is not a recycle duration. The orphan is the
+entry with `sim.booted=false` and `decision=recycle-helper`.
 
 ## Stream and camera (correcting earlier mistakes)
 
@@ -207,13 +216,17 @@ Durations are measured at the hook that already builds the entry, then written w
 `updateEventLogEvent` if the end is later than the start (ack, next frame, helper
 exit). Units are milliseconds. Missing key means "not a duration", not zero.
 
+A reader pairs each duration with the repro fields on the **same** entry. The fields
+decide whether the key is present; they do not live on a second line.
+
 | Key | Entry | Record when | Omit when |
 |---|---|---|---|
-| `input.send_ms` | tap / button / gesture | socket write to ack, or to the fire-and-forget close if no ack yet | `hid.state=gone` or `inject.result=threw` (#136). A landscape miss (#153) still records it. |
+| `input.send_ms` | tap / button / gesture | socket write to ack, or to the fire-and-forget close if no ack yet | `hid.state=gone` or `inject.result=threw` (#136). A landscape miss (#153) and a Device Hub shadow still record it. |
 | `stream.ttff_ms` | first `stream.frame` | session start to first published frame | never saw a frame (Connecting before any frame, #103 cold). Do not write `0`. |
 | `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | #128 `producer_live=true` (false stall). #103 stuck Connecting after a good frame (`producer_live=true`, never returns). |
-| `camera.frame_interval_ms` | `camera.frame` | gap since previous published camera frame | `producer_fps=0` / capture stopped. A long gap is not an interval. |
+| `camera.frame_interval_ms` | `camera.frame` or `stream.stall` | gap since previous published camera frame | `producer_fps=0` / capture stopped. A long gap is not an interval. #128 may carry the last good interval on the stall entry. |
 | `camera.helper_shutdown_ms` | `camera.helper.exit` | supervising parent saw exit, including signal | never. A 48 ms SIGTERM is still `status=error`. |
+| `helper.uptime_ms` | `helper.lifecycle` | watchdog decision is `recycle-helper` or `recycle-self` after shutdown | `classifyStaleState` returned `keep`, or pid unknown. #102 is the recycle, not a heartbeat. |
 
 Worked lines (one entry each; no second span line):
 
@@ -224,6 +237,7 @@ Worked lines (one entry each; no second span line):
 {"kind":"stream.frame","status":"ok","details":{"stream.ttff_ms":180,"saw_first_frame":true}}
 {"kind":"camera.helper.exit","status":"error","details":{"signal":"SIGTERM","exit_code":null,"shutdown_phase":"placeholder","camera.helper_shutdown_ms":48,"placeholder_joined":false}}
 {"kind":"camera.helper.exit","status":"ok","details":{"signal":null,"exit_code":0,"shutdown_phase":"surface_released","camera.helper_shutdown_ms":48,"placeholder_joined":true}}
+{"kind":"helper.lifecycle","status":"ok","details":{"decision":"recycle-helper","sim.booted":false,"helper.uptime_ms":86400000}}
 ```
 
 #128 stays a stall entry. `camera.frame_interval_ms=17` says the producer was fine;
@@ -232,7 +246,8 @@ Worked lines (one entry each; no second span line):
 and no `stream.ttff_ms` (TTFF already happened on the first-frame entry). A later
 recovery is a new `stream.state` with `stream.reconnect_ms` set. #143 records the
 shutdown duration on both the signaled exit and the post-#161 canary; status, not the
-milliseconds, says which one failed.
+milliseconds, says which one failed. #102 records `helper.uptime_ms` only on the recycle
+entry; a still-booted `keep` is silence, not a zero.
 
 ## Privacy and export (Evan's defaults)
 
@@ -263,13 +278,15 @@ Prove recordability with unit tests (`bun test`) and the maintainer loop in
 - Extend `src/__tests__/event-log.test.ts`: `eventLogEventForHidMessage("UDID", 0x03,
   {type:"end", x, y, src:"cli"})` records `source:"cli"`; omitting `src` -> `"unknown"`;
   assert `coord_space`, `orientation`, `frame`, `remapped`, and `screen` are present.
-  A landscape miss records `input.send_ms`; `hid.state=gone` omits it.
+  A landscape miss records `input.send_ms`; `hid.state=gone` omits it; `input.shadowed=true`
+  still records it.
 - A `device-session` test: record a tap, deliver a differing `onSharedMjpegFrame`
   seed -> `updateEventLogEvent` sets `screen_changed:true`; an identical seed -> `false`.
 - `src/__tests__/device-hub-input.test.ts` already covers `isDeviceHubInputShadowed`;
   add that a shadowed session stamps the shadow state on the session/inject entry.
 - `src/__tests__/helper-lifecycle.test.ts` already covers `classifyStaleState`; assert
-  the recycle-after-shutdown path records a `helper.lifecycle` entry.
+  the recycle-after-shutdown path records a `helper.lifecycle` entry with `helper.uptime_ms`,
+  and `keep` records nothing.
 - Stream: a `producer_live` stall does not set `stream.reconnect_ms`; a return to
   `live` does. First frame sets `stream.ttff_ms`; a never-connected preview does not.
 - Read-back: `GET /api/event-log` and `serve-sim event-log --json` return the new
