@@ -45,6 +45,13 @@ import {
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
 import { simctlBootStatusArguments } from "./simctl";
+import {
+  buildDiagnosticsBundle,
+  collectDeviceDiagnostics,
+  collectHostDiagnostics,
+  formatDiagnosticsSummary,
+  type DiagnosticsBundle,
+} from "./doctor";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -661,6 +668,40 @@ async function eventLog(
       deviceLabel: entry.device ? deviceLabels.get(entry.device) : null,
     }));
   }
+}
+
+async function doctor(deviceArg: string | undefined, opts: { json?: boolean; out?: string }) {
+  const udid = deviceArg ? resolveDevice(deviceArg) : undefined;
+  const state = readState(udid);
+  let bundle: DiagnosticsBundle | undefined;
+  let serverError: string | undefined;
+  if (state) {
+    // The running server's view wins: its DEVELOPER_DIR and live stream state
+    // are what the browser saw.
+    const url = new URL("/api/diagnostics", state.url);
+    if (udid) url.searchParams.set("device", state.device);
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      bundle = { ...(await res.json() as DiagnosticsBundle), server: { reachable: true, url: state.url } };
+    } catch (err) {
+      serverError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (!bundle) {
+    const [host, devices] = await Promise.all([
+      collectHostDiagnostics(),
+      udid ? Promise.all([collectDeviceDiagnostics(udid)]) : Promise.resolve([]),
+    ]);
+    bundle = buildDiagnosticsBundle({ host, devices, server: { reachable: false, ...(serverError ? { error: serverError } : {}) } });
+  }
+  const json = JSON.stringify(bundle, null, 2);
+  if (opts.out) {
+    writeFileSync(opts.out, json + "\n");
+    console.error(`Wrote diagnostics to ${opts.out}`);
+  }
+  if (opts.json) console.log(json);
+  else if (!opts.out) console.log(formatDiagnosticsSummary(bundle));
 }
 
 function parseEventLogLimit(value: string | undefined): number | undefined {
@@ -1929,6 +1970,14 @@ program
   .option("-j, --json", "Print JSON")
   .option("-n, --limit <count>", "Maximum number of events")
   .action((opts) => eventLog(opts.device, { json: opts.json, limit: opts.limit }));
+
+program
+  .command("doctor")
+  .description("Collect redacted diagnostics for bug reports (Xcode, displays, encoders, streams, Duo renderer)")
+  .option(...deviceOpt)
+  .option("-j, --json", "Print the full JSON bundle")
+  .option("-o, --out <file>", "Write the JSON bundle to a file")
+  .action((opts) => doctor(opts.device, { json: opts.json, out: opts.out }));
 
 // `camera` and `permissions` keep their own dedicated argument parsers (the
 // camera verb has nested sub-verbs and source flags; permissions has a
