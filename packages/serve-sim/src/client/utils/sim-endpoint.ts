@@ -13,6 +13,8 @@ declare global {
       appStateEndpoint?: string;
       eventLogEndpoint?: string;
       eventLogEventsEndpoint?: string;
+      /** Loopback-only `serve-sim doctor` JSON (copied by "Copy diagnostics"). */
+      diagnosticsEndpoint?: string;
       devtoolsEndpoint?: string;
       gridApiEndpoint?: string;
       gridStartEndpoint?: string;
