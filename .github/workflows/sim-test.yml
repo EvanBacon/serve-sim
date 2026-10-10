@@ -27,6 +27,7 @@ on:
       - "packages/serve-sim/src/__tests__/type-command-sim.test.ts"
       - "packages/serve-sim/src/__tests__/ui-settings.e2e.test.ts"
       - "packages/serve-sim/src/__tests__/shm-probe.integration.test.ts"
+      - "packages/serve-sim/src/__tests__/duo-renderer.integration.test.ts"
 
 # Cancel superseded runs — pushing twice to the same PR shouldn't burn two
 # macOS slots in parallel.
