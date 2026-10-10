@@ -221,7 +221,7 @@ decide whether the key is present; they do not live on a second line.
 
 | Key | Entry | Record when | Omit when |
 |---|---|---|---|
-| `input.send_ms` | tap / button / gesture | socket write to ack, or to the fire-and-forget close if no ack yet | `hid.state=gone` or `inject.result=threw` (#136). A landscape miss (#153) and a Device Hub shadow still record it. |
+| `input.send_ms` | tap / button / gesture | socket write to ack, or to the fire-and-forget close if no ack yet | `hid.state=gone` or `inject.result=threw` (#136), or `ack=timeout` (the 10 s wait is not a send). A landscape miss (#153) and a Device Hub shadow still record it. |
 | `stream.ttff_ms` | first `stream.frame` | session start to first published frame | never saw a frame (Connecting before any frame, #103 cold). Do not write `0`. |
 | `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | #128 `producer_live=true` (false stall). #103 stuck Connecting after a good frame (`producer_live=true`, never returns). |
 | `camera.frame_interval_ms` | `camera.frame` or `stream.stall` | gap since previous published camera frame | `producer_fps=0` / capture stopped. A long gap is not an interval. #128 may carry the last good interval on the stall entry. |
@@ -278,8 +278,8 @@ Prove recordability with unit tests (`bun test`) and the maintainer loop in
 - Extend `src/__tests__/event-log.test.ts`: `eventLogEventForHidMessage("UDID", 0x03,
   {type:"end", x, y, src:"cli"})` records `source:"cli"`; omitting `src` -> `"unknown"`;
   assert `coord_space`, `orientation`, `frame`, `remapped`, and `screen` are present.
-  A landscape miss records `input.send_ms`; `hid.state=gone` omits it; `input.shadowed=true`
-  still records it.
+  A landscape miss records `input.send_ms`; `hid.state=gone` and `ack=timeout` omit it;
+  `input.shadowed=true` still records it.
 - A `device-session` test: record a tap, deliver a differing `onSharedMjpegFrame`
   seed -> `updateEventLogEvent` sets `screen_changed:true`; an identical seed -> `false`.
 - `src/__tests__/device-hub-input.test.ts` already covers `isDeviceHubInputShadowed`;
