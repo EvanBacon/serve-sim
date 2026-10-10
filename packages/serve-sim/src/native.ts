@@ -41,6 +41,8 @@ interface SimCaptureHandle {
   stop(): Promise<void>;
   setPreferredScreenSize(width: number, height: number): Promise<void>;
   subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void | Promise<void>>;
+  /** Absent in addons built before diagnostics existed. */
+  diagnostics?(): Promise<string>;
 }
 
 interface NativeAddon {
@@ -243,6 +245,12 @@ export class NativeCapture {
         isKeyframe: (flags & FLAG_KEYFRAME) !== 0,
       });
     });
+  }
+
+  /** JSON: display candidates + selection reason, surface-size history, encoder sessions and error counts. */
+  diagnostics(): Promise<string> {
+    if (!this.handle.diagnostics) return Promise.reject(new Error("native capture diagnostics unavailable in this build"));
+    return this.handle.diagnostics();
   }
 
   /** Halt frame production. Full teardown happens when this object is GC'd. */

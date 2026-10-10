@@ -45,6 +45,11 @@ actor FrameCapture {
     private var preferredScreenSize: FramebufferSurfaceSize?
     private var didLogRejectedPresentationSurface = false
     private var didLogMissingExpectedSurface = false
+    // Diagnostics for `serve-sim doctor`: what was live, what was chosen, why.
+    private var lastCandidates: [FramebufferSurfaceSize] = []
+    private var lastSelectedIndex: Int?
+    private var lastSelectionReason = "none"
+    private var sizeChanges: [[String: Any]] = []
 
     func start(deviceUDID: String, onFrame: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {
         self.onFrame = onFrame
@@ -166,13 +171,20 @@ actor FrameCapture {
                 height: IOSurfaceGetHeight(surf)
             )
         }
+        lastCandidates = sizes
         guard let selection = FramebufferSurfaceSelector.select(
             from: sizes,
             expectedSizes: expectedScreenSizes,
             preferredSize: preferredScreenSize
         ) else {
+            lastSelectedIndex = nil
+            lastSelectionReason = "no_live_surface"
             return nil
         }
+        lastSelectedIndex = selection.index
+        lastSelectionReason = Self.selectionReason(
+            selection, selected: sizes[selection.index], preferred: preferredScreenSize
+        )
 
         if selection.matchedExpectedSize, !didLogRejectedPresentationSurface {
             let selected = sizes[selection.index]
@@ -180,10 +192,19 @@ actor FrameCapture {
             if let larger = sizes.filter(\.isLive).max(by: {
                 Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
             }), Int64(larger.width) * Int64(larger.height) > selectedArea {
-                print(
-                    "[capture] Ignoring non-device framebuffer \(larger.width)x\(larger.height); "
-                    + "native screen is \(selected.width)x\(selected.height)"
-                )
+                // On a foldable the larger surface is usually the other native
+                // panel (Duo inner), not a presentation surface. Say which.
+                if expectedScreenSizes.contains(where: { Self.sameSize($0, larger) }) {
+                    print(
+                        "[capture] Selected native display \(selected.width)x\(selected.height) "
+                        + "(\(lastSelectionReason)); other native display \(larger.width)x\(larger.height) is also live"
+                    )
+                } else {
+                    print(
+                        "[capture] Ignoring non-device framebuffer \(larger.width)x\(larger.height); "
+                        + "native screen is \(selected.width)x\(selected.height)"
+                    )
+                }
                 didLogRejectedPresentationSurface = true
             }
         } else if
@@ -276,9 +297,18 @@ actor FrameCapture {
         guard w > 0, h > 0 else { return }
 
         if capturedWidth != w || capturedHeight != h {
+            let from = "\(capturedWidth)x\(capturedHeight)"
             capturedWidth = w
             capturedHeight = h
-            print("[capture] Surface size changed: \(w)x\(h)")
+            print("[capture] Surface size changed: \(from) -> \(w)x\(h) (\(lastSelectionReason))")
+            let change: [String: Any] = [
+                "at": isoTimestamp(Date()),
+                "from": from,
+                "to": "\(w)x\(h)",
+                "reason": lastSelectionReason,
+            ]
+            sizeChanges.append(change)
+            if sizeChanges.count > 20 { sizeChanges.removeFirst(sizeChanges.count - 20) }
         }
 
         var pixelBuffer: Unmanaged<CVPixelBuffer>?
@@ -326,6 +356,10 @@ actor FrameCapture {
         preferredScreenSize = nil
         didLogRejectedPresentationSurface = false
         didLogMissingExpectedSurface = false
+        lastCandidates = []
+        lastSelectedIndex = nil
+        lastSelectionReason = "none"
+        sizeChanges = []
     }
 
     func setPreferredScreenSize(width: Int, height: Int) {
@@ -337,6 +371,50 @@ actor FrameCapture {
         didLogRejectedPresentationSurface = false
         didLogMissingExpectedSurface = false
         captureFrame(force: true)
+    }
+
+    /// JSON snapshot of display selection for `serve-sim doctor`.
+    func diagnosticsJSON() -> String {
+        func size(_ s: FramebufferSurfaceSize) -> [String: Any] { ["width": s.width, "height": s.height] }
+        let candidates: [[String: Any]] = lastCandidates.enumerated().map { entry -> [String: Any] in
+            [
+                "width": entry.element.width,
+                "height": entry.element.height,
+                "live": entry.element.isLive,
+                "native": expectedScreenSizes.contains(where: { Self.sameSize($0, entry.element) }),
+                "selected": entry.offset == lastSelectedIndex,
+            ]
+        }
+        let age = ContinuousClock.now - lastCaptureTime
+        let ageMs = Int(age.components.seconds) * 1000
+            + Int(age.components.attoseconds / 1_000_000_000_000_000)
+        var object: [String: Any] = [
+            "native_displays": expectedScreenSizes.map(size),
+            "candidates": candidates,
+            "selection_reason": lastSelectionReason,
+            "captured": ["width": capturedWidth, "height": capturedHeight],
+            "frame_count": Int(frameCount),
+            "size_changes": sizeChanges,
+        ]
+        if frameCount > 0 { object["last_frame_age_ms"] = ageMs }
+        if let preferredScreenSize { object["preferred"] = size(preferredScreenSize) }
+        return jsonString(object)
+    }
+
+    private static func sameSize(_ a: FramebufferSurfaceSize, _ b: FramebufferSurfaceSize) -> Bool {
+        (a.width == b.width && a.height == b.height) || (a.width == b.height && a.height == b.width)
+    }
+
+    /// preferred: pinned by the Duo panel follower (or WS 0x0d).
+    /// native_smallest: no pin; smallest native display (foldable rest pose).
+    /// largest_fallback: no native-size metadata matched.
+    private static func selectionReason(
+        _ selection: FramebufferSurfaceSelection,
+        selected: FramebufferSurfaceSize,
+        preferred: FramebufferSurfaceSize?
+    ) -> String {
+        if let preferred, preferred.isLive, sameSize(preferred, selected) { return "preferred" }
+        return selection.matchedExpectedSize ? "native_smallest" : "largest_fallback"
     }
 
     // MARK: - Helpers

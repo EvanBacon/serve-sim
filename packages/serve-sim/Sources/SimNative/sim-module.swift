@@ -173,6 +173,12 @@ private func u32(_ v: Int) -> UInt32 {
         try await engine.start()
     }
 
+    /// JSON string: display selection, surface-size history, encoder sessions
+    /// and error counts. Read by `/api/diagnostics` (`serve-sim doctor`).
+    @NodeMethod func diagnostics() async -> String {
+        await engine.diagnostics()
+    }
+
     @NodeMethod func stop() async {
         await engine.stop()
     }
