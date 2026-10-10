@@ -1,4 +1,5 @@
-export type EventLogSource = "hid" | "exec" | "ui";
+/** `capture` covers capture, encoders, streams, and the Duo renderer. */
+export type EventLogSource = "hid" | "exec" | "ui" | "capture";
 export type EventLogStatus = "ok" | "error";
 
 export type EventLogEntry = {
