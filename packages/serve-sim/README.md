@@ -107,10 +107,15 @@ serve-sim fold <deg> [-d udid]  Set a Duo hinge angle (0–180)
 serve-sim repair-input [-d udid]         Repair Device Hub input (restarts apps)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events
+<<<<<<< HEAD
 serve-sim exec <command...> [-d udid] Run a host shell command through a server
                                       started with --allow-exec. One argument
                                       is a shell line (exec "xcrun simctl list");
                                       several are quoted as an argv
+=======
+serve-sim doctor [-d udid]            Collect redacted diagnostics for bug reports
+                                      (--json, --out <file>)
+>>>>>>> fdcc974 (serve-sim doctor CLI; client stream retry with reasons (5/8))
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
