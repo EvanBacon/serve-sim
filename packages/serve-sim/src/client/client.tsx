@@ -53,6 +53,7 @@ import {
 import { WebKitDevtoolsPanel } from "./components/webkit-devtools-panel";
 import { useMediaDrop } from "./hooks/use-media-drop";
 import { useMjpegStream } from "./hooks/use-mjpeg-stream";
+import type { StreamError } from "./utils/stream-retry";
 import { useAvccStream } from "./hooks/use-avcc-stream";
 import { useResizableWidth } from "./hooks/use-resizable-width";
 import { useScreenshotToast } from "./hooks/use-screenshot-toast";
@@ -545,6 +546,8 @@ function AppWithConfig({
   const useAvccVideo =
     !serverForcesMjpeg && avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
   const mjpeg = useMjpegStream(foldable || useAvccVideo ? null : config.streamUrl);
+  const [duoStreamError, setDuoStreamError] = useState<StreamError | null>(null);
+  const streamError = foldable ? duoStreamError : useAvccVideo ? null : mjpeg.error;
 
   // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
   useEffect(() => {
@@ -1071,7 +1074,7 @@ function AppWithConfig({
               maxWidth: "min(230px, calc(100vw - 170px))",
             }}
           />
-          <StreamStatusPill streaming={streaming} />
+          <StreamStatusPill streaming={streaming} error={streamError} />
         </SimulatorToolbar>
         <div
           ref={simContainerRef}
@@ -1088,7 +1091,7 @@ function AppWithConfig({
         >
           {(() => {
             if (foldable) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
-              projection={duoProjection} screenConfig={activeStreamConfig} onStreamingChange={setStreaming} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
+              projection={duoProjection} screenConfig={activeStreamConfig} onStreamingChange={setStreaming} onStreamError={setDuoStreamError} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
               onError={() => toast.error("Device rendering is unavailable. Check the selected Xcode and server log.")}>
               {axOverlayEnabled && duoProjection && <AxDomOverlay projection={duoProjection} screenConfig={activeStreamConfig} />}
             </DuoThreeDView>;

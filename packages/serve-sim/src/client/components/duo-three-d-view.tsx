@@ -8,9 +8,14 @@ import { duoHardwareKeys, HardwareKey } from "./duo-hardware-controls";
 
 import type { StreamConfig } from "../types";
 import { beginDuoTouch, moveDuoTouch, type DuoTouchPoint } from "../utils/duo-home-gesture";
+import type { StreamError } from "../utils/stream-retry";
+import { StreamErrorPanel } from "./stream-error-panel";
+import { simEndpoint } from "../utils/sim-endpoint";
 type Point = DuoTouchPoint;
-export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError, onHardwarePress, onStreamingChange, screenConfig, children }: {
+export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError, onHardwarePress, onStreamingChange, onStreamError, screenConfig, children }: {
   children?: React.ReactNode;
+  /** Latest stream failure (503 reason, empty response), or null once frames flow. */
+  onStreamError?: (error: StreamError | null) => void;
   screenConfig: StreamConfig;
   onError?: () => void;
   onStreamingChange: (streaming: boolean) => void;
@@ -28,14 +33,20 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError,
   }, [poseKey]);
   const controlsVisible = projection != null && settledPose === poseKey;
   const image = useRef<HTMLImageElement | null>(null);
-  const { subscribeFrame } = useMjpegStream(url, onStreamingChange);
+  const { subscribeFrame, error: streamError } = useMjpegStream(url, onStreamingChange);
+  const streamErrorHandler = useRef(onStreamError);
+  streamErrorHandler.current = onStreamError;
+  useEffect(() => { streamErrorHandler.current?.(streamError); }, [streamError]);
+  const [hasFrame, setHasFrame] = useState(false);
   const errorHandler = useRef(onError);
   errorHandler.current = onError;
   useEffect(() => {
     let currentUrl: string | null = null;
     const watchdog = setTimeout(() => errorHandler.current?.(), 12000);
+    setHasFrame(false);
     const unsubscribe = subscribeFrame((blobUrl) => {
       clearTimeout(watchdog);
+      setHasFrame(true);
       const previous = currentUrl;
       currentUrl = blobUrl;
       if (image.current) image.current.src = blobUrl;
@@ -94,7 +105,13 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError,
       const two = pair();
       if (two) onMultiTouch({ type: "move", ...two }); else onTouch({ type: "move", ...raw });
     }} onPointerUp={end} onPointerCancel={end}>
-    <img ref={image} onError={onError} alt="Live 3D iPhone Duo" draggable={false} className="block w-full h-full object-contain pointer-events-none bg-transparent" />
+    {/* No src until the first frame: hide the element so a failure shows the reason, not a broken image. */}
+    <img ref={image} onError={onError} alt="Live 3D iPhone Duo" draggable={false} className="block w-full h-full object-contain pointer-events-none bg-transparent" style={hasFrame ? undefined : { visibility: "hidden" }} />
+    {streamError && <StreamErrorPanel
+      title="3D view unavailable"
+      error={streamError}
+      diagnosticsEndpoint={window.__SIM_PREVIEW__?.diagnosticsEndpoint ?? simEndpoint("api/diagnostics")}
+    />}
     {children}
     {controlsVisible && hardwarePositions.map((position) => <div
       key={position.key}
