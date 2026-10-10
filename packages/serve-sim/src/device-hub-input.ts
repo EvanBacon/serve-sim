@@ -10,12 +10,24 @@ export function isDeviceHubInputShadowed(output: string): boolean {
   return output.trim() === `${key} 1`;
 }
 
-export async function warnDeviceHubInput(udid: string, invoke: Run = run): Promise<void> {
+/** Warns when shadowed. Resolves the guest flag, or undefined when the runtime does not publish it. */
+export async function warnDeviceHubInput(udid: string, invoke: Run = run): Promise<boolean | undefined> {
   try {
-    if (isDeviceHubInputShadowed(await invoke(["simctl", "spawn", udid, "notifyutil", "-g", key]))) {
+    const shadowed = isDeviceHubInputShadowed(await invoke(["simctl", "spawn", udid, "notifyutil", "-g", key]));
+    if (shadowed) {
       console.warn(`[hid] Device Hub has disconnected legacy input. Run serve-sim repair-input -d ${udid} before using touch or keyboard. Repair restarts SpringBoard and closes running apps.`);
     }
-  } catch { /* Older runtimes do not publish this state. */ }
+    return shadowed;
+  } catch { return undefined; /* Older runtimes do not publish this state. */ }
+}
+
+/** Raw guest flag for diagnostics: true/false, or null when unreadable. */
+export async function readDeviceHubInputShadowed(udid: string, invoke: Run = run): Promise<boolean | null> {
+  try {
+    return isDeviceHubInputShadowed(await invoke(["simctl", "spawn", udid, "notifyutil", "-g", key]));
+  } catch {
+    return null;
+  }
 }
 
 /** Explicit recovery only: restarting backboardd also terminates running apps. */
