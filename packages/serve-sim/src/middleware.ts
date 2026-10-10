@@ -13,7 +13,13 @@ import type { Socket } from "net";
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { readCameraStatus } from "./camera-helper";
-import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
+import { getDeviceSession, closeDeviceSession, liveDeviceSessions, type HidSocket } from "./device-session";
+import {
+  buildDiagnosticsBundle,
+  collectDeviceDiagnostics,
+  collectHostDiagnostics,
+  isLoopbackAddress,
+} from "./doctor";
 import {
   eventLogEventForCommand,
   readEventLog,
@@ -711,6 +717,42 @@ async function handleCameraStatus(req: SimReq, res: SimRes, device: string): Pro
   }
 }
 
+/** Loopback peer and no non-loopback hop in X-Forwarded-For. */
+export function isLoopbackRequest(req: Pick<SimReq, "socket" | "headers">): boolean {
+  if (!isLoopbackAddress(req.socket?.remoteAddress)) return false;
+  const forwarded = req.headers["x-forwarded-for"];
+  const hops = (Array.isArray(forwarded) ? forwarded.join(",") : forwarded ?? "").split(",").map((hop) => hop.trim()).filter(Boolean);
+  return hops.every(isLoopbackAddress);
+}
+
+async function serveDiagnostics(req: SimReq, res: SimRes, device: string | null): Promise<void> {
+  const send = (status: number, body: unknown) => {
+    res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify(body, null, 2));
+  };
+  if (!isLoopbackRequest(req)) {
+    send(403, { error: "loopback_only", message: "Diagnostics are only served to localhost. Run `serve-sim doctor` on the Mac." });
+    return;
+  }
+  try {
+    const sessions = liveDeviceSessions(device);
+    const udids = device ? [device] : sessions.map((session) => session.udid);
+    const [host, devices, sessionDiagnostics] = await Promise.all([
+      collectHostDiagnostics(),
+      Promise.all(udids.map((udid) => collectDeviceDiagnostics(udid))),
+      Promise.all(sessions.map((session) => session.diagnostics())),
+    ]);
+    send(200, buildDiagnosticsBundle({
+      host,
+      devices,
+      sessions: sessionDiagnostics,
+      event_log: readEventLog({ device, limit: 100 }),
+    }));
+  } catch (error) {
+    send(500, { error: "diagnostics_failed", message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 /**
  * Serve a device-scoped helper endpoint in-process. Camera status reads the
  * camera helper's persisted state; stream and input routes lazily create a
@@ -861,6 +903,7 @@ export function previewConfigForState(
   appStateEndpoint: string;
   eventLogEndpoint: string;
   eventLogEventsEndpoint: string;
+  diagnosticsEndpoint: string;
   axEndpoint: string;
   cameraStatusEndpoint: string;
   devtoolsEndpoint: string;
@@ -882,6 +925,7 @@ export function previewConfigForState(
     appStateEndpoint: endpoint(base, "/appstate", state.device),
     eventLogEndpoint: endpoint(base, "/api/event-log", state.device),
     eventLogEventsEndpoint: endpoint(base, "/api/event-log/events", state.device),
+    diagnosticsEndpoint: endpoint(base, "/api/diagnostics", state.device),
     axEndpoint: endpoint(base, "/ax", state.device),
     cameraStatusEndpoint: `${base === "/" ? "" : base}/helper/${encodeURIComponent(state.device)}/camera/status`,
     devtoolsEndpoint: endpoint(base, "/devtools", state.device),
@@ -1719,6 +1763,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         proxyHelpers,
         options?.initialState,
       ) : null));
+      return;
+    }
+
+    // JSON API: `serve-sim doctor` bundle. Loopback only: it lists host paths,
+    // installed Xcodes, and processes. It never includes the exec token.
+    if (url === base + "/api/diagnostics") {
+      await serveDiagnostics(req, res, requestedDevice);
       return;
     }
 

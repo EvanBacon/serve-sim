@@ -1,6 +1,7 @@
 import { warnDeviceHubInput } from "./device-hub-input";
-import { DuoRenderer } from "./duo-renderer";
-import { DuoPreview } from "./duo-preview";
+import { DuoRenderer, DuoRendererError, logDuoRendererFailure } from "./duo-renderer";
+import { DuoPreview, type DuoRendererEvent } from "./duo-preview";
+import { redactHome } from "./diagnostics-redact";
 /**
  * In-process device session — the replacement for the spawned serve-sim-bin
  * helper. One session per booted simulator owns a NativeCapture + NativeHid and
@@ -148,7 +149,25 @@ async function writeAndDrain(
 type CaptureTransport = Pick<
   NativeCapture,
   "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "setPreferredScreenSize"
->;
+> & Partial<Pick<NativeCapture, "diagnostics">>;
+
+export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
+
+type StreamHealth = {
+  open: number;
+  frames: number;
+  last_frame_at: string | null;
+  last_error: { at: string; message: string; stage?: string } | null;
+};
+
+function newStreamHealth(): StreamHealth {
+  return { open: 0, frames: 0, last_frame_at: null, last_error: null };
+}
+
+/** 503 body for a Duo 3D stream that cannot produce a first frame. */
+function duoRendererErrorBody(error: DuoRendererError): { error: "duo_renderer_unavailable"; reason: string; stage: string; details: Record<string, unknown> } {
+  return { error: "duo_renderer_unavailable", reason: error.reason, stage: error.stage, details: redactHome(error.details) };
+}
 type HidTransport = Pick<
   NativeHid,
   | "touch"
@@ -169,7 +188,7 @@ type HidTransport = Pick<
 export interface DeviceSessionDependencies {
   capture: CaptureTransport;
   hid: HidTransport;
-  createDuoRenderer?: () => Pick<DuoRenderer, "render" | "close">;
+  createDuoRenderer?: (onFailure: (error: DuoRendererError) => void) => Pick<DuoRenderer, "render" | "close">;
   createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
 }
 
@@ -197,16 +216,27 @@ export class DeviceSession {
   private duoStateQueue: Promise<void> = Promise.resolve();
   private readonly streamResponses = new Set<ServerResponse>();
   private touchGestureLog?: TouchGestureLog;
+  private readonly streamHealth: Record<StreamEndpoint, StreamHealth> = {
+    mjpeg: newStreamHealth(),
+    avcc: newStreamHealth(),
+    "3d": newStreamHealth(),
+  };
+  private deviceHubShadowed?: boolean;
+  private rendererFailureEvent?: { id: number; key: string; count: number };
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.hid = dependencies?.hid ?? new NativeHid(udid);
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
     this.duo = new DuoPreview({
-      createRenderer: () => dependencies?.createDuoRenderer?.() ?? new DuoRenderer(),
+      createRenderer: (onFailure) => dependencies?.createDuoRenderer
+        ? dependencies.createDuoRenderer(onFailure)
+        : new DuoRenderer(onFailure),
       onProjection: (frame) => {
         for (const ws of this.hidSockets) ws.send(frame);
       },
-      onStreamError: (res, error) => this.handleStreamError(res, error),
+      onStreamError: (res, error) => this.handleStreamError(res, error, "3d"),
+      onRendererEvent: (event) => this.recordRendererEvent(event),
+      onFrameDelivered: () => this.noteStreamFrame("3d"),
     });
   }
 
@@ -230,7 +260,9 @@ export class DeviceSession {
       this.unsubscribeMjpeg = unsubscribe;
       this.phase = "running";
       if (await this.hid.isFoldable?.() && !this.isStopped()) {
-        if (!this.dependencies?.createDuoMonitor) void warnDeviceHubInput(this.udid);
+        if (!this.dependencies?.createDuoMonitor) {
+          void warnDeviceHubInput(this.udid).then((shadowed) => { this.deviceHubShadowed = shadowed; });
+        }
         const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState) => new DuoStateMonitor(udid, onState));
         this.duoMonitor = createMonitor(this.udid, (state) => {
           void this.followDuoState(state).catch((error) => {
@@ -347,16 +379,22 @@ export class DeviceSession {
       if (res.destroyed || res.writableEnded) return;
       if (!await this.hid.isFoldable?.()) { this.sendJson(res, 400, { error: "This device has no Duo model" }); return; }
       const raw = new URL(req.url ?? "", "http://x").searchParams.get("raw") === "1";
-      res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store", ...CORS });
-      this.trackStreamResponse(res);
+      if (!this.trackStreamResponse(res, "3d")) return;
       this.duo.setPanel(this.activePanel());
-      this.duo.attach(res);
       res.once("close", () => this.duo.detach(res));
-    })().catch((error) => this.handleStreamError(res, error));
+      // Headers wait for the first PNG. Model lookup, worker spawn, and the
+      // first render can all fail; with headers unsent each failure becomes a
+      // 503 with a reason instead of an empty socket (ERR_EMPTY_RESPONSE).
+      this.duo.attach(res, {
+        onFirstFrame: () => {
+          res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store", ...CORS });
+        },
+      });
+    })().catch((error) => this.handleStreamError(res, error, "3d"));
   }
 
   handleMjpeg(req: IncomingMessage, res: ServerResponse): void {
-    void this.serveMjpeg(req, res).catch((error) => this.handleStreamError(res, error));
+    void this.serveMjpeg(req, res).catch((error) => this.handleStreamError(res, error, "mjpeg"));
   }
 
   private async serveMjpeg(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -370,7 +408,7 @@ export class DeviceSession {
       Connection: "keep-alive",
       ...CORS,
     });
-    if (!this.trackStreamResponse(res)) return;
+    if (!this.trackStreamResponse(res, "mjpeg")) return;
 
     // The native subscriber reuses its frame buffer after this callback
     // resolves. Keep the callback pending through HTTP backpressure so the
@@ -388,6 +426,7 @@ export class DeviceSession {
       try {
         if (await writeAndDrain(res, () => this.writeMjpegFrame(res, jpeg))) {
           lastSentAt = Date.now();
+          this.noteStreamFrame("mjpeg");
         }
       } catch (error) {
         if (!res.destroyed) {
@@ -420,7 +459,7 @@ export class DeviceSession {
   }
 
   handleAvcc(_req: IncomingMessage, res: ServerResponse): void {
-    void this.serveAvcc(res).catch((error) => this.handleStreamError(res, error));
+    void this.serveAvcc(res).catch((error) => this.handleStreamError(res, error, "avcc"));
   }
 
   private async serveAvcc(res: ServerResponse): Promise<void> {
@@ -433,7 +472,7 @@ export class DeviceSession {
       Connection: "keep-alive",
       ...CORS,
     });
-    if (!this.trackStreamResponse(res)) return;
+    if (!this.trackStreamResponse(res, "avcc")) return;
 
     // Seed with the current screen; the per-client native AVCC subscription
     // starts with its own decoder config and keyframe.
@@ -442,6 +481,7 @@ export class DeviceSession {
 
     const unsubscribe = await this.capture.subscribeAvcc(async (frame) => {
       await writeAndDrain(res, () => res.write(frame.data));
+      this.noteStreamFrame("avcc");
     });
     this.bindSubscription(res, unsubscribe);
   }
@@ -810,17 +850,18 @@ export class DeviceSession {
     res.once("error", cleanup);
   }
 
-  private trackStreamResponse(res: ServerResponse): boolean {
+  private trackStreamResponse(res: ServerResponse, endpoint: StreamEndpoint): boolean {
     if (this.isStopped() || res.writableEnded || res.destroyed) {
       if (!res.writableEnded && !res.destroyed) res.destroy();
       return false;
     }
 
     this.streamResponses.add(res);
+    this.streamHealth[endpoint].open++;
     const release = () => {
       res.off("close", release);
       res.off("error", release);
-      this.streamResponses.delete(res);
+      if (this.streamResponses.delete(res)) this.streamHealth[endpoint].open--;
     };
     res.once("close", release);
     res.once("error", release);
@@ -842,8 +883,92 @@ export class DeviceSession {
     );
   }
 
-  private handleStreamError(res: ServerResponse, error: unknown): void {
+  private noteStreamFrame(endpoint: StreamEndpoint): void {
+    const health = this.streamHealth[endpoint];
+    health.frames++;
+    health.last_frame_at = new Date().toISOString();
+  }
+
+  /** Coalesce repeated identical renderer failures (client retries) into one counted entry. */
+  private recordRendererEvent(event: DuoRendererEvent): void {
+    if (event.phase === "ready") {
+      this.rendererFailureEvent = undefined;
+      recordEventLogEvent({
+        device: this.udid,
+        source: "capture",
+        kind: "duo.renderer",
+        action: "ready",
+        status: "ok",
+        summary: `Duo renderer ready (${event.firstFrameMs} ms to first frame)`,
+        details: { phase: "ready", "duo.first_frame_ms": event.firstFrameMs },
+      });
+      return;
+    }
+    const { error } = event;
+    logDuoRendererFailure(error);
+    const key = `${error.stage}\u0000${error.reason}`;
+    const details = { phase: "failed", stage: error.stage, reason: error.reason, ...redactHome(error.details) };
+    const previous = this.rendererFailureEvent;
+    if (previous?.key === key && updateEventLogEvent(previous.id, { details: { ...details, count: previous.count + 1 } })) {
+      previous.count++;
+      return;
+    }
+    const entry = recordEventLogEvent({
+      device: this.udid,
+      source: "capture",
+      kind: "duo.renderer",
+      action: "failed",
+      status: "error",
+      summary: `Duo renderer ${error.stage} failed: ${error.reason}`,
+      details: { ...details, count: 1 },
+    });
+    this.rendererFailureEvent = { id: entry.id, key, count: 1 };
+  }
+
+  /** JSON-safe live state for `/api/diagnostics` / `serve-sim doctor`. */
+  async diagnostics(): Promise<Record<string, unknown>> {
+    let native: unknown = null;
+    if (this.capture.diagnostics) {
+      try {
+        native = JSON.parse(await this.capture.diagnostics());
+      } catch (error) {
+        native = { error: error instanceof Error ? error.message : String(error) };
+      }
+    } else {
+      native = { error: "native capture diagnostics unavailable in this build" };
+    }
+    return {
+      udid: this.udid,
+      phase: this.phase,
+      screen: this.screenConfig(),
+      streams: structuredClone(this.streamHealth),
+      native,
+      duo: {
+        ...this.duo.diagnostics(),
+        primary_panel: this.primaryDuoPanel ?? null,
+        active_panel: this.activePanel(),
+        followed_cover: this.followedCover ?? null,
+      },
+      hid: {
+        device_hub_input_shadowed: this.deviceHubShadowed ?? null,
+        sockets: this.hidSockets.size,
+      },
+    };
+  }
+
+  private handleStreamError(res: ServerResponse, error: unknown, endpoint?: StreamEndpoint): void {
+    if (endpoint) {
+      this.streamHealth[endpoint].last_error = {
+        at: new Date().toISOString(),
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof DuoRendererError ? { stage: error.stage } : {}),
+      };
+    }
     if (res.writableEnded || res.destroyed) return;
+    if (error instanceof DuoRendererError && !res.headersSent) {
+      this.sendJson(res, 503, duoRendererErrorBody(error));
+      return;
+    }
     if (res.headersSent) {
       res.destroy(error instanceof Error ? error : new Error(String(error)));
       return;
@@ -879,6 +1004,15 @@ const sessions = new Map<string, DeviceSession>();
  * failures are surfaced by stream endpoints and evict the session so the next
  * request can retry. The session otherwise lives until `closeDeviceSession`.
  */
+/** Live sessions only; never creates or starts one (diagnostics must not open capture). */
+export function liveDeviceSessions(udid?: string | null): DeviceSession[] {
+  if (udid) {
+    const session = sessions.get(udid);
+    return session ? [session] : [];
+  }
+  return [...sessions.values()];
+}
+
 export function getDeviceSession(udid: string): DeviceSession {
   let session = sessions.get(udid);
   if (!session) {
