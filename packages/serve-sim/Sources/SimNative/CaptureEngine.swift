@@ -33,8 +33,10 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
 
     init(
         encoder: E,
+        diagnostics: EncoderDiagnostics? = nil,
         onFrame: @escaping @isolated(any) (E.Encoded) async -> Void
     ) {
+        let codec = String(describing: E.self).replacingOccurrences(of: "Encoder", with: "")
         let (stream, continuation) = AsyncStream.makeStream(
             of: Frame.self,
             // drop old frames if there's backpressure
@@ -46,9 +48,17 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
             for await frame in stream {
                 do {
                     let encoded = try await encoder.encode(frame)
+                    diagnostics?.recordSuccess()
                     await onFrame(encoded)
                 } catch {
-                    print("error encoding \(E.self) frame: \(error)")
+                    // One line per distinct failure plus periodic counts; the
+                    // per-frame print used to flood the log (x20 per second).
+                    let size = frame.pixelBuffer.dimensions
+                    if let diagnostics {
+                        diagnostics.recordFailure(codec: codec, error: error, width: size.width, height: size.height)
+                    } else {
+                        print("error encoding \(E.self) frame: \(error)")
+                    }
                     continue
                 }
             }
@@ -76,6 +86,7 @@ actor CaptureEngine {
 
     // mjpeg is stateless so we can share a single encoder instance
     private let mjpegEncoder = MJPEGEncoder()
+    private let encoderDiagnostics = EncoderDiagnostics()
 
     private(set) var screenSize = Dimensions(width: 0, height: 0)
     private var consumers = [UUID: CaptureConsuming]()
@@ -86,6 +97,20 @@ actor CaptureEngine {
 
     func setPreferredScreenSize(width: Int, height: Int) async {
         await frameCapture.setPreferredScreenSize(width: width, height: height)
+    }
+
+    /// JSON snapshot for `serve-sim doctor`: display selection + encoder state.
+    func diagnostics() async -> String {
+        let capture = await frameCapture.diagnosticsJSON()
+        let encoders = jsonString(encoderDiagnostics.snapshot())
+        let phaseName: String
+        switch phase {
+        case .unstarted: phaseName = "unstarted"
+        case .starting: phaseName = "starting"
+        case .running: phaseName = "running"
+        case .stopped: phaseName = "stopped"
+        }
+        return "{\"phase\":\"\(phaseName)\",\"consumers\":\(consumers.count),\"capture\":\(capture),\"encoders\":\(encoders)}"
     }
 
     func start() async throws {
@@ -130,7 +155,7 @@ actor CaptureEngine {
         encoder: E,
         onFrame: sending @escaping @isolated(any) (E.Encoded) async -> Void
     ) -> (@Sendable () async -> Void) {
-        let consumer = CaptureConsumer(encoder: encoder) { [weak self] encoded in
+        let consumer = CaptureConsumer(encoder: encoder, diagnostics: encoderDiagnostics) { [weak self] encoded in
             guard let self, await self.phase == .running else { return }
             await onFrame(encoded)
         }
@@ -165,7 +190,7 @@ actor CaptureEngine {
     func addAVCCConsumer(
         onFrame: sending @escaping (Dimensions, Data, Int32) async -> Void
     ) -> (@Sendable () async -> Void) {
-        addConsumer(encoder: AVCCEncoder()) { [weak self] encoded in
+        addConsumer(encoder: AVCCEncoder(diagnostics: encoderDiagnostics)) { [weak self] encoded in
             let flagDescription: Int32 = 1 << 0
             let flagKeyframe: Int32 = 1 << 1
 
@@ -219,10 +244,12 @@ actor MJPEGEncoder: FrameEncoder {
 actor AVCCEncoder: FrameEncoder {
     private static let timeout: Duration = .milliseconds(500)
 
-    let h264Encoder = H264Encoder(fps: 60)
+    let h264Encoder: H264Encoder
     var forceKeyframe = true
 
-    init() {}
+    init(diagnostics: EncoderDiagnostics? = nil) {
+        h264Encoder = H264Encoder(fps: 60, diagnostics: diagnostics)
+    }
 
     func encode(_ frame: Frame) async throws -> H264Encoder.Encoded? {
         // TODO: cancel after timeout using TaskGroup
