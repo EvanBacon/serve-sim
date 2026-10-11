@@ -44,6 +44,11 @@ import UniformTypeIdentifiers
     private let fieldOfView: Float = 2 * atan(36 / (2 * 200.0)) * 180 / .pi
 
     init(modelURL: URL) async throws {
+        // Create RealityKit's shared engine here on the main actor. The catalog
+        // initializer is nonisolated async, so on macOS 26 it runs on the
+        // cooperative pool, and creating the engine there trips RealityKit's
+        // main-queue assertion (SIGTRAP).
+        renderer = try RealityRenderer()
         // Load the folding geometry, then apply Device Hub's neutral shell palette.
         let catalog = try await Entity.ConfigurationCatalog(from: modelURL)
         let loaded = try await Entity(from: catalog, configurations: ["color": "Dark"])
@@ -62,7 +67,6 @@ import UniformTypeIdentifiers
         hardwareProjection = try DuoHardwareProjection(entity: inner.0)
         coverProjection = try DuoScreenProjection(slot: cover, inner: false)
         innerProjection = try DuoScreenProjection(slot: inner, inner: true)
-        renderer = try RealityRenderer()
         subject.removeFromParent()
         rest.addChild(subject)
         wrapper.addChild(rest)
