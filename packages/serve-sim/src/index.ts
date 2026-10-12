@@ -43,6 +43,8 @@ import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
 import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
 import { shareHost } from "./share-host";
+import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
+import type { SimulatorOrientation } from "./client/types";
 
 /** Env var naming a remote preview for the input subcommands (same as --url). */
 const REMOTE_URL_ENV = "SERVE_SIM_URL";
@@ -835,10 +837,33 @@ function deviceLabelsForEvents(events: EventLogEntry[]): Map<string, string> {
   return labels;
 }
 
-async function gesture(jsonStr: string, deviceArg?: string) {
+/**
+ * Orientation to remap CLI touches by. `SimHID.touch` reads x/y in the native
+ * portrait frame even after the UI rotates, so a point taken from a landscape
+ * screenshot must be converted the same way the web viewer does. Returns
+ * undefined (send as-is) for portrait, `--raw`, or when /config is unreachable.
+ */
+async function touchInputOrientation(
+  state: InputTarget,
+  raw: boolean | undefined,
+): Promise<SimulatorOrientation | undefined> {
+  if (raw) return undefined;
+  const url = configUrlForWsUrl(state.wsUrl);
+  if (!url) return undefined;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return undefined;
+    return cliInputOrientation(await res.json());
+  } catch (err) {
+    debugCli("touch orientation lookup failed for %s: %o", url, err);
+    return undefined;
+  }
+}
+
+async function gesture(jsonStr: string, deviceArg?: string, raw?: boolean) {
   const state = await resolveInputTarget(deviceArg);
 
-  let touch: { type: string; x: number; y: number };
+  let touch: { type: string; x: number; y: number; edge?: number };
   try {
     touch = JSON.parse(jsonStr);
   } catch {
@@ -846,12 +871,15 @@ async function gesture(jsonStr: string, deviceArg?: string) {
     process.exit(1);
   }
 
+  const orientation = await touchInputOrientation(state, raw);
+  const rawTouch = displayTouchToRaw(touch, orientation);
+
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl, { headers: state.headers });
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify(touch));
+      const json = new TextEncoder().encode(JSON.stringify(rawTouch));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x03;
       msg.set(json, 1);
@@ -866,7 +894,7 @@ async function gesture(jsonStr: string, deviceArg?: string) {
   });
 }
 
-async function tap(xArg: string, yArg: string, deviceArg?: string) {
+async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean) {
   const x = Number(xArg);
   const y = Number(yArg);
   if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
@@ -876,11 +904,12 @@ async function tap(xArg: string, yArg: string, deviceArg?: string) {
     process.exit(1);
   }
   const state = await resolveInputTarget(deviceArg);
+  const orientation = await touchInputOrientation(state, raw);
   return new Promise<void>((resolve, reject) => {
     const ws = new WebSocket(state.wsUrl, { headers: state.headers });
     ws.binaryType = "arraybuffer";
     const send = (type: "begin" | "end") => {
-      const json = new TextEncoder().encode(JSON.stringify({ type, x, y }));
+      const json = new TextEncoder().encode(JSON.stringify(displayTouchToRaw({ type, x, y }, orientation)));
       const msg = new Uint8Array(1 + json.length);
       msg[0] = 0x03;
       msg.set(json, 1);
@@ -1991,13 +2020,18 @@ Examples:
   });
 
 const deviceOpt = ["-d, --device <udid>", "Target a specific simulator (udid or name)"] as const;
+const rawOpt = [
+  "--raw",
+  "Send coords in the device's native portrait frame (skip landscape remapping)",
+] as const;
 
 program
   .command("gesture")
   .description("Send a touch gesture")
   .argument("<json>", 'Gesture JSON, e.g. \'{"type":"begin","x":0.5,"y":0.5}\'')
   .option(...deviceOpt)
-  .action((json: string, opts) => gesture(json, opts.device));
+  .option(...rawOpt)
+  .action((json: string, opts) => gesture(json, opts.device, opts.raw));
 
 program
   .command("tap")
@@ -2005,7 +2039,8 @@ program
   .argument("<x>", "X coord, normalized 0..1")
   .argument("<y>", "Y coord, normalized 0..1")
   .option(...deviceOpt)
-  .action((x: string, y: string, opts) => tap(x, y, opts.device));
+  .option(...rawOpt)
+  .action((x: string, y: string, opts) => tap(x, y, opts.device, opts.raw));
 
 program
   .command("button")
