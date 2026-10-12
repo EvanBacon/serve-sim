@@ -76,13 +76,13 @@ PORT=3599                       # a free port that isn't someone's preview
 TOKEN=$(openssl rand -hex 24)   # the shared secret
 
 cd <serve-sim-checkout>
-node packages/serve-sim/dist/serve-sim.js --detach -p "$PORT" --auth-token "$TOKEN" "$UDID"
 ```
 
-`--detach` prints one line of JSON and exits, leaving the helper running. **Read the port back from that JSON** rather than assuming it; serve-sim picks the next free port if `PORT` is taken:
+`--detach` prints one line of JSON and exits, leaving the helper running. **Read the port back from that JSON** rather than assuming it; serve-sim picks the next free port if `PORT` is taken. Run this once:
 
 ```bash
 PORT=$(node packages/serve-sim/dist/serve-sim.js --detach -p "$PORT" --auth-token "$TOKEN" "$UDID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["port"])')
+test -n "$PORT" || { echo "serve-sim --detach failed; see the error above" >&2; exit 1; }
 ```
 
 Sanity-check locally (loopback needs no token):
@@ -180,6 +180,8 @@ function frame(tag, payload) {
 }
 
 const ws = new WebSocket(`${wsBase}/helper/${process.env.UDID}/ws`, { headers });
+// The server only sends 0x82 once the screen size is known; don't hang forever.
+setTimeout(() => { console.error("no config frame in 10s"); process.exit(1); }, 10_000).unref();
 
 let sent = false;
 ws.on("message", (data) => {
