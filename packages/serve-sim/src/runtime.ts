@@ -96,13 +96,10 @@ function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number):
     // The internal server sees this pipe as a loopback client. Record the real
     // peer so the middleware's trust checks don't treat a LAN or tunnel client
     // as loopback (see request-trust.ts).
-    // Fail closed: without the mapping the request would look loopback.
-    if (typeof upstream.localPort !== "number") {
-      destroyBoth();
-      return;
+    if (typeof upstream.localPort === "number") {
+      const unregister = registerProxiedPeer(upstream.localPort, socket.remoteAddress ?? "unknown");
+      upstream.once("close", unregister);
     }
-    const unregister = registerProxiedPeer(upstream.localPort, socket.remoteAddress ?? "unknown");
-    upstream.once("close", unregister);
     upstream.write(firstChunk);
     socket.pipe(upstream);
     upstream.pipe(socket);

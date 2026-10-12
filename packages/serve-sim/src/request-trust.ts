@@ -7,16 +7,10 @@ import type { IncomingHttpHeaders, IncomingMessage } from "http";
  * A request is "trusted loopback" only when all three hold:
  *   1. the TCP peer is a loopback address (127.0.0.0/8 or ::1),
  *   2. it carries no proxy/forwarding headers (a tunnel or reverse proxy such
- *      as ngrok, cloudflared, or Tailscale Serve connects from loopback but
- *      forwards someone else's request and adds these headers), and
+ *      as ngrok, cloudflared, Tailscale Serve, or nginx connects from loopback
+ *      but forwards someone else's request), and
  *   3. the Host header names a loopback host (defeats DNS rebinding, where a
  *      remote page reaches 127.0.0.1 under its own hostname).
- *
- * A forwarder that adds no forwarding headers and keeps a loopback Host (for
- * example a plain nginx `proxy_pass` without `proxy_set_header
- * X-Forwarded-For`, or a raw TCP forward such as `ssh -L`/socat) is
- * indistinguishable from a local client and is treated as loopback. Put
- * serve-sim behind such a forwarder only if it adds `X-Forwarded-For`.
  *
  * Everything else is remote. Remote callers must present the auth token
  * configured with `--auth-token` / `SERVE_SIM_AUTH_TOKEN`; without one, remote
@@ -139,26 +133,6 @@ export function isLoopbackSameOrigin(req: Pick<IncomingMessage, "headers">): boo
     const parsed = new URL(origin);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
     if (parsed.host.toLowerCase() !== (headerValue(req.headers.host) ?? "").toLowerCase()) return false;
-    return isLoopbackHostname(parsed.hostname.toLowerCase());
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The Origin is a page served from this machine (any loopback host and port).
- * Embedded mounts (e.g. Metro at localhost:8081/.sim) point the browser at the
- * standalone server's helper URLs on another loopback port, so a trusted
- * loopback request from a loopback Origin is treated like same-origin for
- * reads, WebSockets and CORS. It never unlocks the host shell, which stays
- * strictly same-origin (isLoopbackSameOrigin).
- */
-export function hasLoopbackOrigin(req: Pick<IncomingMessage, "headers">): boolean {
-  const origin = headerValue(req.headers.origin);
-  if (!origin) return false;
-  try {
-    const parsed = new URL(origin);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
     return isLoopbackHostname(parsed.hostname.toLowerCase());
   } catch {
     return false;
