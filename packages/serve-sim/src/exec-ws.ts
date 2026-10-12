@@ -110,7 +110,12 @@ function wireExecSocket(
     // only for authed sockets — strictly less exposure than the routes' own
     // direct (tokenless same-origin) GET surface.
     const pathOnly = path.split("?")[0]!;
-    if (!path.startsWith("/") || !ssePrefixes.some((p) => pathOnly === p)) {
+    // Reject control chars / spaces before http.request (ERR_UNESCAPED_CHARACTERS).
+    if (
+      !path.startsWith("/") ||
+      /[\u0000-\u001f\u007f\s]/.test(path) ||
+      !ssePrefixes.some((p) => pathOnly === p)
+    ) {
       send({ sub, end: true, error: "path not allowed" });
       return;
     }
@@ -120,21 +125,27 @@ function wireExecSocket(
       send({ sub, end: true, error: "no local port" });
       return;
     }
-    const upstream = httpRequest(
-      {
-        host: "127.0.0.1",
-        port: serverPort,
-        path,
-        headers: { accept: "text/event-stream" },
-      },
-      (res) => {
-        res.on("data", (chunk: Buffer) => send({ sub, data: chunk.toString("utf-8") }));
-        res.on("end", () => {
-          subscriptions.delete(sub);
-          send({ sub, end: true });
-        });
-      },
-    );
+    let upstream;
+    try {
+      upstream = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: serverPort,
+          path,
+          headers: { accept: "text/event-stream" },
+        },
+        (res) => {
+          res.on("data", (chunk: Buffer) => send({ sub, data: chunk.toString("utf-8") }));
+          res.on("end", () => {
+            subscriptions.delete(sub);
+            send({ sub, end: true });
+          });
+        },
+      );
+    } catch {
+      send({ sub, end: true, error: "bad path" });
+      return;
+    }
     upstream.on("error", () => {
       subscriptions.delete(sub);
       send({ sub, end: true });

@@ -481,6 +481,16 @@ function devtoolsProxyTarget(rawUrl: string, prefix: string): { upstreamPath: st
   return { upstreamPath: `/devtools${suffix}${parsed.search}` };
 }
 
+/** Pathname the routers already match on (dot-segments / `//host` collapsed). */
+function requestPathname(rawUrl: string): string {
+  try {
+    return new URL(rawUrl || "/", "http://serve-sim.local").pathname;
+  } catch {
+    const q = rawUrl.indexOf("?");
+    return q === -1 ? rawUrl || "/" : rawUrl.slice(0, q) || "/";
+  }
+}
+
 function helperProxyTarget(rawUrl: string, prefix: string): { device: string | null; upstreamPath: string } | null {
   const parsed = new URL(rawUrl, "http://serve-sim.local");
   if (parsed.pathname !== prefix && !parsed.pathname.startsWith(`${prefix}/`)) {
@@ -1389,16 +1399,19 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const rawUrl: string = req.url ?? "";
     const qIndex = rawUrl.indexOf("?");
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
+    // Same pathname helperProxyTarget / devtoolsProxyTarget match on, so a
+    // `/x/../.sim/...` or `//host/.sim/...` request cannot skip the auth gate.
+    const pathname = requestPathname(rawUrl);
     const requestedDevice = queryDevice(rawUrl);
     const selectedDevice = requestedDevice ?? options?.device ?? null;
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
     const trustedLoopback = isTrustedLoopback(req);
 
-    if (ownsPath(url)) {
+    if (ownsPath(pathname)) {
       // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
       // token on every route, including the preview page itself.
       if (!trustedLoopback) {
-        if (bootstrapAuthCookie(req, res, rawUrl, url)) return;
+        if (bootstrapAuthCookie(req, res, rawUrl, pathname)) return;
         const access = remoteAccess(req, authToken);
         if (!access.ok) {
           sendAccessDenied(res, access);
@@ -1415,7 +1428,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     }
 
     const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
-    if (helperTarget) {
+    if (helperTarget && ownsPath(pathname)) {
       const device = helperTarget.device ?? selectedDevice;
       // The device's helper endpoints are served from an in-process
       // NativeCapture/NativeHid DeviceSession.
@@ -2153,8 +2166,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
     const rawUrl = req.url ?? "";
     const selectedDevice = queryDevice(rawUrl) ?? options?.device ?? null;
-    const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
-    const devtoolsTarget = devtoolsProxyTarget(rawUrl, devtoolsPrefix);
+    const pathname = requestPathname(rawUrl);
+    const helperTarget = ownsPath(pathname) ? helperProxyTarget(rawUrl, helperPrefix) : null;
+    const devtoolsTarget = ownsPath(pathname) ? devtoolsProxyTarget(rawUrl, devtoolsPrefix) : null;
     if (devtoolsTarget) {
       (async () => {
         try {
@@ -2207,8 +2221,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const handleProxyUpgrade = middleware.handleUpgrade;
   middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
     const rawUrl = req.url ?? "";
-    const qIndex = rawUrl.indexOf("?");
-    const pathname = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
+    const pathname = requestPathname(rawUrl);
     if (ownsPath(pathname)) {
       if (!isTrustedLoopback(req)) {
         const access = remoteAccess(req, authToken);

@@ -358,6 +358,74 @@ describe("remote browser cookie bootstrap", () => {
   });
 });
 
+
+// Embedded mounts (Metro/Expo at `/.sim`) must gate on the same normalized
+// pathname the helper/devtools routers use — otherwise `/x/../.sim/...` and
+// `//host/.sim/...` skip the auth token (N2).
+describe("embedded basePath remote gate", () => {
+  const EMBED_BASE = "/.sim";
+  let embedded: { server: Server; port: number };
+
+  function listenEmbedded(authToken?: string): Promise<{ server: Server; port: number }> {
+    const middleware = simMiddleware({
+      basePath: EMBED_BASE,
+      execToken: EXEC_TOKEN,
+      device: DEVICE,
+      authToken,
+    });
+    const server = createServer((req, res) => {
+      middleware(req, res, async () => {
+        if (!res.headersSent) res.statusCode = 404;
+        res.end("host-app");
+      });
+    });
+    server.on("upgrade", (req, socket, head) => middleware.handleUpgrade(req, socket as Socket, head));
+    return new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", () =>
+        resolve({ server, port: (server.address() as AddressInfo).port }),
+      );
+    });
+  }
+
+  beforeAll(async () => {
+    embedded = await listenEmbedded(AUTH_TOKEN);
+  });
+  afterAll(() => embedded.server.close());
+
+  const helperConfig = `${EMBED_BASE}/helper/${DEVICE}/config`;
+  const bypassPaths = [
+    `/x/..${helperConfig}`,
+    `/foo/bar/../..${helperConfig}`,
+    `//evil${helperConfig}`,
+    `/%2e%2e${helperConfig}`,
+  ];
+
+  test("canonical helper path is refused remotely without the token", async () => {
+    expect((await send(embedded.port, helperConfig, { headers: PROXY })).status).toBe(401);
+  });
+
+  test("dot-segment, absolute-form and %2e%2e targets are gated", async () => {
+    for (const path of bypassPaths) {
+      const r = await send(embedded.port, path, { headers: PROXY });
+      expect({ path, status: r.status }).toEqual({ path, status: 401 });
+    }
+  });
+
+  test("canonical helper path works with the token", async () => {
+    const r = await send(embedded.port, helperConfig, {
+      headers: { ...PROXY, Authorization: `Bearer ${AUTH_TOKEN}` },
+    });
+    // No live session → empty config JSON (or 404); never unauthorized.
+    expect(r.status).not.toBe(401);
+    expect(r.status).not.toBe(403);
+  });
+
+  test("the host app's own routes are untouched", async () => {
+    expect((await send(embedded.port, "/host-only", { headers: PROXY })).status).toBe(404);
+    expect((await send(embedded.port, "/host-only")).body).toBe("host-app");
+  });
+});
+
 // Under Bun, servePreview pipes plain HTTP through a TCP front server, so the
 // internal server's peer is always 127.0.0.1. A real LAN connection must still
 // be classified as remote.
