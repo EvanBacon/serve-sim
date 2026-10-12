@@ -90,7 +90,6 @@ function wireExecSocket(
   serverPort: number | undefined,
   opts: ExecChannelOptions,
   shellAllowed: boolean,
-  upstreamHeaders: Record<string, string>,
 ): void {
   let authed = false;
   const subscriptions = new Map<number, { destroy: () => void }>();
@@ -121,14 +120,12 @@ function wireExecSocket(
       send({ sub, end: true, error: "no local port" });
       return;
     }
-    let upstream: ReturnType<typeof httpRequest>;
-    try {
-      upstream = httpRequest(
+    const upstream = httpRequest(
       {
         host: "127.0.0.1",
         port: serverPort,
         path,
-        headers: { accept: "text/event-stream", ...upstreamHeaders },
+        headers: { accept: "text/event-stream" },
       },
       (res) => {
         res.on("data", (chunk: Buffer) => send({ sub, data: chunk.toString("utf-8") }));
@@ -137,12 +134,7 @@ function wireExecSocket(
           send({ sub, end: true });
         });
       },
-      );
-    } catch {
-      // e.g. a path with characters http.request rejects synchronously.
-      send({ sub, end: true, error: "invalid path" });
-      return;
-    }
+    );
     upstream.on("error", () => {
       subscriptions.delete(sub);
       send({ sub, end: true });
@@ -248,33 +240,16 @@ export function createExecUpgradeHandler(opts: ExecChannelOptions) {
     }
     const shellAllowed = (opts.allowShell ?? defaultAllowShell)(req);
 
-    // Port for SSE loopback requests: prefer the socket's own local port.
-    // Fall back to the Host header (Bun's upgrade socket may not expose it)
-    // only when Host names a loopback address, so a caller can't aim the
-    // loopback request at some other local service.
-    let serverPort = (socket as Socket).localPort ?? (req.socket as Socket | undefined)?.localPort;
+    // Port for SSE loopback requests: prefer the socket's own local port,
+    // fall back to the Host header (Bun's upgrade socket may not expose it).
+    let serverPort = (socket as Socket).localPort;
     if (!serverPort) {
-      const host = req.headers.host ?? "";
-      const hostPort = Number(host.split(":").pop());
-      if (/^(127\.0\.0\.1|localhost|\[::1\]):\d+$/i.test(host) && Number.isFinite(hostPort) && hostPort > 0) {
-        serverPort = hostPort;
-      }
-    }
-
-    // SSE subscriptions loop back through our own HTTP server. For a socket
-    // that is not trusted loopback, carry its identity and credentials so the
-    // looped-back request is gated (and redacted) exactly like a direct one.
-    const upstreamHeaders: Record<string, string> = {};
-    if (!shellAllowed) {
-      upstreamHeaders["x-forwarded-for"] = req.socket?.remoteAddress ?? "remote";
-      for (const name of ["authorization", "cookie"] as const) {
-        const value = req.headers[name];
-        if (typeof value === "string") upstreamHeaders[name] = value;
-      }
+      const hostPort = Number((req.headers.host ?? "").split(":")[1]);
+      if (Number.isFinite(hostPort) && hostPort > 0) serverPort = hostPort;
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      wireExecSocket(ws, serverPort, opts, shellAllowed, upstreamHeaders);
+      wireExecSocket(ws, serverPort, opts, shellAllowed);
     });
     return true;
   };

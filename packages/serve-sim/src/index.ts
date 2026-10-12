@@ -28,6 +28,10 @@ import { setUiOption, uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
+import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
+
+/** Env var naming a remote preview for the input subcommands (same as --url). */
+const REMOTE_URL_ENV = "SERVE_SIM_URL";
 import {
   parsePreviewPanes,
   parseSimulatorTheme,
@@ -621,25 +625,102 @@ function killStreams(deviceArg?: string) {
   console.log(JSON.stringify({ disconnected: true, devices }));
 }
 
+/** Options shared by the input subcommands for driving a remote server. */
+let remoteInputOptions: { url?: string; authToken?: string } = {};
+
+function remoteInputUrl(): string | undefined {
+  const value = (remoteInputOptions.url ?? process.env[REMOTE_URL_ENV] ?? "").trim();
+  return value === "" ? undefined : value;
+}
+
+/** A server the input subcommands can reach, local or remote. */
+interface InputTarget {
+  device: string;
+  /** Preview base URL (no trailing slash). */
+  url: string;
+  wsUrl: string;
+  headers: Record<string, string>;
+}
+
+/**
+ * Resolve where an input subcommand sends its frames. Without `--url` /
+ * `SERVE_SIM_URL` this reads the local state file in `$TMPDIR/serve-sim`.
+ * With one, it asks the remote preview's `/api` which simulator it serves
+ * (pass a UDID with `-d` to pick one) and connects to
+ * `<url>/helper/<udid>/ws`, sending `--auth-token` / `SERVE_SIM_AUTH_TOKEN`
+ * as a bearer token.
+ */
+async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
+  const token = resolveAuthToken(remoteInputOptions.authToken);
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const remoteUrl = remoteInputUrl();
+  if (!remoteUrl) {
+    const state = readState(deviceArg);
+    if (!state) {
+      console.error("No serve-sim server running. Run `serve-sim` first.");
+      process.exit(1);
+    }
+    return { device: state.device, url: state.url, wsUrl: state.wsUrl, headers };
+  }
+
+  let base: URL;
+  try {
+    base = new URL(remoteUrl.endsWith("/") ? remoteUrl : `${remoteUrl}/`);
+  } catch {
+    console.error(`Invalid --url / ${REMOTE_URL_ENV}: ${remoteUrl}`);
+    process.exit(1);
+  }
+  const api = new URL("api", base);
+  if (deviceArg) api.searchParams.set("device", deviceArg);
+  let res: Response;
+  try {
+    res = await fetch(api, { headers });
+  } catch (err) {
+    console.error(`Failed to reach serve-sim at ${base.origin}: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  if (res.status === 401 || res.status === 403) {
+    console.error(
+      `serve-sim at ${base.origin} refused the request (HTTP ${res.status}). ` +
+        `Pass --auth-token or set ${AUTH_TOKEN_ENV} to the server's token.`,
+    );
+    process.exit(1);
+  }
+  if (!res.ok) {
+    console.error(`serve-sim at ${base.origin} returned HTTP ${res.status} for /api`);
+    process.exit(1);
+  }
+  const config = await res.json().catch(() => null) as { device?: string } | null;
+  const device = config?.device;
+  if (!device) {
+    console.error(
+      deviceArg
+        ? `serve-sim at ${base.origin} is not serving ${deviceArg}. Pass the simulator UDID with -d.`
+        : `serve-sim at ${base.origin} is not serving a simulator.`,
+    );
+    process.exit(1);
+  }
+  const ws = new URL(`helper/${encodeURIComponent(device)}/ws`, base);
+  ws.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  return { device, url: base.toString().replace(/\/$/, ""), wsUrl: ws.toString(), headers };
+}
+
 async function eventLog(
   deviceArg?: string,
   opts: { json?: boolean; limit?: string } = {},
 ) {
-  const udid = deviceArg ? resolveDevice(deviceArg) : undefined;
-  const state = readState(udid);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
+  const remote = remoteInputUrl() !== undefined;
+  const udid = deviceArg ? (remote ? deviceArg : resolveDevice(deviceArg)) : undefined;
+  const state = await resolveInputTarget(udid);
 
-  const url = new URL("/api/event-log", state.url);
+  const url = new URL("api/event-log", state.url.endsWith("/") ? state.url : `${state.url}/`);
   if (udid) url.searchParams.set("device", state.device);
   const limit = parseEventLogLimit(opts.limit);
   if (limit != null) url.searchParams.set("limit", String(limit));
 
   let payload: { events: EventLogEntry[] };
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: state.headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     payload = await res.json() as { events: EventLogEntry[] };
   } catch (err) {
@@ -694,11 +775,7 @@ function deviceLabelsForEvents(events: EventLogEntry[]): Map<string, string> {
 }
 
 async function gesture(jsonStr: string, deviceArg?: string) {
-  const state = readState(deviceArg);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
+  const state = await resolveInputTarget(deviceArg);
 
   let touch: { type: string; x: number; y: number };
   try {
@@ -709,7 +786,7 @@ async function gesture(jsonStr: string, deviceArg?: string) {
   }
 
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
+    const ws = new WebSocket(state.wsUrl, { headers: state.headers });
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
@@ -737,13 +814,9 @@ async function tap(xArg: string, yArg: string, deviceArg?: string) {
     console.error("  Example: serve-sim tap 0.5 0.9   # near bottom-center");
     process.exit(1);
   }
-  const state = readState(deviceArg);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
+  const state = await resolveInputTarget(deviceArg);
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
+    const ws = new WebSocket(state.wsUrl, { headers: state.headers });
     ws.binaryType = "arraybuffer";
     const send = (type: "begin" | "end") => {
       const json = new TextEncoder().encode(JSON.stringify({ type, x, y }));
@@ -811,18 +884,13 @@ async function typeText(
     throw err;
   }
 
-  const state = readState(deviceArg);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
-
-  await sendKeyEventsToWs(state.wsUrl, events);
+  const state = await resolveInputTarget(deviceArg);
+  await sendKeyEventsToWs(state.wsUrl, events, undefined, state.headers);
 }
 
-function openHidSocket(wsUrl: string): Promise<WebSocket> {
+function openHidSocket(wsUrl: string, headers: Record<string, string> = {}): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl, { headers });
     ws.binaryType = "arraybuffer";
     ws.onopen = () => resolve(ws);
     ws.onerror = () => {
@@ -841,13 +909,8 @@ function sendHid(ws: WebSocket, tag: number, payload: object): void {
 }
 
 async function fold(hinge: number, deviceArg?: string) {
-  const state = readState(deviceArg);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
-
-  const ws = await openHidSocket(state.wsUrl);
+  const state = await resolveInputTarget(deviceArg);
+  const ws = await openHidSocket(state.wsUrl, state.headers);
   const FOLD_TAG = 0x0e;
   return new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -873,11 +936,6 @@ async function fold(hinge: number, deviceArg?: string) {
 }
 
 async function rotate(orientation: string, deviceArg?: string) {
-  const state = readState(deviceArg);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
 
   const valid = new Set([
     "portrait",
@@ -892,7 +950,8 @@ async function rotate(orientation: string, deviceArg?: string) {
     process.exit(1);
   }
 
-  const ws = await openHidSocket(state.wsUrl);
+  const state = await resolveInputTarget(deviceArg);
+  const ws = await openHidSocket(state.wsUrl, state.headers);
   sendHid(ws, 0x07, { orientation });
   setTimeout(() => { ws.close(); }, 50);
 }
@@ -911,17 +970,13 @@ const HID_BUTTON_CODES: Record<string, { page: number; usage: number }> = {
 };
 
 async function button(buttonName = "home", deviceArg?: string) {
-  const state = readState(deviceArg);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
+  const state = await resolveInputTarget(deviceArg);
 
   const hid = HID_BUTTON_CODES[buttonName];
   const payload = hid ? { button: buttonName, ...hid } : { button: buttonName };
 
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
+    const ws = new WebSocket(state.wsUrl, { headers: state.headers });
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
@@ -963,14 +1018,10 @@ async function caDebug(option: string, stateRaw: string, deviceArg?: string) {
     process.exit(1);
   }
 
-  const stateFile = readState(deviceArg);
-  if (!stateFile) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
+  const stateFile = await resolveInputTarget(deviceArg);
 
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(stateFile.wsUrl);
+    const ws = new WebSocket(stateFile.wsUrl, { headers: stateFile.headers });
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       const json = new TextEncoder().encode(JSON.stringify({ option: resolved, enabled }));
@@ -989,13 +1040,9 @@ async function caDebug(option: string, stateRaw: string, deviceArg?: string) {
 
 // Ask the helper to invoke -[SimDevice simulateMemoryWarning].
 async function memoryWarning(deviceArg?: string) {
-  const stateFile = readState(deviceArg);
-  if (!stateFile) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
-    process.exit(1);
-  }
+  const stateFile = await resolveInputTarget(deviceArg);
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(stateFile.wsUrl);
+    const ws = new WebSocket(stateFile.wsUrl, { headers: stateFile.headers });
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       ws.send(new Uint8Array([0x09]));
@@ -1690,6 +1737,11 @@ async function serve(
   } else {
     console.log("  - Network: \x1b[2muse --host 0.0.0.0 to expose on the LAN\x1b[0m");
   }
+  if (resolveAuthToken(undefined)) {
+    console.log("  - Remote:  non-loopback requests require the auth token");
+  } else if (exposedToLan) {
+    console.log("  - Remote:  \x1b[33mrefused (no --auth-token); only this machine can connect\x1b[0m");
+  }
   console.log("");
 
   // Exit cleanly on Ctrl+C
@@ -1737,9 +1789,13 @@ program
   .option(
     "--host <addr>",
     "Interface to bind the preview server to. Use 0.0.0.0 to expose on the " +
-      "LAN — only on trusted networks: the preview exposes a token-gated " +
-      "shell-exec route.",
+      "LAN. Non-loopback clients need --auth-token; the host shell route is " +
+      "loopback-only.",
     "127.0.0.1",
+  )
+  .option(
+    "--auth-token <token>",
+    `Token required for any non-loopback or proxied request (LAN, tunnels). Also read from ${AUTH_TOKEN_ENV}.`,
   )
   .option("--detach", "Spawn helper and exit (daemon mode)")
   .option(
@@ -1802,6 +1858,11 @@ Examples:
   serve-sim --kill                       Stop all streams`,
   )
   .action(async (devices: string[], opts) => {
+    // Hand the token to the middleware (and to a --detach child) through the
+    // environment so it never appears in `ps` output of the spawned server.
+    if (typeof opts.authToken === "string" && opts.authToken.trim() !== "") {
+      process.env[AUTH_TOKEN_ENV] = opts.authToken.trim();
+    }
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -1929,6 +1990,25 @@ program
   .option("-j, --json", "Print JSON")
   .option("-n, --limit <count>", "Maximum number of events")
   .action((opts) => eventLog(opts.device, { json: opts.json, limit: opts.limit }));
+
+// Input subcommands can drive a remote preview (e.g. through an
+// authenticated tunnel) instead of the local state file.
+const REMOTE_INPUT_COMMANDS = new Set([
+  "gesture", "tap", "button", "type", "rotate", "fold", "ca-debug", "memory-warning", "event-log",
+]);
+for (const cmd of program.commands) {
+  if (!REMOTE_INPUT_COMMANDS.has(cmd.name())) continue;
+  cmd
+    .option("--url <url>", `Remote serve-sim preview URL (or ${REMOTE_URL_ENV}); pass a UDID with -d`)
+    .option("--auth-token <token>", `Auth token for the remote preview (or ${AUTH_TOKEN_ENV})`)
+    .hook("preAction", (_command, action) => {
+      // The root command also declares --auth-token (for `serve`), and
+      // commander lets root options match after the subcommand name, so read
+      // the merged view rather than only this command's options.
+      const o = action.optsWithGlobals() as { url?: string; authToken?: string };
+      remoteInputOptions = { url: o.url, authToken: o.authToken };
+    });
+}
 
 // `camera` and `permissions` keep their own dedicated argument parsers (the
 // camera verb has nested sub-verbs and source flags; permissions has a

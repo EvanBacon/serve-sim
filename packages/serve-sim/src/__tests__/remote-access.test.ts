@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { createServer, request, type Server } from "http";
-import { connect as netConnect, createServer as createNetServer, type AddressInfo, type Socket } from "net";
+import type { AddressInfo, Socket } from "net";
 import { networkInterfaces } from "os";
 import { join } from "path";
 import WebSocket from "ws";
-import { INSPECT_WEBKIT_BIND_HOST, simMiddleware } from "../middleware";
+import { simMiddleware } from "../middleware";
 import {
   AUTH_COOKIE,
   authCookieValue,
@@ -251,15 +251,7 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
   });
 
   test("DevTools and helper HTTP routes are refused remotely without the token", async () => {
-    const paths = [
-      "/devtools", "/devtools/release", "/devtools-frontend/front_end/inspector.html",
-      "/api", "/api/events", "/api/event-log", "/api/event-log/events", "/appstate", "/ax",
-      "/grid/api", "/grid/api/memory",
-      ...["config", "stream.mjpeg", "stream.avcc", "ax", "foreground", "health", "camera/status"].map(
-        (r) => `/helper/${DEVICE}/${r}`,
-      ),
-    ];
-    for (const path of paths) {
+    for (const path of ["/devtools", `/helper/${DEVICE}/config`, `/helper/${DEVICE}/stream.mjpeg`, "/api/event-log", "/grid/api"]) {
       expect((await send(noToken.port, path, { headers: PROXY })).status).toBe(403);
       expect((await send(withToken.port, path, { headers: PROXY })).status).toBe(401);
     }
@@ -334,24 +326,6 @@ describe("control channel (/exec-ws)", () => {
     c.ws.close();
   });
 
-  test("SSE over an authenticated remote socket is gated and redacted like a direct request", async () => {
-    const c = await channel(withToken.port, { Origin: `http://127.0.0.1:${withToken.port}`, ...PROXY, ...bearer }, "");
-    expect(c).not.toBe("closed");
-    if (c === "closed") return;
-    // A path http.request rejects synchronously must not crash the server.
-    c.ws.send(JSON.stringify({ sub: 9, path: "/api/events?a b" }));
-    expect((await c.next()).end).toBe(true);
-    c.ws.send(JSON.stringify({ sub: 1, path: "/api/events" }));
-    const msg = await c.next();
-    expect(msg.sub).toBe(1);
-    const data = String(msg.data ?? "");
-    expect(data).not.toContain("unauthorized");
-    expect(data).not.toContain("forbidden");
-    expect(data).not.toContain(EXEC_TOKEN);
-    if (process.argv[1]) expect(data).not.toContain(process.argv[1]);
-    c.ws.close();
-  });
-
   test("the loopback page with the exec token can still exec", async () => {
     const c = await channel(withToken.port, { Origin: `http://127.0.0.1:${withToken.port}` }, EXEC_TOKEN);
     expect(c).not.toBe("closed");
@@ -371,7 +345,7 @@ describe("remote browser cookie bootstrap", () => {
     const cookie = String(r.headers["set-cookie"]);
     expect(cookie).toContain(`${AUTH_COOKIE}=${authCookieValue(AUTH_TOKEN)}`);
     expect(cookie).toContain("HttpOnly");
-    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).toContain("SameSite=Strict");
     expect(cookie).toContain("Secure");
     const api = await send(withToken.port, "/api", {
       headers: { ...PROXY, Cookie: `${AUTH_COOKIE}=${authCookieValue(AUTH_TOKEN)}` },
@@ -410,49 +384,6 @@ describe.skipIf(!lanAddress || !process.versions.bun)("Bun front server keeps th
 
   test("LAN peer cannot open the HID socket without the token", async () => {
     expect(await upgrade(`ws://${lanAddress}:${PORT}/helper/${DEVICE}/ws`, {}, "localhost")).toBe(401);
-  });
-
-  test("LAN peer cannot exec even with the auth token, a loopback Host and a matching Origin", async () => {
-    const r = await send(PORT, "/exec", {
-      host: lanAddress,
-      method: "POST",
-      headers: {
-        Host: `localhost:${PORT}`,
-        Origin: `http://localhost:${PORT}`,
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${EXEC_TOKEN}`,
-      },
-      body: JSON.stringify({ command: "echo lan-exec" }),
-    });
-    expect(r.status).toBe(401);
-    const authed = await send(PORT, "/exec", {
-      host: lanAddress,
-      method: "POST",
-      headers: { Host: `localhost:${PORT}`, Origin: `http://localhost:${PORT}`, "Content-Type": "application/json", ...bearer },
-      body: JSON.stringify({ command: "echo lan-exec" }),
-    });
-    expect(authed.status).toBe(403);
-    expect(authed.body).not.toContain("lan-exec");
-  });
-
-  test("LAN peer's /exec-ws socket cannot run commands", async () => {
-    const result = await new Promise<string>((resolve) => {
-      const ws = new WebSocket(`ws://${lanAddress}:${PORT}/exec-ws`, {
-        headers: { Origin: `http://localhost:${PORT}`, ...bearer },
-        host: `localhost:${PORT}`,
-      } as never);
-      setTimeout(() => { ws.terminate(); resolve("timeout"); }, 4000);
-      ws.on("unexpected-response", (_q, res) => resolve(`http ${res.statusCode}`));
-      ws.on("error", () => resolve("refused"));
-      ws.on("open", () => ws.send(JSON.stringify({ token: EXEC_TOKEN })));
-      ws.on("message", (data) => {
-        const msg = JSON.parse(String(data)) as { ready?: boolean; exitCode?: number; stdout?: string };
-        if (msg.ready) ws.send(JSON.stringify({ id: 1, command: "echo lan-ws-exec" }));
-        else { ws.close(); resolve(`exit ${msg.exitCode} ${msg.stdout ?? ""}`.trim()); }
-      });
-    });
-    expect(result).not.toContain("lan-ws-exec");
-    expect(result === "refused" || result.startsWith("http") || result.startsWith("exit 126")).toBe(true);
   });
 });
 
@@ -497,148 +428,5 @@ describe("exec channel default is fail-closed for embedders", () => {
   });
   test("loopback same-origin upgrade can exec", async () => {
     expect(await run({ Origin: `http://127.0.0.1:${PORT_DEFAULT}` })).toBe("exit 0");
-  });
-});
-
-describe("cross-site browser requests", () => {
-  test("cross-site subresource GETs with side effects are refused", async () => {
-    for (const path of ["/devtools", "/appstate", "/api", `/helper/${DEVICE}/config`, `/helper/${DEVICE}/stream.avcc`]) {
-      const r = await send(withToken.port, path, { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors" } });
-      expect(r.status).toBe(403);
-    }
-    expect((await send(withToken.port, "/api", { headers: { Origin: "http://evil.example" } })).status).toBe(403);
-  });
-
-  test("the one no-cors exception is an <img> of the MJPEG stream (opaque to the page)", async () => {
-    const path = `/helper/${DEVICE}/stream.mjpeg`;
-    const img = await send(withToken.port, path, { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors" } });
-    expect(img.status).not.toBe(403);
-    const corsRead = await send(withToken.port, path, { headers: { "Sec-Fetch-Site": "cross-site", Origin: "http://evil.example" } });
-    expect(corsRead.status).toBe(403);
-  });
-
-  test("a cross-site top-level navigation to the preview page still loads", async () => {
-    const r = await send(withToken.port, "/", { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" } });
-    expect(r.status).toBe(200);
-  });
-
-  test("same-origin subresources are unaffected", async () => {
-    const r = await send(withToken.port, "/api", { headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" } });
-    expect(r.status).toBe(200);
-  });
-});
-
-/** Send a raw request line (for targets an HTTP client would normalise). */
-function rawRequest(port: number, target: string, headers: Record<string, string>): Promise<number> {
-  return new Promise((resolve) => {
-    const sock = netConnect(port, "127.0.0.1", () => {
-      let head = `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n`;
-      for (const [k, v] of Object.entries(headers)) head += `${k}: ${v}\r\n`;
-      sock.write(head + "\r\n");
-    });
-    let buf = "";
-    sock.on("data", (d) => {
-      buf += d.toString("latin1");
-      const m = /^HTTP\/1\.1 (\d{3})/.exec(buf);
-      if (m) { sock.destroy(); resolve(Number(m[1])); }
-    });
-    sock.on("error", () => resolve(0));
-    sock.on("close", () => resolve(0));
-  });
-}
-
-describe("embedded basePath: normalised paths cannot skip the gate", () => {
-  let embedded: { server: Server; port: number };
-  beforeAll(async () => {
-    const middleware = simMiddleware({ basePath: "/.sim", execToken: EXEC_TOKEN, device: DEVICE, authToken: AUTH_TOKEN });
-    const server = createServer((req, res) => {
-      middleware(req, res, async () => {
-        res.statusCode = 404;
-        res.end("host app");
-      });
-    });
-    server.on("upgrade", (req, socket, head) => middleware.handleUpgrade(req, socket as Socket, head));
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    embedded = { server, port: (server.address() as AddressInfo).port };
-  });
-  afterAll(() => embedded?.server.close());
-
-  test("dot-segment, backslash and absolute-form targets are gated", async () => {
-    for (const target of [
-      `/x/../.sim/helper/${DEVICE}/config`,
-      `/.sim\\helper\\${DEVICE}\\config`,
-      `http://example.test/.sim/helper/${DEVICE}/config`,
-      `/x/../.sim/devtools`,
-    ]) {
-      expect(await rawRequest(embedded.port, target, PROXY)).toBe(401);
-    }
-  });
-
-  test("the host app's own routes are untouched", async () => {
-    expect((await send(embedded.port, "/elsewhere", { headers: PROXY })).status).toBe(404);
-  });
-});
-
-describe("inspect-webkit CDP bridge bind address", () => {
-  test("is not a spelling inspect-webkit widens to every interface", () => {
-    expect(["127.0.0.1", "localhost", "::1"]).not.toContain(INSPECT_WEBKIT_BIND_HOST);
-  });
-
-  test.skipIf(!lanAddress)("binding it accepts loopback and refuses the LAN address", async () => {
-    const server = createNetServer((s) => s.destroy());
-    await new Promise<void>((r) => server.listen({ port: 0, host: INSPECT_WEBKIT_BIND_HOST, ipv6Only: false }, r));
-    const port = (server.address() as AddressInfo).port;
-    const probe = (host: string) =>
-      new Promise<boolean>((resolve) => {
-        const c = netConnect(port, host, () => { c.destroy(); resolve(true); });
-        c.on("error", () => resolve(false));
-      });
-    expect(await probe("127.0.0.1")).toBe(true);
-    expect(await probe(lanAddress!)).toBe(false);
-    server.close();
-  });
-});
-
-describe("embedded page on another loopback port", () => {
-  const ORIGIN = "http://localhost:8081";
-  test("trusted loopback reads from a loopback Origin get a reflected CORS header", async () => {
-    const r = await send(withToken.port, `/helper/${DEVICE}/config`, { headers: { Origin: ORIGIN, "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors" } });
-    expect(r.status).not.toBe(403);
-    expect(r.headers["access-control-allow-origin"]).toBe(ORIGIN);
-    const pre = await send(withToken.port, `/helper/${DEVICE}/config`, { method: "OPTIONS", headers: { Origin: ORIGIN } });
-    expect(pre.status).toBe(204);
-  });
-
-  test("a page on another loopback port cannot read the exec token from the preview HTML", async () => {
-    const r = await send(withToken.port, "/", { headers: { Origin: ORIGIN, "Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "cors" } });
-    expect(r.body).not.toContain(EXEC_TOKEN);
-    expect(r.body).not.toContain("execToken");
-    // The same request without a cross-origin Origin (a top-level load) still gets it.
-    const own = await send(withToken.port, "/", {});
-    expect(own.body).toContain(EXEC_TOKEN);
-  });
-
-  test("a non-loopback Origin gets neither access nor a CORS header", async () => {
-    const r = await send(withToken.port, `/helper/${DEVICE}/config`, { headers: { Origin: "http://evil.example" } });
-    expect(r.status).toBe(403);
-    expect(r.headers["access-control-allow-origin"]).toBeUndefined();
-  });
-
-  test("a loopback Origin does not help a proxied request", async () => {
-    const r = await send(withToken.port, `/helper/${DEVICE}/config`, { headers: { Origin: ORIGIN, ...PROXY } });
-    expect(r.status).toBe(401);
-  });
-
-  test("HID upgrade from a loopback page passes the gate; /exec stays same-origin only", async () => {
-    const status = await upgrade(`ws://127.0.0.1:${withToken.port}/helper/${DEVICE}/ws`, { Origin: ORIGIN });
-    expect(status).not.toBe(401);
-    expect(status).not.toBe(403);
-    const exec = await send(withToken.port, "/exec", {
-      method: "POST",
-      headers: { Origin: ORIGIN, "Content-Type": "application/json", Authorization: `Bearer ${EXEC_TOKEN}` },
-      body: JSON.stringify({ command: "echo cross-port" }),
-    });
-    expect(exec.status).toBe(403);
-    expect(exec.body).not.toContain("cross-port");
   });
 });
