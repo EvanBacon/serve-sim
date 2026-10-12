@@ -4,7 +4,7 @@ This is how I let an agent that runs on Linux (a cloud agent, a CI job, a bot in
 
 Read it top to bottom the first time. Fill in the values from [Variables](#variables) and the commands paste as-is.
 
-> **Requires the `--auth-token` / `--url` support from the "Require auth for exec and remote access" change.** Older builds have no remote auth and must not be tunneled. See that PR for why.
+> **Depends on [PR #166](https://github.com/EvanBacon/serve-sim/pull/166)** (*Require auth for exec and remote access*). That PR adds `--auth-token` / `SERVE_SIM_AUTH_TOKEN`, `--url` / `SERVE_SIM_URL`, the `?token=` cookie bootstrap, and remote gating. **Keep this guide in draft until #166 lands**, then pin a published version that includes those flags. Check with `node packages/serve-sim/dist/serve-sim.js --help | grep -- --auth-token`; if that prints nothing, stop — this build must not be tunneled.
 
 ## Who runs what
 
@@ -32,7 +32,7 @@ For serve-sim development I use my Mac mini as the Mac. Our bot has a remote she
 
 - Node 20+.
 - Outbound HTTPS/WSS to the tunnel (ngrok, Tailscale) or SSH to the Mac.
-- The serve-sim CLI (`npx serve-sim@<version-with---url>`, or a checkout: `bun install`, then `bun run packages/serve-sim/src/index.ts ...`). Or just the `ws` package for the [direct WebSocket recipe](#direct-websocket-recipe).
+- The serve-sim CLI from a build that includes #166 (`npx serve-sim@<version-after-#166>`, or a checkout of that branch: `bun install`, then `node packages/serve-sim/dist/serve-sim.js ...`). Until #166 is published, prefer the [direct WebSocket recipe](#direct-websocket-recipe) with the `ws` package.
 
 ## Variables
 
@@ -49,8 +49,8 @@ For serve-sim development I use my Mac mini as the Mac. Our bot has a remote she
 The preview server gates every non-loopback route behind `--auth-token`. Still, the tunnel is the outer fence; pick one that only your agent can reach:
 
 1. **SSH local forward (preferred).** No public surface at all. From Linux:
-   `ssh -N -L "$PORT:127.0.0.1:$PORT" mac-user@mac-host`. Then `URL=http://127.0.0.1:$PORT`. The forwarded connection arrives on the Mac from loopback, so set the token anyway (the agent is a remote process over the forward); it's required.
-2. **Tailscale (preferred for long-lived).** Put the Mac and the Linux host on your tailnet and reach the Mac's tailnet IP directly, or `tailscale serve`. Restrict with tailnet ACLs.
+   `ssh -N -L "$PORT:127.0.0.1:$PORT" mac-user@mac-host`. Then `URL=http://127.0.0.1:$PORT`. Over an SSH forward serve-sim sees a loopback client, so your SSH access is the access control; still start serve-sim with `--auth-token` so the same commands work unchanged over any tunnel.
+2. **Tailscale (preferred for long-lived).** On the Mac: `tailscale serve --bg "$PORT"`; URL = the `https://<mac>.<tailnet>.ts.net` address it prints. Restrict with tailnet ACLs. (serve-sim binds to loopback, so the tailnet IP alone won't reach it.)
 3. **ngrok with auth.** `ngrok http "$PORT"` gives an HTTPS URL. serve-sim's `--auth-token` is what actually protects it; keep the URL out of git and chat. Free ngrok injects a browser warning — send `ngrok-skip-browser-warning: 1` on every request. ngrok forwards from loopback with `X-Forwarded-For`, which serve-sim treats as remote, so the token is enforced.
 
 Do not expose the port without a token, and do not pass the token in a URL query except the one-time browser cookie bootstrap (`<URL>/?token=...`), which the server immediately redirects away.
@@ -103,10 +103,11 @@ For SSH, open the forward from Linux instead (previous section) and use `URL=htt
 
 ## Handing the URL and token to the agent
 
-The agent needs exactly two values: `URL` and `TOKEN` (plus `UDID`). Pass them as environment variables to the agent process, or write them to a file the agent reads. Never commit them. The agent uses them two ways:
+The agent needs exactly: the tunnel URL, the auth token, and the UDID. Pass them as environment variables to the agent process, or write them to a file the agent reads. Never commit them.
 
-- The CLI reads `SERVE_SIM_URL` and `SERVE_SIM_AUTH_TOKEN` (or the `--url` / `--auth-token` flags).
-- The direct WebSocket recipe reads `URL`, `TOKEN`, `UDID` from its own env.
+If you have no shell on the Mac, ask the operator for exactly: (1) URL — or SSH user@host and PORT if you'll open the forward, (2) TOKEN, (3) UDID, (4) confirmation that the Mac-side `/health` check printed `{"status":"ok"}`. Pass all of them out-of-band, never in a commit or PR comment.
+
+Export the same names the CLI and the WebSocket recipe both read:
 
 ```bash
 # On the Linux agent:
@@ -119,46 +120,56 @@ export UDID="<same-udid>"
 
 ```bash
 # ngrok free also needs: -H 'ngrok-skip-browser-warning: 1'
-curl -fsS -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" "$SERVE_SIM_URL/helper/$UDID/health"
-curl -fsS -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" "$SERVE_SIM_URL/helper/$UDID/config"
+# Expected: {"status":"ok"} within a few seconds; retry on connection refused.
+curl -fsS --max-time 10 -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" "$SERVE_SIM_URL/helper/$UDID/health"
+# Expected: JSON with non-zero width/height once the helper is ready.
+curl -fsS --max-time 10 -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" "$SERVE_SIM_URL/helper/$UDID/config"
 # Wait until config width/height are non-zero before driving input.
 ```
 
 ## Linux: drive it with the CLI
 
-With `SERVE_SIM_URL` and `SERVE_SIM_AUTH_TOKEN` set, the normal input commands target the Mac:
+**Requires #166.** Until that PR is published, skip this section and use the [direct WebSocket recipe](#direct-websocket-recipe) instead — on mainline builds, `tap`/`button`/`event-log` only read a Mac-local state file and cannot target a remote URL.
+
+With a #166 build and `SERVE_SIM_URL` / `SERVE_SIM_AUTH_TOKEN` set:
 
 ```bash
-serve-sim tap 0.5 0.9 -d "$UDID"       # ack'd; exits non-zero if the tap is not delivered
+serve-sim tap 0.5 0.9 -d "$UDID"       # fire-and-forget; confirm with event-log or a JPEG delta
 serve-sim button home -d "$UDID"
 serve-sim event-log -d "$UDID"         # read back what the device received
 ```
 
-Grab a JPEG for evidence (first frame of the MJPEG stream):
+Grab a JPEG for evidence (first complete MJPEG part — `?raw=1` does **not** strip multipart framing):
 
 ```bash
-curl -fsS -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" \
-  "$SERVE_SIM_URL/helper/$UDID/stream.mjpeg?raw=1" --output - | \
-  head -c 400000 > before.jpg
+curl -sSN --max-time 5 -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" \
+  "$SERVE_SIM_URL/helper/$UDID/stream.mjpeg" | python3 -c '
+import sys,re
+b=sys.stdin.buffer.read()
+m=re.search(rb"Content-Length: (\d+)\r\n\r\n",b)
+if not m: raise SystemExit("no MJPEG part")
+sys.stdout.buffer.write(b[m.end():m.end()+int(m.group(1))])' > before.jpg
+file before.jpg   # expect: JPEG image data
 ```
 
 ## Direct WebSocket recipe
 
 When you don't want the CLI, drive input over one WebSocket. This matches what the server actually handles, verified against a running server:
 
-- Connect to `<ws-base>/helper/<UDID>/ws` (`ws://` or `wss://`), where `<ws-base>` is `URL` with the scheme swapped to ws/wss.
+- Connect to `<ws-base>/helper/<UDID>/ws` (`ws://` or `wss://`), where `<ws-base>` is `SERVE_SIM_URL` with the scheme swapped to ws/wss.
 - Each input is **one binary frame**: a 1-byte tag, then UTF-8 JSON.
 - The tags the server handles are `0x03`-`0x0e` (see [the full list](../../skills/serve-sim/references/endpoints.md#websocket-message-types)). There is no 0x10/0x11 binary-struct format and no `serve-sim-client/touch-codec` package.
-- The server pushes a config frame (first byte `0x82`) on connect and on change; ignore inbound frames you don't need, or read `0x82` for live width/height/orientation.
+- The server pushes a config frame (first byte `0x82`) once the screen size is known and on every change; **wait for it before sending input**.
 - A tap is `0x03` `begin` then `0x03` `end` on the same socket, ~40 ms apart. `x`/`y` are normalized `0..1`.
 
 ```js
-// npm i ws   —   env: URL, TOKEN, UDID
+// Save as tap.mjs; run: npm i ws && node tap.mjs
+// env: SERVE_SIM_URL, SERVE_SIM_AUTH_TOKEN, UDID (as exported above)
 import WebSocket from "ws";
 
-const wsBase = process.env.URL.replace(/^http/, "ws");
+const wsBase = process.env.SERVE_SIM_URL.replace(/^http/, "ws");
 const headers = {
-  Authorization: `Bearer ${process.env.TOKEN}`,
+  Authorization: `Bearer ${process.env.SERVE_SIM_AUTH_TOKEN}`,
   // ngrok free only:
   // "ngrok-skip-browser-warning": "1",
 };
@@ -170,23 +181,24 @@ function frame(tag, payload) {
 
 const ws = new WebSocket(`${wsBase}/helper/${process.env.UDID}/ws`, { headers });
 
+let sent = false;
 ws.on("message", (data) => {
   const buf = Buffer.from(data);
-  if (buf[0] === 0x82) {
-    // server config: {width, height, orientation, ...}
-    console.error("config", JSON.parse(buf.subarray(1).toString("utf8")));
-  }
-});
-
-ws.on("open", () => {
+  if (buf[0] !== 0x82) return; // ignore other server frames
+  console.error("config", JSON.parse(buf.subarray(1).toString("utf8")));
+  if (sent) return;
+  sent = true; // first config = screen is ready
   const x = 0.5, y = 0.9;
-  ws.send(frame(0x03, { type: "begin", x, y }));         // touch down
+  ws.send(frame(0x03, { type: "begin", x, y }));
   setTimeout(() => {
-    ws.send(frame(0x03, { type: "end", x, y }));         // touch up  -> a tap
+    ws.send(frame(0x03, { type: "end", x, y }));
     setTimeout(() => ws.close(), 60);
   }, 40);
 });
+ws.on("error", (e) => { console.error(e.message); process.exit(1); });
 ```
+
+Expected: one `config { width: <px>, height: <px>, orientation: 'portrait' }` line, then exit 0. Verify delivery with `curl -fsS -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" "$SERVE_SIM_URL/api/event-log?device=$UDID&limit=5"`: the newest entry should be a tap at your x/y. Then take a second JPEG and compare it with the first.
 
 Tags you'll actually use: `0x03` touch (`begin`/`move`/`end`), `0x04` button (`{button:"home"}`; hardware buttons also take `{page,usage,phase}`), `0x05` multi-touch, `0x06` key (`{type:"down"|"up", usage}`, USB HID page 0x07), `0x07` orientation (`{orientation:"portrait"|"portrait_upside_down"|"landscape_left"|"landscape_right"}`), `0x08` CoreAnimation debug, `0x09` memory warning (empty body), `0x0a` digital crown, `0x0b` scroll, `0x0c` software keyboard, `0x0d` preferred screen size, `0x0e` Duo pose/hinge.
 
