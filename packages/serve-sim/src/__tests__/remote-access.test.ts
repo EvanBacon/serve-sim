@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "fs";
 import { createServer, request, type Server } from "http";
-import type { AddressInfo, Socket } from "net";
+import { connect, type AddressInfo, type Socket } from "net";
 import { networkInterfaces } from "os";
 import { join } from "path";
 import WebSocket from "ws";
@@ -64,15 +64,155 @@ function send(
   });
 }
 
-/** Attempt a WebSocket upgrade; resolve with "open" or the HTTP status. */
-function upgrade(url: string, headers: Record<string, string> = {}, host?: string): Promise<"open" | number> {
+interface RawRes {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  body: string;
+}
+
+/** Decode a chunked body. Returns null until the terminating chunk has arrived. */
+function decodeChunked(body: Buffer): string | null {
+  let offset = 0;
+  const parts: Buffer[] = [];
+  while (offset < body.length) {
+    const lineEnd = body.indexOf("\r\n", offset);
+    if (lineEnd === -1) return null;
+    const size = Number.parseInt(body.subarray(offset, lineEnd).toString("latin1").split(";")[0]!.trim(), 16);
+    if (!Number.isFinite(size) || size < 0) return null;
+    const dataStart = lineEnd + 2;
+    if (size === 0) return Buffer.concat(parts).toString("utf8");
+    if (body.length < dataStart + size + 2) return null;
+    parts.push(body.subarray(dataStart, dataStart + size));
+    offset = dataStart + size + 2;
+  }
+  return null;
+}
+
+/**
+ * Write an HTTP request as exact bytes over a raw TCP socket.
+ * `0` means the peer closed without a status line; `-1` means the 4000ms timeout.
+ */
+function rawRequest(
+  port: number,
+  target: string,
+  headers: Record<string, string> = {},
+  opts: { method?: string; body?: string; host?: string } = {},
+): Promise<RawRes> {
   return new Promise((resolve) => {
-    const ws = new WebSocket(url, { headers, ...(host ? { host } : {}) } as never);
-    const timer = setTimeout(() => { ws.terminate(); resolve(-1); }, 4000);
-    ws.on("open", () => { clearTimeout(timer); ws.close(); resolve("open"); });
-    ws.on("unexpected-response", (_req, res) => { clearTimeout(timer); resolve(res.statusCode ?? 0); });
-    ws.on("error", () => { clearTimeout(timer); resolve(0); });
+    let settled = false;
+    const socket = connect(port, opts.host ?? "127.0.0.1");
+    let buf = Buffer.alloc(0);
+    const finish = (result: RawRes) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({ status: -1, headers: {}, body: "" }), 4000);
+
+    const parse = (force: boolean): RawRes | null => {
+      const headerEnd = buf.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return null;
+      const lines = buf.subarray(0, headerEnd).toString("latin1").split("\r\n");
+      const status = Number(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/.exec(lines.shift() ?? "")?.[1]);
+      if (!Number.isFinite(status)) return force ? { status: 0, headers: {}, body: "" } : null;
+      const responseHeaders: Record<string, string | string[]> = {};
+      for (const line of lines) {
+        const colon = line.indexOf(":");
+        if (colon === -1) continue;
+        const name = line.slice(0, colon).trim().toLowerCase();
+        const value = line.slice(colon + 1).trim();
+        const existing = responseHeaders[name];
+        if (existing === undefined) responseHeaders[name] = value;
+        else if (Array.isArray(existing)) existing.push(value);
+        else responseHeaders[name] = [existing, value];
+      }
+      const rest = buf.subarray(headerEnd + 4);
+      if (status === 101) return { status, headers: responseHeaders, body: rest.toString("utf8") };
+      const transfer = responseHeaders["transfer-encoding"];
+      const transferValue = Array.isArray(transfer) ? transfer.join(",") : transfer ?? "";
+      if (/chunked/i.test(transferValue)) {
+        const decoded = decodeChunked(rest);
+        if (decoded === null) {
+          return force ? { status, headers: responseHeaders, body: rest.toString("utf8") } : null;
+        }
+        return { status, headers: responseHeaders, body: decoded };
+      }
+      const lengthHeader = responseHeaders["content-length"];
+      const lengthValue = Array.isArray(lengthHeader) ? lengthHeader[0] : lengthHeader;
+      if (lengthValue !== undefined && lengthValue !== "") {
+        const length = Number(lengthValue);
+        if (!Number.isFinite(length) || rest.length < length) {
+          return force ? { status, headers: responseHeaders, body: rest.toString("utf8") } : null;
+        }
+        return { status, headers: responseHeaders, body: rest.subarray(0, length).toString("utf8") };
+      }
+      if (!force) return null;
+      return { status, headers: responseHeaders, body: rest.toString("utf8") };
+    };
+
+    socket.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      const parsed = parse(false);
+      if (parsed) finish(parsed);
+    });
+    socket.on("error", () => {
+      if (buf.length === 0) finish({ status: 0, headers: {}, body: "" });
+    });
+    socket.on("close", () => {
+      const parsed = parse(true);
+      finish(parsed ?? { status: 0, headers: {}, body: "" });
+    });
+
+    const method = opts.method ?? "GET";
+    const provided = new Map(
+      Object.entries(headers).map(([name, value]) => [name.toLowerCase(), { name, value }] as const),
+    );
+    const lines = [`${method} ${target} HTTP/1.1`];
+    if (!provided.has("host")) lines.push(`Host: ${opts.host ?? "127.0.0.1"}`);
+    for (const { name, value } of provided.values()) lines.push(`${name}: ${value}`);
+    if (!provided.has("connection")) lines.push("Connection: close");
+    if (opts.body != null && opts.body !== "" && !provided.has("content-length")) {
+      lines.push(`Content-Length: ${Buffer.byteLength(opts.body)}`);
+    }
+    socket.write(`${lines.join("\r\n")}\r\n\r\n${opts.body ?? ""}`);
   });
+}
+
+/**
+ * Attempt a WebSocket upgrade by writing the handshake bytes directly.
+ * `"open"` is a 101; otherwise the HTTP status (`0` = close with no status, `-1` = timeout).
+ */
+function upgrade(url: string, headers: Record<string, string> = {}, host?: string): Promise<"open" | number> {
+  const parsed = new URL(url);
+  const requestHeaders: Record<string, string> = {
+    Upgrade: "websocket",
+    Connection: "Upgrade",
+    "Sec-WebSocket-Version": "13",
+    "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+    ...headers,
+  };
+  if (host) requestHeaders.Host = host;
+  return rawRequest(Number(parsed.port), `${parsed.pathname}${parsed.search}`, requestHeaders, {
+    host: parsed.hostname,
+  }).then((res) => (res.status === 101 ? "open" : res.status));
+}
+
+/**
+ * Bun 1.3's node:http upgrade socket swallows the rejection status line (the
+ * peer closes and the client sees `0`). A timeout (`-1`) is never a refusal.
+ * `0` counts only while {@link upgradeRejectionsVisible} is false.
+ */
+function expectUpgradeRefused(status: "open" | number, code: number): void {
+  if (!upgradeRejectionsVisible && status === 0) return;
+  expect(status).toBe(code);
+}
+
+/** True when a refused upgrade on the node:http server returns a real status. */
+async function probeUpgradeRejectionVisible(): Promise<boolean> {
+  const status = await upgrade(`ws://127.0.0.1:${noToken.port}/helper/${DEVICE}/ws`, PROXY);
+  return typeof status === "number" && status >= 100;
 }
 
 function listen(authToken?: string): Promise<{ server: Server; port: number }> {
@@ -91,10 +231,19 @@ function listen(authToken?: string): Promise<{ server: Server; port: number }> {
 
 let withToken: { server: Server; port: number };
 let noToken: { server: Server; port: number };
+// Set in beforeAll. False only on Bun 1.3.x, where node:http upgrade writes
+// do not flush a rejection status (the front server still does).
+let upgradeRejectionsVisible = false;
 
 beforeAll(async () => {
   withToken = await listen(AUTH_TOKEN);
   noToken = await listen(undefined);
+  upgradeRejectionsVisible = await probeUpgradeRejectionVisible();
+  if (!upgradeRejectionsVisible && !/^1\.3\./.test(process.versions.bun ?? "")) {
+    throw new Error(
+      `WebSocket upgrade rejections are not visible on ${process.versions.bun ? `bun ${process.versions.bun}` : "this runtime"}; only Bun 1.3.x may hide them`,
+    );
+  }
 });
 
 afterAll(() => {
@@ -261,15 +410,19 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
     for (const port of [noToken.port, withToken.port]) {
       for (const path of [`/helper/${DEVICE}/ws`, "/devtools/page/1"]) {
         const status = await upgrade(`ws://127.0.0.1:${port}${path}`, PROXY);
-        expect(status).toBe(port === noToken.port ? 403 : 401);
-        expect(await upgrade(`ws://127.0.0.1:${port}${path}`, { Origin: "http://evil.example" })).toBe(403);
+        expectUpgradeRefused(status, port === noToken.port ? 403 : 401);
+        expectUpgradeRefused(
+          await upgrade(`ws://127.0.0.1:${port}${path}`, { Origin: "http://evil.example" }),
+          403,
+        );
       }
     }
     // Authenticated remote passes the auth gate (what happens next depends on
-    // the device; here it is not real).
+    // the device; here it is not real). A timeout is not a refusal.
     const authed = await upgrade(`ws://127.0.0.1:${withToken.port}/helper/${DEVICE}/ws`, { ...PROXY, ...bearer });
     expect(authed).not.toBe(401);
     expect(authed).not.toBe(403);
+    expect(authed).not.toBe(-1);
   });
 
   test("helper responses no longer send a wildcard CORS header", () => {
@@ -406,7 +559,9 @@ describe("embedded basePath remote gate", () => {
 
   test("dot-segment, absolute-form and %2e%2e targets are gated", async () => {
     for (const path of bypassPaths) {
-      const r = await send(embedded.port, path, { headers: PROXY });
+      // Exact request-target bytes: Bun's HTTP client rewrites `//evil/...`
+      // to `/evil/...` before the server sees it.
+      const r = await rawRequest(embedded.port, path, PROXY);
       expect({ path, status: r.status }).toEqual({ path, status: 401 });
     }
   });
@@ -452,6 +607,40 @@ describe.skipIf(!lanAddress || !process.versions.bun)("Bun front server keeps th
 
   test("LAN peer cannot open the HID socket without the token", async () => {
     expect(await upgrade(`ws://${lanAddress}:${PORT}/helper/${DEVICE}/ws`, {}, "localhost")).toBe(401);
+  });
+});
+
+// servePreview's TCP front server writes the rejection itself, so the status
+// line is visible on Bun 1.3 even when node:http upgrade sockets swallow it.
+describe.skipIf(!process.versions.bun)("Bun front server shows upgrade rejection statuses", () => {
+  const PORT_AUTH = 3564;
+  const PORT_OPEN = 3565;
+  let withAuth: PreviewServer;
+  let noAuth: PreviewServer;
+
+  beforeAll(async () => {
+    withAuth = await servePreview({
+      port: PORT_AUTH,
+      host: "127.0.0.1",
+      middleware: simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: DEVICE, authToken: AUTH_TOKEN }),
+    });
+    noAuth = await servePreview({
+      port: PORT_OPEN,
+      host: "127.0.0.1",
+      middleware: simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: DEVICE }),
+    });
+  });
+  afterAll(() => {
+    withAuth?.stop(true);
+    noAuth?.stop(true);
+  });
+
+  test("remote-without-token and cross-origin upgrades return exact 401/403", async () => {
+    for (const path of [`/helper/${DEVICE}/ws`, "/devtools/page/1"]) {
+      expect(await upgrade(`ws://127.0.0.1:${PORT_AUTH}${path}`, PROXY)).toBe(401);
+      expect(await upgrade(`ws://127.0.0.1:${PORT_OPEN}${path}`, PROXY)).toBe(403);
+      expect(await upgrade(`ws://127.0.0.1:${PORT_AUTH}${path}`, { Origin: "http://evil.example" })).toBe(403);
+    }
   });
 });
 

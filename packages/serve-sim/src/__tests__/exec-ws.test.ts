@@ -126,6 +126,37 @@ describe("exec-ws control channel", () => {
     channel.close();
   });
 
+  test("sse subscriptions reject control characters and non-latin1 paths", async () => {
+    const channel = await connect(TOKEN);
+    await channel.next(); // ready
+    const guarded = [
+      "/api/events?device=a\r\nX-Injected: 1",
+      "/api/events?device=\u0000",
+      "/api/events?device=\u007f",
+      "/api/events?device=a b",
+      "/api/events\r\nX-Injected: 1",
+      "api/events",
+    ];
+    let sub = 20;
+    for (const path of guarded) {
+      channel.send({ sub, path });
+      const reply = await channel.next();
+      expect({ path, sub: reply.sub, end: reply.end, error: reply.error }).toEqual({
+        path,
+        sub,
+        end: true,
+        error: "path not allowed",
+      });
+      sub++;
+    }
+    channel.send({ sub, path: "/api/events?device=\u0100" });
+    const reply = await channel.next();
+    expect(reply.sub).toBe(sub);
+    expect(reply.end).toBe(true);
+    expect(reply.error).toBe("bad path");
+    channel.close();
+  });
+
   test("sse subscription streams a real middleware route", async () => {
     const channel = await connect(TOKEN);
     await channel.next(); // ready

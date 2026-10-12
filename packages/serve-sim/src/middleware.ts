@@ -1442,12 +1442,29 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // appspot-hosted frontend directly works as a top-level tab, but is flaky
     // inside embedded browser iframes. Serving it from the preview origin keeps
     // the frontend's relative assets and CSP on the local page.
-    if (url === devtoolsFrontendBase || url.startsWith(`${devtoolsFrontendBase}/`)) {
-      const assetPath = url === devtoolsFrontendBase
+    // Match on the normalized pathname (inside the auth gate), not the raw URL:
+    // a raw `%2e%2e` segment would otherwise slip past both the gate and the
+    // traversal check and escape `serve_rev/@rev/` upstream.
+    if (
+      ownsPath(pathname) &&
+      (pathname === devtoolsFrontendBase || pathname.startsWith(`${devtoolsFrontendBase}/`))
+    ) {
+      const assetPath = pathname === devtoolsFrontendBase
         ? "inspector.html"
-        : url.slice(devtoolsFrontendBase.length + 1);
-      // Reject path-traversal segments before they reach the upstream URL.
-      if (assetPath.split("/").some((seg) => seg === "..")) {
+        : pathname.slice(devtoolsFrontendBase.length + 1);
+      // Reject path-traversal segments (raw or percent-encoded) and encoded
+      // separators before they reach the upstream URL.
+      if (
+        assetPath.split("/").some((seg) => {
+          let decoded: string;
+          try {
+            decoded = decodeURIComponent(seg);
+          } catch {
+            return true;
+          }
+          return decoded === "." || decoded === ".." || /[\\/]/.test(decoded);
+        })
+      ) {
         res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
         res.end("Invalid asset path");
         return;
