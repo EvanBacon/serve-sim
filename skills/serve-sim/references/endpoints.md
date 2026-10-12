@@ -23,7 +23,9 @@ This is the per-device binary started for each booted simulator. It serves the v
 | `GET` | `/ax` | JSON accessibility tree (axe-compatible flat-array shape). |
 | `GET` | `/foreground` | JSON `{bundleId: string, pid: number}` of the frontmost app. |
 
-The helper routes are served in-process by the preview server, which applies the auth and origin checks below. (Older standalone helper processes set a wildcard `Access-Control-Allow-Origin: *`; the current in-process server does not, and sends a reflected CORS header only to a trusted loopback page on another port.)
+> Requires serve-sim with [#166](https://github.com/EvanBacon/serve-sim/pull/166) (the auth/exec fix). Older builds send a wildcard `Access-Control-Allow-Origin: *` from the helper routes and have no auth token; never tunnel them.
+
+The helper routes are served in-process by the preview server, which applies the auth and origin checks below. With #166 the helper routes send no `Access-Control-Allow-Origin` header at all, so only same-origin pages can read them from a browser.
 
 ### WebSocket message types
 
@@ -81,6 +83,8 @@ app.use(simMiddleware({ basePath: "/.sim" }));
 ```
 
 ## Authentication
+
+> Requires serve-sim with [#166](https://github.com/EvanBacon/serve-sim/pull/166). Older builds have no `--auth-token`, no loopback/remote distinction, and no `serve_sim_auth` cookie; never expose them beyond loopback.
 
 serve-sim distinguishes a **trusted loopback** request (loopback TCP peer, no proxy/forwarding headers, loopback `Host`) from everything else (LAN, tunnel, reverse proxy, or a rebound `Host` — all "remote").
 
