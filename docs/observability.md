@@ -194,6 +194,8 @@ via the native addon; don't name a binary that doesn't exist.)
 `helper.uptime_ms`. A still-booted sim is not a recycle duration. The orphan is the
 entry with `sim.booted=false` and `decision=recycle-helper`.
 
+- When `recycle-helper` signals a stale helper, keep a module-level `Set<string>` of `device:pid` keys already signalled.
+
 ## Stream and camera (correcting earlier mistakes)
 
 - **#128 is a consumer false-stall, not a dead producer.** The watchdog that fires
