@@ -55,6 +55,15 @@ interface ExecMessage {
   unsub?: number;
 }
 
+/** C0 controls, DEL, or any whitespace: never valid in a subscribe path. */
+function hasControlOrSpace(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return /\s/.test(value);
+}
+
 /** In-process handler for `{id, ui}` requests; resolves to the reply body. */
 export type UiRequestHandler = (payload: unknown) => Promise<Record<string, unknown>>;
 export type CommandResultHandler = (
@@ -113,7 +122,7 @@ function wireExecSocket(
     // Reject control chars / spaces before http.request (ERR_UNESCAPED_CHARACTERS).
     if (
       !path.startsWith("/") ||
-      /[\u0000-\u001f\u007f\s]/.test(path) ||
+      hasControlOrSpace(path) ||
       !ssePrefixes.some((p) => pathOnly === p)
     ) {
       send({ sub, end: true, error: "path not allowed" });
