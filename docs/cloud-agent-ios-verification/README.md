@@ -53,7 +53,23 @@ The preview server gates every non-loopback route behind `--auth-token`. Still, 
 2. **Tailscale (preferred for long-lived).** On the Mac: `tailscale serve --bg "$PORT"`; URL = the `https://<mac>.<tailnet>.ts.net` address it prints. Restrict with tailnet ACLs. (serve-sim binds to loopback, so the tailnet IP alone won't reach it.)
 3. **ngrok with auth.** `ngrok http "$PORT"` gives an HTTPS URL. serve-sim's `--auth-token` is what actually protects it; keep the URL out of git and chat. Free ngrok injects a browser warning — send `ngrok-skip-browser-warning: 1` on every request. ngrok forwards from loopback with `X-Forwarded-For`, which serve-sim treats as remote, so the token is enforced.
 
-> **Raw TCP forwards look local.** serve-sim trusts a request as loopback when the socket peer is loopback, it has no forwarding headers (`X-Forwarded-*`, `Forwarded`, `Via`, `Tailscale-*`, `ngrok-*`, …), and `Host` is loopback. `ssh -L` from the agent's machine is fine. `ssh -R`, `socat`, or a reverse proxy that strips forwarding headers deliver *remote* clients that way, so serve-sim skips the token check for them. Don't use those to expose the port. **Never start a tunneled serve-sim with `--allow-exec`**: the host shell is only safe when nobody but you can reach the port. A remote agent never needs it; every step here works without it.
+### What #166's local-only check refuses through a tunnel
+
+serve-sim decides "local" from the socket alone (`isTrustedLoopback` in `src/request-trust.ts`): the TCP peer must be loopback (`127.0.0.0/8` / `::1`), the request must carry **no** forwarding headers (`Forwarded`, `Via`, `X-Forwarded-*`, `X-Real-IP`, `CF-Connecting-IP`, `Tailscale-*`, `ngrok-*`, …), and `Host` must name a loopback host. Forwarding headers are never trusted; their presence makes the request remote.
+
+A proxy that adds those headers — **nginx with the usual `proxy_set_header X-Forwarded-For` / `X-Real-IP`**, ngrok, Tailscale Serve — is therefore remote, even though it connects from loopback. With `--auth-token` it still gets everything this guide uses:
+
+- the preview page (via the `?token=` cookie bootstrap), `/api`, `/api/event-log` and its SSE stream;
+- `/helper/<udid>/stream.mjpeg`, `stream.avcc`, `config`, `health`, `ax`, `foreground`, and the HID WebSocket `/helper/<udid>/ws`;
+- on `/exec-ws`, SSE subscriptions and simulator settings.
+
+It is refused, with or without the token:
+
+- `POST /exec` and shell commands on `/exec-ws`. `/exec` is off unless the server was started with `--allow-exec` (403 `exec disabled; start with --allow-exec`); with it on, a remote caller gets 403 `exec is only available to loopback clients` (exit 126 on `/exec-ws`).
+- The exec token. No HTTP response ever contains it; it lives only in `$TMPDIR/serve-sim/exec-tokens/<port>.token` (0600) on the Mac, for `serve-sim exec`.
+- Preview host actions (screenshot, camera, permissions, uploads, app install, location, …): `host actions are only available to loopback clients`.
+
+**`ssh -R`, `socat`, and a proxy that strips forwarding headers are *not* refused.** They deliver a remote client from a loopback socket with no forwarding headers, which is indistinguishable from a local one, so serve-sim treats it as trusted loopback: no auth token needed, host actions allowed. (`/exec` would still need `--allow-exec` plus the token file, which the remote side can't read.) Don't use those to expose the port. `ssh -L` from the agent's machine is fine: only people with SSH access to the Mac reach it. **Never start a tunneled serve-sim with `--allow-exec`**; a remote agent never needs it, and every step here works without it.
 
 Do not expose the port without a token, and do not pass the token in a URL query except the one-time browser cookie bootstrap (`<URL>/?token=...`), which the server immediately redirects away.
 
@@ -82,7 +98,7 @@ cd <serve-sim-checkout>
 
 `--detach` prints one line of JSON and exits, leaving the helper running. **Read the port back from that JSON** rather than assuming it; serve-sim picks the next free port if `PORT` is taken.
 
-Stop any server already running for this device first. `--detach` reuses a running server for the same UDID, and with #166 it exits with an error (`…was started with a different --auth-token. Stop it with serve-sim -k <udid>…`) if that server's token doesn't match your new `TOKEN`, or (`…was started with --allow-exec, but it was not given now`) if it was started with `--allow-exec`. `-k` is a no-op when nothing is running. Leave `--allow-exec` off. Run this once:
+Stop any server already running for this device first with `serve-sim -k "$UDID"`. `-k <udid>` reads that device's state file in `$TMPDIR/serve-sim/`, stops the recorded serve-sim process and any serve-sim process still holding its recorded port, then deletes the state file and the port's exec token file. It prints `{"disconnected":true,"device":"<udid>"}` whether or not anything was running, so it's safe to run every time. You need it because `--detach` reuses a running server for the same UDID, and with #166 it refuses (exit 1) when that server's settings differ from this start: `…was started with a different --auth-token` (your fresh `TOKEN` never matches), `…was started without an --auth-token`, or `…was started with --allow-exec, but it was not given now`, each followed by ``Stop it with `serve-sim -k <udid>` ``. Leave `--allow-exec` off. Run this once:
 
 ```bash
 node packages/serve-sim/dist/serve-sim.js -k "$UDID" -q
@@ -229,7 +245,7 @@ Run the rebuilt local CLI (`node packages/serve-sim/dist/serve-sim.js ...`), not
 | 403 only from the tunnel, fine on loopback | Server started without `--auth-token` | Restart serve-sim with `--auth-token` | Mac |
 | `--detach` exits: `already running for <udid> but was started with a different --auth-token` (or `with/without an --auth-token`) | An older server for this UDID has another token | `serve-sim -k "$UDID"`, then rerun the `--detach` step | Mac |
 | `--detach` exits: `already running for <udid> but was started with --allow-exec, but it was not given now` | An older server for this UDID has the host shell on | `serve-sim -k "$UDID"`, then rerun the `--detach` step (without `--allow-exec`) | Mac |
-| 403 `exec disabled; start with --allow-exec` | Something called `/exec`; the host shell is off by default | Remote agents can't use exec. Do host-side work in a Mac shell, and don't enable `--allow-exec` on a tunneled port | Mac |
+| 403 `exec disabled; start with --allow-exec` (or, with it on, `exec is only available to loopback clients`) | Something called `/exec`; the host shell is off by default and never reachable through a tunnel | Remote agents can't use exec. Do host-side work in a Mac shell, and don't enable `--allow-exec` on a tunneled port | Mac |
 | Preview UI tools (screenshot, camera, permissions, drops) fail over the tunnel with `host actions are only available to loopback clients` | Those tools are host actions, served only to a loopback same-origin page | Expected for a remote browser. Use the stream/HID/CLI routes, or run the action in a Mac shell | Agent |
 | No frames after the Mac idles | Mac slept | Keep `caffeinate -dims`; reopen the stream after wake | Mac |
 | `config` width/height stay 0 | Helper not ready yet | Wait and re-poll `/config`; restart serve-sim if it persists | Mac |
@@ -239,7 +255,7 @@ Run the rebuilt local CLI (`node packages/serve-sim/dist/serve-sim.js ...`), not
 | Taps logged but UI unchanged | Device Hub input not attached | `serve-sim repair-input -d "$UDID"`, then restart serve-sim | Mac |
 | **TCC / permission dialog on the simulator (human only)** | First camera/photos/etc. access | **A person must click it on the Mac** (or script an AX lookup + tap on the Mac). A remote agent cannot dismiss a TCC prompt. | **Human on the Mac** |
 | **Xcode "install additional components" prompt (human only)** | First run of a new Xcode/runtime | **A person must complete it on the Mac.** | **Human on the Mac** |
-| `/helper/<udid>/ax` returns 503 `{"error":"ax_unavailable", ...}` (`/foreground`: `foreground_unavailable`) | AX tree not readable yet, e.g. no app in the foreground | Launch an app first and retry; prove the change with a JPEG delta | Agent |
+| `/helper/<udid>/ax` returns 503 `{"error":"ax_unavailable","message":...}` (`/foreground`: `foreground_unavailable`) | The native AX probe failed. The `message` carries the cause, e.g. `No frontmost application returned for simulator` (Swift `AccessibilityError.noFrontmostApplication`, which is never the `error` code) or `Timed out waiting for accessibility response` | Launch an app first and retry; prove the change with a JPEG delta | Agent |
 
 Steps marked **human only** need someone physically (or via GUI) on the Mac; they can't be done over the tunnel.
 
