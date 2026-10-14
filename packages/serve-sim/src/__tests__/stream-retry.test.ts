@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readStreamError, runStreamWithRetry, streamRetryDelay, type StreamError } from "../client/utils/stream-retry";
+import { abortableSleep, readStreamError, runStreamWithRetry, streamRetryDelay, type StreamError } from "../client/utils/stream-retry";
 
 describe("stream retry backoff", () => {
   test("doubles from 500 ms and caps at 10 s", () => {
@@ -58,5 +58,46 @@ describe("stream retry backoff", () => {
     expect(sleeps).toEqual([500, 1000, 2000, 500, 1000]);
     expect(opens).toBe(1);
     expect(chunks).toEqual([1, 2, 3]);
+  });
+
+  test("abortableSleep removes its abort listener after each sleep (no buildup over retries)", async () => {
+    const controller = new AbortController();
+    const signal = controller.signal;
+    let live = 0;
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    const tracked = new Set<unknown>();
+    signal.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, opts?: AddEventListenerOptions | boolean) => {
+      if (type === "abort" && !tracked.has(listener)) { tracked.add(listener); live++; }
+      add(type, listener, opts);
+    }) as typeof signal.addEventListener;
+    signal.removeEventListener = ((type: string, listener: EventListenerOrEventListenerObject, opts?: EventListenerOptions | boolean) => {
+      if (type === "abort" && tracked.delete(listener)) live--;
+      remove(type, listener, opts);
+    }) as typeof signal.removeEventListener;
+
+    for (let i = 0; i < 50; i++) await abortableSleep(0, signal);
+    expect(live).toBe(0);
+
+    const pending = abortableSleep(60_000, signal);
+    expect(live).toBe(1);
+    controller.abort();
+    await pending;
+  });
+
+  test("an injected sleep that rejects on abort ends the loop without an unhandled rejection", async () => {
+    const controller = new AbortController();
+    await runStreamWithRetry({
+      url: "http://x/stream.mjpeg",
+      signal: controller.signal,
+      fetch: (async () => new Response("{}", { status: 503 })) as unknown as typeof fetch,
+      connect: () => () => {},
+      onError: () => {},
+      sleep: async () => {
+        controller.abort();
+        throw new DOMException("Aborted", "AbortError");
+      },
+    });
+    expect(controller.signal.aborted).toBe(true);
   });
 });

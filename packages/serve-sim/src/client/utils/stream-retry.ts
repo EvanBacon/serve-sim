@@ -43,9 +43,12 @@ export async function readStreamError(res: Response): Promise<StreamError> {
   }
 }
 
-const defaultSleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
-  const timer = setTimeout(resolve, ms);
-  signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+/** Resolves after `ms`, or early on abort. Never rejects; the abort listener is removed when the timer fires so retries don't pile listeners onto the signal. */
+export const abortableSleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal.aborted) return resolve();
+  const onAbort = () => { clearTimeout(timer); resolve(); };
+  const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+  signal.addEventListener("abort", onAbort, { once: true });
 });
 
 export async function runStreamWithRetry(options: {
@@ -61,7 +64,7 @@ export async function runStreamWithRetry(options: {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }): Promise<void> {
   const doFetch = options.fetch ?? fetch;
-  const sleep = options.sleep ?? defaultSleep;
+  const sleep = options.sleep ?? abortableSleep;
   let failures = 0;
   while (!options.signal.aborted) {
     let error: StreamError;
@@ -99,6 +102,8 @@ export async function runStreamWithRetry(options: {
     failures++;
     const retryInMs = streamRetryDelay(failures);
     options.onError({ ...error, retryInMs });
-    await sleep(retryInMs, options.signal);
+    // Callers fire-and-forget this loop, so a sleep that rejects (e.g. on
+    // abort) must not escape; the loop condition decides whether to stop.
+    await sleep(retryInMs, options.signal).catch(() => {});
   }
 }
