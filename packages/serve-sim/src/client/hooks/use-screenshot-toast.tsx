@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import { toast as sonnerToast } from "sonner";
 import { ScreenshotToast } from "../components/screenshot-toast";
-import { execOnHost, shellEscape } from "../utils/exec";
+import { hostAction } from "../utils/exec";
 
 export type ScreenshotToast = {
   id: string;
@@ -22,12 +22,6 @@ export type ScreenshotToast = {
 // read and act on it.
 const SAVED_DISMISS_MS = 3500;
 const ERROR_DISMISS_MS = 4000;
-
-function timestampSlug(): string {
-  // 2026-06-11T14-12-44-123 — filesystem-safe, sorts chronologically. Keep the
-  // milliseconds so two captures in the same second don't clobber one file.
-  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
-}
 
 export function useScreenshotToast(deviceUdid?: string | null, display?: "primary" | "primary-1") {
   const toastRef = useRef<ScreenshotToast | null>(null);
@@ -55,7 +49,7 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
 
   const reveal = useCallback(() => {
     const t = toastRef.current;
-    if (t?.path) void execOnHost(`open -R ${shellEscape(t.path)}`);
+    if (t?.path) void hostAction("revealScreenshot", { path: t.path });
   }, []);
 
   const scheduleDismiss = useCallback((ms: number) => {
@@ -107,17 +101,12 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
     const id = crypto.randomUUID();
     render({ id, status: "saving", phase: "in" });
 
-    // Resolve $HOME shell-side so the saved path comes back absolute — a "~"
-    // path would survive shellEscape() as a literal tilde and break the later
-    // `open -R`. The command echoes the path it wrote on success.
-    const file = `$HOME/Desktop/serve-sim-screenshot-${timestampSlug()}.png`;
-    const capCmd =
-      `F="${file}"; xcrun simctl io ${shellEscape(deviceUdid)} screenshot${display ? ` --display=${display}` : ""} "$F" && printf '%s' "$F"`;
-
+    // The server picks the absolute `~/Desktop/serve-sim-screenshot-<ts>.png`
+    // path and returns it on success.
     let path: string;
     try {
-      const res = await execOnHost(capCmd);
-      path = res.stdout.trim();
+      const res = await hostAction("screenshot", { udid: deviceUdid, ...(display ? { display } : {}) });
+      path = typeof res.path === "string" ? res.path : "";
       if (res.exitCode !== 0 || !path) {
         render({ id, status: "error", phase: "in", message: res.stderr.trim() || "Screenshot failed" }, ERROR_DISMISS_MS);
         return;
@@ -134,14 +123,11 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
 
     render({ id, status: "saved", phase: "in", path }, SAVED_DISMISS_MS);
 
-    // Best-effort thumbnail: downscale to a temp PNG, base64 it back, then
-    // delete it. Failures (sips missing, etc.) just leave the placeholder.
-    const thumb = `/tmp/serve-sim-screenshot-thumb-${id}.png`;
+    // Best-effort thumbnail: the server downscales to a temp PNG and returns
+    // it base64'd. Failures (sips missing, etc.) just leave the placeholder.
     try {
-      const tr = await execOnHost(
-        `sips -Z 320 ${shellEscape(path)} --out ${shellEscape(thumb)} >/dev/null 2>&1 && base64 -i ${shellEscape(thumb)}; rm -f ${shellEscape(thumb)}`,
-      );
-      const b64 = tr.stdout.replace(/\s+/g, "");
+      const tr = await hostAction("screenshotThumbnail", { path });
+      const b64 = typeof tr.data === "string" ? tr.data.replace(/\s+/g, "") : "";
       if (b64) {
         const current = toastRef.current;
         if (current?.id === id) {

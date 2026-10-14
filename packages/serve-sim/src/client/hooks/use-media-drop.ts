@@ -6,7 +6,7 @@ import {
   DROP_HOST_PATH_TYPE,
   uploadDroppedFile,
 } from "../utils/drop";
-import type { ExecResult } from "../utils/exec";
+import type { HostActionFn } from "../utils/exec";
 
 type UploadCallbacks = {
   onUploadStart: (name: string, kind: DropKind) => string;
@@ -16,7 +16,7 @@ type UploadCallbacks = {
 
 export function startHostPathDrop({
   hostPath,
-  exec,
+  host,
   udid,
   onUploadStart,
   onUploadProgress,
@@ -24,7 +24,7 @@ export function startHostPathDrop({
   onHostPathDrop,
 }: {
   hostPath: string;
-  exec: (command: string) => Promise<ExecResult>;
+  host: HostActionFn;
   udid: string;
   onHostPathDrop?: (path: string) => void;
 } & UploadCallbacks): Promise<void> {
@@ -32,7 +32,7 @@ export function startHostPathDrop({
   const name = hostPath.split("/").pop() ?? "image";
   const id = onUploadStart(name, "media");
   onUploadProgress(id, null);
-  return addHostMediaToPhotos(hostPath, exec, udid)
+  return addHostMediaToPhotos(hostPath, host, udid)
     .then(() => onUploadEnd(id, true))
     .catch((err) =>
       onUploadEnd(id, false, err instanceof Error ? err.message : "Add failed"),
@@ -40,7 +40,7 @@ export function startHostPathDrop({
 }
 
 export function useMediaDrop({
-  exec,
+  host,
   udid,
   enabled,
   onUploadStart,
@@ -49,7 +49,7 @@ export function useMediaDrop({
   onUnsupported,
   onHostPathDrop,
 }: {
-  exec: (command: string) => Promise<ExecResult>;
+  host: HostActionFn;
   udid: string | undefined;
   enabled: boolean;
   onUploadStart: (name: string, kind: DropKind) => string;
@@ -76,7 +76,7 @@ export function useMediaDrop({
       if (hostPath) {
         void startHostPathDrop({
           hostPath,
-          exec,
+          host,
           udid,
           onUploadStart,
           onUploadProgress,
@@ -96,7 +96,7 @@ export function useMediaDrop({
           continue;
         }
         const id = onUploadStart(file.name, kind);
-        uploadDroppedFile(file, kind, exec, udid, (p) => onUploadProgress(id, p))
+        uploadDroppedFile(file, kind, host, udid, (p) => onUploadProgress(id, p))
           .then(() => onUploadEnd(id, true))
           .catch((err) =>
             onUploadEnd(id, false, err instanceof Error ? err.message : "Upload failed"),
@@ -106,7 +106,7 @@ export function useMediaDrop({
     [
       enabled,
       udid,
-      exec,
+      host,
       onUploadStart,
       onUploadProgress,
       onUploadEnd,
