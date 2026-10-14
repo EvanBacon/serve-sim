@@ -67,7 +67,7 @@ This is a Node middleware that serves the preview UI and proxies state. It can b
 | `GET` | `/.sim` | The preview HTML page (React UI showing the simulator stream). |
 | `GET` | `/.sim/api` | JSON state: `{device, pid, port, url, streamUrl, wsUrl}`. |
 | `GET` | `/.sim/ax` | SSE stream of accessibility tree snapshots. |
-| `POST` | `/.sim/exec` | Run a shell command on the host. **Requires a bearer token.** |
+| `POST` | `/.sim/exec` | Run a shell command on the host. **Off unless started with `--allow-exec`; requires a bearer token.** |
 | `POST` | `/.sim/appstate` | SSE-like stream of frontmost-app changes. |
 | `GET` | `/.sim/devtools` | WebKit Inspector bridge for in-app web views. |
 | `POST` | `/grid/api` | List running devices. |
@@ -85,7 +85,7 @@ app.use(simMiddleware({ basePath: "/.sim" }));
 ## Authentication
 
 - The Swift stream server has no authentication. It listens on `0.0.0.0` by default — be careful when tunneling.
-- The preview middleware's `/.sim/exec` endpoint requires a bearer token. The token is printed when `serve-sim` starts and is stored in the per-device state file under `$TMPDIR/serve-sim/server-{udid}.json`. Use `Authorization: Bearer <token>`.
+- The preview middleware's `/.sim/exec` endpoint is disabled unless the server was started with `--allow-exec` (otherwise `403 {"error":"exec disabled; start with --allow-exec"}`). When enabled it is loopback-only and requires a bearer token that no HTTP response contains: it is written to an owner-only (0600) file under `$TMPDIR/serve-sim/exec-tokens/<port>.token` and removed when the server stops. Prefer `serve-sim exec <command>`, which reads that file; otherwise send `Authorization: Bearer <token>` with a same-origin `Origin` header.
 
 ## Discovering the live URLs
 

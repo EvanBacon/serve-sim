@@ -5,7 +5,7 @@
  *
  * Run: bun --watch dev.ts
  *
- * The whole host surface — the exec control socket, devtools, grid/device
+ * The whole host surface — the control socket (host actions), devtools, grid/device
  * list, and every SSE side-channel (`/logs`, `/appstate`, `/ax`,
  * `/api/events`) — is served by the production `simMiddleware`, mounted on a
  * Node `http` server exactly like `servePreview` does. This file only layers
@@ -17,7 +17,6 @@
  *     published `serve-sim` the middleware would otherwise resolve.
  */
 import { readdirSync, readFileSync, existsSync, watch } from "fs";
-import { randomBytes } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { Socket } from "net";
 import { join, resolve } from "path";
@@ -45,23 +44,30 @@ function resolveServeSimBin(): string {
 }
 const SERVE_SIM_BIN = resolveServeSimBin();
 
-// The in-page UI routes host requests (shell exec, simulator settings, SSE
-// side-channels) through one `/exec-ws` control socket, authenticated with
-// this per-process token (injected into the page config + the middleware).
-const EXEC_TOKEN = randomBytes(32).toString("base64url");
+// The in-page UI routes host requests (host actions, simulator settings, SSE
+// side-channels) through one `/exec-ws` control socket; none of them need the
+// host shell. Arbitrary `/exec` commands stay off unless opted in with
+// `SERVE_SIM_ALLOW_EXEC=1` (like `serve-sim --allow-exec`), and even then
+// require the exec token, which the page never receives.
+const ALLOW_EXEC = process.env.SERVE_SIM_ALLOW_EXEC === "1";
 
 // The same connect-style middleware production runs. `basePath: "/"` normalizes
 // to an empty base internally, matching the `previewConfigForState(state, "")`
 // endpoints we inject into the dev HTML shell below.
 // The dev server owns its HTTP server and forwards upgrades (below), so it
 // proxies helper/DevTools sockets through the single port like production.
-const middleware = simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, proxyHelpers: true });
+const middleware = simMiddleware({
+  basePath: "/",
+  allowExec: ALLOW_EXEC,
+  proxyHelpers: true,
+  serveSimBin: SERVE_SIM_BIN,
+});
 
 // The dev server serves at the root (empty base), so endpoints look like
-// `/logs`, `/grid/api`, etc. We point the advertised CLI binary at our local
-// source so the sidebar's `serve-sim …` calls run from this checkout.
+// `/logs`, `/grid/api`, etc. The host actions' `serve-sim …` calls (camera,
+// permissions) run from this checkout via `serveSimBin` above.
 function devPreviewConfig(state: ServeSimState) {
-  return previewConfigForState(state, "", SERVE_SIM_BIN, EXEC_TOKEN, undefined, true);
+  return previewConfigForState(state, "", SERVE_SIM_BIN, ALLOW_EXEC, undefined, true);
 }
 
 // ─── Client bundler with watch ───
@@ -205,10 +211,10 @@ async function buildHtml(selectedDevice?: string | null): Promise<string> {
   const state = selectServeSimState(await readServeSimStates(), selectedDevice);
   // Even with no helper attached the page polls the host (list/boot devices)
   // and streams `/api/events` over the control socket, so it always needs the
-  // basePath + exec token.
+  // basePath.
   const config = state
     ? devPreviewConfig(state)
-    : { basePath: "", execToken: EXEC_TOKEN };
+    : { basePath: "", ...(ALLOW_EXEC ? { allowExec: true } : {}) };
   const configScript = `<script>window.__SIM_PREVIEW__=${JSON.stringify(config)}</script>`;
 
   return `<!doctype html>

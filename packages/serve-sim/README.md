@@ -107,6 +107,8 @@ serve-sim fold <deg> [-d udid]  Set a Duo hinge angle (0–180)
 serve-sim repair-input [-d udid]         Repair Device Hub input (restarts apps)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events
+serve-sim exec <command...> [-d udid] Run a host shell command through a server
+                                      started with --allow-exec
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
@@ -122,6 +124,8 @@ serve-sim camera --stop-webcam [-d udid]
 Options:
   -p, --port <port>   Starting port (preview default: 3200; helper default: 3100)
   -d, --detach        Spawn helper and exit (daemon mode)
+      --allow-exec    Enable the host shell (/exec, `serve-sim exec`, and the
+                      preview's shell-backed tools). Off by default
   -q, --quiet         JSON-only output
       --no-preview    Skip the web UI; stream in foreground only
       --panes <panes> Initially open preview panes: devices, tools, devtools,
@@ -157,6 +161,7 @@ serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
 serve-sim --panes devices,tools --fit  # start with selected panes open and fit the simulator
 serve-sim --theme dark                 # start the simulator in Dark Mode
+serve-sim --allow-exec                 # enable host-shell tools and `serve-sim exec`
 
 # Type text into the focused field
 serve-sim type "Hello, world!"
@@ -183,6 +188,12 @@ serve-sim camera --stop-webcam
 ```
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
+
+### Host shell (`--allow-exec`)
+
+The preview's `/exec` route runs shell commands on the host, so it is off unless the server is started with `--allow-exec`; otherwise it answers `403 {"error":"exec disabled; start with --allow-exec"}`. Preview tools that shell out (screenshots, camera, permissions, reveal in Finder) need it too. Even when enabled, `/exec` is loopback-only and requires a per-session token that is never sent in any HTTP response: the server writes it to an owner-only file under `$TMPDIR/serve-sim/exec-tokens/` (removed on stop), and `serve-sim exec` reads it from there. A raw TCP forward of the preview port (`ssh -R`, socat) looks like a local client, so only enable `--allow-exec` on a port nobody else can reach.
+
+`--detach` and `--no-preview` reuse a running server only when it was started with the same `--auth-token` (or with none on both sides); otherwise they exit with an error — stop the old server with `serve-sim -k <udid>` first.
 
 ### Camera
 
@@ -272,7 +283,7 @@ app.use(simMiddleware({ basePath: "/.sim" }));
 // → state JSON  at /.sim/api
 ```
 
-The middleware reads the helper's state from `$TMPDIR/serve-sim/` and points the browser at the helper's stream, interaction WebSocket, and WebKit DevTools endpoints. By default those URLs target the helper's own port directly (CORS is wide-open on the helper), so a plain `app.use(...)` mount works without touching your server's WebSocket handling.
+Host-shell features are off unless you pass `allowExec: true`. The middleware reads the helper's state from `$TMPDIR/serve-sim/` and points the browser at the helper's stream, interaction WebSocket, and WebKit DevTools endpoints. By default those URLs target the helper's own port directly (CORS is wide-open on the helper), so a plain `app.use(...)` mount works without touching your server's WebSocket handling.
 
 ### Single-port / remote proxying
 

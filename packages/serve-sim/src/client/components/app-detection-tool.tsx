@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AppWindow, ArrowUpRight } from "lucide-react";
 import { type AppDetails, fetchAppDetails } from "../utils/app-icon";
-import { execOnHost, shellEscape } from "../utils/exec";
+import { hostAction } from "../utils/exec";
 import { CollapsibleSection } from "./collapsible-section";
 
 export function isSystemBundleId(bundleId: string): boolean {
@@ -83,7 +83,7 @@ export function AppDetectionTool({
       pid: currentApp.pid,
       loading: true,
     });
-    fetchAppDetails(execOnHost, udid, currentApp.bundleId).then((extra) => {
+    fetchAppDetails(hostAction, udid, currentApp.bundleId).then((extra) => {
       if (cancelled) return;
       setDetails({
         bundleId: currentApp.bundleId,
@@ -135,7 +135,7 @@ export function AppDetectionTool({
                 details.appPath
                   ? {
                       title: "Reveal in Finder",
-                      onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
+                      onClick: () => { void hostAction("revealApp", { udid, bundleId: details.bundleId }); },
                       icon: (
                         <ArrowUpRight size={11} strokeWidth={2.2} />
                       ),
