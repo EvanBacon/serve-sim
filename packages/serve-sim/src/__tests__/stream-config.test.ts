@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { streamConfigFrom } from "../client/utils/sim-endpoint";
 
-// The middleware injects a minimal `{basePath, execToken}` __SIM_PREVIEW__
-// when no helper is attached (the empty state needs the exec token before a
-// device exists). The client must not treat that as a stream config: doing so
+// The middleware injects a minimal `{basePath, allowExec}` __SIM_PREVIEW__
+// when no helper is attached. The client must not treat that as a stream config: doing so
 // mounts SimulatorView with url=undefined, which fetches /undefined/stream.avcc
 // and — when the api/events correction never arrives — trips the 6s "Stream is
 // not producing frames" watchdog on a page that should show the device picker.
@@ -16,7 +15,7 @@ const fullConfig = {
   port: 3100,
   device: "ABCD-1234",
   basePath: "",
-  execToken: "tok",
+  allowExec: true,
 };
 
 describe("streamConfigFrom", () => {
@@ -26,7 +25,7 @@ describe("streamConfigFrom", () => {
 
   test("rejects the minimal empty-state injection", () => {
     expect(
-      streamConfigFrom({ basePath: "", execToken: "tok" } as never),
+      streamConfigFrom({ basePath: "", allowExec: true } as never),
     ).toBeNull();
   });
 

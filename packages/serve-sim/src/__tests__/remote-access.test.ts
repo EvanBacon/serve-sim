@@ -30,7 +30,7 @@ delete process.env.SERVE_SIM_AUTH_TOKEN;
 const EXEC_TOKEN = "exec-token-for-tests";
 const AUTH_TOKEN = "remote-auth-token-for-tests";
 // Pinned to a device that has no state file, so the preview serves the
-// minimal empty-state config (which still carries the exec token locally).
+// minimal empty-state config.
 const DEVICE = "00000000-0000-0000-0000-000000000000";
 const PROXY = { "X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https" };
 
@@ -216,7 +216,7 @@ async function probeUpgradeRejectionVisible(): Promise<boolean> {
 }
 
 function listen(authToken?: string): Promise<{ server: Server; port: number }> {
-  const middleware = simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: DEVICE, authToken });
+  const middleware = simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, allowExec: true, device: DEVICE, authToken });
   const server = createServer((req, res) => {
     middleware(req, res, async () => {
       if (!res.headersSent) res.statusCode = 404;
@@ -309,10 +309,12 @@ describe("request trust classification", () => {
 });
 
 describe("exec token is never handed to remote callers", () => {
-  test("loopback preview HTML still carries the exec token", async () => {
+  test("loopback preview HTML never carries the exec token", async () => {
     const r = await send(withToken.port, "/");
     expect(r.status).toBe(200);
-    expect(r.body).toContain(`"execToken":"${EXEC_TOKEN}"`);
+    expect(r.body).toContain(`"allowExec":true`);
+    expect(r.body).not.toContain("execToken");
+    expect(r.body).not.toContain(EXEC_TOKEN);
   });
 
   test("proxied preview HTML is refused without the auth token", async () => {
@@ -479,13 +481,34 @@ describe("control channel (/exec-ws)", () => {
     c.ws.close();
   });
 
-  test("the loopback page with the exec token can still exec", async () => {
+  test("the token-less loopback page cannot exec, even with allowExec", async () => {
+    const c = await channel(withToken.port, { Origin: `http://127.0.0.1:${withToken.port}` }, "");
+    expect(c).not.toBe("closed");
+    if (c === "closed") return;
+    c.ws.send(JSON.stringify({ id: 2, command: "echo should-not-run" }));
+    const reply = await c.next();
+    expect(reply.exitCode).toBe(126);
+    expect(String(reply.stdout)).not.toContain("should-not-run");
+    c.ws.close();
+  });
+
+  test("a loopback socket holding the exec token can exec (allowExec)", async () => {
     const c = await channel(withToken.port, { Origin: `http://127.0.0.1:${withToken.port}` }, EXEC_TOKEN);
     expect(c).not.toBe("closed");
     if (c === "closed") return;
-    c.ws.send(JSON.stringify({ id: 2, command: "echo loopback-channel-ok" }));
+    c.ws.send(JSON.stringify({ id: 3, command: "echo loopback-channel-ok" }));
     const reply = await c.next();
     expect(String(reply.stdout).trim()).toBe("loopback-channel-ok");
+    c.ws.close();
+  });
+
+  test("an authenticated remote socket cannot run host actions", async () => {
+    const c = await channel(withToken.port, { Origin: `http://127.0.0.1:${withToken.port}`, ...PROXY, ...bearer }, "");
+    expect(c).not.toBe("closed");
+    if (c === "closed") return;
+    c.ws.send(JSON.stringify({ id: 4, rpc: { method: "cameraListWebcams", params: {} } }));
+    const reply = await c.next();
+    expect(reply.error).toBe("host actions are only available to loopback clients");
     c.ws.close();
   });
 });
@@ -650,7 +673,7 @@ describe("exec channel default is fail-closed for embedders", () => {
   beforeAll(async () => {
     const { createExecUpgradeHandler } = await import("../exec-ws");
     // No allowShell passed: the default must be loopback + same-origin only.
-    const handle = createExecUpgradeHandler({ path: "/exec-ws", execToken: "embed-token" });
+    const handle = createExecUpgradeHandler({ path: "/exec-ws", allowExec: true, execToken: "embed-token" });
     srv = createServer((_req, res) => res.end());
     srv.on("upgrade", (req, socket, head) => {
       if (!handle(req, socket, head)) socket.destroy();
@@ -659,7 +682,7 @@ describe("exec channel default is fail-closed for embedders", () => {
   });
   afterAll(() => srv?.close());
 
-  function run(headers: Record<string, string>): Promise<string> {
+  function run(headers: Record<string, string>, token = "embed-token"): Promise<string> {
     return new Promise((resolve) => {
       const ws = new WebSocket(`ws://127.0.0.1:${PORT_DEFAULT}/exec-ws`, { headers });
       const done = (v: string) => {
@@ -668,7 +691,7 @@ describe("exec channel default is fail-closed for embedders", () => {
       };
       setTimeout(() => done("timeout"), 3000);
       ws.on("error", () => done("refused"));
-      ws.on("open", () => ws.send(JSON.stringify({ token: "embed-token" })));
+      ws.on("open", () => ws.send(JSON.stringify({ token })));
       ws.on("message", (data) => {
         const msg = JSON.parse(data.toString()) as { ready?: boolean; exitCode?: number };
         if (msg.ready) ws.send(JSON.stringify({ id: 1, command: "echo default-ok" }));
@@ -683,7 +706,10 @@ describe("exec channel default is fail-closed for embedders", () => {
   test("forwarded same-origin upgrade cannot exec", async () => {
     expect(await run({ Origin: `http://127.0.0.1:${PORT_DEFAULT}`, "X-Forwarded-For": "203.0.113.7" })).toBe("exit 126");
   });
-  test("loopback same-origin upgrade can exec", async () => {
+  test("loopback same-origin upgrade can exec with the token", async () => {
     expect(await run({ Origin: `http://127.0.0.1:${PORT_DEFAULT}` })).toBe("exit 0");
+  });
+  test("loopback same-origin upgrade without the token cannot exec", async () => {
+    expect(await run({ Origin: `http://127.0.0.1:${PORT_DEFAULT}` }, "")).toBe("exit 126");
   });
 });
