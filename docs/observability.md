@@ -40,12 +40,14 @@ type EventLogEntry = {
 
 - **HID input** -> `handleHidMessage` (`src/device-session.ts`) routes tag `0x03`
   touches to `DeviceSession.recordTouchEvent` and every other tag to `recordHidEvent`
-  -> `eventLogEventForHidMessage(device, tag, payload, screen)`. `recordTouchEvent`
-  folds begin/move/end into one `kind:"tap"` or `kind:"drag"` entry whose details
-  (`touchGestureDetails`) carry `start`, `current`, `moveCount`, and
-  `screen = {width,height}` (via `eventLogScreen()`). (`eventLogEventForHidMessage`'s
-  own `0x03` branch builds a per-phase `kind:"touch"` entry, but the session never
-  calls it for touches.)
+  -> `eventLogEventForHidMessage(device, tag, payload, screen)`. Tap events come from
+  `recordTouchEvent`: it folds begin/move/end into one `kind:"tap"` or `kind:"drag"`
+  entry (top-level `source:"hid"`) whose details (`touchGestureDetails`) carry `type`,
+  `start`, `current`, `moveCount`, optional `edge`, and `screen = {width,height}` (via
+  `eventLogScreen()`). The only `kind:"touch"` entries are its fallthrough: an `end`
+  with no preceding `begin`, or an unknown `type`, goes to
+  `recordHidEvent(0x03, …)`, whose `0x03` branch builds a per-phase `kind:"touch"`
+  entry.
 - **Shell actions** -> `eventLogEventForCommand(command, {exitCode})`, parsed in
   `src/middleware.ts` from the `/exec` path. It already drops upload plumbing and
   never records raw command strings with tokens.
@@ -80,16 +82,29 @@ from `SimulatorView.tsx` with `streamDisplayGeometry(...).inputOrientation`). On
 point unchanged, which is the #153 miss.
 
 **Fixed by [#167](https://github.com/EvanBacon/serve-sim/pull/167) (pending).** It
-adds `src/touch-remap.ts`: the CLI fetches the server's `/config`, derives the input
-orientation with the viewer's own rule (`cliInputOrientation` ->
-`streamDisplayGeometry`), and remaps with `displayTouchToRaw` (point and `edge`).
-`--raw` on `tap`/`gesture` opts out and sends native-portrait coords as-is; an
-unreachable `/config` also falls back to no remap. Note: as of #167's head
-(`ebd54ef`), `cliInputOrientation` reads only `width`/`height`/`orientation` and does
-not check `hingeDegrees`, so foldable/Duo devices are not explicitly skipped; confirm
-that before relying on it, since Duo web touches use 3D projection rather than
-`rawPointForDisplayPoint`. Even with #167 merged, nothing in the log distinguishes a
-coordinate miss (`--raw`, a stale `orientation`, an old CLI) from a dead injector.
+adds `src/touch-remap.ts`, and `tap()` / `gesture()` call `touchInputOrientation`
+(`index.ts`) before sending:
+
+- **Config lookup with the socket's auth.** `configUrlForWsUrl` derives the `/config`
+  URL from the HID socket URL (`…/helper/<udid>/ws` -> `…/helper/<udid>/config`,
+  `wss:` -> `https:`), so it works for local state files and `--url` remotes. It is
+  fetched with the same headers as the socket (`Authorization: Bearer <token>` from
+  `--auth-token` / `SERVE_SIM_AUTH_TOKEN`), 2 s timeout.
+- **Landscape display -> raw.** `cliInputOrientation` applies the viewer's own rule
+  (`streamDisplayGeometry(...).inputOrientation`: remap only when the raw frame is
+  still portrait while the UI is rotated), and `displayTouchToRaw` converts the point
+  with `rawPointForDisplayPoint` and a non-zero `edge` with `rawEdgeForDisplayEdge`.
+- **401/403 warns, then sends unmapped.** A refused `/config` prints a warning to
+  stderr (pass `--auth-token` to remap, or `--raw`) and the touch is sent as-is; the
+  command still exits 0. Any other non-OK status, a network error, or a timeout
+  silently falls back to no remap.
+- **Foldables skipped.** A `/config` carrying `hingeDegrees` returns no remap, since
+  the viewer renders the Duo projection and sends those touches unrotated.
+- **`--raw`** on `tap` / `gesture` skips the lookup and sends the coordinates as given
+  (native portrait frame).
+
+Even with #167 merged, nothing in the log distinguishes a coordinate miss (`--raw`, a
+401/403 on `/config`, a stale `orientation`, an old CLI) from a dead injector.
 
 Add these keys to the `details` of `tap`/`drag` entries (built in
 `DeviceSession.recordTouchEvent` via `touchGestureDetails`):
@@ -98,8 +113,8 @@ Add these keys to the `details` of `tap`/`drag` entries (built in
 |---|---|---|
 | `coord_space` | `normalized_0_1` | constant; the `0x03` payload is always 0..1 normalized |
 | `orientation` | `portrait` \| `portrait_upside_down` \| `landscape_left` \| `landscape_right` \| `unknown` | `screenConfig().orientation` (i.e. `this.orientation`) read **at record time** |
-| `frame` | `display` \| `native_portrait` | which space the point was in when sent: `native_portrait` when the sender remapped (the web client and #167's CLI whenever `inputOrientation` is set); `display` when it did not (pre-#167 CLI, `--raw`, `/config` unreachable). When no rotation is needed the two are identical. |
-| `remapped` | bool | Sender-reported: an extra `remapped` key in the `0x03` JSON, set by the web client and the #167 CLI to whether `inputOrientation` was defined (`false` for `--raw` / no `/config`). The server can't infer it from `source` alone, since both clients now remap. Omitted when the sender doesn't send it, and for Duo. |
+| `frame` | `display` \| `native_portrait` | which space the point was in when sent: `native_portrait` when the sender remapped (the web client and #167's CLI whenever `inputOrientation` is set); `display` when it did not (pre-#167 CLI, `--raw`, `/config` refused or unreachable). When no rotation is needed the two are identical. |
+| `remapped` | bool | Sender-reported: an extra `remapped` key in the `0x03` JSON, set by the web client and the #167 CLI to whether `inputOrientation` was defined (`false` for `--raw` / a refused or unreachable `/config`). The server can't infer it from `source` alone, since both clients now remap. Omitted when the sender doesn't send it, and for Duo. |
 | `observed_orientation` | string | Polled UI orientation (`simctl io enumerate`); can lag ~1s. Do **not** write into `this.orientation` / `broadcastConfig()`. |
 | `remap_expected` | bool | Rule applied to `observed_orientation` when present, else `orientation`. Omitted for Duo (`hingeDegrees != null`): Duo web touches use 3D projection, not `rawPointForDisplayPoint`. |
 | `source` | `cli` \| `web` \| `unknown` | who sent the frame (see below) |
@@ -112,9 +127,10 @@ A web miss is `remap_expected=true`, `remapped=false`: the browser hadn't been t
 **`source` (cli vs web), compatibly.** Both CLI and browser touches arrive over the
 separate WebSocket connections to the same handler (`attachHidInProcess` -> `attachHidSocket` -> `handleHidMessage`) and are recorded as
 `source:"hid"`, so the log can't say which client sent them. Add an extra key to the
-`0x03` JSON payload -- `{type,x,y,src:"cli"}` from `tap()`/`gesture()` in `index.ts`,
-`{...,src:"web"}` from `SimulatorView.tsx` -- and read it in `recordTouchEvent`, stored
-as `details.source` (the `source` field in the table above). It is an
+`0x03` JSON payload -- `{type,x,y,source:"cli"}` from `tap()`/`gesture()` in `index.ts`,
+`{...,source:"web"}` from `SimulatorView.tsx` -- and read it in `recordTouchEvent`, stored
+as `details.source` (the `source` field in the table above; distinct from the
+entry's top-level `source:"hid"`). It is an
 extra JSON field: the native `touch()` call ignores it and older clients that omit it
 record `source:"unknown"`. (A dedicated tag is unnecessary; the payload is already JSON.)
 
@@ -135,8 +151,8 @@ IOSurface seed if the capture exposes it) -- not the image. Store `frameSeq` on 
 
 Landscape miss vs portrait hit, same 4 ms send, distinguished only by the repro fields.
 `source` is part of the signature: on `main` the miss is the CLI path, not the web
-client (which already remaps); after #167 it is a CLI run with `--raw` or without a
-reachable `/config`.
+client (which already remaps); after #167 it is a CLI run with `--raw`, a 401/403 on
+`/config` (warned on stderr), or an otherwise unreachable `/config`.
 
 ```json
 {"kind":"tap","status":"ok","details":{"source":"web","orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","screen_changed":true,"input.send_ms":4}}
@@ -300,12 +316,12 @@ Prove recordability with unit tests (`bun test`) and the maintainer loop in
 `AGENTS.md` (`build.ts` -> run from `dist/` -> reproduce):
 
 - Taps are built in `DeviceSession.recordTouchEvent` (`kind:"tap"`/`"drag"`), not
-  `eventLogEventForHidMessage` (whose `0x03` branch yields `kind:"touch"` and is
-  unused for touches). So in a `DeviceSession` test (fake `hid`, as in
+  `eventLogEventForHidMessage` (whose `0x03` branch yields `kind:"touch"` and is only
+  reached for an orphan `end` or unknown `type`). So in a `DeviceSession` test (fake `hid`, as in
   `src/__tests__/device-session-lifecycle.test.ts`), send `0x03` `{type:"begin",…}`
-  then `{type:"end", x, y, src:"cli", remapped:false}` over a fake socket passed to
+  then `{type:"end", x, y, source:"cli", remapped:false}` over a fake socket passed to
   `attachHidSocket` (which feeds the private `handleHidMessage`), and
-  read the `kind:"tap"` entry: `source:"cli"`; omitting `src` -> `"unknown"`; assert
+  read the `kind:"tap"` entry: `details.source:"cli"`; omitting `source` -> `"unknown"`; assert
   `coord_space`, `orientation`, `frame`, `remapped`, and `screen` are present.
   A landscape miss records `input.send_ms`; `hid.state=gone` and `ack=timeout` omit it;
   `input.shadowed=true` still records it.
