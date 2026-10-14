@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, utimesSync, writeFileSync } from "fs";
 import { createServer, type Server } from "http";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { AddressInfo } from "net";
 import {
   buildDiagnosticsBundle,
   collectHostDiagnostics,
   diagnosticsVerdicts,
+  findSimulatorCrashReports,
   formatDiagnosticsSummary,
   type Probe,
 } from "../doctor";
@@ -130,5 +134,55 @@ describe("/api/diagnostics loopback guard", () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+describe("simulator crash report pointer", () => {
+  const UDID = "A1B2C3D4-0000-4000-8000-00000000ABCD";
+  const header = (name: string) => JSON.stringify({ app_name: name, bug_type: "309" });
+
+  test("lists recent .ips reports from simulator processes, newest first", () => {
+    const dir = mkdtempSync(join(tmpdir(), "serve-sim-ips-"));
+    const now = Date.parse("2026-10-14T12:00:00Z");
+    const write = (file: string, body: string, ageHours: number) => {
+      const path = join(dir, file);
+      writeFileSync(path, body);
+      const t = new Date(now - ageHours * 3600_000);
+      utimesSync(path, t, t);
+    };
+    write("MyApp-2026-10-14-110000.ips", `${header("MyApp")}\n{"procPath":"/Users/evan/Library/Developer/CoreSimulator/Devices/${UDID}/data/Containers/Bundle/Application/X/MyApp.app/MyApp"}`, 1);
+    write("SpringBoard-2026-10-14-090000.ips", `${header("SpringBoard")}\n{"procPath":"\\/Library\\/Developer\\/CoreSimulator\\/Volumes\\/x\\/iOS 27.0.simruntime\\/Contents/Resources/RuntimeRoot/System/Library/CoreServices/SpringBoard.app/SpringBoard"}`, 3);
+    write("maild-2026-10-14-080000.ips", `{"app_name":"maild","platform":7,"bug_type":"309"}\n{"procPath" : "\\/Volumes\\/VOLUME\\/*\\/EmailDaemon.framework\\/maild"}`, 4);
+    write("Safari-2026-10-14-100000.ips", `{"app_name":"Safari","platform":1}\n{"procPath":"/Applications/Safari.app/Contents/MacOS/Safari"}`, 2);
+    write("Old-2026-09-01-100000.ips", `${header("Old")}\n{"procPath":"/x/CoreSimulator/Devices/${UDID}/data/Old"}`, 24 * 30);
+    write("notes.txt", "CoreSimulator/Devices/", 1);
+
+    const reports = findSimulatorCrashReports({ dir, now: () => now });
+    expect(reports.directory).toBe(dir);
+    expect(reports.recent.map((r) => r.file)).toEqual(["MyApp-2026-10-14-110000.ips", "SpringBoard-2026-10-14-090000.ips", "maild-2026-10-14-080000.ips"]);
+    expect(reports.recent[0]!.path).toBe(join(dir, "MyApp-2026-10-14-110000.ips"));
+    expect(reports.recent[0]!.udid).toBe(UDID);
+    expect(reports.recent[0]!.process).toBe("MyApp");
+  });
+
+  test("a missing directory yields the pointer with no reports", () => {
+    const reports = findSimulatorCrashReports({ dir: join(tmpdir(), "serve-sim-no-such-dir") });
+    expect(reports.recent).toEqual([]);
+  });
+
+  test("the doctor summary always points at DiagnosticReports", () => {
+    const bundle = buildDiagnosticsBundle({ host: {}, home: HOME });
+    const none = formatDiagnosticsSummary({ ...bundle, crash_reports: { directory: "~/Library/Logs/DiagnosticReports", recent: [] } });
+    expect(none).toContain("Simulator crash reports (.ips): ~/Library/Logs/DiagnosticReports");
+    expect(none).toContain("none in the last 7 days");
+    const some = formatDiagnosticsSummary({
+      ...bundle,
+      crash_reports: {
+        directory: "~/Library/Logs/DiagnosticReports",
+        recent: [{ file: "MyApp-1.ips", path: "~/Library/Logs/DiagnosticReports/MyApp-1.ips", modified_at: "2026-10-14T11:00:00.000Z", process: "MyApp", udid: UDID }],
+      },
+    });
+    expect(some).toContain("~/Library/Logs/DiagnosticReports/MyApp-1.ips");
+    expect(some).toContain("MyApp");
   });
 });

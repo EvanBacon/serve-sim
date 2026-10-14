@@ -71,9 +71,11 @@ import {
   buildDiagnosticsBundle,
   collectDeviceDiagnostics,
   collectHostDiagnostics,
+  findSimulatorCrashReports,
   formatDiagnosticsSummary,
   type DiagnosticsBundle,
 } from "./doctor";
+import { redactHome } from "./diagnostics-redact";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -839,6 +841,8 @@ async function doctor(deviceArg: string | undefined, opts: { json?: boolean; out
     ]);
     bundle = buildDiagnosticsBundle({ host, devices, server: { reachable: false, ...(serverError ? { error: serverError } : {}) } });
   }
+  // Crash logs live on this Mac regardless of which process collected the rest.
+  bundle.crash_reports = redactHome(findSimulatorCrashReports());
   const json = JSON.stringify(bundle, null, 2);
   if (opts.out) {
     writeFileSync(opts.out, json + "\n");

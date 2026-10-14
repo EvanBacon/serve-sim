@@ -5,7 +5,8 @@
  * mutates the simulator, Xcode selection, or Device Hub.
  */
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { duoModelPath, resolveDuoModel, resolveDuoRendererExecutable } from "./duo-renderer";
@@ -168,7 +169,75 @@ export type DiagnosticsBundle = {
   sessions: Record<string, unknown>[];
   event_log: unknown[];
   server?: { reachable: boolean; url?: string; error?: string };
+  crash_reports?: SimulatorCrashReports;
 };
+
+export type SimulatorCrashReports = {
+  directory: string;
+  recent: Array<{ file: string; path: string; modified_at: string; process: string | null; udid: string | null }>;
+};
+
+const CRASH_REPORT_MAX_AGE_MS = 7 * 24 * 3600_000;
+const SIMULATOR_PROCESS_PATH = /CoreSimulator\/Devices\/|\.simruntime\/|iPhoneSimulator\.platform\//;
+/** Mach-O platform ids in the .ips header: iOS, tvOS, watchOS, visionOS simulators. */
+const SIMULATOR_PLATFORMS = new Set([7, 8, 9, 12]);
+
+function readHead(path: string, bytes: number): string {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(bytes);
+    return buf.toString("utf8", 0, readSync(fd, buf, 0, bytes, 0));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Host-side `.ips` crash reports from simulator processes (apps, SpringBoard,
+ * runtime daemons). macOS writes them for simulator crashes too; the header's
+ * `platform` (or a simulator `procPath`) tells them apart from Mac crashes.
+ */
+export function findSimulatorCrashReports(options: { dir?: string; now?: () => number; maxAgeMs?: number; limit?: number } = {}): SimulatorCrashReports {
+  const directory = options.dir ?? join(homedir(), "Library", "Logs", "DiagnosticReports");
+  const cutoff = (options.now ?? Date.now)() - (options.maxAgeMs ?? CRASH_REPORT_MAX_AGE_MS);
+  let names: string[];
+  try {
+    names = readdirSync(directory).filter((name) => name.endsWith(".ips"));
+  } catch {
+    return { directory, recent: [] };
+  }
+  const candidates = names.flatMap((file) => {
+    const path = join(directory, file);
+    try {
+      const mtime = statSync(path).mtimeMs;
+      return mtime >= cutoff ? [{ file, path, mtime }] : [];
+    } catch {
+      return [];
+    }
+  }).sort((a, b) => b.mtime - a.mtime);
+  const recent: SimulatorCrashReports["recent"] = [];
+  for (const candidate of candidates) {
+    if (recent.length >= (options.limit ?? 5)) break;
+    let head: string;
+    try {
+      head = readHead(candidate.path, 64 * 1024);
+    } catch {
+      continue;
+    }
+    // Report bodies JSON-escape slashes (`\/`).
+    head = head.replace(/\\\//g, "/");
+    const platform = Number(/"platform"\s*:\s*(\d+)/.exec(head)?.[1]);
+    if (!SIMULATOR_PLATFORMS.has(platform) && !SIMULATOR_PROCESS_PATH.test(head)) continue;
+    recent.push({
+      file: candidate.file,
+      path: candidate.path,
+      modified_at: new Date(candidate.mtime).toISOString(),
+      process: /"app_name"\s*:\s*"([^"]+)"/.exec(head)?.[1] ?? /"procName"\s*:\s*"([^"]+)"/.exec(head)?.[1] ?? null,
+      udid: /CoreSimulator\/Devices\/([0-9A-Fa-f-]{36})\//.exec(head)?.[1] ?? null,
+    });
+  }
+  return { directory, recent };
+}
 
 type EncoderError = { codec: string; error: string; width: number; height: number; count: number; first_at: string; last_at: string; variants?: number };
 type EncoderSession = { at: string; codec: string; session_count?: number } & Record<string, unknown>;
@@ -230,6 +299,7 @@ export function buildDiagnosticsBundle(parts: {
   sessions?: Record<string, unknown>[];
   event_log?: unknown[];
   server?: DiagnosticsBundle["server"];
+  crash_reports?: SimulatorCrashReports;
   now?: Date;
   home?: string;
 }): DiagnosticsBundle {
@@ -242,6 +312,7 @@ export function buildDiagnosticsBundle(parts: {
     sessions: (parts.sessions ?? []).map(dedupeSessionEncoders),
     event_log: parts.event_log ?? [],
     ...(parts.server ? { server: parts.server } : {}),
+    ...(parts.crash_reports ? { crash_reports: parts.crash_reports } : {}),
   };
   return redactHome(bundle, parts.home);
 }
@@ -304,6 +375,13 @@ export function formatDiagnosticsSummary(bundle: DiagnosticsBundle): string {
     }
     const duo = session.duo as { renderer?: string; hinge_degrees?: number | null; active_panel?: string; last_error?: { stage: string; reason: string } | null } | undefined;
     if (duo) lines.push(`  duo renderer=${duo.renderer} hinge=${duo.hinge_degrees ?? "unknown"} panel=${duo.active_panel}${duo.last_error ? ` last_error=${duo.last_error.stage}: ${duo.last_error.reason}` : ""}`);
+  }
+  if (bundle.crash_reports) {
+    lines.push(`Simulator crash reports (.ips): ${bundle.crash_reports.directory}`);
+    if (bundle.crash_reports.recent.length === 0) lines.push("  none in the last 7 days");
+    for (const report of bundle.crash_reports.recent) {
+      lines.push(`  ${report.modified_at}  ${report.process ?? "?"}${report.udid ? ` (${report.udid.slice(0, 8)})` : ""}  ${report.path}`);
+    }
   }
   if (bundle.server && !bundle.server.reachable) lines.push(`Server: not reachable (${bundle.server.error ?? "not running"}); live stream state omitted.`);
   const verdicts = diagnosticsVerdicts(bundle);
