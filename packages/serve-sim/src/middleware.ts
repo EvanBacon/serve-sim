@@ -22,7 +22,12 @@ import {
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
-import { classifyStaleState, persistRecoveredState, resolveLiveHelperState } from "./helper-lifecycle";
+import {
+  authTokenFingerprint,
+  classifyStaleState,
+  persistRecoveredState,
+  resolveLiveHelperState,
+} from "./helper-lifecycle";
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
@@ -31,7 +36,8 @@ import {
   serveDeviceKitChromeAsset,
   serveDevicePlaceholderAsset,
 } from "./devicekit-chrome";
-import { createExecUpgradeHandler, type UiRequestHandler } from "./exec-ws";
+import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler } from "./exec-ws";
+import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { simctlBootStatusArguments } from "./simctl";
@@ -408,6 +414,17 @@ function endpoint(base: string, path: string, device: string): string {
 }
 
 /**
+ * A state record as it may be served over HTTP: drops the server-private
+ * fields (the auth-token fingerprint and the exec opt-in recorded for
+ * `--detach` reuse checks), which no client needs.
+ */
+export function publicState(state: ServeSimState): ServeSimState {
+  if (!("authTokenSha256" in state) && !("allowExec" in state)) return state;
+  const { authTokenSha256: _fingerprint, allowExec: _allowExec, ...rest } = state;
+  return rest;
+}
+
+/**
  * Rewrite the helper URLs in a state for the requesting browser.
  *
  * When `proxy` is set (standalone `serve-sim`, which owns its server and wires
@@ -425,6 +442,7 @@ export function rewriteStateForRequestHost(
   protocol: "http" | "https" = "http",
   proxy = false,
 ): ServeSimState {
+  state = publicState(state);
   if (!hostHeader) {
     return state;
   }
@@ -770,7 +788,12 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
  * preview server itself serves the device's /helper routes in-process. Resolves
  * to an error string on boot failure, or null on success.
  */
-export async function startDeviceInProcess(udid: string, port: number, base: string): Promise<string | null> {
+export async function startDeviceInProcess(
+  udid: string,
+  port: number,
+  base: string,
+  record: Pick<ServeSimDeviceState, "authTokenSha256" | "allowExec"> = {},
+): Promise<string | null> {
   // `simctl boot` errors when already booted — ignore and let bootstatus confirm.
   await new Promise<void>((resolve) => execFile("xcrun", ["simctl", "boot", udid], () => resolve()));
   const ready = await new Promise<boolean>((resolve) => {
@@ -795,7 +818,13 @@ export async function startDeviceInProcess(udid: string, port: number, base: str
     });
     if (!booted) return `Device ${udid} failed to reach booted state`;
   }
-  writeServeSimState(inProcessServeSimState(udid, port, base));
+  // Record the server's auth/exec settings like the CLI does, so a later
+  // `--detach` reuse check sees what this server actually enforces.
+  writeServeSimState({
+    ...inProcessServeSimState(udid, port, base),
+    ...(record.authTokenSha256 ? { authTokenSha256: record.authTokenSha256 } : {}),
+    ...(record.allowExec ? { allowExec: true } : {}),
+  });
   return null;
 }
 
@@ -874,7 +903,7 @@ export function previewConfigForState(
   state: ServeSimState,
   base: string,
   serveSimBin: string,
-  execToken: string | undefined,
+  allowExec: boolean | undefined,
   codec?: string,
   proxyHelpers = false,
   initialState?: PreviewInitialState,
@@ -892,14 +921,14 @@ export function previewConfigForState(
   gridShutdownEndpoint: string;
   gridMemoryEndpoint: string;
   previewEndpoint: string;
-  execToken?: string;
+  allowExec?: boolean;
   codec?: string;
   initialState?: PreviewInitialState;
   proxyHelpers?: boolean;
 } {
   const gridApiBase = (base === "" ? "" : base) + "/grid/api";
   return {
-    ...state,
+    ...publicState(state),
     basePath: base,
     appStateEndpoint: endpoint(base, "/appstate", state.device),
     eventLogEndpoint: endpoint(base, "/api/event-log", state.device),
@@ -913,7 +942,7 @@ export function previewConfigForState(
     gridShutdownEndpoint: gridApiBase + "/shutdown",
     gridMemoryEndpoint: gridApiBase + "/memory",
     previewEndpoint: base === "" ? "/" : base,
-    ...(execToken ? { execToken } : {}),
+    ...(allowExec ? { allowExec: true } : {}),
     ...(codec ? { codec } : {}),
     ...(initialState ? { initialState } : {}),
     ...(proxyHelpers ? { proxyHelpers: true } : {}),
@@ -1242,10 +1271,16 @@ export interface SimMiddlewareOptions {
   /** Pin this preview server to a specific simulator UDID. */
   device?: string;
   /**
-   * Per-session bearer token gating the `/exec` shell-exec route.
-   * Auto-generated if omitted. It is injected only into preview HTML served
-   * to a trusted loopback request, and `/exec` itself is loopback-only, so
-   * remote and cross-origin callers can neither read nor use it.
+   * Allow the host shell: `POST /exec` and `{command}` frames on the
+   * `/exec-ws` control channel. Default false — both answer 403 /
+   * "exec disabled" until the server opts in (`serve-sim --allow-exec`).
+   */
+  allowExec?: boolean;
+  /**
+   * Per-session bearer token gating `POST /exec`. Auto-generated if omitted.
+   * It is never sent in any HTTP response (a raw TCP forward of the preview
+   * port looks like loopback, so the page cannot be trusted to carry it);
+   * standalone serve-sim hands it to the CLI through an owner-only file.
    */
   execToken?: string;
   /**
@@ -1278,6 +1313,13 @@ export interface SimMiddlewareOptions {
   proxyHelpers?: boolean;
   /** Test hook for supplying a fake inspect-webkit bridge. */
   inspectWebKitBridge?: () => Promise<WebKitBridge>;
+  /**
+   * serve-sim CLI entry the host RPCs run for `permissions` / `camera`.
+   * Default: this process's entry script (or `serve-sim` on PATH).
+   */
+  serveSimBin?: string;
+  /** Test hook: whether a udid may be targeted by host RPCs. Default: booted. */
+  isKnownDevice?: (udid: string) => Promise<boolean>;
 }
 
 function safeEqualString(a: string, b: string): boolean {
@@ -1331,10 +1373,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const devtoolsPrefix = devtoolsProxyPrefix(base);
   const proxyHelpers = options?.proxyHelpers ?? false;
   const getInspectWebKitBridge = options?.inspectWebKitBridge ?? ensureInspectWebKitBridge;
-  // Per-process random token. Anyone who can read the preview HTML same-origin
-  // can call /exec; cross-origin pages and LAN clients cannot, because they
-  // can't read this value (it's only injected into the preview page's config).
+  // Per-process random token for POST /exec. Never served over HTTP; only a
+  // local process that was handed it out of band (the CLI's token file) has it.
   const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
+  const allowExec = options?.allowExec === true;
   const authToken = resolveAuthToken(options?.authToken);
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
@@ -1363,6 +1405,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     res.end();
     return true;
   };
+
+  // Narrow host actions for the page (screenshot, camera, permissions, …):
+  // validated params, fixed argv, no shell. Not gated on `allowExec`.
+  const handleRpcRequest = createHostRpcHandler({
+    serveSimBin: options?.serveSimBin ?? serveSimBinPath(),
+    isKnownDevice: options?.isKnownDevice ?? (async (udid) => (await getBootedUdids())?.has(udid) ?? false),
+    onCommandResult: (command, result) => recordCommandEvent(command, result),
+  });
 
   // Simulator-settings requests run in-process (just the underlying simctl /
   // ax-tool spawn) instead of round-tripping a full `node <cli>` exec per
@@ -1494,12 +1544,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       let html = loadHtml();
 
       if (!state) {
-        // Empty-state UI still polls /exec (boot/list helpers), so the page
-        // needs the bearer token even before a helper attaches. Inject a
-        // minimal config with just the basePath + token.
+        // Empty state: inject a minimal config with just the basePath (and
+        // whether host-shell UI features are enabled). Never the exec token.
         const minimal = JSON.stringify({
           basePath: base,
-          ...(trustedLoopback ? { execToken } : {}),
+          ...(allowExec && trustedLoopback ? { allowExec: true } : {}),
           ...(options?.initialState ? { initialState: options.initialState } : {}),
         });
         html = html.replace(
@@ -1510,13 +1559,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
       if (state) {
         const remoteState = rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers);
-        // Only a trusted loopback page gets the exec token (and the local
-        // binary path it uses for exec'd commands).
+        // Only a trusted loopback page gets the local binary path it uses for
+        // exec'd commands. The exec token is never part of any page config.
         const config = JSON.stringify(previewConfigForState(
           remoteState,
           base,
           trustedLoopback ? serveSimBinPath() : "",
-          trustedLoopback ? execToken : undefined,
+          allowExec && trustedLoopback,
           options?.codec,
           proxyHelpers,
           options?.initialState,
@@ -1692,7 +1741,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           return;
         }
         const port = req.socket.localPort ?? 0;
-        void startDeviceInProcess(udid, port, base).then((error) => {
+        void startDeviceInProcess(udid, port, base, {
+          authTokenSha256: authTokenFingerprint(authToken),
+          allowExec,
+        }).then((error) => {
           if (res.writableEnded) return;
           if (error) {
             res.writeHead(500, { "Content-Type": "application/json" });
@@ -1834,13 +1886,12 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         "Cache-Control": "no-store",
       });
       const remoteState = state ? rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
-      // Never return the exec token from a JSON endpoint; the page keeps the
-      // one it was served with.
+      // Never return the exec token from a JSON endpoint.
       res.end(JSON.stringify(remoteState ? previewConfigForState(
         remoteState,
         base,
         trustedLoopback ? serveSimBinPath() : "",
-        undefined,
+        allowExec && trustedLoopback,
         options?.codec,
         proxyHelpers,
         options?.initialState,
@@ -1912,7 +1963,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
             remoteState,
             base,
             trustedLoopback ? serveSimBinPath() : "",
-            undefined,
+            allowExec && trustedLoopback,
             options?.codec,
             proxyHelpers,
             options?.initialState,
@@ -2015,12 +2066,19 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
 
-    // POST /exec — run a shell command on the host. Only for the loopback
-    // preview page: the request must be trusted loopback (no proxy headers,
-    // loopback Host), carry a loopback same-origin Origin, be JSON, and
-    // present the per-process exec token that only that page receives. A
-    // remote caller is refused even with a valid auth token.
+    // POST /exec — run a shell command on the host. Disabled unless the server
+    // opted in with `allowExec`; then the request must be trusted loopback (no
+    // proxy headers, loopback Host), carry a loopback same-origin Origin, be
+    // JSON, and present the per-process exec token, which is delivered only
+    // out of band (the CLI's token file). A remote caller is refused even
+    // with a valid auth token.
     if ((url === base + "/exec" || url === base + "/exec/") && req.method === "POST") {
+      // 0. Opt-in only (`--allow-exec`).
+      if (!allowExec) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: EXEC_DISABLED_MESSAGE }));
+        return;
+      }
       // 1. Loopback only.
       if (!trustedLoopback) {
         res.writeHead(403, { "Content-Type": "application/json" });
@@ -2041,9 +2099,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ stdout: "", stderr: "Origin required", exitCode: 1 }));
         return;
       }
-      // 4. Require the per-session bearer token. Cross-origin pages cannot
-      //    read it from window.__SIM_PREVIEW__; non-browser callers must
-      //    have copied it from the CLI output.
+      // 4. Require the per-session bearer token. No HTTP response carries
+      //    it; `serve-sim exec` reads it from the owner-only token file.
       const authHeader = req.headers.authorization ?? "";
       const match = /^Bearer\s+(.+)$/i.exec(authHeader);
       if (!match || !safeEqualString(match[1]!.trim(), execToken)) {
@@ -2211,18 +2268,24 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     }
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
   };
-  // WebSocket exec channel — same auth/origin policy as POST /exec, but off
-  // the browser's per-origin HTTP connection pool so multiple preview tabs
-  // (each holding MJPEG + SSE streams) can't starve exec actions. Servers
-  // mounting this middleware should forward `upgrade` events here (the
-  // built-in preview server does); the client falls back to POST /exec when
-  // the upgrade never completes.
+  // WebSocket control channel, off the browser's per-origin HTTP connection
+  // pool so multiple preview tabs (each holding MJPEG + SSE streams) can't
+  // starve host actions. Shell commands need `allowExec`, a loopback
+  // same-origin socket, AND the exec token (which the page never holds — only
+  // a local process that read the owner-only token file). The page's host
+  // features use validated `{rpc}` actions instead. Servers mounting this
+  // middleware should forward `upgrade` events here (the built-in preview
+  // server does).
   const handleExecUpgrade = createExecUpgradeHandler({
     path: `${base}/exec-ws`,
+    allowExec,
     execToken,
-    // Shell commands only for the loopback preview page; an authenticated
-    // remote page still gets SSE subscriptions and simulator settings.
+    // Shell commands and host actions only for a loopback same-origin socket;
+    // an authenticated remote page still gets SSE subscriptions and simulator
+    // settings.
     allowShell: (req) => isTrustedLoopback(req) && isLoopbackSameOrigin(req), // same as the default; explicit here
+    allowRpc: (req) => isTrustedLoopback(req) && isLoopbackSameOrigin(req),
+    onRpcRequest: handleRpcRequest,
     ssePrefixes: [
       `${base}/api/events`,
       `${base}/api/event-log/events`,

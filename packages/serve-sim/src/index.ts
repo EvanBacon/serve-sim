@@ -3,15 +3,26 @@ import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
 import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { networkInterfaces } from "os";
 import { join, resolve } from "path";
-import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
+import {
+  STATE_DIR,
+  stateFileForDevice,
+  listStateFiles,
+  inProcessServeSimState,
+  readExecTokenFile,
+  removeExecTokenFile,
+  writeExecTokenFile,
+  writeServeSimState,
+  type ServeSimDeviceState,
+} from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, resolveDevice } from "./device";
 import {
+  authTokenFingerprint,
   classifyStaleState,
   collectKillPids,
   dropStateFileIfDead,
@@ -20,6 +31,8 @@ import {
   parseDeviceState,
   persistRecoveredState,
   resolveLiveHelperState,
+  reuseAuthMismatch,
+  reuseExecMismatch,
   startSimulatorShutdownWatch,
   stopProcess,
 } from "./helper-lifecycle";
@@ -49,6 +62,7 @@ import {
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
 import { simctlBootStatusArguments } from "./simctl";
+import { shellJoin } from "./shell-quote";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -158,13 +172,23 @@ function readStateFile(file: string): ServerState | null {
 /**
  * Existing helper we can reuse for `--detach` / follow. A live process bound
  * to a simulator that is no longer booted is recycled (stopped, then replaced)
- * instead of being treated as a working stream.
+ * instead of being treated as a working stream. A live server started with a
+ * different `--auth-token` (or none), or a different `--allow-exec` opt-in,
+ * is never reused: that is an error.
  */
-function readReusableState(udid: string): ServerState | null {
+function readReusableState(udid: string, allowExec: boolean): ServerState | null {
   const state = readState(udid);
   if (!state) return null;
   const action = classifyStaleState(state, getBootedUdids(), process.pid);
-  if (action === "keep") return state;
+  if (action === "keep") {
+    const mismatch =
+      reuseAuthMismatch(state, resolveAuthToken(undefined)) ?? reuseExecMismatch(state, allowExec);
+    if (mismatch) {
+      console.error(mismatch);
+      process.exit(1);
+    }
+    return state;
+  }
   debugState(
     "recycling %s helper pid=%d for unbooted device %s",
     action,
@@ -371,7 +395,7 @@ async function waitForStateFile(udid: string, timeoutMs = 150_000): Promise<Serv
 async function startHelper(
   udid: string,
   port: number,
-  opts: { detach: boolean },
+  opts: { detach: boolean; allowExec: boolean },
 ): Promise<{ pid: number; child?: ChildProcess }> {
   debugHelper("startHelper udid=%s port=%d detach=%s", udid, port, opts.detach);
 
@@ -389,6 +413,7 @@ async function startHelper(
     "--host",
     host,
     "--exit-on-simulator-shutdown",
+    ...(opts.allowExec ? ["--allow-exec"] : []),
   ]);
   const child = nodeSpawn(command, args, {
     detached: opts.detach,
@@ -412,7 +437,7 @@ async function startHelper(
 // ─── Commands ───
 
 /** Foreground follow mode (default). Stays attached, cleans up on Ctrl+C. */
-async function follow(devices: string[], startPort: number, quiet: boolean) {
+async function follow(devices: string[], startPort: number, quiet: boolean, allowExec: boolean) {
   debugCli("follow devices=%o startPort=%d", devices, startPort);
   const udids = devices.length > 0
     ? devices.map(resolveDevice)
@@ -436,7 +461,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
 
   for (const udid of udids) {
     // Return existing server if already running (and still bound to a booted sim)
-    const existing = readReusableState(udid);
+    const existing = readReusableState(udid, allowExec);
     if (existing) {
       if (!quiet) {
         const name = getDeviceName(udid) ?? udid;
@@ -450,7 +475,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
     }
 
     port = await findAvailablePort(port);
-    const { child } = await startHelper(udid, port, { detach: false });
+    const { child } = await startHelper(udid, port, { detach: false, allowExec });
 
     if (child) {
       children.set(udid, child);
@@ -534,7 +559,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
 }
 
 /** Detach mode (--detach). Spawns helpers and returns their states. */
-async function detach(devices: string[], startPort: number): Promise<ServerState[]> {
+async function detach(devices: string[], startPort: number, allowExec: boolean): Promise<ServerState[]> {
   debugCli("detach devices=%o startPort=%d", devices, startPort);
   const udids = devices.length > 0
     ? devices.map(resolveDevice)
@@ -553,14 +578,14 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
   let port = startPort;
 
   for (const udid of udids) {
-    const existing = readReusableState(udid);
+    const existing = readReusableState(udid, allowExec);
     if (existing) {
       states.push(existing);
       continue;
     }
 
     port = await findAvailablePort(port);
-    await startHelper(udid, port, { detach: true });
+    await startHelper(udid, port, { detach: true, allowExec });
 
     // Reuse the detached server's own in-process state (same-origin /helper URLs).
     states.push(readState(udid) ?? inProcessServeSimState(udid, port, "/", "127.0.0.1"));
@@ -597,6 +622,7 @@ function killHelperState(state: ServerState): void {
   for (const pid of collectKillPids(state)) stopProcess(pid);
   killPortHolder(state.port);
   clearState(state.device);
+  removeExecTokenFile(state.port);
 }
 
 /** Kill running streams (--kill). Uses the pidfile plus the recorded listen port. */
@@ -703,6 +729,49 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
   const ws = new URL(`helper/${encodeURIComponent(device)}/ws`, base);
   ws.protocol = base.protocol === "https:" ? "wss:" : "ws:";
   return { device, url: base.toString().replace(/\/$/, ""), wsUrl: ws.toString(), headers };
+}
+
+/**
+ * `serve-sim exec`: POST /exec on the local server. The token comes from the
+ * owner-only file the server wrote at start (`--allow-exec`); no HTTP route
+ * ever returns it.
+ */
+async function execCommand(command: string, deviceArg?: string) {
+  const state = readState(deviceArg ? resolveDevice(deviceArg) : undefined);
+  if (!state) {
+    console.error("No serve-sim server running. Run `serve-sim --allow-exec` first.");
+    process.exit(1);
+  }
+  const token = readExecTokenFile(state.port);
+  if (!token) {
+    console.error(
+      `exec is disabled on the serve-sim server on port ${state.port}. ` +
+        `Restart it with --allow-exec (\`serve-sim -k ${state.device}\` first).`,
+    );
+    process.exit(1);
+  }
+  const origin = `http://127.0.0.1:${state.port}`;
+  let res: Response;
+  try {
+    res = await fetch(`${origin}/exec`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, Origin: origin },
+      body: JSON.stringify({ command }),
+    });
+  } catch (err) {
+    console.error(`Failed to reach serve-sim at ${origin}: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  const body = await res.json().catch(() => null) as
+    | { stdout?: string; stderr?: string; exitCode?: number; error?: string }
+    | null;
+  if (!res.ok) {
+    console.error(`serve-sim exec failed (HTTP ${res.status}): ${body?.error ?? body?.stderr ?? "unknown error"}`);
+    process.exit(1);
+  }
+  if (body?.stdout) process.stdout.write(body.stdout);
+  if (body?.stderr) process.stderr.write(body.stderr);
+  process.exitCode = body?.exitCode ?? 1;
 }
 
 async function eventLog(
@@ -1660,6 +1729,7 @@ async function serve(
   initialState: PreviewInitialState | undefined,
   theme: SimulatorTheme | undefined,
   exitOnSimulatorShutdown = false,
+  allowExec = false,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -1676,12 +1746,17 @@ async function serve(
   const { simMiddleware } = await import("./middleware");
   // Standalone serve-sim owns its HTTP server and wires WebSocket upgrades, so
   // it can route helper/DevTools sockets through the single preview port.
+  // The exec token reaches `serve-sim exec` only through an owner-only file,
+  // never through HTTP.
+  const execToken = randomBytes(32).toString("base64url");
   const middleware = simMiddleware({
     basePath: "/",
     device: targetDevice,
     codec,
     initialState,
     proxyHelpers: true,
+    allowExec,
+    execToken,
   });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
@@ -1716,13 +1791,22 @@ async function serve(
 
   // Record in-process state so the preview/grid enumerate these devices and the
   // CLI input subcommands can reach the same-origin /helper ws.
+  const authTokenSha256 = authTokenFingerprint(resolveAuthToken(undefined));
   for (const udid of targetDevices) {
-    writeState(inProcessServeSimState(udid, boundPort, "/", host));
+    writeState({
+      ...inProcessServeSimState(udid, boundPort, "/", host),
+      ...(authTokenSha256 ? { authTokenSha256 } : {}),
+      ...(allowExec ? { allowExec: true } : {}),
+    });
   }
+  // Drop any token a previous (killed) server left for this port.
+  removeExecTokenFile(boundPort);
+  const execTokenFile = allowExec ? writeExecTokenFile(boundPort, execToken) : undefined;
   const clearAll = () => {
     for (const udid of targetDevices) {
       try { clearState(udid); } catch {}
     }
+    if (execTokenFile) removeExecTokenFile(boundPort);
   };
   process.on("exit", clearAll);
 
@@ -1741,6 +1825,9 @@ async function serve(
     console.log("  - Remote:  non-loopback requests require the auth token");
   } else if (exposedToLan) {
     console.log("  - Remote:  \x1b[33mrefused (no --auth-token); only this machine can connect\x1b[0m");
+  }
+  if (execTokenFile) {
+    console.log(`  - Exec:    \x1b[33menabled (--allow-exec)\x1b[0m; \`serve-sim exec\` token in ${execTokenFile}`);
   }
   console.log("");
 
@@ -1790,12 +1877,17 @@ program
     "--host <addr>",
     "Interface to bind the preview server to. Use 0.0.0.0 to expose on the " +
       "LAN. Non-loopback clients need --auth-token; the host shell route is " +
-      "loopback-only.",
+      "loopback-only and off unless --allow-exec.",
     "127.0.0.1",
   )
   .option(
     "--auth-token <token>",
     `Token required for any non-loopback or proxied request (LAN, tunnels). Also read from ${AUTH_TOKEN_ENV}.`,
+  )
+  .option(
+    "--allow-exec",
+    "Enable the host shell route (/exec and the preview's shell-backed tools). " +
+      "Off by default; `serve-sim exec` reads its token from an owner-only file.",
   )
   .option("--detach", "Spawn helper and exit (daemon mode)")
   .option(
@@ -1853,6 +1945,7 @@ Examples:
   serve-sim --theme dark                 Start the simulator in Dark Mode
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
+  serve-sim --allow-exec                 Enable host-shell tools and \`serve-sim exec\`
   serve-sim --detach                     Start streaming in background (daemon)
   serve-sim --list                       Show all running streams
   serve-sim --kill                       Stop all streams`,
@@ -1873,10 +1966,10 @@ Examples:
     }
     const startPort: number | undefined = opts.port;
     if (opts.detach) {
-      const states = await detach(devices, startPort ?? 3100);
+      const states = await detach(devices, startPort ?? 3100, !!opts.allowExec);
       printStatesJSON(states);
     } else if (opts.preview === false) {
-      await follow(devices, startPort ?? 3100, !!opts.quiet);
+      await follow(devices, startPort ?? 3100, !!opts.quiet, !!opts.allowExec);
     } else {
       const initialState: PreviewInitialState | undefined =
         opts.panes !== undefined || opts.fit ? {
@@ -1892,6 +1985,7 @@ Examples:
         initialState,
         opts.theme,
         !!opts.exitOnSimulatorShutdown,
+        !!opts.allowExec,
       );
     }
   });
@@ -1982,6 +2076,15 @@ program
   .description("Simulate a memory warning on the device")
   .option(...deviceOpt)
   .action((opts) => memoryWarning(opts.device));
+
+program
+  .command("exec")
+  .description("Run a shell command through a local server started with --allow-exec")
+  .argument("<command...>", "Shell command to run on the host")
+  .option(...deviceOpt)
+  // Quote every word so `serve-sim exec ls "my dir"` runs exactly that argv;
+  // pass `sh -c '<pipeline>'` for shell syntax.
+  .action((command: string[], opts) => execCommand(shellJoin(command), opts.device));
 
 program
   .command("event-log")
