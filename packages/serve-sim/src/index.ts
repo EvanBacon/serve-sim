@@ -62,7 +62,8 @@ import {
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
 import { simctlBootStatusArguments } from "./simctl";
-import { shellJoin } from "./shell-quote";
+import { execCommandLine } from "./shell-quote";
+import { reExecArgs, selfServeSimBin } from "./self-bin";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -365,16 +366,6 @@ async function ensureBooted(udid: string): Promise<void> {
 }
 
 // ─── Preview server lifecycle ───
-
-/** Resolve the command to re-exec this CLI (compiled binary or `node …js`). */
-function reExecArgs(extra: string[]): { command: string; args: string[] } {
-  // Compiled standalone binary: argv[0] is the serve-sim binary itself.
-  if (process.argv[0] && /(^|\/)serve-sim$/.test(process.argv[0])) {
-    return { command: process.argv[0], args: extra };
-  }
-  // Running the JS bundle: `node /path/to/serve-sim.js`.
-  return { command: process.argv[0]!, args: [process.argv[1]!, ...extra] };
-}
 
 /** Poll for the state file a re-exec'd preview server writes once it's serving. */
 async function waitForStateFile(udid: string, timeoutMs = 150_000): Promise<ServerState | null> {
@@ -1757,6 +1748,8 @@ async function serve(
     proxyHelpers: true,
     allowExec,
     execToken,
+    // Host RPCs re-run this CLI; never let the middleware guess from argv.
+    serveSimBin: selfServeSimBin(),
   });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
@@ -2079,12 +2072,14 @@ program
 
 program
   .command("exec")
-  .description("Run a shell command through a local server started with --allow-exec")
-  .argument("<command...>", "Shell command to run on the host")
+  .description(
+    "Run a shell command through a local server started with --allow-exec. " +
+      'One argument is a shell command line (`exec "xcrun simctl list | head"`); ' +
+      "several are quoted as one argv (`exec ls \"my dir\"`).",
+  )
+  .argument("<command...>", "Shell command line, or argv words to quote")
   .option(...deviceOpt)
-  // Quote every word so `serve-sim exec ls "my dir"` runs exactly that argv;
-  // pass `sh -c '<pipeline>'` for shell syntax.
-  .action((command: string[], opts) => execCommand(shellJoin(command), opts.device));
+  .action((command: string[], opts) => execCommand(execCommandLine(command), opts.device));
 
 program
   .command("event-log")

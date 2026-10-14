@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync, existsSync, unlinkSync, watch, type FSWatcher } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { createServer as createNetServer } from "net";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
@@ -1095,14 +1096,22 @@ function devtoolsFrontendUrl(
 
 let _html: string | null = null;
 /**
- * Best-effort absolute path to the running serve-sim entry script. Used so
- * the in-page Camera tool can `node <path> camera ...` regardless of PATH.
- * Falls back to the literal `serve-sim` if we can't determine a usable path.
+ * Default serve-sim CLI entry for host RPCs when the mounting app doesn't pass
+ * `serveSimBin`. Resolved from this module's own location — never the host
+ * process's argv, which names the embedding app's entry script. Falls back to
+ * `serve-sim` on PATH (e.g. the virtual `/$bunfs` paths of a compiled binary).
  */
-function serveSimBinPath(): string {
+export function resolveServeSimBin(
+  moduleUrl: string = import.meta.url,
+  exists: (path: string) => boolean = existsSync,
+): string {
   try {
-    const argv = process.argv;
-    if (argv[1] && existsSync(argv[1])) return argv[1];
+    const dir = dirname(fileURLToPath(moduleUrl));
+    // dist/middleware.js (or the bundled dist/serve-sim.js) → dist/serve-sim.js;
+    // src/middleware.ts in a dev checkout → ../dist/serve-sim.js.
+    for (const candidate of [join(dir, "serve-sim.js"), join(dir, "..", "dist", "serve-sim.js")]) {
+      if (exists(candidate)) return candidate;
+    }
   } catch {}
   return "serve-sim";
 }
@@ -1315,7 +1324,7 @@ export interface SimMiddlewareOptions {
   inspectWebKitBridge?: () => Promise<WebKitBridge>;
   /**
    * serve-sim CLI entry the host RPCs run for `permissions` / `camera`.
-   * Default: this process's entry script (or `serve-sim` on PATH).
+   * Default: this package's `dist/serve-sim.js`, else `serve-sim` on PATH.
    */
   serveSimBin?: string;
   /** Test hook: whether a udid may be targeted by host RPCs. Default: booted. */
@@ -1378,6 +1387,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
   const allowExec = options?.allowExec === true;
   const authToken = resolveAuthToken(options?.authToken);
+  const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
@@ -1409,7 +1419,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // Narrow host actions for the page (screenshot, camera, permissions, …):
   // validated params, fixed argv, no shell. Not gated on `allowExec`.
   const handleRpcRequest = createHostRpcHandler({
-    serveSimBin: options?.serveSimBin ?? serveSimBinPath(),
+    serveSimBin,
     isKnownDevice: options?.isKnownDevice ?? (async (udid) => (await getBootedUdids())?.has(udid) ?? false),
     onCommandResult: (command, result) => recordCommandEvent(command, result),
   });
@@ -1564,7 +1574,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         const config = JSON.stringify(previewConfigForState(
           remoteState,
           base,
-          trustedLoopback ? serveSimBinPath() : "",
+          trustedLoopback ? serveSimBin : "",
           allowExec && trustedLoopback,
           options?.codec,
           proxyHelpers,
@@ -1890,7 +1900,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       res.end(JSON.stringify(remoteState ? previewConfigForState(
         remoteState,
         base,
-        trustedLoopback ? serveSimBinPath() : "",
+        trustedLoopback ? serveSimBin : "",
         allowExec && trustedLoopback,
         options?.codec,
         proxyHelpers,
@@ -1962,7 +1972,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           remoteState ? previewConfigForState(
             remoteState,
             base,
-            trustedLoopback ? serveSimBinPath() : "",
+            trustedLoopback ? serveSimBin : "",
             allowExec && trustedLoopback,
             options?.codec,
             proxyHelpers,
