@@ -88,8 +88,9 @@ adds `src/touch-remap.ts`, and `tap()` / `gesture()` call `touchInputOrientation
 - **Config lookup with the socket's auth.** `configUrlForWsUrl` derives the `/config`
   URL from the HID socket URL (`…/helper/<udid>/ws` -> `…/helper/<udid>/config`,
   `wss:` -> `https:`), so it works for local state files and `--url` remotes. It is
-  fetched with the same headers as the socket (`Authorization: Bearer <token>` from
-  `--auth-token` / `SERVE_SIM_AUTH_TOKEN`), 2 s timeout.
+  fetched with the same headers as the socket, 2 s timeout. Those headers carry
+  `Authorization: Bearer <token>` only when `--auth-token` or `SERVE_SIM_AUTH_TOKEN`
+  is set; otherwise the request is unauthenticated.
 - **Landscape display -> raw.** `cliInputOrientation` applies the viewer's own rule
   (`streamDisplayGeometry(...).inputOrientation`: remap only when the raw frame is
   still portrait while the UI is rotated), and `displayTouchToRaw` converts the point
