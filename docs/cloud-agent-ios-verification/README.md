@@ -4,7 +4,7 @@ This is how I let an agent that runs on Linux (a cloud agent, a CI job, a bot in
 
 Read it top to bottom the first time. Fill in the values from [Variables](#variables) and the commands paste as-is.
 
-> **Depends on [PR #166](https://github.com/EvanBacon/serve-sim/pull/166)** (*Require auth for exec and remote access*). That PR adds `--auth-token` / `SERVE_SIM_AUTH_TOKEN`, `--url` / `SERVE_SIM_URL`, the `?token=` cookie bootstrap, and remote gating. **Keep this guide in draft until #166 lands**, then pin a published version that includes those flags. Check with `node packages/serve-sim/dist/serve-sim.js --help | grep -- --auth-token`; if that prints nothing, stop — this build must not be tunneled.
+> **Depends on [PR #166](https://github.com/EvanBacon/serve-sim/pull/166)** (*Require auth for exec and remote access*). That PR adds `--auth-token` / `SERVE_SIM_AUTH_TOKEN`, `--url` / `SERVE_SIM_URL`, the `?token=` cookie bootstrap, and remote gating. It also makes the host shell (`/exec`) opt-in with `--allow-exec` and refuses to reuse a running server started with a different token. **Keep this guide in draft until #166 lands**, then pin a published version that includes those flags. Check with `node packages/serve-sim/dist/serve-sim.js --help | grep -- --auth-token`; if that prints nothing, stop — this build must not be tunneled.
 
 ## Who runs what
 
@@ -49,9 +49,11 @@ For serve-sim development I use my Mac mini as the Mac. Our bot has a remote she
 The preview server gates every non-loopback route behind `--auth-token`. Still, the tunnel is the outer fence; pick one that only your agent can reach:
 
 1. **SSH local forward (preferred).** No public surface at all. From Linux:
-   `ssh -N -L "$PORT:127.0.0.1:$PORT" mac-user@mac-host`. Then `URL=http://127.0.0.1:$PORT`. Over an SSH forward serve-sim sees a loopback client, so your SSH access is the access control; still start serve-sim with `--auth-token` so the same commands work unchanged over any tunnel.
+   `ssh -N -L "$PORT:127.0.0.1:$PORT" mac-user@mac-host`. Then `URL=http://127.0.0.1:$PORT`. Over an SSH local forward serve-sim sees a loopback client, so your SSH access is the access control; still start serve-sim with `--auth-token` so the same commands work unchanged over any tunnel.
 2. **Tailscale (preferred for long-lived).** On the Mac: `tailscale serve --bg "$PORT"`; URL = the `https://<mac>.<tailnet>.ts.net` address it prints. Restrict with tailnet ACLs. (serve-sim binds to loopback, so the tailnet IP alone won't reach it.)
 3. **ngrok with auth.** `ngrok http "$PORT"` gives an HTTPS URL. serve-sim's `--auth-token` is what actually protects it; keep the URL out of git and chat. Free ngrok injects a browser warning — send `ngrok-skip-browser-warning: 1` on every request. ngrok forwards from loopback with `X-Forwarded-For`, which serve-sim treats as remote, so the token is enforced.
+
+> **Raw TCP forwards look local.** serve-sim trusts a request as loopback when the socket peer is loopback, it has no forwarding headers (`X-Forwarded-*`, `Forwarded`, `Via`, `Tailscale-*`, `ngrok-*`, …), and `Host` is loopback. `ssh -L` from the agent's machine is fine. `ssh -R`, `socat`, or a reverse proxy that strips forwarding headers deliver *remote* clients that way, so serve-sim skips the token check for them. Don't use those to expose the port. **Never start a tunneled serve-sim with `--allow-exec`**: the host shell is only safe when nobody but you can reach the port. A remote agent never needs it; every step here works without it.
 
 Do not expose the port without a token, and do not pass the token in a URL query except the one-time browser cookie bootstrap (`<URL>/?token=...`), which the server immediately redirects away.
 
@@ -78,9 +80,12 @@ TOKEN=$(openssl rand -hex 24)   # the shared secret
 cd <serve-sim-checkout>
 ```
 
-`--detach` prints one line of JSON and exits, leaving the helper running. **Read the port back from that JSON** rather than assuming it; serve-sim picks the next free port if `PORT` is taken. Run this once:
+`--detach` prints one line of JSON and exits, leaving the helper running. **Read the port back from that JSON** rather than assuming it; serve-sim picks the next free port if `PORT` is taken.
+
+Stop any server already running for this device first. `--detach` reuses a running server for the same UDID, and with #166 it exits with an error (`…was started with a different --auth-token. Stop it with serve-sim -k <udid>…`) if that server's token doesn't match your new `TOKEN`, or (`…was started with --allow-exec, but it was not given now`) if it was started with `--allow-exec`. `-k` is a no-op when nothing is running. Leave `--allow-exec` off. Run this once:
 
 ```bash
+node packages/serve-sim/dist/serve-sim.js -k "$UDID" -q
 PORT=$(node packages/serve-sim/dist/serve-sim.js --detach -p "$PORT" --auth-token "$TOKEN" "$UDID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["port"])')
 test -n "$PORT" || { echo "serve-sim --detach failed; see the error above" >&2; exit 1; }
 ```
@@ -222,6 +227,10 @@ Run the rebuilt local CLI (`node packages/serve-sim/dist/serve-sim.js ...`), not
 |---|---|---|---|
 | 401/403 on every remote call | No/wrong token | Set `SERVE_SIM_AUTH_TOKEN` (or `--auth-token`) to the server's token | Agent |
 | 403 only from the tunnel, fine on loopback | Server started without `--auth-token` | Restart serve-sim with `--auth-token` | Mac |
+| `--detach` exits: `already running for <udid> but was started with a different --auth-token` (or `with/without an --auth-token`) | An older server for this UDID has another token | `serve-sim -k "$UDID"`, then rerun the `--detach` step | Mac |
+| `--detach` exits: `already running for <udid> but was started with --allow-exec, but it was not given now` | An older server for this UDID has the host shell on | `serve-sim -k "$UDID"`, then rerun the `--detach` step (without `--allow-exec`) | Mac |
+| 403 `exec disabled; start with --allow-exec` | Something called `/exec`; the host shell is off by default | Remote agents can't use exec. Do host-side work in a Mac shell, and don't enable `--allow-exec` on a tunneled port | Mac |
+| Preview UI tools (screenshot, camera, permissions, drops) fail over the tunnel with `host actions are only available to loopback clients` | Those tools are host actions, served only to a loopback same-origin page | Expected for a remote browser. Use the stream/HID/CLI routes, or run the action in a Mac shell | Agent |
 | No frames after the Mac idles | Mac slept | Keep `caffeinate -dims`; reopen the stream after wake | Mac |
 | `config` width/height stay 0 | Helper not ready yet | Wait and re-poll `/config`; restart serve-sim if it persists | Mac |
 | Port already in use | Another preview on that port | Use the port from the `--detach` JSON; never take `:3200` | Mac |
@@ -230,7 +239,7 @@ Run the rebuilt local CLI (`node packages/serve-sim/dist/serve-sim.js ...`), not
 | Taps logged but UI unchanged | Device Hub input not attached | `serve-sim repair-input -d "$UDID"`, then restart serve-sim | Mac |
 | **TCC / permission dialog on the simulator (human only)** | First camera/photos/etc. access | **A person must click it on the Mac** (or script an AX lookup + tap on the Mac). A remote agent cannot dismiss a TCC prompt. | **Human on the Mac** |
 | **Xcode "install additional components" prompt (human only)** | First run of a new Xcode/runtime | **A person must complete it on the Mac.** | **Human on the Mac** |
-| AX returns 503 `noFrontmostApplication` | No app in foreground | Launch an app first; prove the change with a JPEG delta | Agent |
+| `/helper/<udid>/ax` returns 503 `{"error":"ax_unavailable", ...}` (`/foreground`: `foreground_unavailable`) | AX tree not readable yet, e.g. no app in the foreground | Launch an app first and retry; prove the change with a JPEG delta | Agent |
 
 Steps marked **human only** need someone physically (or via GUI) on the Mac; they can't be done over the tunnel.
 

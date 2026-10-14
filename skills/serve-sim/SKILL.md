@@ -82,7 +82,7 @@ Key invariants the agent must respect:
 | Inject camera feed | `npx serve-sim camera <bundle-id> [--file <path>\|--webcam [name]]` | (Re)launches the app with the camera dylib attached. macOS 14+ only. See [references/camera.md](references/camera.md). |
 | Hot-swap camera source | `npx serve-sim camera switch <placeholder\|webcam\|file> [arg]` | No app relaunch. |
 | Manage app permissions | `npx serve-sim permissions <grant\|revoke\|reset\|list> <permission> <bundle-id>` | Camera, photos, location, **push notifications**, contacts, etc. See [references/permissions.md](references/permissions.md). |
-| Read accessibility tree | `curl http://localhost:3100/ax` | Returns axe-style JSON. See [references/endpoints.md](references/endpoints.md) for all endpoints. |
+| Read accessibility tree | `curl http://localhost:<port>/helper/<udid>/ax` | Returns axe-style JSON. See [references/endpoints.md](references/endpoints.md) for all endpoints. |
 
 Most subcommands accept `-d <udid|name>` to target a specific device when several are booted.
 

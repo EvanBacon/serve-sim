@@ -4,28 +4,32 @@ For agents that want to bypass the CLI — for example to drive gestures from a 
 
 ## Contents
 
-- Stream server (Swift helper, port 3100)
+- Device helper routes (`/helper/<udid>/…`, on the preview port)
 - Preview middleware (port 3200)
 - Authentication
 - Discovering the live URLs
 
-## Stream server (Swift helper, default port 3100)
+## Device helper routes (`/helper/<udid>/…`, same port as the preview)
 
-This is the per-device binary started for each booted simulator. It serves the video stream and accepts input over a binary WebSocket.
+There is no separate per-device binary or stream port. The preview server serves each device's stream, input WebSocket, and AX routes in-process (a native capture/HID session per device, created on first request) under `<preview-url>/helper/<udid>/`. The `streamUrl` / `wsUrl` from `serve-sim --list -q` already point here.
 
-| Method | Path | Returns / accepts |
+| Method | Path (under `/helper/<udid>`) | Returns / accepts |
 |---|---|---|
 | `GET` | `/stream.mjpeg` | MJPEG video stream as `multipart/x-mixed-replace; boundary=frame`. Use this in `<img>` tags. |
-| `GET` | `/stream.mjpeg?raw=1` | Same JPEG bytes as `application/octet-stream`. Use this when consuming from `fetch().body.getReader()` — WebKit refuses multipart responses there. |
+| `GET` | `/stream.mjpeg?raw=1` | Same bytes (still multipart-framed) labelled `application/octet-stream`. Use this when consuming from `fetch().body.getReader()` — WebKit refuses multipart responses there. |
+| `GET` | `/stream.avcc` | H.264 (AVCC) stream for the preview's decoder. |
 | `GET` | `/ws` | Binary WebSocket. Accepts touch / button / orientation / CoreAnimation / memory-warning messages. See "WebSocket message types" below. |
 | `GET` | `/config` | JSON `{width: number, height: number, orientation: string}` describing the current display. |
 | `GET` | `/health` | JSON `{status: "ok"}`. Use for liveness probes. |
-| `GET` | `/ax` | JSON accessibility tree (axe-compatible flat-array shape). |
-| `GET` | `/foreground` | JSON `{bundleId: string, pid: number}` of the frontmost app. |
+| `GET` | `/ax` | JSON accessibility tree (axe-compatible flat-array shape). 503 `{error: "ax_unavailable", message}` when it can't be read (e.g. nothing in the foreground yet). |
+| `GET` | `/foreground` | JSON `{bundleId: string, pid: number}` of the frontmost app. 503 `{error: "foreground_unavailable", message}` when unavailable. |
+| `GET` | `/camera/status` | Camera-injection helper state. |
+
+A device that isn't booted (or can't be captured) gets 404.
 
 > Requires serve-sim with [#166](https://github.com/EvanBacon/serve-sim/pull/166) (the auth/exec fix). Older builds send a wildcard `Access-Control-Allow-Origin: *` from the helper routes and have no auth token; never tunnel them.
 
-The helper routes are served in-process by the preview server, which applies the auth and origin checks below. With #166 the helper routes send no `Access-Control-Allow-Origin` header at all, so only same-origin pages can read them from a browser.
+Because the helper routes are served by the preview server, they get the same auth and origin checks as everything else (below). With #166 the helper routes send no `Access-Control-Allow-Origin` header at all, so only same-origin pages can read them from a browser.
 
 ### WebSocket message types
 
@@ -67,7 +71,7 @@ This is a Node middleware that serves the preview UI and proxies state. It can b
 | `GET` | `/.sim` | The preview HTML page (React UI showing the simulator stream). |
 | `GET` | `/.sim/api` | JSON state: `{device, pid, port, url, streamUrl, wsUrl}`. |
 | `GET` | `/.sim/ax` | SSE stream of accessibility tree snapshots. |
-| `POST` | `/.sim/exec` | Run a shell command on the host. **Loopback same-origin only**, and must carry the per-process exec token. Never available to a remote/tunneled or cross-origin caller, token or not. |
+| `POST` | `/.sim/exec` | Run a shell command on the host. **Off unless the server was started with `--allow-exec`** (otherwise 403 `{"error":"exec disabled; start with --allow-exec"}`). When on: trusted loopback, same-origin, JSON, and the exec token from the token file (see Authentication). Use `serve-sim exec <command>` rather than calling it yourself. Never available to a remote caller, auth token or not. |
 | `POST` | `/.sim/appstate` | SSE-like stream of frontmost-app changes. |
 | `GET` | `/.sim/devtools` | WebKit Inspector bridge for in-app web views. |
 | `POST` | `/grid/api` | List running devices. |
@@ -82,15 +86,20 @@ import { simMiddleware } from "serve-sim/middleware";
 app.use(simMiddleware({ basePath: "/.sim" }));
 ```
 
+Arbitrary host-shell commands (`/exec` and `{id, command}` frames on `/exec-ws`) are off in the middleware unless you pass `allowExec: true`. The preview UI's host tools (screenshots, camera, permissions, media/app drops, reveal in Finder) don't need it: they use validated host actions (see Authentication).
+
 ## Authentication
 
 > Requires serve-sim with [#166](https://github.com/EvanBacon/serve-sim/pull/166). Older builds have no `--auth-token`, no loopback/remote distinction, and no `serve_sim_auth` cookie; never expose them beyond loopback.
 
-serve-sim distinguishes a **trusted loopback** request (loopback TCP peer, no proxy/forwarding headers, loopback `Host`) from everything else (LAN, tunnel, reverse proxy, or a rebound `Host` — all "remote").
+serve-sim distinguishes a **trusted loopback** request from everything else. Trusted loopback means all three: the real TCP peer address is loopback (`127.0.0.0/8` or `::1`), the request carries no proxy/forwarding headers (`Forwarded`, `Via`, `X-Forwarded-*`, `X-Real-IP`, `CF-Connecting-IP`, `Tailscale-*`, `ngrok-*`, …), and `Host` names a loopback host. LAN clients, tunnels and reverse proxies that add those headers, and rebound `Host`s are all "remote". `Host`/`Origin` never grant trust on their own.
 
-- **Exec token (`/exec`, and shell commands over the `/exec-ws` control socket).** A per-process random token, injected only into the preview page served to a trusted loopback same-origin browser. `/exec` runs a command only for a trusted loopback request whose `Origin` matches its loopback `Host` and that presents this token. A remote caller can never run a shell command, even with the auth token below.
-- **Auth token (`--auth-token <token>` / `SERVE_SIM_AUTH_TOKEN`).** Gates *all* non-loopback access: the API, the stream and helper routes, `/config`, `/ax`, DevTools, the HID/stream WebSockets, and the grid routes. A remote request without it gets 401/403. Send it as `Authorization: Bearer <token>` (or let a browser pick up the `serve_sim_auth` cookie via the one-time `<url>/?token=...` redirect). This token does **not** unlock `/exec`.
-- The exec token lives only in the trusted-loopback preview page's injected config (`window.__SIM_PREVIEW__.execToken`). It is **not** written to the state file under `$TMPDIR/serve-sim/server-{udid}.json`; `GET /api`, `GET /api/events`, and a remote preview page never return it.
+> **A raw TCP forward looks local.** `ssh -R`, `socat`, or a reverse proxy that strips forwarding headers delivers remote clients from a loopback socket with no forwarding headers, so serve-sim treats them as trusted loopback: no auth token needed, and shell access if `--allow-exec` is on. `ssh -L` from a machine you control is fine (only people with SSH access to the Mac reach it). **Never combine a tunnel or forward with `--allow-exec`.**
+
+- **Auth token (`--auth-token <token>` / `SERVE_SIM_AUTH_TOKEN`).** Gates *all* non-loopback access: the API, the stream and helper routes, `/config`, `/ax`, DevTools, the HID/stream WebSockets, and the grid routes. A remote request gets 403 if the server has no token, 401 if the token is missing or wrong. Send it as `Authorization: Bearer <token>` (or let a browser pick up the `serve_sim_auth` cookie via the one-time `<url>/?token=...` redirect). This token does **not** unlock `/exec`. The state file records only its SHA-256, and `--detach` / foreground start refuse to reuse a running server whose token differs (`serve-sim is already running for <udid> but was started with a different --auth-token…`); stop it with `serve-sim -k <udid>` and start again.
+- **Host shell (`--allow-exec`).** Off by default: `POST /exec` answers 403 `{"error":"exec disabled; start with --allow-exec"}`, and `{id, command}` frames on the `/exec-ws` control socket get the same message back. Start the server with `--allow-exec` (or pass `allowExec: true` to the middleware) to turn it on. Even then a remote caller can never run a command, auth token or not. The state file records whether a server has it on, and `--detach` / foreground start refuse to reuse a running server whose `--allow-exec` setting differs from the one you passed (`…was started without --allow-exec` / `…was started with --allow-exec, but it was not given now`); stop it with `serve-sim -k <udid>` and start again.
+- **Exec token.** With `--allow-exec`, `/exec` also needs a per-process random token that no HTTP response contains (not the preview HTML, `/api`, `/api/events`, or the state file). The server writes it to `$TMPDIR/serve-sim/exec-tokens/<port>.token` (mode 0600, owner-only directory) and deletes it on stop and on `serve-sim -k`. `serve-sim exec <command...> [-d udid]` reads that file and POSTs to `http://127.0.0.1:<port>/exec` for you; it prints the command's stdout/stderr and exits with its exit code. It shell-quotes each argument, so `serve-sim exec ls "my dir"` runs exactly that argv; for pipes, redirects, or `&&`, pass a shell yourself: `serve-sim exec sh -c 'xcrun simctl list | head'`. Shell commands over `/exec-ws` need the same token: the socket's first frame must be `{"token":"<exec token>"}`, on top of `--allow-exec` and a trusted loopback socket with a same-origin `Origin`; otherwise `{id, command}` frames get exit 126 and `exec requires the exec token`. The preview page never holds the token, so it can't run shell commands.
+- **Host actions (preview UI).** The page's host tools send `{id, rpc:{method, params}}` frames on `/exec-ws` instead of shell text: named actions (screenshot, camera, permissions, uploads, app install, location, …) whose params the server validates and runs as a fixed argv against a booted simulator, with no shell. They work without `--allow-exec`, but only for a trusted loopback socket with a same-origin `Origin`; anything else gets `{id, error:"host actions are only available to loopback clients"}`. A remote (authenticated) page still gets SSE subscriptions and simulator settings over the socket, just not host actions.
 
 ## Discovering the live URLs
 
@@ -100,7 +109,7 @@ The simplest path is the CLI:
 npx serve-sim --list -q
 ```
 
-Returns a JSON array of running streams, each with `url`, `streamUrl`, `wsUrl`, `device`, `pid`, `port`. An agent should call this once on entry to discover ports — they are not guaranteed to be 3200/3100 if other processes occupy those defaults.
+Returns a JSON array of running streams, each with `url`, `streamUrl`, `wsUrl`, `device`, `pid`, `port`. An agent should call this once on entry to discover ports — the port is not guaranteed to be 3200 if another process holds it.
 
 Alternatively, read state files directly:
 

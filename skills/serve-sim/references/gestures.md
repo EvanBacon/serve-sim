@@ -19,7 +19,7 @@ All coordinates are normalized floats in `[0, 1]`:
 
 The serve-sim client compensates for device orientation automatically. After a `rotate landscape_left`, coords still describe the **logical** display from the user's perspective — you do not rotate them manually.
 
-To convert pixel coords to normalized, divide by the display dimensions reported by `GET http://localhost:3100/config` (`{width, height, orientation}`).
+To convert pixel coords to normalized, divide by the display dimensions reported by `GET http://localhost:<port>/helper/<udid>/config` (port from `serve-sim --list -q`) (`{width, height, orientation}`).
 
 ## Single-touch JSON shape
 
