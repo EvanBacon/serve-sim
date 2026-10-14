@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { appIconCache, fetchAppIcon } from "../utils/app-icon";
-import { execOnHost } from "../utils/exec";
+import { hostAction } from "../utils/exec";
 
 export function useAppIcons(udid: string | null | undefined, bundleIds: string[]) {
   const [icons, setIcons] = useState<Record<string, string | null>>({});
@@ -18,7 +18,7 @@ export function useAppIcons(udid: string | null | undefined, bundleIds: string[]
         setIcons((prev) => (prev[bundleId] === cached ? prev : { ...prev, [bundleId]: cached as string | null }));
         continue;
       }
-      void fetchAppIcon(execOnHost, udid, bundleId).then((url) => {
+      void fetchAppIcon(hostAction, udid, bundleId).then((url) => {
         if (cancelled) return;
         setIcons((prev) => ({ ...prev, [bundleId]: url }));
       });

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { FlipHorizontal2, Images, X } from "lucide-react";
 import { PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
-import { execOnHost, shellEscape } from "../utils/exec";
+import { hostAction } from "../utils/exec";
 import { fileExtension, uploadFileToTmp } from "../utils/drop";
 import { CollapsibleSection } from "./collapsible-section";
 
@@ -260,14 +260,6 @@ export function CameraTool({
   const appliedMirrorRef = useRef<CamMirror>("off");
   const autoOpenedForInjectionRef = useRef(false);
 
-  const cliPrefix = useMemo(() => {
-    const bin = window.__SIM_PREVIEW__?.serveSimBin;
-    if (!bin) return "serve-sim";
-    if (/\.ts$/.test(bin)) return `bun ${shellEscape(bin)}`;
-    if (/\.js$/.test(bin)) return `node ${shellEscape(bin)}`;
-    return shellEscape(bin);
-  }, []);
-
   const fetchCameraStatus = useCallback(async () => {
     const endpoint = window.__SIM_PREVIEW__?.cameraStatusEndpoint;
     return endpoint ? requestCameraStatus(endpoint) : null;
@@ -379,7 +371,7 @@ export function CameraTool({
     setWebcamLoading(true);
     setError(null);
     try {
-      const res = await execOnHost(`${cliPrefix} camera --list-webcams`);
+      const res = await hostAction("cameraListWebcams");
       if (res.exitCode !== 0) {
         setError(res.stderr.trim() || `--list-webcams failed (${res.exitCode})`);
         return;
@@ -390,7 +382,7 @@ export function CameraTool({
     } finally {
       setWebcamLoading(false);
     }
-  }, [webcamId, cliPrefix]);
+  }, [webcamId]);
 
   useEffect(() => {
     refreshWebcamsRef.current = refreshWebcams;
@@ -416,17 +408,16 @@ export function CameraTool({
     nextFilePath: string,
   ): Promise<boolean> => {
     const isFile = nextSource === "image" || nextSource === "video";
-    const argv = ["camera", "switch", isFile ? "file" : nextSource];
-    if (nextSource === "webcam" && nextWebcamId) argv.push(shellEscape(nextWebcamId));
-    if (isFile) {
-      if (!nextFilePath.trim()) {
-        setError("Drop a file into the panel or pick another source.");
-        return false;
-      }
-      argv.push(shellEscape(nextFilePath.trim()));
+    if (isFile && !nextFilePath.trim()) {
+      setError("Drop a file into the panel or pick another source.");
+      return false;
     }
-    argv.push("-d", udid, "--quiet");
-    const res = await execOnHost(`${cliPrefix} ${argv.join(" ")}`);
+    const res = await hostAction("cameraSwitch", {
+      udid,
+      source: nextSource,
+      ...(nextSource === "webcam" && nextWebcamId ? { webcamId: nextWebcamId } : {}),
+      ...(isFile ? { filePath: nextFilePath.trim() } : {}),
+    });
     if (res.exitCode !== 0) {
       reportSourceError(res.stderr.trim() || res.stdout.trim() || `switch failed (${res.exitCode})`);
       return false;
@@ -439,7 +430,7 @@ export function CameraTool({
       setStatus(`Switched → ${nextSource}`);
     }
     return true;
-  }, [udid, cliPrefix, reportSourceError]);
+  }, [udid, reportSourceError]);
 
   const inject = useCallback(async () => {
     if (!bundleId) return;
@@ -447,19 +438,19 @@ export function CameraTool({
     setError(null);
     setStatus(null);
     try {
-      const flags: string[] = ["camera", shellEscape(bundleId), "-d", udid, "--quiet"];
-      if (source === "image" || source === "video") {
-        if (!filePath.trim()) {
-          setError("Drop a file into the panel or pick another source.");
-          return;
-        }
-        flags.push("--file", shellEscape(filePath.trim()));
-      } else if (source === "webcam") {
-        if (webcamId) flags.push("--webcam", shellEscape(webcamId));
-        else flags.push("--webcam");
+      const isFile = source === "image" || source === "video";
+      if (isFile && !filePath.trim()) {
+        setError("Drop a file into the panel or pick another source.");
+        return;
       }
-      flags.push(`--mirror`, mirror);
-      const res = await execOnHost(`${cliPrefix} ${flags.join(" ")}`);
+      const res = await hostAction("cameraInject", {
+        udid,
+        bundleId,
+        source,
+        mirror,
+        ...(isFile ? { filePath: filePath.trim() } : {}),
+        ...(source === "webcam" && webcamId ? { webcamId } : {}),
+      });
       if (res.exitCode !== 0) {
         reportSourceError(res.stderr.trim() || res.stdout.trim() || `inject failed (${res.exitCode})`);
         return;
@@ -487,7 +478,7 @@ export function CameraTool({
     } finally {
       setPendingPrimary(null);
     }
-  }, [bundleId, udid, source, filePath, webcamId, mirror, cliPrefix, reportSourceError]);
+  }, [bundleId, udid, source, filePath, webcamId, mirror, reportSourceError]);
 
   const autoSwapKey = injected
     ? `${source}::${source === "webcam" ? webcamId : ""}::${source === "image" || source === "video" ? filePath : ""}`
@@ -546,9 +537,7 @@ export function CameraTool({
       setPendingAux("mirror");
       setError(null);
       try {
-        const res = await execOnHost(
-          `${cliPrefix} camera mirror ${target} -d ${udid} --quiet`,
-        );
+        const res = await hostAction("cameraMirror", { udid, mirror: target });
         if (cancelled) return;
         if (res.exitCode !== 0) {
           setError(res.stderr.trim() || res.stdout.trim() || `mirror failed (${res.exitCode})`);
@@ -568,7 +557,7 @@ export function CameraTool({
     setPendingPrimary("stop");
     setError(null);
     try {
-      const res = await execOnHost(`${cliPrefix} camera --stop-webcam -d ${udid}`);
+      const res = await hostAction("cameraStop", { udid });
       if (res.exitCode !== 0) {
         setError(res.stderr.trim() || `stop-webcam failed (${res.exitCode})`);
         return;
@@ -581,7 +570,7 @@ export function CameraTool({
     } finally {
       setPendingPrimary(null);
     }
-  }, [udid, cliPrefix]);
+  }, [udid]);
 
   const handleSourceFile = useCallback(async (file: File) => {
     const isHeic = isHeicLikeFile({ type: file.type, name: file.name });
@@ -601,7 +590,7 @@ export function CameraTool({
     lastFileIsHeicRef.current = isHeic;
     try {
       const ext = fileExtension(file);
-      const tmpPath = await uploadFileToTmp(file, "serve-sim-camsrc", ext, execOnHost);
+      const tmpPath = await uploadFileToTmp(file, "serve-sim-camsrc", ext, hostAction);
       setDroppedFileName(file.name);
       setSource(isVideo ? "video" : "image");
       setFilePath(tmpPath);
