@@ -17,12 +17,12 @@ Recipes for common end-to-end agent tasks. These compose the primitives document
 Pixel-hunting is fragile across device sizes. Prefer driving taps from the accessibility tree.
 
 ```sh
-# 1. Ensure serve-sim is running and discover the stream port
-URL=$(npx serve-sim --list -q | jq -r '.[0].streamUrl')
-PORT=$(echo "$URL" | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+# 1. Ensure serve-sim is running and discover the device's routes
+#    (streamUrl is <server>/helper/<udid>/stream.mjpeg; strip the file name)
+HELPER=$(npx serve-sim --list -q | jq -r '(.streams // [.])[0].streamUrl' | sed 's|/stream.mjpeg$||')
 
 # 2. Fetch the accessibility tree
-AX=$(curl -s "http://localhost:${PORT}/ax")
+AX=$(curl -s "${HELPER}/ax")
 
 # 3. Find the element by label (use jq with a query that matches your tree shape)
 TARGET=$(echo "$AX" | jq '.[] | select(.label == "Submit")')
@@ -39,7 +39,7 @@ CX=$(echo "$TARGET" | jq '.frame.x + .frame.width / 2')
 CY=$(echo "$TARGET" | jq '.frame.y + .frame.height / 2')
 
 # 4. Normalize coordinates against the display
-CONFIG=$(curl -s "http://localhost:${PORT}/config")
+CONFIG=$(curl -s "${HELPER}/config")
 W=$(echo "$CONFIG" | jq '.width')
 H=$(echo "$CONFIG" | jq '.height')
 NX=$(echo "scale=4; $CX / $W" | bc)
@@ -60,15 +60,15 @@ xcrun simctl openurl booted "myapp://products/42"
 # 2. Wait briefly for the app to handle the deep link
 sleep 1
 
-# 3. Resolve the stream endpoint — do not hardcode :3100, it may differ
-PORT=$(npx serve-sim --list -q | jq -r '.[0].streamUrl' | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+# 3. Resolve the device's routes — never hardcode a port, it may differ
+HELPER=$(npx serve-sim --list -q | jq -r '(.streams // [.])[0].streamUrl' | sed 's|/stream.mjpeg$||')
 
 # 4. Verify the frontmost app is yours
-curl -s "http://localhost:${PORT}/foreground" | jq
+curl -s "${HELPER}/foreground" | jq
 # Expect: {"bundleId":"com.acme.myapp","pid":12345}
 
 # 5. Verify the screen by reading the accessibility tree
-curl -s "http://localhost:${PORT}/ax" | jq '.[] | select(.label | test("Product #42"))'
+curl -s "${HELPER}/ax" | jq '.[] | select(.label | test("Product #42"))'
 ```
 
 ## Workflow 3: Test a camera capture flow
@@ -106,11 +106,11 @@ npx serve-sim ca-debug blended on
 # 2. Navigate to the screen of interest (via openurl, taps, etc.)
 xcrun simctl openurl booted "myapp://settings"
 
-# 3. Resolve the stream endpoint — do not hardcode :3100, it may differ
-PORT=$(npx serve-sim --list -q | jq -r '.[0].streamUrl' | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+# 3. Resolve the device's routes — never hardcode a port, it may differ
+HELPER=$(npx serve-sim --list -q | jq -r '(.streams // [.])[0].streamUrl' | sed 's|/stream.mjpeg$||')
 
 # 4. Grab a screenshot from the MJPEG stream
-curl -s "http://localhost:${PORT}/stream.mjpeg?raw=1" \
+curl -s "${HELPER}/stream.mjpeg?raw=1" \
   --max-time 1 -o /tmp/blended.jpg
 
 # 5. Inspect — red regions are blended (expensive); green is opaque (good)

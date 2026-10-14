@@ -5,7 +5,7 @@ For agents that want to bypass the CLI — for example to drive gestures from a 
 ## Contents
 
 - Device helper routes (`/helper/<udid>/…`, on the preview port)
-- Preview middleware (port 3200)
+- Preview middleware (default port 3200)
 - Authentication
 - Discovering the live URLs
 
@@ -109,7 +109,7 @@ The simplest path is the CLI:
 npx serve-sim --list -q
 ```
 
-Returns a JSON array of running streams, each with `url`, `streamUrl`, `wsUrl`, `device`, `pid`, `port`. An agent should call this once on entry to discover ports — the port is not guaranteed to be 3200 if another process holds it.
+Returns JSON: `{running: false}` when nothing is running, `{running: true, url, streamUrl, wsUrl, port, device, pid}` for one stream, or `{running: true, streams: [...]}` for several (pass a UDID to `--list` to get one device's entry). An agent should call this once on entry to discover ports. The starting port depends on how the server was launched (`npx serve-sim` starts at 3200, `--detach` at 3100, `-p` overrides both) and serve-sim moves to the next free port if that one is taken, so never assume a fixed port.
 
 Alternatively, read state files directly:
 

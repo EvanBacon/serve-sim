@@ -98,10 +98,10 @@ cd <serve-sim-checkout>
 
 `--detach` prints one line of JSON and exits, leaving the helper running. **Read the port back from that JSON** rather than assuming it; serve-sim picks the next free port if `PORT` is taken.
 
-Stop any server already running for this device first with `serve-sim -k "$UDID"`. `-k <udid>` reads that device's state file in `$TMPDIR/serve-sim/`, stops the recorded serve-sim process and any serve-sim process still holding its recorded port, then deletes the state file and the port's exec token file. It prints `{"disconnected":true,"device":"<udid>"}` whether or not anything was running, so it's safe to run every time. You need it because `--detach` reuses a running server for the same UDID, and with #166 it refuses (exit 1) when that server's settings differ from this start: `…was started with a different --auth-token` (your fresh `TOKEN` never matches), `…was started without an --auth-token`, or `…was started with --allow-exec, but it was not given now`, each followed by ``Stop it with `serve-sim -k <udid>` ``. Leave `--allow-exec` off. Run this once:
+Stop any server already running for this device first with `serve-sim -k "$UDID"`. `-k <udid>` reads that device's state file in `$TMPDIR/serve-sim/`, stops the recorded serve-sim process, then force-kills (SIGKILL) **any** process still listening on its recorded port, serve-sim or not, and deletes the state file and the port's exec token file. So don't record a port another service now uses. It prints `{"disconnected":true,"device":"<udid>"}` whether or not anything was running (preceded by a `Port <n> busy, killing listener pid(s): …` line if it had to kill a listener), so it's safe to run every time. `-k` ignores `-q`. You need it because `--detach` reuses a running server for the same UDID, and with #166 it refuses (exit 1) when that server's settings differ from this start: `…was started with a different --auth-token` (your fresh `TOKEN` never matches), `…was started without an --auth-token`, or `…was started with --allow-exec, but it was not given now`, each followed by ``Stop it with `serve-sim -k <udid>` ``. Leave `--allow-exec` off. Run this once:
 
 ```bash
-node packages/serve-sim/dist/serve-sim.js -k "$UDID" -q
+node packages/serve-sim/dist/serve-sim.js -k "$UDID"
 PORT=$(node packages/serve-sim/dist/serve-sim.js --detach -p "$PORT" --auth-token "$TOKEN" "$UDID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["port"])')
 test -n "$PORT" || { echo "serve-sim --detach failed; see the error above" >&2; exit 1; }
 ```
@@ -232,7 +232,7 @@ When you're editing serve-sim and testing on the Mac, the loop is build-from-sou
 1. Edit the TypeScript/Swift under `packages/serve-sim/`.
 2. Build: `bun run packages/serve-sim/build.ts` (rebuilds the bundle, the compiled CLI, the native `.node` addon, and the camera/AX helpers; see [AGENTS.md](../../AGENTS.md)).
 3. Restart the server from `dist/` so the new native addon loads (the addon is loaded once per process):
-   `node packages/serve-sim/dist/serve-sim.js -k "$UDID" -q` then start it again as above.
+   `node packages/serve-sim/dist/serve-sim.js -k "$UDID"` then start it again as above.
 4. Reproduce the behavior and run the relevant tests (`bun test packages/serve-sim/src/__tests__/<file>`).
 
 Run the rebuilt local CLI (`node packages/serve-sim/dist/serve-sim.js ...`), not `npx serve-sim`, while validating local changes.
@@ -263,7 +263,7 @@ Steps marked **human only** need someone physically (or via GUI) on the Mac; the
 
 ```bash
 # Mac
-node packages/serve-sim/dist/serve-sim.js -k "$UDID" -q
+node packages/serve-sim/dist/serve-sim.js -k "$UDID"
 kill "$CAFFEINE_PID"            # stop caffeinate
 # stop the ngrok / Tailscale serve / SSH forward you started
 # retire the bot device when you're done with it entirely:
