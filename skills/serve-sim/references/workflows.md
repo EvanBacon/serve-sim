@@ -17,12 +17,12 @@ Recipes for common end-to-end agent tasks. These compose the primitives document
 Pixel-hunting is fragile across device sizes. Prefer driving taps from the accessibility tree.
 
 ```sh
-# 1. Ensure serve-sim is running and discover the stream port
-URL=$(npx serve-sim --list -q | jq -r '.[0].streamUrl')
-PORT=$(echo "$URL" | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+# 1. Ensure serve-sim is running and discover the device's routes
+#    (streamUrl is <server>/helper/<udid>/stream.mjpeg; strip the file name)
+HELPER=$(npx serve-sim --list -q | jq -r '(.streams // [.])[0].streamUrl' | sed 's|/stream.mjpeg$||')
 
 # 2. Fetch the accessibility tree
-AX=$(curl -s "http://localhost:${PORT}/ax")
+AX=$(curl -s "${HELPER}/ax")
 
 # 3. Find the element by label (use jq with a query that matches your tree shape)
 TARGET=$(echo "$AX" | jq '.[] | select(.label == "Submit")')
@@ -39,7 +39,7 @@ CX=$(echo "$TARGET" | jq '.frame.x + .frame.width / 2')
 CY=$(echo "$TARGET" | jq '.frame.y + .frame.height / 2')
 
 # 4. Normalize coordinates against the display
-CONFIG=$(curl -s "http://localhost:${PORT}/config")
+CONFIG=$(curl -s "${HELPER}/config")
 W=$(echo "$CONFIG" | jq '.width')
 H=$(echo "$CONFIG" | jq '.height')
 NX=$(echo "scale=4; $CX / $W" | bc)
@@ -60,15 +60,15 @@ xcrun simctl openurl booted "myapp://products/42"
 # 2. Wait briefly for the app to handle the deep link
 sleep 1
 
-# 3. Resolve the stream endpoint — do not hardcode :3100, it may differ
-PORT=$(npx serve-sim --list -q | jq -r '.[0].streamUrl' | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+# 3. Resolve the device's routes — never hardcode a port, it may differ
+HELPER=$(npx serve-sim --list -q | jq -r '(.streams // [.])[0].streamUrl' | sed 's|/stream.mjpeg$||')
 
 # 4. Verify the frontmost app is yours
-curl -s "http://localhost:${PORT}/foreground" | jq
+curl -s "${HELPER}/foreground" | jq
 # Expect: {"bundleId":"com.acme.myapp","pid":12345}
 
 # 5. Verify the screen by reading the accessibility tree
-curl -s "http://localhost:${PORT}/ax" | jq '.[] | select(.label | test("Product #42"))'
+curl -s "${HELPER}/ax" | jq '.[] | select(.label | test("Product #42"))'
 ```
 
 ## Workflow 3: Test a camera capture flow
@@ -106,11 +106,11 @@ npx serve-sim ca-debug blended on
 # 2. Navigate to the screen of interest (via openurl, taps, etc.)
 xcrun simctl openurl booted "myapp://settings"
 
-# 3. Resolve the stream endpoint — do not hardcode :3100, it may differ
-PORT=$(npx serve-sim --list -q | jq -r '.[0].streamUrl' | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+# 3. Resolve the device's routes — never hardcode a port, it may differ
+HELPER=$(npx serve-sim --list -q | jq -r '(.streams // [.])[0].streamUrl' | sed 's|/stream.mjpeg$||')
 
 # 4. Grab a screenshot from the MJPEG stream
-curl -s "http://localhost:${PORT}/stream.mjpeg?raw=1" \
+curl -s "${HELPER}/stream.mjpeg?raw=1" \
   --max-time 1 -o /tmp/blended.jpg
 
 # 5. Inspect — red regions are blended (expensive); green is opaque (good)
@@ -146,39 +146,40 @@ The full erase is destructive — only do it when the user explicitly asks.
 
 ## Workflow 6: Drive a multi-step gesture reliably
 
-For a complex gesture (long drag, multi-finger choreography), the CLI's `gesture` subcommand is unreliable because each call opens a fresh WebSocket. The reliable path is one persistent WebSocket connection.
+For a complex gesture (long drag, multi-finger choreography), the CLI's `gesture` subcommand is unreliable because each call opens a fresh WebSocket. The reliable path is one persistent WebSocket connection that you feed frames.
+
+The wire format is simple: each message is **one binary frame** of a 1-byte tag followed by UTF-8 JSON. Touches are tag `0x03` (`begin`/`move`/`end`), multi-touch is `0x05`. There is no packed binary struct and no `serve-sim-client` package to import — you build the frames yourself. See [endpoints.md](endpoints.md#websocket-message-types) for every tag.
+
+Discover the WebSocket URL with `serve-sim --list -q` (the `wsUrl` field); locally it looks like `ws://127.0.0.1:<port>/helper/<udid>/ws`. When driving a remote Mac over a tunnel, use the tunnel URL and send `Authorization: Bearer <token>` (see [the cloud-agent guide](../../../docs/cloud-agent-ios-verification/README.md)).
 
 In a Node agent:
 
 ```js
 import WebSocket from "ws";
-import { encodeSingleTouch, encodeMultiTouch } from "serve-sim-client/touch-codec";
 
-// 3100 is the default stream port — discover the real one with
-// `serve-sim --list -q` (.streamUrl) when it may differ.
-const ws = new WebSocket("ws://localhost:3100/ws");
+// Build one frame: 1-byte tag + UTF-8 JSON.
+function frame(tag, payload) {
+  const json = Buffer.from(JSON.stringify(payload));
+  return Buffer.concat([Buffer.from([tag]), json]);
+}
+const touch = (type, x, y) => frame(0x03, { type, x, y });
+
+// `serve-sim --list -q` -> .wsUrl. Add { headers: { Authorization: `Bearer ${token}` } } for a remote server.
+const ws = new WebSocket("ws://127.0.0.1:<port>/helper/<udid>/ws");
 await new Promise((r) => ws.once("open", r));
 
-let seq = 0;
-function send(data) {
-  const buf = data.x1 !== undefined
-    ? encodeMultiTouch(data, seq++)
-    : encodeSingleTouch(data, seq++);
-  ws.send(buf);
-}
-
-// Long vertical drag
-send({ type: "begin", x: 0.5, y: 0.2 });
+// Long vertical drag on one socket.
+ws.send(touch("begin", 0.5, 0.2));
 for (let i = 1; i <= 30; i++) {
-  send({ type: "move", x: 0.5, y: 0.2 + (0.6 * i) / 30 });
+  ws.send(touch("move", 0.5, 0.2 + (0.6 * i) / 30));
   await new Promise((r) => setTimeout(r, 16));
 }
-send({ type: "end", x: 0.5, y: 0.8 });
+ws.send(touch("end", 0.5, 0.8));
 
 ws.close();
 ```
 
-If you do not want a Node dependency, you can build the same frames in any language — the binary format is documented in [endpoints.md](endpoints.md).
+The server sends you frames too: a config frame (first byte `0x82`, body `{width,height,orientation,...}`) on connect and whenever the display changes. Read it if you need live dimensions; otherwise ignore inbound frames.
 
 ## Workflow 7: Show the simulator stream in the host's preview
 

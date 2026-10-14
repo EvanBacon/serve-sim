@@ -6,12 +6,13 @@ license: Apache-2.0
 
 # serve-sim
 
-Drive an Apple Simulator (iOS, iPad, Apple Watch) from an agent using the [serve-sim](https://github.com/EvanBacon/serve-sim) CLI. serve-sim spawns a Swift helper that captures the simulator framebuffer via `simctl io`, exposes it as an MJPEG stream plus a binary WebSocket input channel, and serves a React preview UI on top. This skill teaches an agent the exact CLI surface, the gesture JSON shape, the gotchas, and the recommended workflows.
+Drive an Apple Simulator (iOS, iPad, Apple Watch) from an agent using the [serve-sim](https://github.com/EvanBacon/serve-sim) CLI. serve-sim captures the simulator framebuffer in-process (through its native addon), serves it as an MJPEG stream plus a binary WebSocket input channel under `/helper/<udid>/` on the same port as its React preview UI. This skill teaches an agent the exact CLI surface, the gesture JSON shape, the gotchas, and the recommended workflows.
 
 ## When to use
 
 - The user wants an agent to **tap, swipe, drag, pinch, or send hardware buttons** to a running Apple Simulator.
 - The user wants to **stream a simulator** to a browser (local, LAN, or tunneled) for review or remote control.
+- An agent that is **not on the Mac** (a Linux cloud agent, CI) needs to drive a Mac simulator over an authenticated tunnel — see [the cloud-agent guide](../../docs/cloud-agent-ios-verification/README.md).
 - The user wants to **inject a synthetic camera feed** (file, webcam, or animated placeholder) into a specific app on the simulator.
 - The user wants to **toggle CoreAnimation debug overlays** (off-screen rendering, blended layers, slow animations) for performance work.
 - The user wants to **simulate a memory warning** or **rotate the device** programmatically.
@@ -43,32 +44,34 @@ A booted simulator is required for most subcommands. Check with `xcrun simctl li
 ## Mental model
 
 ```text
-┌──────────────┐  simctl io  ┌─────────────────┐  MJPEG / WS  ┌─────────┐
-│ iOS Simulator│ ──────────► │ serve-sim-bin   │ ───────────► │ Browser │
-└──────────────┘   (Swift)   │ (per-device)    │              └─────────┘
-                             └─────────────────┘
-                                     ▲
-                              state file in
-                            $TMPDIR/serve-sim/
-                                     ▲
-                            ┌──────────────────┐
-                            │ serve-sim CLI    │
-                            └──────────────────┘
+┌──────────────┐  native   ┌───────────────────────────────┐  HTTP / WS  ┌─────────┐
+│ iOS Simulator│ ────────► │ serve-sim server (one port)   │ ──────────► │ Browser │
+└──────────────┘  addon    │  /              preview UI    │             └─────────┘
+                           │  /helper/<udid>/stream.mjpeg  │
+                           │  /helper/<udid>/ws  (input)   │
+                           └───────────────────────────────┘
+                                          ▲
+                                   state file in
+                                 $TMPDIR/serve-sim/
+                                          ▲
+                                 ┌──────────────────┐
+                                 │ serve-sim CLI    │
+                                 └──────────────────┘
 ```
 
 Key invariants the agent must respect:
 
 - **All coordinates are normalized 0..1**, with `(0, 0)` at top-left and `(1, 1)` at bottom-right of the display. Never pass pixel coordinates.
-- **One helper per device**. Multiple booted simulators are supported by passing several device names or by attaching to all.
+- **One in-process session per device, no separate helper binary or stream port**. The stream, `/config`, `/ax`, and the input WebSocket live under `/helper/<udid>/` on the server's own port. Multiple booted simulators are supported by passing several device names or by attaching to all.
 - **State lives in `$TMPDIR/serve-sim/server-{udid}.json`**. Use `serve-sim --list` to query it; do not read the JSON directly unless you know what you are doing.
-- **The orientation set via `rotate` is remembered by the helper**, and subsequent gestures are rotated client-side. An agent that sends raw coords after a rotation does not need to compensate manually.
+- **The orientation set via `rotate` is remembered by the server**, and subsequent gestures are rotated client-side. An agent that sends raw coords after a rotation does not need to compensate manually.
 
 ## Common operations
 
 | Goal | Command | Notes |
 |---|---|---|
-| Start preview server | `npx serve-sim [device]` | Default preview at `http://localhost:3200`, stream at `:3100`. Foreground process. |
-| Start headless / daemon | `npx serve-sim --detach [device]` | Returns JSON with `pid`, `port`, `url`. Use for agent loops. |
+| Start preview server | `npx serve-sim [device]` | Default preview at `http://localhost:3200`; stream at `/helper/<udid>/stream.mjpeg` on the same port. Foreground process. |
+| Start headless / daemon | `npx serve-sim --detach [device]` | Starts at port 3100 (not 3200) unless `-p` is given. Returns JSON with `url`, `streamUrl`, `wsUrl`, `port`, `device`. Use for agent loops. |
 | Show stream in host's preview | `npx serve-sim --detach -q` → hand off `url` to host preview tool | See "Showing the stream in your agent's preview" section. |
 | List running streams | `npx serve-sim --list` | Add `-q` for JSON-only output. |
 | Stop all helpers | `npx serve-sim --kill` | Pass `[device]` to stop a specific one. |
@@ -81,7 +84,7 @@ Key invariants the agent must respect:
 | Inject camera feed | `npx serve-sim camera <bundle-id> [--file <path>\|--webcam [name]]` | (Re)launches the app with the camera dylib attached. macOS 14+ only. See [references/camera.md](references/camera.md). |
 | Hot-swap camera source | `npx serve-sim camera switch <placeholder\|webcam\|file> [arg]` | No app relaunch. |
 | Manage app permissions | `npx serve-sim permissions <grant\|revoke\|reset\|list> <permission> <bundle-id>` | Camera, photos, location, **push notifications**, contacts, etc. See [references/permissions.md](references/permissions.md). |
-| Read accessibility tree | `curl http://localhost:3100/ax` | Returns axe-style JSON. See [references/endpoints.md](references/endpoints.md) for all endpoints. |
+| Read accessibility tree | `curl http://localhost:<port>/helper/<udid>/ax` | Returns axe-style JSON. See [references/endpoints.md](references/endpoints.md) for all endpoints. |
 
 Most subcommands accept `-d <udid|name>` to target a specific device when several are booted.
 
@@ -108,8 +111,8 @@ If the user has only one booted simulator, omit `-d` entirely. The skill should 
 By default, serve-sim prints human-readable status to stdout. For agent loops, prefer JSON output:
 
 ```sh
-npx serve-sim --list -q          # JSON array of running streams
-npx serve-sim --detach -q        # JSON with pid/port/url after spawn
+npx serve-sim --list -q          # JSON: one stream's fields, or {running, streams: [...]}
+npx serve-sim --detach -q        # JSON with url/streamUrl/wsUrl/port/device after spawn
 npx serve-sim camera status -q   # JSON with {alive, source, mirror, ...}
 ```
 
@@ -125,7 +128,7 @@ Steps:
    ```sh
    npx serve-sim --detach -q
    ```
-   This returns JSON like `{"pid":..., "port":3200, "url":"http://localhost:3200", "streamUrl":"http://localhost:3100", ...}`. The `url` field is the human-facing preview UI; `streamUrl` is the raw MJPEG endpoint.
+   This returns JSON like `{"url":"http://127.0.0.1:3100", "streamUrl":"http://127.0.0.1:3100/helper/<udid>/stream.mjpeg", "wsUrl":"ws://127.0.0.1:3100/helper/<udid>/ws", "port":3100, "device":"<udid>"}` (`--detach` starts at 3100 and takes the next free port). The `url` field is the human-facing preview UI; `streamUrl` is the raw MJPEG endpoint.
 
 2. **Always surface the URL plainly** in your response so the user can fallback to opening it manually in any browser.
 
@@ -154,7 +157,7 @@ npx serve-sim --kill            # stop all
 npx serve-sim --kill "iPhone 16 Pro"  # stop one
 ```
 
-Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
+Orphan servers keep holding their port (3200 for the foreground preview, 3100+ for `--detach`) and `--detach` reuses or refuses them instead of starting fresh. `--kill` also SIGKILLs any process still listening on a stopped server's recorded port.
 
 ## Anti-patterns
 
@@ -176,3 +179,4 @@ Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
 - [references/ca-debug.md](references/ca-debug.md) — the five CoreAnimation debug flags and when each one helps.
 - [references/endpoints.md](references/endpoints.md) — HTTP and WebSocket endpoints for agents that bypass the CLI.
 - [references/workflows.md](references/workflows.md) — end-to-end recipes for UI automation, camera testing, deep-link flows.
+- [../../docs/cloud-agent-ios-verification/README.md](../../docs/cloud-agent-ios-verification/README.md) — driving a Mac simulator from a Linux/remote agent over an authenticated tunnel (`--auth-token` / `--url`).
