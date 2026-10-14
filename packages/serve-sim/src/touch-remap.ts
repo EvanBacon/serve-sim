@@ -32,12 +32,15 @@ export interface DisplayTouch {
  * Orientation to remap CLI touches by, given the server's `/config`. Mirrors
  * the web viewer: remap only when the raw frame is still portrait while the
  * UI is rotated. Returns undefined (no remap) for portrait, for frames that
- * are already landscape, and for missing or malformed config.
+ * are already landscape, for foldables (a `hingeDegrees` reading means the
+ * viewer renders the Duo projection, which sends touches unrotated), and for
+ * missing or malformed config.
  */
 export function cliInputOrientation(config: unknown): SimulatorOrientation | undefined {
   if (!config || typeof config !== "object") return undefined;
   const c = config as Partial<StreamConfig>;
   if (typeof c.width !== "number" || typeof c.height !== "number") return undefined;
+  if (typeof c.hingeDegrees === "number") return undefined;
   const orientation = ORIENTATIONS.has(c.orientation as SimulatorOrientation)
     ? c.orientation
     : undefined;

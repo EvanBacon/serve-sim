@@ -841,17 +841,27 @@ function deviceLabelsForEvents(events: EventLogEntry[]): Map<string, string> {
  * Orientation to remap CLI touches by. `SimHID.touch` reads x/y in the native
  * portrait frame even after the UI rotates, so a point taken from a landscape
  * screenshot must be converted the same way the web viewer does. Returns
- * undefined (send as-is) for portrait, `--raw`, or when /config is unreachable.
+ * undefined (send as-is) for portrait, foldables, `--raw`, or when /config is
+ * unreachable. /config is fetched with the same auth headers as the HID
+ * socket; a 401/403 is reported rather than silently sending unmapped coords.
  */
 async function touchInputOrientation(
-  state: InputTarget,
+  target: InputTarget,
   raw: boolean | undefined,
 ): Promise<SimulatorOrientation | undefined> {
   if (raw) return undefined;
-  const url = configUrlForWsUrl(state.wsUrl);
+  const url = configUrlForWsUrl(target.wsUrl);
   if (!url) return undefined;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(url, { headers: target.headers, signal: AbortSignal.timeout(2000) });
+    if (res.status === 401 || res.status === 403) {
+      console.error(
+        `Warning: serve-sim refused ${url} (HTTP ${res.status}); landscape remap skipped, ` +
+          `coordinates sent unmapped. Pass --auth-token (or set ${AUTH_TOKEN_ENV}) to remap, ` +
+          `or --raw to send native portrait coordinates.`,
+      );
+      return undefined;
+    }
     if (!res.ok) return undefined;
     return cliInputOrientation(await res.json());
   } catch (err) {

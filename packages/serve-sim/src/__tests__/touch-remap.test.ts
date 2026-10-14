@@ -32,6 +32,15 @@ describe("cliInputOrientation", () => {
     ).toBeUndefined();
   });
 
+  test("does not remap foldables (hingeDegrees set), matching the Duo viewer", () => {
+    expect(
+      cliInputOrientation({ width: RAW_W, height: RAW_H, orientation: "landscape_left", hingeDegrees: 0 }),
+    ).toBeUndefined();
+    expect(
+      cliInputOrientation({ width: RAW_W, height: RAW_H, orientation: "landscape_right", hingeDegrees: 180 }),
+    ).toBeUndefined();
+  });
+
   test("ignores missing, malformed, or unknown config", () => {
     expect(cliInputOrientation(null)).toBeUndefined();
     expect(cliInputOrientation("nope")).toBeUndefined();
