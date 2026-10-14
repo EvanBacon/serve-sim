@@ -87,13 +87,21 @@ describe("--detach / follow reuse checks the --allow-exec opt-in", () => {
   });
 });
 
-describe("serve-sim exec quotes each argv word", () => {
-  test("metacharacters in an argument stay literal", async () => {
-    const { shellJoin } = await import("../shell-quote");
+describe("serve-sim exec command line", () => {
+  test("with several arguments, metacharacters in each stay literal", async () => {
+    const { execCommandLine } = await import("../shell-quote");
     const { execFileSync } = await import("child_process");
     const argv = ["printf", "%s|", "a b", "$(echo injected)", "it's", "; echo nope"];
-    const out = execFileSync("sh", ["-c", shellJoin(argv)], { encoding: "utf-8" });
+    const out = execFileSync("sh", ["-c", execCommandLine(argv)], { encoding: "utf-8" });
     expect(out).toBe("a b|$(echo injected)|it's|; echo nope|");
+  });
+
+  test("a single argument is a shell command line, passed through unquoted", async () => {
+    const { execCommandLine } = await import("../shell-quote");
+    const { execFileSync } = await import("child_process");
+    expect(execCommandLine(["xcrun simctl list"])).toBe("xcrun simctl list");
+    const out = execFileSync("sh", ["-c", execCommandLine(["printf '%s' a b | tr a-z A-Z"])], { encoding: "utf-8" });
+    expect(out).toBe("AB");
   });
 });
 

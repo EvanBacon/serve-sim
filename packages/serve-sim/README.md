@@ -108,7 +108,9 @@ serve-sim repair-input [-d udid]         Repair Device Hub input (restarts apps)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events
 serve-sim exec <command...> [-d udid] Run a host shell command through a server
-                                      started with --allow-exec
+                                      started with --allow-exec. One argument
+                                      is a shell line (exec "xcrun simctl list");
+                                      several are quoted as an argv
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app

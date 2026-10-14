@@ -255,9 +255,16 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       await requireDevice(udid);
       const appPath = await appContainer(udid, bundleId);
 
-      const plist = await run("plutil", ["-convert", "json", "-o", "-", join(appPath, "Info.plist")]);
+      // Info.plist comes from the app bundle; like the icons below, only read
+      // a regular file so a symlink can't point plutil at an arbitrary path.
+      const plistPath = join(appPath, "Info.plist");
+      let plistIsFile = false;
+      try { plistIsFile = lstatSync(plistPath).isFile(); } catch {}
+      const plist = plistIsFile
+        ? await run("plutil", ["-convert", "json", "-o", "-", plistPath])
+        : null;
       let info: any = {};
-      if (plist.exitCode === 0) {
+      if (plist?.exitCode === 0) {
         try { info = JSON.parse(plist.stdout); } catch {}
       }
 
