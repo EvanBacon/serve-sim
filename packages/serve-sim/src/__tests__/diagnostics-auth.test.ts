@@ -145,3 +145,48 @@ describe("/api/diagnostics cache and rate limit", () => {
     expect((await fetch(url)).status).toBe(200);
   });
 });
+
+describe("/api/diagnostics encoder dedupe", () => {
+  test("collapses encoder errors and sessions to one entry per codec", async () => {
+    const err = (codec: string, error: string, width: number, count: number, first_at: string, last_at: string) =>
+      ({ codec, error, width, height: 2853, count, first_at, last_at });
+    const session = {
+      udid: DEVICE,
+      native: {
+        encoders: {
+          errors: [
+            err("AVCC", "encodingFailed: kVTPixelTransferNotSupportedErr (-12905)", 2007, 3, "2026-10-14T10:00:00.000Z", "2026-10-14T10:00:05.000Z"),
+            err("AVCC", "encodingFailed: kVTPixelTransferNotSupportedErr (-12905)", 1920, 4, "2026-10-14T09:59:00.000Z", "2026-10-14T10:00:09.000Z"),
+            err("MJPEG", "jpegFailed", 2007, 1, "2026-10-14T10:00:01.000Z", "2026-10-14T10:00:01.000Z"),
+            err("AVCC", "encodingFailed: kVTVideoEncoderMalfunctionErr (-12911)", 2007, 2, "2026-10-14T10:00:02.000Z", "2026-10-14T10:00:03.000Z"),
+          ],
+          sessions: [
+            { at: "2026-10-14T10:00:00.000Z", codec: "AVCC", width: 2007, height: 2853, status: 0 },
+            { at: "2026-10-14T10:00:01.000Z", codec: "MJPEG", width: 2007, height: 2853, status: 0 },
+            { at: "2026-10-14T10:00:04.000Z", codec: "AVCC", width: 1920, height: 2853, status: -12905 },
+          ],
+        },
+      },
+    };
+    const url = await listen({ diagnostics: { sources: fakeSources([session]).sources } });
+    const res = await fetch(url);
+    expect(res.status).toBe(200);
+    const bundle = await res.json() as { sessions: Array<{ native: { encoders: { errors: Array<Record<string, unknown>>; sessions: Array<Record<string, unknown>> } } }> };
+    const { errors, sessions } = bundle.sessions[0]!.native.encoders;
+
+    expect(errors.map((e) => e.codec).sort()).toEqual(["AVCC", "MJPEG"]);
+    const avcc = errors.find((e) => e.codec === "AVCC")!;
+    expect(avcc.count).toBe(9);
+    expect(avcc.first_at).toBe("2026-10-14T09:59:00.000Z");
+    expect(avcc.last_at).toBe("2026-10-14T10:00:09.000Z");
+    // The most recent failure describes the codec's current state.
+    expect(avcc.width).toBe(1920);
+    expect(avcc.error).toBe("encodingFailed: kVTPixelTransferNotSupportedErr (-12905)");
+    expect(avcc.variants).toBe(3);
+
+    expect(sessions.map((s) => s.codec).sort()).toEqual(["AVCC", "MJPEG"]);
+    const avccSession = sessions.find((s) => s.codec === "AVCC")!;
+    expect(avccSession.width).toBe(1920);
+    expect(avccSession.session_count).toBe(2);
+  });
+});

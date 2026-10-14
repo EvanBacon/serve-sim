@@ -170,6 +170,59 @@ export type DiagnosticsBundle = {
   server?: { reachable: boolean; url?: string; error?: string };
 };
 
+type EncoderError = { codec: string; error: string; width: number; height: number; count: number; first_at: string; last_at: string; variants?: number };
+type EncoderSession = { at: string; codec: string; session_count?: number } & Record<string, unknown>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * The native log keys encoder errors by codec+error+size and keeps a session
+ * history, so one failing codec repeats across resizes. Report one entry per
+ * codec: the latest error/session, with totals (`count`, `variants`,
+ * `session_count`) carrying what was folded in.
+ */
+export function dedupeEncoderDiagnostics(encoders: unknown): unknown {
+  if (!isRecord(encoders)) return encoders;
+  const out: Record<string, unknown> = { ...encoders };
+  if (Array.isArray(encoders.errors)) {
+    const byCodec = new Map<string, EncoderError>();
+    for (const entry of encoders.errors as EncoderError[]) {
+      const prev = byCodec.get(entry.codec);
+      if (!prev) {
+        byCodec.set(entry.codec, { ...entry });
+        continue;
+      }
+      const latest = entry.last_at > prev.last_at ? entry : prev;
+      byCodec.set(entry.codec, {
+        ...latest,
+        count: prev.count + entry.count,
+        first_at: entry.first_at < prev.first_at ? entry.first_at : prev.first_at,
+        last_at: latest.last_at,
+        variants: (prev.variants ?? 1) + 1,
+      });
+    }
+    out.errors = [...byCodec.values()].sort((a, b) => (a.last_at < b.last_at ? 1 : a.last_at > b.last_at ? -1 : 0));
+  }
+  if (Array.isArray(encoders.sessions)) {
+    const byCodec = new Map<string, EncoderSession>();
+    for (const entry of encoders.sessions as EncoderSession[]) {
+      const prev = byCodec.get(entry.codec);
+      const session_count = (prev?.session_count ?? 0) + 1;
+      byCodec.set(entry.codec, { ...(!prev || entry.at >= prev.at ? entry : prev), session_count });
+    }
+    out.sessions = [...byCodec.values()].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  }
+  return out;
+}
+
+function dedupeSessionEncoders(session: Record<string, unknown>): Record<string, unknown> {
+  const native = session.native;
+  if (!isRecord(native) || !("encoders" in native)) return session;
+  return { ...session, native: { ...native, encoders: dedupeEncoderDiagnostics(native.encoders) } };
+}
+
 /** Assemble and redact. Callers must never pass the exec token or raw preview config in. */
 export function buildDiagnosticsBundle(parts: {
   host: Record<string, unknown>;
@@ -186,7 +239,7 @@ export function buildDiagnosticsBundle(parts: {
     serve_sim: { version: serveSimVersion(), pid: process.pid },
     host: parts.host,
     devices: parts.devices ?? [],
-    sessions: parts.sessions ?? [],
+    sessions: (parts.sessions ?? []).map(dedupeSessionEncoders),
     event_log: parts.event_log ?? [],
     ...(parts.server ? { server: parts.server } : {}),
   };
