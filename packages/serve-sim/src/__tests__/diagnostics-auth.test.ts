@@ -108,3 +108,40 @@ describe("/api/diagnostics trust", () => {
     expect(text).not.toContain("never-leak-exec-token");
   });
 });
+
+describe("/api/diagnostics cache and rate limit", () => {
+  test("repeat requests within the TTL reuse one collection", async () => {
+    const fake = fakeSources();
+    const url = await listen({ diagnostics: { sources: fake.sources } });
+    const [a, b] = await Promise.all([fetch(url), fetch(url)]);
+    const c = await fetch(url);
+    expect([a.status, b.status, c.status]).toEqual([200, 200, 200]);
+    expect(fake.calls.host).toBe(1);
+  });
+
+  test("a burst beyond the limit gets 429 with Retry-After", async () => {
+    const url = await listen({ diagnostics: { sources: fakeSources().sources } });
+    const statuses: number[] = [];
+    let limited: Response | undefined;
+    for (let i = 0; i < 12; i++) {
+      const res = await fetch(url);
+      statuses.push(res.status);
+      if (res.status === 429) limited ??= res;
+      else await res.arrayBuffer();
+    }
+    expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
+    expect(statuses).toContain(429);
+    expect(Number(limited!.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect((await limited!.json() as { error: string }).error).toBe("rate_limited");
+  }, 60_000);
+
+  test("refused callers do not drain the loopback budget", async () => {
+    const middlewareOptions = { diagnostics: { sources: fakeSources().sources } };
+    const url = await listen(middlewareOptions);
+    for (let i = 0; i < 20; i++) {
+      const res = await fetch(url, { headers: { Forwarded: "for=203.0.113.9" } });
+      expect(res.status).toBe(403);
+    }
+    expect((await fetch(url)).status).toBe(200);
+  });
+});

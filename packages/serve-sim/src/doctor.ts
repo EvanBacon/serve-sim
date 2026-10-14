@@ -257,3 +257,44 @@ export function formatDiagnosticsSummary(bundle: DiagnosticsBundle): string {
   if (verdicts.length) lines.push("Findings:", ...verdicts.map((verdict) => `  - ${verdict}`));
   return lines.join("\n");
 }
+
+/**
+ * Token bucket for `/api/diagnostics`: each collection shells out to several
+ * host probes, so a page (or a stuck retry loop) must not be able to spin them.
+ */
+export function createRateLimiter(options: { burst: number; refillMs: number; now?: () => number }) {
+  const now = options.now ?? Date.now;
+  let tokens = options.burst;
+  let updated = now();
+  return {
+    /** Spend one token; when empty, report how long until the next one. */
+    take(): { ok: true } | { ok: false; retryAfterMs: number } {
+      const t = now();
+      tokens = Math.min(options.burst, tokens + (t - updated) / options.refillMs);
+      updated = t;
+      if (tokens >= 1) {
+        tokens -= 1;
+        return { ok: true };
+      }
+      return { ok: false, retryAfterMs: Math.ceil((1 - tokens) * options.refillMs) };
+    },
+  };
+}
+
+/** Share one in-flight or recent result per key for `ttlMs`; failures are not cached. */
+export function createTtlCache<T>(ttlMs: number, now: () => number = Date.now) {
+  const entries = new Map<string, { at: number; value: Promise<T> }>();
+  return {
+    get(key: string, load: () => Promise<T>): Promise<T> {
+      const t = now();
+      const hit = entries.get(key);
+      if (hit && t - hit.at < ttlMs) return hit.value;
+      for (const [k, entry] of entries) if (t - entry.at >= ttlMs) entries.delete(k);
+      const value = load();
+      const entry = { at: t, value };
+      entries.set(key, entry);
+      value.catch(() => { if (entries.get(key) === entry) entries.delete(key); });
+      return value;
+    },
+  };
+}

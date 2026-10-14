@@ -11,6 +11,7 @@ export async function copyDiagnostics(
     const res = await doFetch(endpoint, { cache: "no-store" });
     const text = await res.text();
     if (res.status === 403) return "Diagnostics are localhost-only. Run `serve-sim doctor --json` on the Mac.";
+    if (res.status === 429) return "Diagnostics are rate-limited; try again in a few seconds.";
     if (!res.ok) return `Diagnostics failed (HTTP ${res.status}).`;
     await writeText(text);
     return "Copied diagnostics JSON.";
