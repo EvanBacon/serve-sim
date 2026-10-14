@@ -1,12 +1,13 @@
-import { shellEscape, type ExecResult } from "./exec";
+import type { HostActionFn } from "./exec";
 
 // ─── File drop (drag media/ipa onto the simulator) ───
 //
 // Media → `xcrun simctl addmedia`   (Photos)
 // .ipa  → `xcrun simctl install`    (install app on simulator)
 //
-// Files are streamed to /tmp over /exec in base64-chunked bash `echo | base64 -d`
-// calls. No sonner dep here, so uploads surface in an inline toast list.
+// Files are streamed to /tmp in base64 chunks over the `uploadChunk` host
+// action (the server writes the bytes itself — no shell). No sonner dep here,
+// so uploads surface in an inline toast list.
 
 export const DROP_MEDIA_MIME_TYPES = new Set([
   "image/jpeg",
@@ -19,10 +20,9 @@ export const DROP_MEDIA_MIME_TYPES = new Set([
   "video/quicktime",
 ]);
 
-// 192KB of raw bytes per chunk → ~256KB of base64 per exec. macOS ARG_MAX is
-// 1MB, so this leaves generous headroom for the bash/echo wrapper while
-// sharply cutting round-trips on large .ipa uploads. Each chunk is decoded by
-// its own `base64 -d`, so chunks are independent of each other.
+// 192KB of raw bytes per chunk → ~256KB of base64 per control-socket frame,
+// well under the server's per-chunk cap while sharply cutting round-trips on
+// large .ipa uploads.
 export const DROP_CHUNK_BYTES = 196608;
 export const DROP_MAX_FILE_SIZE = 500 * 1024 * 1024;
 
@@ -35,10 +35,10 @@ export const DROP_HOST_PATH_TYPE = "application/x-serve-sim-host-path";
 // since the file is already on disk.
 export async function addHostMediaToPhotos(
   path: string,
-  exec: (command: string) => Promise<ExecResult>,
+  host: HostActionFn,
   udid: string,
 ) {
-  const result = await exec(`xcrun simctl addmedia ${udid} ${shellEscape(path)}`);
+  const result = await host("addMedia", { udid, path });
   if (result.exitCode !== 0) {
     throw new Error(result.stderr || `addmedia failed (exit ${result.exitCode})`);
   }
@@ -78,15 +78,14 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 async function streamFileToHostPath(
   file: File,
   tmpPath: string,
-  exec: (command: string) => Promise<ExecResult>,
+  host: HostActionFn,
   onProgress?: (fraction: number) => void,
 ): Promise<void> {
   let lastReportedPct = 0;
   for (let offset = 0; offset < file.size; offset += DROP_CHUNK_BYTES) {
     const slice = await file.slice(offset, offset + DROP_CHUNK_BYTES).arrayBuffer();
     const chunk = arrayBufferToBase64(slice);
-    const op = offset === 0 ? ">" : ">>";
-    const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
+    const result = await host("uploadChunk", { path: tmpPath, data: chunk, append: offset > 0 });
     if (result.exitCode !== 0) {
       throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
     }
@@ -100,27 +99,27 @@ async function streamFileToHostPath(
   }
 }
 
-// Stream a file to /tmp via the /exec base64 chunk loop. Used by the camera
+// Stream a file to /tmp via the uploadChunk loop. Used by the camera
 // panel to stage image/video sources for `serve-sim camera --file`.
 // Caller is responsible for the lifetime of the temp file.
 export async function uploadFileToTmp(
   file: File,
   prefix: string,
   ext: string,
-  exec: (command: string) => Promise<ExecResult>,
+  host: HostActionFn,
 ): Promise<string> {
   if (file.size > DROP_MAX_FILE_SIZE) {
     throw new Error("File too large (max 500MB)");
   }
   const tmpPath = `/tmp/${prefix}-${crypto.randomUUID()}.${ext}`;
-  await streamFileToHostPath(file, tmpPath, exec);
+  await streamFileToHostPath(file, tmpPath, host);
   return tmpPath;
 }
 
 export async function uploadDroppedFile(
   file: File,
   kind: DropKind,
-  exec: (command: string) => Promise<ExecResult>,
+  host: HostActionFn,
   udid: string,
   onProgress: (progress: number | null) => void,
 ) {
@@ -134,19 +133,16 @@ export async function uploadDroppedFile(
 
   try {
     onProgress(0);
-    await streamFileToHostPath(file, tmpPath, exec, onProgress);
+    await streamFileToHostPath(file, tmpPath, host, onProgress);
 
     // install/addmedia gives no progress signal — flip to indeterminate.
     onProgress(null);
-    const cmd = kind === "ipa"
-      ? `xcrun simctl install ${udid} ${tmpPath}`
-      : `xcrun simctl addmedia ${udid} ${tmpPath}`;
-    const result = await exec(cmd);
+    const result = await host(kind === "ipa" ? "installApp" : "addMedia", { udid, path: tmpPath });
     if (result.exitCode !== 0) {
       const label = kind === "ipa" ? "install" : "addmedia";
       throw new Error(result.stderr || `${label} failed (exit ${result.exitCode})`);
     }
   } finally {
-    exec(`bash -c 'rm -f ${tmpPath}'`).catch(() => {});
+    host("uploadRemove", { path: tmpPath }).catch(() => {});
   }
 }

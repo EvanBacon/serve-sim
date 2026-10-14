@@ -68,7 +68,7 @@ import {
   AVCC_FRAME_TIMEOUT_MS,
 } from "./avcc-fallback";
 import { fileExtension } from "./utils/drop";
-import { execOnHost, openHostEventStream } from "./utils/exec";
+import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
 import {
   DEVICE_SIDEBAR_WIDTH,
@@ -274,15 +274,12 @@ function App() {
       next = proxyPreviewConfigForBrowser(streamConfigFrom(next), window.location);
       if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
       if (next) {
-        // `/api` and `/api/events` never carry the exec token; keep the one
-        // the loopback page was served with.
-        const execToken = window.__SIM_PREVIEW__?.execToken;
-        window.__SIM_PREVIEW__ = execToken && !next.execToken ? { ...next, execToken } : next;
+        window.__SIM_PREVIEW__ = next;
       } else if (window.__SIM_PREVIEW__) {
         // Keep the minimal injection: the empty state still routes through
-        // simEndpoint (basePath) and authenticates /exec (execToken).
-        const { basePath, execToken } = window.__SIM_PREVIEW__;
-        window.__SIM_PREVIEW__ = { basePath, execToken } as Window["__SIM_PREVIEW__"];
+        // simEndpoint (basePath) and gates host-shell features (allowExec).
+        const { basePath, allowExec } = window.__SIM_PREVIEW__;
+        window.__SIM_PREVIEW__ = { basePath, allowExec } as Window["__SIM_PREVIEW__"];
       }
       return next;
     });
@@ -929,10 +926,7 @@ function AppWithConfig({
       if (e.code === "KeyA" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) {
-          execOnHost(`xcrun simctl ui ${config.device} appearance`).then((r) => {
-            const next = r.stdout.trim() === "dark" ? "light" : "dark";
-            return execOnHost(`xcrun simctl ui ${config.device} appearance ${next}`);
-          }).catch(() => {});
+          hostAction("toggleAppearance", { udid: config.device }).catch(() => {});
         }
         return;
       }
@@ -961,7 +955,7 @@ function AppWithConfig({
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
   const mediaDrop = useMediaDrop({
-    exec: execOnHost,
+    host: hostAction,
     udid: config.device,
     enabled: streaming,
     onUploadStart: uploads.add,
@@ -1043,7 +1037,7 @@ function AppWithConfig({
         }}
       >
         <SimulatorToolbar
-          exec={execOnHost}
+          exec={noHostShell}
           onRotate={rotateDevice}
           orientation={currentOrientation}
           deviceUdid={config.device}
@@ -1204,7 +1198,7 @@ function AppWithConfig({
         </div>
         <div className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
           <SimulatorToolbar
-            exec={execOnHost}
+            exec={noHostShell}
             onRotate={rotateDevice}
             orientation={currentOrientation}
             deviceUdid={config.device}
@@ -1233,7 +1227,13 @@ function AppWithConfig({
                   <ReloadIcon />
                 </SimulatorToolbar.Button>
               )}
-              <SimulatorToolbar.HomeButton title="Home" />
+              <SimulatorToolbar.HomeButton
+                title="Home"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void hostAction("home", { udid: config.device, watch: deviceType === "watch" });
+                }}
+              />
               <SimulatorToolbar.ScreenshotButton
                 title="Screenshot"
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
@@ -1265,7 +1265,7 @@ function AppWithConfig({
           </SimulatorToolbar>
           {!foldable && (
             <SimulatorToolbar
-              exec={execOnHost}
+              exec={noHostShell}
               onRotate={rotateDevice}
               orientation={currentOrientation}
               deviceUdid={config.device}

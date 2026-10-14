@@ -6,8 +6,10 @@ export interface ExecResult {
   exitCode: number;
 }
 
-// Everything the preview page asks of the host — shell execs, simulator
+// Everything the preview page asks of the host — host actions, simulator
 // settings, and the SSE side-channels — rides one WebSocket (`/exec-ws`).
+// The page never sends shell text: host features are named actions whose
+// params the server validates and runs as a fixed argv (host-rpc.ts).
 // Pooled fetches are not used: every tab holds long-lived HTTP streams
 // (MJPEG), and the browser's six-connections-per-origin cap let pooled
 // requests starve with multiple tabs open. The channel is intentionally
@@ -76,7 +78,7 @@ function openExecSocket(): Promise<WebSocket> {
       }
     }, CONNECT_TIMEOUT_MS);
     ws.onopen = () => {
-      ws.send(JSON.stringify({ token: window.__SIM_PREVIEW__?.execToken ?? "" }));
+      ws.send(JSON.stringify({}));
     };
     ws.onmessage = (event) => {
       let msg: SocketReply;
@@ -164,16 +166,37 @@ async function socketRequest(
   });
 }
 
-export async function execOnHost(
-  command: string,
+export type HostActionResult = ExecResult & Record<string, unknown>;
+export type HostActionFn = (
+  method: string,
+  params?: Record<string, unknown>,
+) => Promise<HostActionResult>;
+
+/**
+ * Run a named host action (screenshot, camera, permissions, uploads, …) on
+ * the preview server. Resolves to the action's reply with exec-style
+ * `stdout`/`stderr`/`exitCode` filled in; a refused or invalid request
+ * resolves like a command that couldn't run (exit 126, reason on stderr).
+ * Rejects only when the control socket itself fails.
+ */
+export async function hostAction(
+  method: string,
+  params: Record<string, unknown> = {},
   opts?: { signal?: AbortSignal },
-): Promise<ExecResult> {
-  const reply = await socketRequest({ command }, opts?.signal);
-  return {
-    stdout: reply.stdout ?? "",
-    stderr: reply.stderr ?? "",
-    exitCode: reply.exitCode ?? 1,
-  };
+): Promise<HostActionResult> {
+  const reply = await socketRequest({ rpc: { method, params } }, opts?.signal);
+  if (reply.error) return { stdout: "", stderr: reply.error, exitCode: 126 };
+  const { id: _id, ...rest } = reply;
+  return { ...rest, stdout: reply.stdout ?? "", stderr: reply.stderr ?? "", exitCode: reply.exitCode ?? 0 };
+}
+
+/**
+ * `exec` stand-in for library components (SimulatorToolbar) that accept a
+ * shell runner: the preview page has no host shell, so anything it would
+ * run must be wired to a host action instead.
+ */
+export async function noHostShell(): Promise<ExecResult> {
+  return { stdout: "", stderr: "the preview page has no host shell", exitCode: 126 };
 }
 
 export interface UiRequestPayload {
@@ -268,8 +291,4 @@ export function openHostEventStream(path: string): HostEventStream {
     }
   };
   return stream;
-}
-
-export function shellEscape(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
 }
