@@ -3,6 +3,7 @@ import { execSync, spawnSync } from "child_process";
 import { readdirSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { readStreamWindow } from "./read-stream-window";
 
 /**
  * Integration test for the idle-frame-floor guarantee.
@@ -154,82 +155,47 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
 
   test("first frame arrives quickly even on an idle simulator", async () => {
     const t0 = Date.now();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FIRST_FRAME_BUDGET_MS + 500);
-
-    const res = await fetch(streamUrl, { signal: controller.signal });
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type") ?? "").toContain("multipart/x-mixed-replace");
-
-    const reader = res.body!.getReader();
     let buf = Buffer.alloc(0);
     let firstFrameAt: number | null = null;
 
-    try {
-      while (Date.now() - t0 < FIRST_FRAME_BUDGET_MS) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf = Buffer.concat([buf, Buffer.from(value)]);
-        const parsed = parseMjpegStream(buf);
-        buf = parsed.rest as Buffer<ArrayBuffer>;
-        if (parsed.frames.length > 0) {
-          firstFrameAt = Date.now() - t0;
-          // Sanity: every frame must start with JPEG SOI.
-          for (const f of parsed.frames) {
-            expect(f.jpeg[0]).toBe(0xff);
-            expect(f.jpeg[1]).toBe(0xd8);
-          }
-          break;
-        }
+    const { response } = await readStreamWindow(streamUrl, FIRST_FRAME_BUDGET_MS, (chunk) => {
+      buf = Buffer.concat([buf, Buffer.from(chunk)]);
+      const parsed = parseMjpegStream(buf);
+      buf = parsed.rest as Buffer<ArrayBuffer>;
+      if (parsed.frames.length === 0) return false;
+      firstFrameAt = Date.now() - t0;
+      // Sanity: every frame must start with JPEG SOI.
+      for (const f of parsed.frames) {
+        expect(f.jpeg[0]).toBe(0xff);
+        expect(f.jpeg[1]).toBe(0xd8);
       }
-    } catch (err) {
-      // AbortError from the budget timer is expected when the stream stalls;
-      // fall through so the assertion below reports the real diagnosis
-      // (firstFrameAt === null) instead of a confusing unhandled rejection.
-      if ((err as { name?: string }).name !== "AbortError") throw err;
-    }
+      return true;
+    });
 
-    clearTimeout(timer);
-    try { reader.cancel(); } catch {}
-
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type") ?? "").toContain("multipart/x-mixed-replace");
     expect(firstFrameAt).not.toBeNull();
     expect(firstFrameAt).toBeLessThanOrEqual(FIRST_FRAME_BUDGET_MS);
   }, FIRST_FRAME_BUDGET_MS + 5000);
 
   test(`idle floor emits >= ${MIN_FRAMES_IN_IDLE_WINDOW} frames in ${IDLE_WINDOW_MS}ms`, async () => {
-    const t0 = Date.now();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), IDLE_WINDOW_MS + 500);
-
-    const res = await fetch(streamUrl, { signal: controller.signal });
-    const reader = res.body!.getReader();
-
     let buf = Buffer.alloc(0);
     let frameCount = 0;
     const sizes: number[] = [];
 
-    try {
-      while (Date.now() - t0 < IDLE_WINDOW_MS) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf = Buffer.concat([buf, Buffer.from(value)]);
-        const parsed = parseMjpegStream(buf);
-        buf = parsed.rest as Buffer<ArrayBuffer>;
-        for (const f of parsed.frames) {
-          frameCount++;
-          sizes.push(f.jpeg.length);
-          expect(f.jpeg[0]).toBe(0xff);
-          expect(f.jpeg[1]).toBe(0xd8);
-        }
+    // A frame gap that straddles the window end is fine: the deadline ends
+    // the read and the frame-count assertion is the actual signal.
+    await readStreamWindow(streamUrl, IDLE_WINDOW_MS, (chunk) => {
+      buf = Buffer.concat([buf, Buffer.from(chunk)]);
+      const parsed = parseMjpegStream(buf);
+      buf = parsed.rest as Buffer<ArrayBuffer>;
+      for (const f of parsed.frames) {
+        frameCount++;
+        sizes.push(f.jpeg.length);
+        expect(f.jpeg[0]).toBe(0xff);
+        expect(f.jpeg[1]).toBe(0xd8);
       }
-    } catch (err) {
-      // The abort-controller deadline is supposed to fire at the end of the
-      // window — let the frame-count assertion be the actual signal.
-      if ((err as { name?: string }).name !== "AbortError") throw err;
-    }
-
-    clearTimeout(timer);
-    try { reader.cancel(); } catch {}
+    });
 
     expect(frameCount).toBeGreaterThanOrEqual(MIN_FRAMES_IN_IDLE_WINDOW);
     // Every frame should have a reasonable size — serve-sim emits a real
