@@ -151,6 +151,14 @@ export async function collectDeviceDiagnostics(udid: string, probe: Probe = defa
   };
 }
 
+/** Where `/api/diagnostics` reads from; injectable for tests. */
+export type DiagnosticsSources = {
+  host: () => Promise<Record<string, unknown>>;
+  device: (udid: string) => Promise<Record<string, unknown>>;
+  /** Live sessions only (`device` narrows to one); never starts capture. */
+  sessions: (device: string | null) => Promise<Record<string, unknown>[]>;
+};
+
 export type DiagnosticsBundle = {
   schema_version: number;
   generated_at: string;
@@ -210,12 +218,6 @@ export function diagnosticsVerdicts(bundle: DiagnosticsBundle): string[] {
     for (const error of errors) out.push(`${error.codec} encoder: ${error.error} at ${error.width}x${error.height} (${error.count}x)`);
   }
   return out;
-}
-
-/** True only for loopback peers. `/api/diagnostics` exposes host paths and process lists. */
-export function isLoopbackAddress(address: string | undefined): boolean {
-  if (!address) return false;
-  return address === "::1" || address === "127.0.0.1" || address.startsWith("127.") || address === "::ffff:127.0.0.1" || address.startsWith("::ffff:127.");
 }
 
 /** Human summary for `serve-sim doctor` without --json. */

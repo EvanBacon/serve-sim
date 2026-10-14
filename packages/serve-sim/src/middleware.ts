@@ -19,7 +19,7 @@ import {
   buildDiagnosticsBundle,
   collectDeviceDiagnostics,
   collectHostDiagnostics,
-  isLoopbackAddress,
+  type DiagnosticsSources,
 } from "./doctor";
 import {
   eventLogEventForCommand,
@@ -766,30 +766,30 @@ async function handleCameraStatus(req: SimReq, res: SimRes, device: string): Pro
   }
 }
 
-/** Loopback peer and no non-loopback hop in X-Forwarded-For. */
-export function isLoopbackRequest(req: Pick<SimReq, "socket" | "headers">): boolean {
-  if (!isLoopbackAddress(req.socket?.remoteAddress)) return false;
-  const forwarded = req.headers["x-forwarded-for"];
-  const hops = (Array.isArray(forwarded) ? forwarded.join(",") : forwarded ?? "").split(",").map((hop) => hop.trim()).filter(Boolean);
-  return hops.every(isLoopbackAddress);
-}
+const defaultDiagnosticsSources: DiagnosticsSources = {
+  host: () => collectHostDiagnostics(),
+  device: (udid) => collectDeviceDiagnostics(udid),
+  sessions: (device) => Promise.all(liveDeviceSessions(device).map((session) => session.diagnostics())),
+};
 
-async function serveDiagnostics(req: SimReq, res: SimRes, device: string | null): Promise<void> {
+async function serveDiagnostics(req: SimReq, res: SimRes, device: string | null, sources: DiagnosticsSources): Promise<void> {
   const send = (status: number, body: unknown) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(JSON.stringify(body, null, 2));
   };
-  if (!isLoopbackRequest(req)) {
+  // Socket-only trust (see request-trust.ts): a remote peer is refused even
+  // with a valid --auth-token, and any proxied request (forwarding headers)
+  // or rebound Host is refused even from a loopback socket.
+  if (!isTrustedLoopback(req)) {
     send(403, { error: "loopback_only", message: "Diagnostics are only served to localhost. Run `serve-sim doctor` on the Mac." });
     return;
   }
   try {
-    const sessions = liveDeviceSessions(device);
-    const udids = device ? [device] : sessions.map((session) => session.udid);
-    const [host, devices, sessionDiagnostics] = await Promise.all([
-      collectHostDiagnostics(),
-      Promise.all(udids.map((udid) => collectDeviceDiagnostics(udid))),
-      Promise.all(sessions.map((session) => session.diagnostics())),
+    const sessionDiagnostics = await sources.sessions(device);
+    const udids = device ? [device] : sessionDiagnostics.map((session) => String(session.udid));
+    const [host, devices] = await Promise.all([
+      sources.host(),
+      Promise.all(udids.map((udid) => sources.device(udid))),
     ]);
     send(200, buildDiagnosticsBundle({
       host,
@@ -1384,6 +1384,8 @@ export interface SimMiddlewareOptions {
   serveSimBin?: string;
   /** Test hook: whether a udid may be targeted by host RPCs. Default: booted. */
   isKnownDevice?: (udid: string) => Promise<boolean>;
+  /** Test hook: `/api/diagnostics` collectors. Default: live host probes and sessions. */
+  diagnostics?: { sources?: DiagnosticsSources };
 }
 
 function safeEqualString(a: string, b: string): boolean {
@@ -2038,7 +2040,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // JSON API: `serve-sim doctor` bundle. Loopback only: it lists host paths,
     // installed Xcodes, and processes. It never includes the exec token.
     if (url === base + "/api/diagnostics") {
-      await serveDiagnostics(req, res, requestedDevice);
+      await serveDiagnostics(req, res, requestedDevice, options?.diagnostics?.sources ?? defaultDiagnosticsSources);
       return;
     }
 

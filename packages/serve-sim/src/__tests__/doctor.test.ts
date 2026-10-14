@@ -6,10 +6,10 @@ import {
   collectHostDiagnostics,
   diagnosticsVerdicts,
   formatDiagnosticsSummary,
-  isLoopbackAddress,
   type Probe,
 } from "../doctor";
-import { isLoopbackRequest, simMiddleware } from "../middleware";
+import { simMiddleware } from "../middleware";
+import { isTrustedLoopback } from "../request-trust";
 
 const HOME = "/Users/evan";
 
@@ -100,13 +100,16 @@ describe("serve-sim doctor bundle", () => {
 });
 
 describe("/api/diagnostics loopback guard", () => {
-  test("accepts only loopback peers without non-loopback forwarding hops", () => {
-    expect(["127.0.0.1", "::1", "::ffff:127.0.0.1", "127.0.0.2"].every(isLoopbackAddress)).toBe(true);
-    expect(["10.0.0.4", "::ffff:192.168.1.2", "", undefined].some(isLoopbackAddress)).toBe(false);
-    const req = (remoteAddress: string, forwarded?: string) => ({ socket: { remoteAddress }, headers: forwarded ? { "x-forwarded-for": forwarded } : {} }) as never;
-    expect(isLoopbackRequest(req("127.0.0.1"))).toBe(true);
-    expect(isLoopbackRequest(req("127.0.0.1", "203.0.113.9"))).toBe(false);
-    expect(isLoopbackRequest(req("192.168.1.5"))).toBe(false);
+  test("uses the shared socket-only trust check (any forwarding hop is untrusted)", () => {
+    const req = (remoteAddress: string, forwarded?: string) => ({
+      socket: { remoteAddress },
+      headers: { host: "localhost:3200", ...(forwarded ? { "x-forwarded-for": forwarded } : {}) },
+    }) as never;
+    expect(isTrustedLoopback(req("127.0.0.1"))).toBe(true);
+    expect(isTrustedLoopback(req("::1"))).toBe(true);
+    expect(isTrustedLoopback(req("127.0.0.1", "127.0.0.1"))).toBe(false);
+    expect(isTrustedLoopback(req("127.0.0.1", "203.0.113.9"))).toBe(false);
+    expect(isTrustedLoopback(req("192.168.1.5"))).toBe(false);
   });
 
   test("the endpoint serves JSON on loopback and refuses forwarded requests", async () => {
@@ -122,7 +125,7 @@ describe("/api/diagnostics loopback guard", () => {
       expect(JSON.stringify(body)).not.toMatch(/exec_?token/i);
       const denied = await fetch(url, { headers: { "x-forwarded-for": "203.0.113.9" } });
       expect(denied.status).toBe(403);
-      expect((await denied.json() as { error: string }).error).toBe("loopback_only");
+      expect(JSON.stringify(await denied.json())).not.toContain("schema_version");
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
