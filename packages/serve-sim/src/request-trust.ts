@@ -4,13 +4,23 @@ import type { IncomingHttpHeaders, IncomingMessage } from "http";
 /**
  * Request trust model for the preview server.
  *
- * A request is "trusted loopback" only when all three hold:
- *   1. the TCP peer is a loopback address (127.0.0.0/8 or ::1),
- *   2. it carries no proxy/forwarding headers (a tunnel or reverse proxy such
- *      as ngrok, cloudflared, Tailscale Serve, or nginx connects from loopback
- *      but forwards someone else's request), and
- *   3. the Host header names a loopback host (defeats DNS rebinding, where a
- *      remote page reaches 127.0.0.1 under its own hostname).
+ * Trust comes only from the socket: a request is "trusted loopback" when the
+ * real TCP peer (for Bun's piped connections, the front server's recorded
+ * peer — see {@link registerProxiedPeer}) is a loopback address (127.0.0.0/8
+ * or ::1) AND it carries no proxy/forwarding headers (a tunnel or reverse
+ * proxy such as ngrok, cloudflared, Tailscale Serve, or nginx connects from
+ * loopback but forwards someone else's request, so any proxied request is
+ * untrusted).
+ *
+ * Host and Origin are client-controlled and never grant trust. They are only
+ * an additional requirement on top of the socket check: the Host must name a
+ * loopback host (defeats DNS rebinding), and state-changing routes and
+ * WebSocket upgrades also require a same-origin Origin (CSRF).
+ *
+ * A raw TCP forward (`ssh -R`, socat) is indistinguishable from a local client
+ * at the socket level, so trusted loopback is not enough to run host shell
+ * commands: `/exec` is opt-in (`--allow-exec`) and its token is delivered to
+ * the CLI through a 0600 file, never through any HTTP response.
  *
  * Everything else is remote. Remote callers must present the auth token
  * configured with `--auth-token` / `SERVE_SIM_AUTH_TOKEN`; without one, remote
@@ -98,9 +108,15 @@ export function hasForwardingHeaders(headers: IncomingHttpHeaders): boolean {
   return false;
 }
 
+/** Socket-level trust: the real TCP peer is loopback and nothing forwarded the request. */
+function isUnproxiedLoopbackPeer(req: Pick<IncomingMessage, "socket" | "headers">): boolean {
+  return isLoopbackAddress(peerAddress(req)) && !hasForwardingHeaders(req.headers);
+}
+
 export function isTrustedLoopback(req: Pick<IncomingMessage, "socket" | "headers">): boolean {
-  if (!isLoopbackAddress(peerAddress(req))) return false;
-  if (hasForwardingHeaders(req.headers)) return false;
+  if (!isUnproxiedLoopbackPeer(req)) return false;
+  // An additional DNS-rebinding requirement, never a reason to trust. Origin
+  // (CSRF) is enforced separately on state-changing routes and upgrades.
   return isLoopbackHostname(hostnameOf(headerValue(req.headers.host)));
 }
 
