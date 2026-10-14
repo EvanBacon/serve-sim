@@ -38,11 +38,14 @@ type EventLogEntry = {
 };
 ```
 
-- **HID input** -> `eventLogEventForHidMessage(device, tag, payload, screen)`, called
-  from `recordHidEvent` / `recordTouchEvent` inside `handleHidMessage`
-  (`src/device-session.ts`). Taps and drags are synthesized in `recordTouchEvent`
-  (tag `0x03` begin/move/end) and already carry `details.start`, `details.current`,
-  `details.moveCount`, and `details.screen = {width,height}` (via `eventLogScreen()`).
+- **HID input** -> `handleHidMessage` (`src/device-session.ts`) routes tag `0x03`
+  touches to `DeviceSession.recordTouchEvent` and every other tag to `recordHidEvent`
+  -> `eventLogEventForHidMessage(device, tag, payload, screen)`. `recordTouchEvent`
+  folds begin/move/end into one `kind:"tap"` or `kind:"drag"` entry whose details
+  (`touchGestureDetails`) carry `start`, `current`, `moveCount`, and
+  `screen = {width,height}` (via `eventLogScreen()`). (`eventLogEventForHidMessage`'s
+  own `0x03` branch builds a per-phase `kind:"touch"` entry, but the session never
+  calls it for touches.)
 - **Shell actions** -> `eventLogEventForCommand(command, {exitCode})`, parsed in
   `src/middleware.ts` from the `/exec` path. It already drops upload plumbing and
   never records raw command strings with tokens.
@@ -68,22 +71,35 @@ added here is additive; an older consumer ignores unknown keys.
 ## Making the #153 touch miss reproducible from the log
 
 #153: a tap exits 0 and the screenshot is unchanged because the point was sent in
-the wrong coordinate frame. The web client remaps display->native
-(`rawPointForDisplayPoint` in `client/simulator/orientation.ts`, called from
-`SimulatorView.tsx`); the CLI (`tap()` / `gesture()` in `index.ts`) and the
-server path `handleHidMessage` -> `this.hid.touch(type, x, y, W, H, edge)` pass the
-display-normalized point straight into the native portrait frame with **no remap**.
-Nothing in the log distinguishes that miss from a dead injector.
+the wrong coordinate frame. The server path `handleHidMessage` ->
+`this.hid.touch(type, x, y, W, H, edge)` never remaps: `SimHID.touch` expects the
+native portrait frame, so each client must remap before sending. The web client
+already does (`rawPointForDisplayPoint` in `client/simulator/orientation.ts`, called
+from `SimulatorView.tsx` with `streamDisplayGeometry(...).inputOrientation`). On
+`main` the CLI (`tap()` / `gesture()` in `index.ts`) sends the display-normalized
+point unchanged, which is the #153 miss.
 
-Add these keys to the `details` of touch/tap/drag entries (produced where the entry
-is built -- `recordTouchEvent` / `eventLogEventForHidMessage`):
+**Fixed by [#167](https://github.com/EvanBacon/serve-sim/pull/167) (pending).** It
+adds `src/touch-remap.ts`: the CLI fetches the server's `/config`, derives the input
+orientation with the viewer's own rule (`cliInputOrientation` ->
+`streamDisplayGeometry`), and remaps with `displayTouchToRaw` (point and `edge`).
+`--raw` on `tap`/`gesture` opts out and sends native-portrait coords as-is; an
+unreachable `/config` also falls back to no remap. Note: as of #167's head
+(`ebd54ef`), `cliInputOrientation` reads only `width`/`height`/`orientation` and does
+not check `hingeDegrees`, so foldable/Duo devices are not explicitly skipped; confirm
+that before relying on it, since Duo web touches use 3D projection rather than
+`rawPointForDisplayPoint`. Even with #167 merged, nothing in the log distinguishes a
+coordinate miss (`--raw`, a stale `orientation`, an old CLI) from a dead injector.
+
+Add these keys to the `details` of `tap`/`drag` entries (built in
+`DeviceSession.recordTouchEvent` via `touchGestureDetails`):
 
 | Field | Values | Source / hook |
 |---|---|---|
-| `coord_space` | `normalized_0_1` | constant; the `0x03` payload is always normalized to the displayed frame |
+| `coord_space` | `normalized_0_1` | constant; the `0x03` payload is always 0..1 normalized |
 | `orientation` | `portrait` \| `portrait_upside_down` \| `landscape_left` \| `landscape_right` \| `unknown` | `screenConfig().orientation` (i.e. `this.orientation`) read **at record time** |
-| `frame` | `display` \| `native_portrait` | which space the point was in when sent: `display` for the web preview and `serve-sim tap`; `native_portrait` after a remap |
-| `remapped` | bool | `input_source === "web"` && the `needsCssRotation` rule applied to the **broadcast** `orientation` and raw size (what the browser actually used). Omitted for Duo. |
+| `frame` | `display` \| `native_portrait` | which space the point was in when sent: `native_portrait` when the sender remapped (the web client and #167's CLI whenever `inputOrientation` is set); `display` when it did not (pre-#167 CLI, `--raw`, `/config` unreachable). When no rotation is needed the two are identical. |
+| `remapped` | bool | Sender-reported: an extra `remapped` key in the `0x03` JSON, set by the web client and the #167 CLI to whether `inputOrientation` was defined (`false` for `--raw` / no `/config`). The server can't infer it from `source` alone, since both clients now remap. Omitted when the sender doesn't send it, and for Duo. |
 | `observed_orientation` | string | Polled UI orientation (`simctl io enumerate`); can lag ~1s. Do **not** write into `this.orientation` / `broadcastConfig()`. |
 | `remap_expected` | bool | Rule applied to `observed_orientation` when present, else `orientation`. Omitted for Duo (`hingeDegrees != null`): Duo web touches use 3D projection, not `rawPointForDisplayPoint`. |
 | `source` | `cli` \| `web` \| `unknown` | who sent the frame (see below) |
@@ -97,7 +113,8 @@ A web miss is `remap_expected=true`, `remapped=false`: the browser hadn't been t
 separate WebSocket connections to the same handler (`attachHidInProcess` -> `attachHidSocket` -> `handleHidMessage`) and are recorded as
 `source:"hid"`, so the log can't say which client sent them. Add an extra key to the
 `0x03` JSON payload -- `{type,x,y,src:"cli"}` from `tap()`/`gesture()` in `index.ts`,
-`{...,src:"web"}` from `SimulatorView.tsx` -- and read it in `recordTouchEvent`. It is an
+`{...,src:"web"}` from `SimulatorView.tsx` -- and read it in `recordTouchEvent`, stored
+as `details.source` (the `source` field in the table above). It is an
 extra JSON field: the native `touch()` call ignores it and older clients that omit it
 record `source:"unknown"`. (A dedicated tag is unnecessary; the payload is already JSON.)
 
@@ -117,7 +134,9 @@ cheap content **seed** (e.g. a hash of JPEG length plus a few sampled bytes, or 
 IOSurface seed if the capture exposes it) -- not the image. Store `frameSeq` on the gesture at `begin`. At `end`, if `frameSeq` has already advanced (e.g. a touch-down highlight during the CLI's ~40 ms begin→end gap), record `screen_changed:true` immediately. Otherwise record `false` and, on the first higher `frameSeq` / differing seed within the window, call `updateEventLogEvent(tapId, …)`. `recordTouchEvent` must return the entry id (it returns `void` today), and the window timer must be cleared in `close()`. This is the guest-effect evidence that an ack can't provide.
 
 Landscape miss vs portrait hit, same 4 ms send, distinguished only by the repro fields.
-`source` is part of the signature: today's miss is the CLI/server path, not the web client.
+`source` is part of the signature: on `main` the miss is the CLI path, not the web
+client (which already remaps); after #167 it is a CLI run with `--raw` or without a
+reachable `/config`.
 
 ```json
 {"kind":"tap","status":"ok","details":{"source":"web","orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","screen_changed":true,"input.send_ms":4}}
@@ -126,7 +145,7 @@ Landscape miss vs portrait hit, same 4 ms send, distinguished only by the repro 
 
 The miss is `hid.state=ok` + `inject.result=sent` + `frame=display` + `remapped=false` +
 `screen_changed=false` + `source=cli`. Status stays `ok`: the injector did what it was asked.
-A later remap expectation is the same entry shape with `frame=native_portrait` and `remapped=true`.
+A #167 CLI tap in landscape is the same entry shape as the web hit: `frame=native_portrait`, `remapped=true`.
 
 ## What an ack proves (Evan's default: inject waits for ack, exits non-zero on failure)
 
@@ -184,8 +203,10 @@ and `input.shadowed` absent or false):
 The orphan in #102 was a detached helper still running after the simulator was
 `Shutdown`. There are two hooks. (a) `recycle-self` in `readServeSimStates` (`middleware.ts`, from `classifyStaleState`) closes the device session in-process; an entry recorded there survives via `GET /api/event-log`. (b) The `onExit` closure `index.ts` passes to `startSimulatorShutdownWatch` runs only for detached/`--no-preview` servers and calls `process.exit(0)` immediately (best-effort for SSE). The watchdog itself never calls `classifyStaleState`. The pure-state decision path is still `classifyStaleState(state, bootedUdids, pid)` ->
 `keep | recycle-self | recycle-helper` and the pure-state watchdog
-`startSimulatorShutdownWatch(targets, ...)` (no timers; driven by `tick`), both in
-`src/helper-lifecycle.ts`. Record one `helper.lifecycle` entry when the watchdog
+`startSimulatorShutdownWatch(targets, ...)`, both in
+`src/helper-lifecycle.ts`. The watch decision object (`tick` / `nextDelayMs`) is
+timer-free, but `startSimulatorShutdownWatch` drives it with a `setTimeout` loop
+(re-armed after each `tick` with `nextDelayMs()`). Record one `helper.lifecycle` entry when the watchdog
 decides to recycle/exit after shutdown, carrying `sim.booted` and helper uptime.
 (There is no separate `serve-sim-bin` process today -- HID and capture run in-process
 via the native addon; don't name a binary that doesn't exist.)
@@ -278,9 +299,14 @@ Docs-only; the field additions above are small and additive, each at a named hoo
 Prove recordability with unit tests (`bun test`) and the maintainer loop in
 `AGENTS.md` (`build.ts` -> run from `dist/` -> reproduce):
 
-- Extend `src/__tests__/event-log.test.ts`: `eventLogEventForHidMessage("UDID", 0x03,
-  {type:"end", x, y, src:"cli"})` records `source:"cli"`; omitting `src` -> `"unknown"`;
-  assert `coord_space`, `orientation`, `frame`, `remapped`, and `screen` are present.
+- Taps are built in `DeviceSession.recordTouchEvent` (`kind:"tap"`/`"drag"`), not
+  `eventLogEventForHidMessage` (whose `0x03` branch yields `kind:"touch"` and is
+  unused for touches). So in a `DeviceSession` test (fake `hid`, as in
+  `src/__tests__/device-session-lifecycle.test.ts`), send `0x03` `{type:"begin",…}`
+  then `{type:"end", x, y, src:"cli", remapped:false}` over a fake socket passed to
+  `attachHidSocket` (which feeds the private `handleHidMessage`), and
+  read the `kind:"tap"` entry: `source:"cli"`; omitting `src` -> `"unknown"`; assert
+  `coord_space`, `orientation`, `frame`, `remapped`, and `screen` are present.
   A landscape miss records `input.send_ms`; `hid.state=gone` and `ack=timeout` omit it;
   `input.shadowed=true` still records it.
 - A `device-session` test: record a tap, deliver a differing `onSharedMjpegFrame`
