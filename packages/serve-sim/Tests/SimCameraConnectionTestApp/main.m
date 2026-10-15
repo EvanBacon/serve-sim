@@ -14,7 +14,70 @@ static void WriteResult(BOOL passed, NSString *message) {
     exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
-@interface SimCameraConnectionTestDelegate : UIResponder <UIApplicationDelegate>
+static BOOL ExerciseAutomaticOutputTeardown(
+    id<AVCaptureVideoDataOutputSampleBufferDelegate,
+       AVCaptureMetadataOutputObjectsDelegate> delegate,
+    NSString **message) {
+    @autoreleasepool {
+        AVCaptureDevice *device = [AVCaptureDevice
+            defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                              mediaType:AVMediaTypeVideo
+                               position:AVCaptureDevicePositionBack];
+        NSError *inputError = nil;
+        AVCaptureDeviceInput *input = [AVCaptureDeviceInput
+            deviceInputWithDevice:device
+                            error:&inputError];
+        if (!input || inputError) {
+            *message = [NSString stringWithFormat:
+                @"Could not create fake input for teardown: %@", inputError];
+            return NO;
+        }
+
+        AVCaptureSession *session = [AVCaptureSession new];
+        AVCaptureMetadataOutput *metadataOutput = [AVCaptureMetadataOutput new];
+        AVCaptureVideoDataOutput *videoOutput = [AVCaptureVideoDataOutput new];
+        [metadataOutput setMetadataObjectsDelegate:delegate queue:dispatch_get_main_queue()];
+        [videoOutput setSampleBufferDelegate:delegate queue:dispatch_get_main_queue()];
+
+        [session beginConfiguration];
+        [session addInput:input];
+        [session addOutput:metadataOutput];
+        [session addOutput:videoOutput];
+        [session commitConfiguration];
+
+        if (metadataOutput.connections.count != 1 || videoOutput.connections.count != 1) {
+            *message = @"Automatic outputs did not each expose one connection";
+            return NO;
+        }
+
+        [session startRunning];
+        [session stopRunning];
+
+        [metadataOutput setMetadataObjectsDelegate:nil queue:dispatch_get_main_queue()];
+        [videoOutput setSampleBufferDelegate:nil queue:dispatch_get_main_queue()];
+
+        [session beginConfiguration];
+        [session removeOutput:videoOutput];
+        [session removeOutput:metadataOutput];
+        [session removeInput:input];
+        [session commitConfiguration];
+
+        // Releasing each output releases the fake connection associated with
+        // it; releasing the input likewise releases its fake port. The caller
+        // reports success on a later main-queue turn so queued frame work can
+        // drop its temporary output retains and the objects can deallocate.
+        metadataOutput = nil;
+        videoOutput = nil;
+        input = nil;
+        session = nil;
+    }
+    return YES;
+}
+
+@interface SimCameraConnectionTestDelegate : UIResponder <
+    UIApplicationDelegate,
+    AVCaptureVideoDataOutputSampleBufferDelegate,
+    AVCaptureMetadataOutputObjectsDelegate>
 @property(nonatomic, strong) UIWindow *window;
 @end
 
@@ -29,6 +92,25 @@ static void WriteResult(BOOL passed, NSString *message) {
     [self.window makeKeyAndVisible];
 
     dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *mode = NSProcessInfo.processInfo.environment[@"SIMCAM_CONNECTION_TEST_MODE"];
+        if ([mode isEqualToString:@"teardown"]) {
+            NSString *message = nil;
+            BOOL passed = NO;
+            @try {
+                passed = ExerciseAutomaticOutputTeardown(self, &message);
+            } @catch (NSException *exception) {
+                message = [NSString stringWithFormat:@"Exception: %@", exception.reason];
+            }
+            dispatch_after(
+                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                dispatch_get_main_queue(), ^{
+                    WriteResult(passed, passed
+                        ? @"Automatic metadata and video outputs deallocated safely"
+                        : message);
+                });
+            return;
+        }
+
         @try {
             AVCaptureDevice *device = [AVCaptureDevice
                 defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
