@@ -37,6 +37,8 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError,
   const streamErrorHandler = useRef(onStreamError);
   streamErrorHandler.current = onStreamError;
   useEffect(() => { streamErrorHandler.current?.(streamError); }, [streamError]);
+  // Unmounting (leaving a foldable) must not leave the last error showing.
+  useEffect(() => () => streamErrorHandler.current?.(null), []);
   const [hasFrame, setHasFrame] = useState(false);
   const errorHandler = useRef(onError);
   errorHandler.current = onError;

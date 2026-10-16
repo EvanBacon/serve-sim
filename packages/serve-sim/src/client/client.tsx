@@ -549,9 +549,11 @@ function AppWithConfig({
   const [duoStreamError, setDuoStreamError] = useState<StreamError | null>(null);
   const streamError = foldable ? duoStreamError : useAvccVideo ? null : mjpeg.error;
 
-  // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
+  // Re-arm AVCC and drop any stale Duo stream error whenever the target stream
+  // changes (device switch / reconnect).
   useEffect(() => {
     setStreaming(false);
+    setDuoStreamError(null);
     dispatchAvccFallback("reset");
   }, [config.streamUrl, setStreaming]);
   // `streaming` flips true on the first painted AVCC frame (JPEG seed decodes
