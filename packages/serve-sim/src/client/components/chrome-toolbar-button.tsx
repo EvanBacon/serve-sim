@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Frame } from "lucide-react";
 import { SimulatorToolbar } from "../simulator";
+import { inkFill, inkText } from "../utils/theme";
 
 export function ChromeToolbarButton({
   hideChrome,
@@ -22,8 +23,8 @@ export function ChromeToolbarButton({
       style={
         hideChrome
           ? {
-              background: hovered ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.08)",
-              color: "rgba(255,255,255,0.95)",
+              background: hovered ? inkFill(0.12) : inkFill(0.08),
+              color: inkText(0.95),
             }
           : undefined
       }

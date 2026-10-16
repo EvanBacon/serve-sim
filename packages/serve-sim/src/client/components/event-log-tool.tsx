@@ -58,11 +58,11 @@ export function EventLogTool({
       summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
       summary={
         <>
-          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none">
+          <span className="text-[11px] font-semibold text-ink-50 uppercase tracking-[0.08em] leading-none">
             Event Log
           </span>
           <span />
-          <span className="rounded-md border border-white/8 bg-white/[0.04] px-1.5 py-[3px] text-[10px] font-mono text-white/60">
+          <span className="rounded-md border border-ink/8 bg-ink/[0.04] px-1.5 py-[3px] text-[10px] font-mono text-ink-60">
             {events.length}
           </span>
         </>
@@ -72,7 +72,7 @@ export function EventLogTool({
         <div
           role="status"
           aria-live="polite"
-          className="flex items-center justify-center py-4 text-[12px] text-white/45"
+          className="flex items-center justify-center py-4 text-[12px] text-ink-45"
         >
           {errored ? "Disconnected" : "No events yet"}
         </div>
@@ -92,21 +92,21 @@ function EventLogRow({ event }: { event: EventLogEntry }) {
   const detail = [event.source, event.kind, event.action].filter(Boolean).join(" / ");
   const message = event.msg ?? event.summary;
   const statusClass = event.status === "error"
-    ? "border-[#ff453a]/50 bg-[#ff453a]/10 text-[#ffb3ad]"
-    : "border-white/8 bg-white/[0.04] text-white/50";
+    ? "border-danger/50 bg-danger/10 text-danger-soft"
+    : "border-ink/8 bg-ink/[0.04] text-ink-50";
 
   return (
     <div
       role="listitem"
       title={detail}
-      className="grid grid-cols-[56px_1fr_auto] items-center gap-2 rounded-md px-1.5 py-1.5 text-[12px] leading-tight hover:bg-white/[0.05]"
+      className="grid grid-cols-[56px_1fr_auto] items-center gap-2 rounded-md px-1.5 py-1.5 text-[12px] leading-tight hover:bg-ink/[0.05]"
     >
-      <span className="font-mono text-[10px] text-white/45">{time}</span>
+      <span className="font-mono text-[10px] text-ink-45">{time}</span>
       <span className="min-w-0">
-        <span className="block overflow-hidden text-ellipsis whitespace-nowrap text-white/90">
+        <span className="block overflow-hidden text-ellipsis whitespace-nowrap text-ink-90">
           {message}
         </span>
-        <span className="mt-0.5 block overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[10px] text-white/40">
+        <span className="mt-0.5 block overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[10px] text-ink-40">
           {detail}
         </span>
       </span>

@@ -385,10 +385,10 @@ function App() {
           />
         ) : (
           <div className="flex flex-col items-center gap-3 text-center">
-            <h1 className="text-[18px] m-0 text-white/90">No simulators available</h1>
-            <p className="text-white/55 text-[14px] max-w-120">
+            <h1 className="text-[18px] m-0 text-ink-90">No simulators available</h1>
+            <p className="text-ink-55 text-[14px] max-w-120">
               Create a simulator in Xcode, or start one with{" "}
-              <code className="bg-[#222] px-1.5 py-0.5 rounded text-[13px]">bunx serve-sim --detach</code>.
+              <code className="bg-ink/10 px-1.5 py-0.5 rounded text-[13px]">bunx serve-sim --detach</code>.
             </p>
           </div>
         )}
@@ -1257,7 +1257,7 @@ function AppWithConfig({
                     streaming={streaming}
                     onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
                   />
-                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-ink/15" />
                   <DeviceHingeControls
                     orientation={currentOrientation}
                     angle={hingeAngle}
@@ -1301,14 +1301,14 @@ function AppWithConfig({
 
       {/* Right-edge rail: tools + WebKit DevTools. */}
       <div
-        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-white/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || devtoolsOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
+        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-ink/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || devtoolsOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
       >
         <button
           onClick={() => {
             setDevtoolsOpen(false);
             setPanelOpen((o) => !o);
           }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-icon cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink"
           aria-label="Open tools panel"
           aria-pressed={panelOpen}
           title="Tools"
@@ -1320,7 +1320,7 @@ function AppWithConfig({
             setPanelOpen(false);
             setDevtoolsOpen((o) => !o);
           }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-icon cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink"
           aria-label="Open WebKit DevTools"
           aria-pressed={devtoolsOpen}
           title="WebKit DevTools"

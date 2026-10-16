@@ -112,8 +112,8 @@ export function ScreenshotToast({
         />
       )}
       {toast.status === "error" ? (
-        <div className="flex items-center gap-2 px-3.5 py-2.5 bg-panel border border-white/12 rounded-xl text-white/90 text-[12px] shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
-          <span className="size-1.5 rounded-full shrink-0 bg-[#f87171]" />
+        <div className="flex items-center gap-2 px-3.5 py-2.5 bg-panel border border-ink/12 rounded-xl text-ink-90 text-[12px] shadow-popover">
+          <span className="size-1.5 rounded-full shrink-0 bg-danger" />
           <span className="select-text">{toast.message ?? "Screenshot failed"}</span>
         </div>
       ) : (
@@ -126,26 +126,26 @@ export function ScreenshotToast({
           onDragEnd={handleDragEnd}
           aria-label="Open screenshot in Finder"
           title="Click to reveal in Finder · drag to copy the file"
-          className={`group flex w-full items-center gap-3 pl-2 pr-3.5 py-2 bg-panel border border-white/12 rounded-xl shadow-[0_8px_24px_rgba(0,0,0,0.45)] text-left cursor-pointer enabled:hover:bg-[#2a2a2c] disabled:cursor-default [transition:background_0.15s_ease] ${dragging ? "invisible" : ""}`}
+          className={`group flex w-full items-center gap-3 pl-2 pr-3.5 py-2 bg-panel border border-ink/12 rounded-xl shadow-popover text-left cursor-pointer enabled:hover:bg-panel-hover disabled:cursor-default [transition:background_0.15s_ease] ${dragging ? "invisible" : ""}`}
         >
-          <div className="size-9 rounded-md overflow-hidden bg-white/10 shrink-0 flex items-center justify-center ring-1 ring-white/10 pointer-events-none">
+          <div className="size-9 rounded-md overflow-hidden bg-ink/10 shrink-0 flex items-center justify-center ring-1 ring-ink/10 pointer-events-none">
             {toast.thumb ? (
               <img src={toast.thumb} alt="" className="size-full object-cover" draggable={false} />
             ) : (
-              <span className="block size-4 rounded-full border-2 border-white/30 border-t-white animate-[grid-spin_0.8s_linear_infinite]" />
+              <span className="block size-4 rounded-full border-2 border-ink/30 border-t-ink animate-[grid-spin_0.8s_linear_infinite]" />
             )}
           </div>
           <div className="flex flex-col leading-tight pointer-events-none">
-            <span className="text-[13px] font-semibold text-white">
+            <span className="text-[13px] font-semibold text-ink">
               {toast.status === "saving" ? "Saving Screenshot…" : "Screenshot Saved"}
             </span>
             {toast.status === "saved" && (
-              <span className="text-[11px] text-white/60">Open in Finder</span>
+              <span className="text-[11px] text-ink-60">Open in Finder</span>
             )}
           </div>
           {toast.status === "saved" && (
             <ChevronRight
-              className="ml-auto text-white/80 pointer-events-none"
+              className="ml-auto text-ink-80 pointer-events-none"
               size={16}
               strokeWidth={2.25}
             />

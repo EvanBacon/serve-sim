@@ -72,7 +72,7 @@ export function WebKitTargetPicker({
             return !wasOpen;
           });
         }}
-        className="w-full min-w-0 h-[26px] flex items-center justify-between gap-2 bg-panel text-white/90 border border-white/12 rounded-md text-[12px] px-2 cursor-pointer text-left"
+        className="w-full min-w-0 h-[26px] flex items-center justify-between gap-2 bg-panel text-ink-90 border border-ink/12 rounded-md text-[12px] px-2 cursor-pointer text-left"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="WebKit target"
@@ -83,13 +83,13 @@ export function WebKitTargetPicker({
       {open && (
         <ul
           role="listbox"
-          className="absolute top-[calc(100%+4px)] left-0 m-0 p-1 list-none bg-panel border border-white/12 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.5)] min-w-[220px] max-w-[360px] max-h-[320px] overflow-y-auto z-50"
+          className="absolute top-[calc(100%+4px)] left-0 m-0 p-1 list-none bg-panel border border-ink/12 rounded-lg shadow-popover min-w-[220px] max-w-[360px] max-h-[320px] overflow-y-auto z-50"
         >
           {groups.map((group) => {
             const iconUrl = group.bundleId ? icons[group.bundleId] : null;
             return (
             <li key={group.key} className="list-none m-0 p-0">
-              <div className="flex items-center gap-2 px-1.5 pt-1 pb-0.5 text-[12px] font-semibold text-white/[0.92]">
+              <div className="flex items-center gap-2 px-1.5 pt-1 pb-0.5 text-[12px] font-semibold text-ink-92">
                 {iconUrl ? (
                   <img src={iconUrl} alt="" className="w-4 h-4 rounded-[3px] shrink-0 object-cover" />
                 ) : (
@@ -105,12 +105,12 @@ export function WebKitTargetPicker({
                   const hovered = hoveredId === target.id && !isDisabled;
                   const baseCls = "flex flex-col px-2 py-[3px] rounded text-[12px] leading-[1.35]";
                   const stateCls = isDisabled
-                    ? "opacity-40 cursor-not-allowed italic text-white/85"
+                    ? "opacity-40 cursor-not-allowed italic text-ink-85"
                     : hovered
-                    ? "bg-[rgba(10,132,255,0.22)] text-white/85 cursor-pointer"
+                    ? "bg-tint/22 text-ink-85 cursor-pointer"
                     : isSelected
-                    ? "bg-white/[0.06] text-white/85 cursor-pointer"
-                    : "text-white/85 cursor-pointer";
+                    ? "bg-ink/[0.06] text-ink-85 cursor-pointer"
+                    : "text-ink-85 cursor-pointer";
                   return (
                     <li
                       key={target.id}
@@ -144,7 +144,7 @@ export function WebKitTargetPicker({
                     >
                       <span className="block overflow-hidden text-ellipsis whitespace-nowrap">{title}</span>
                       {target.url && target.url !== "about:blank" && (
-                        <span className="block font-mono text-[10px] text-white/[0.42] overflow-hidden text-ellipsis whitespace-nowrap">{target.url}</span>
+                        <span className="block font-mono text-[10px] text-ink-42 overflow-hidden text-ellipsis whitespace-nowrap">{target.url}</span>
                       )}
                     </li>
                   );

@@ -2,7 +2,7 @@ export function Chevron({ open }: { open: boolean }) {
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-      className="lem-chevron text-white/50"
+      className="lem-chevron text-ink-50"
       style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)" }}>
       <polyline points="6 9 12 15 18 9" />
     </svg>

@@ -75,7 +75,7 @@ export function StreamSettingsTool({
       summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
       summary={
         <>
-          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">
+          <span className="text-[11px] font-semibold text-ink-50 uppercase tracking-[0.08em] leading-none inline-flex items-center">
             Stream
           </span>
           <span />
@@ -104,12 +104,12 @@ export function StreamSettingsTool({
                 onChange={(show) => onHideChromeChange(!show)}
               />
             </SettingRow>
-            <p className="text-[11px] text-white/55 leading-snug px-0.5">
+            <p className="text-[11px] text-ink-55 leading-snug px-0.5">
               Turn off to hide the bezel when viewing the simulator on a phone, so nested frames don't shrink the screen.
             </p>
           </>
         )}
-        <p className="text-[11px] text-white/55 leading-snug px-0.5">
+        <p className="text-[11px] text-ink-55 leading-snug px-0.5">
           {!avccSupported
             ? "This browser can't decode H.264, so the stream uses MJPEG."
             : downgraded

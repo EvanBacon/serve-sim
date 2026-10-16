@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { toast } from "sonner";
 import { ServeSimToaster, UploadToastContent } from "../client/components/app-toasts";
 import { useUploadToasts } from "../client/hooks/use-upload-toasts";
+import { inkFill, inkText } from "../client/utils/theme";
 
 describe("UploadToastContent", () => {
   test("renders determinate upload progress", () => {
@@ -129,12 +130,12 @@ describe("plain toast chrome", () => {
       );
       expect(error?.querySelector("[data-content]")).not.toBeNull();
       const errorDot = error?.querySelector("[data-testid='plain-toast-dot']");
-      expect(errorDot?.getAttribute("style")).toContain("#f87171");
+      expect(errorDot?.getAttribute("style")).toContain("var(--serve-sim-danger)");
 
       const success = dom.document.querySelector('[data-sonner-toast][data-type="success"]');
       expect(success?.getAttribute("data-styled")).toBe("true");
       expect(success?.querySelector("[data-testid='plain-toast-dot']")?.getAttribute("style")).toContain(
-        "#4ade80",
+        "var(--serve-sim-success)",
       );
 
       const upload = dom.document.querySelector("[data-testid='upload-toast']");
@@ -147,9 +148,10 @@ describe("plain toast chrome", () => {
 
       const toaster = dom.document.querySelector("[data-sonner-toaster]") as unknown as HTMLElement;
       expect(toaster.classList.contains("serve-sim-toaster")).toBe(true);
-      expect(toaster.style.getPropertyValue("--normal-bg")).toBe("#1c1c1e");
-      expect(toaster.style.getPropertyValue("--normal-border")).toBe("rgba(255, 255, 255, 0.12)");
-      expect(toaster.style.getPropertyValue("--normal-text")).toBe("rgba(255, 255, 255, 0.9)");
+      // Theme-aware: resolves through the light/dark palette in global.css.
+      expect(toaster.style.getPropertyValue("--normal-bg")).toBe("var(--serve-sim-panel)");
+      expect(toaster.style.getPropertyValue("--normal-border")).toBe(inkFill(0.12));
+      expect(toaster.style.getPropertyValue("--normal-text")).toBe(inkText(0.9));
       expect(toaster.style.getPropertyValue("--border-radius")).toBe("8px");
       expect(toaster.style.getPropertyValue("--width")).toBe("320px");
     } finally {

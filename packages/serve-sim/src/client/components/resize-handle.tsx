@@ -1,4 +1,5 @@
 import { useState, type PointerEvent as ReactPointerEvent } from "react";
+import { inkFill } from "../utils/theme";
 
 // Rendered as a fixed-positioned sibling of the panel, so the grabber can
 // straddle the panel's interior border without being clipped by overflow:hidden.
@@ -48,7 +49,7 @@ export function ResizeHandle({
         style={{
           transform: "translateX(-0.5px)",
           background:
-            "linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,0.28) 30%, rgba(255,255,255,0.28) 70%, rgba(255,255,255,0) 100%)",
+            `linear-gradient(to bottom, ${inkFill(0)} 0%, ${inkFill(0.28)} 30%, ${inkFill(0.28)} 70%, ${inkFill(0)} 100%)`,
         }}
       />
       {/* Centered pill grabber, straddling the panel's interior border. */}
