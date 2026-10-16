@@ -1393,9 +1393,12 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const ownsPath = (pathname: string) =>
     base === "" || pathname === base || pathname.startsWith(base + "/");
   // A remote browser opens `<preview>/?token=<auth token>` once; it gets an
-  // HttpOnly, SameSite=Strict cookie and is redirected to the clean URL, so
+  // HttpOnly, SameSite=Lax cookie and is redirected to the clean URL, so
   // the page's own stream, API, and WebSocket requests authenticate without
-  // putting the token in every URL.
+  // putting the token in every URL. Lax, not Strict: the token link is
+  // usually opened from another site (chat, docs), and a Strict cookie would
+  // be withheld from that navigation's redirect, so the page would 401.
+  // State-changing routes and upgrades still require a same-origin Origin.
   const bootstrapAuthCookie = (req: SimReq, res: SimRes, rawUrl: string, pathname: string): boolean => {
     if (!authToken || (req.method ?? "GET").toUpperCase() !== "GET") return false;
     if (pathname !== base && pathname !== base + "/") return false;
@@ -1407,7 +1410,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const secure = forwardedProto === "https" || (req.socket as { encrypted?: boolean }).encrypted === true;
     res.writeHead(302, {
       "Set-Cookie":
-        `${AUTH_COOKIE}=${authCookieValue(authToken)}; Path=${base === "" ? "/" : base}; HttpOnly; SameSite=Strict` +
+        `${AUTH_COOKIE}=${authCookieValue(authToken)}; Path=${base === "" ? "/" : base}; HttpOnly; SameSite=Lax` +
         (secure ? "; Secure" : ""),
       Location: `${parsed.pathname}${parsed.search}`,
       "Cache-Control": "no-store",

@@ -527,7 +527,7 @@ describe("remote browser cookie bootstrap", () => {
     const cookie = String(r.headers["set-cookie"]);
     expect(cookie).toContain(`${AUTH_COOKIE}=${authCookieValue(AUTH_TOKEN)}`);
     expect(cookie).toContain("HttpOnly");
-    expect(cookie).toContain("SameSite=Strict");
+    expect(cookie).toContain("SameSite=Lax");
     expect(cookie).toContain("Secure");
     const api = await send(withToken.port, "/api", {
       headers: { ...PROXY, Cookie: `${AUTH_COOKIE}=${authCookieValue(AUTH_TOKEN)}` },
