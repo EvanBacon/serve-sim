@@ -48,7 +48,7 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
             for await frame in stream {
                 do {
                     let encoded = try await encoder.encode(frame)
-                    diagnostics?.recordSuccess()
+                    diagnostics?.recordSuccess(codec: codec)
                     await onFrame(encoded)
                 } catch {
                     // One line per distinct failure plus periodic counts; the

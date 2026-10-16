@@ -61,6 +61,9 @@ public struct EncoderErrorLog: Sendable {
         self.summaryInterval = summaryInterval
     }
 
+    /// True between a recorded failure and the next `recovered`.
+    public var isFailing: Bool { key != nil }
+
     public mutating func record(_ next: EncoderErrorKey, at now: Double) -> [String] {
         if key == next {
             suppressed += 1
@@ -91,5 +94,30 @@ public struct EncoderErrorLog: Sendable {
         suppressed = 0
         windowStart = now
         return line
+    }
+}
+
+/// One `EncoderErrorLog` per codec. The MJPEG and AVCC consumers share a
+/// capture engine, so a success on one codec must not end (and reset the
+/// suppression of) a failure run on the other.
+public struct CodecEncoderErrorLogs: Sendable {
+    public let summaryInterval: Double
+    private var logs: [String: EncoderErrorLog] = [:]
+
+    public init(summaryInterval: Double = 10) {
+        self.summaryInterval = summaryInterval
+    }
+
+    public func isFailing(codec: String) -> Bool {
+        logs[codec]?.isFailing ?? false
+    }
+
+    public mutating func record(_ next: EncoderErrorKey, at now: Double) -> [String] {
+        logs[next.codec, default: EncoderErrorLog(summaryInterval: summaryInterval)].record(next, at: now)
+    }
+
+    public mutating func recovered(codec: String, at now: Double) -> [String] {
+        guard isFailing(codec: codec) else { return [] }
+        return logs[codec]!.recovered(at: now)
     }
 }

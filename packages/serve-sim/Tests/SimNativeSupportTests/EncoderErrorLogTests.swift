@@ -36,4 +36,20 @@ final class EncoderErrorLogTests: XCTestCase {
             "[capture] AVCC encode failed at 1398x2034: kVTPixelTransferNotSupportedErr (-12905)",
         ])
     }
+
+    func testSuccessOnOneCodecDoesNotResetAnotherCodecsSuppression() {
+        var logs = CodecEncoderErrorLogs(summaryInterval: 10)
+        XCTAssertEqual(logs.record(inner, at: 0).count, 1)
+        // MJPEG keeps encoding fine while AVCC fails every frame.
+        XCTAssertEqual(logs.recovered(codec: "MJPEG", at: 0.05), [])
+        XCTAssertEqual(logs.record(inner, at: 0.1), [])
+        XCTAssertEqual(logs.recovered(codec: "MJPEG", at: 0.15), [])
+        XCTAssertEqual(logs.record(inner, at: 0.2), [])
+        XCTAssertTrue(logs.isFailing(codec: "AVCC"))
+        XCTAssertFalse(logs.isFailing(codec: "MJPEG"))
+        XCTAssertEqual(logs.recovered(codec: "AVCC", at: 1), [
+            "[capture] AVCC encode failed at 2007x2853: kVTPixelTransferNotSupportedErr (-12905) repeated 2x in 1.0s; recovered",
+        ])
+        XCTAssertFalse(logs.isFailing(codec: "AVCC"))
+    }
 }

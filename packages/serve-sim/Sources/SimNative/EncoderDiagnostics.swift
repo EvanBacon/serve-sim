@@ -12,8 +12,8 @@ final class EncoderDiagnostics: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var log = EncoderErrorLog()
-    private var failing = false
+    // Per codec: MJPEG and AVCC consumers share this instance.
+    private var log = CodecEncoderErrorLogs()
     private var errors: [EncoderErrorKey: Count] = [:]
     private var sessions: [[String: Any]] = []
 
@@ -28,7 +28,6 @@ final class EncoderDiagnostics: @unchecked Sendable {
         let key = EncoderErrorKey(codec: codec, error: Self.describe(error), width: width, height: height)
         let now = Date()
         lock.lock()
-        failing = true
         var entry = errors[key] ?? Count(count: 0, first: now, last: now)
         entry.count += 1
         entry.last = now
@@ -38,11 +37,10 @@ final class EncoderDiagnostics: @unchecked Sendable {
         for line in lines { print(line) }
     }
 
-    func recordSuccess() {
+    func recordSuccess(codec: String) {
         lock.lock()
-        guard failing else { lock.unlock(); return }
-        failing = false
-        let lines = log.recovered(at: Date().timeIntervalSince1970)
+        guard log.isFailing(codec: codec) else { lock.unlock(); return }
+        let lines = log.recovered(codec: codec, at: Date().timeIntervalSince1970)
         lock.unlock()
         for line in lines { print(line) }
     }
