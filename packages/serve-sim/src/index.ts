@@ -42,6 +42,7 @@ import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
 import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
+import { shareHost } from "./share-host";
 
 /** Env var naming a remote preview for the input subcommands (same as --url). */
 const REMOTE_URL_ENV = "SERVE_SIM_URL";
@@ -1818,8 +1819,8 @@ async function serve(
     console.log("  - Remote:  non-loopback requests require the auth token");
     // The token rides in the fragment, which browsers never send: it stays
     // out of request lines and server/proxy logs.
-    const shareHost = exposedToLan && networkIP ? networkIP : "<host>";
-    console.log(`  - Share:   http://${shareHost}:${boundPort}/#token=<token> \x1b[2m(never ?token=)\x1b[0m`);
+    const linkHost = shareHost({ host, exposedToLan, networkIP });
+    console.log(`  - Share:   http://${linkHost}:${boundPort}/#token=<token> \x1b[2m(never ?token=)\x1b[0m`);
   } else if (exposedToLan) {
     console.log("  - Remote:  \x1b[33mrefused (no --auth-token); only this machine can connect\x1b[0m");
   }
