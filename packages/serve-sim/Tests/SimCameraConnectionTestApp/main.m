@@ -14,9 +14,32 @@ static void WriteResult(BOOL passed, NSString *message) {
     exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
+// Weak handles to the objects released by the teardown exercise. The test only
+// proves the fake-connection dealloc path is safe once every one of these has
+// actually deallocated, so the completion step polls them instead of assuming
+// a fixed delay is long enough.
+@interface SimCameraTeardownProbe : NSObject
+@property(nonatomic, weak) AVCaptureMetadataOutput *metadataOutput;
+@property(nonatomic, weak) AVCaptureVideoDataOutput *videoOutput;
+@property(nonatomic, weak) AVCaptureDeviceInput *input;
+@property(nonatomic, weak) AVCaptureSession *session;
+@end
+
+@implementation SimCameraTeardownProbe
+- (NSArray<NSString *> *)liveObjectNames {
+    NSMutableArray<NSString *> *live = [NSMutableArray new];
+    if (self.metadataOutput) [live addObject:@"AVCaptureMetadataOutput"];
+    if (self.videoOutput) [live addObject:@"AVCaptureVideoDataOutput"];
+    if (self.input) [live addObject:@"AVCaptureDeviceInput"];
+    if (self.session) [live addObject:@"AVCaptureSession"];
+    return live;
+}
+@end
+
 static BOOL ExerciseAutomaticOutputTeardown(
     id<AVCaptureVideoDataOutputSampleBufferDelegate,
        AVCaptureMetadataOutputObjectsDelegate> delegate,
+    SimCameraTeardownProbe *probe,
     NSString **message) {
     @autoreleasepool {
         AVCaptureDevice *device = [AVCaptureDevice
@@ -36,6 +59,10 @@ static BOOL ExerciseAutomaticOutputTeardown(
         AVCaptureSession *session = [AVCaptureSession new];
         AVCaptureMetadataOutput *metadataOutput = [AVCaptureMetadataOutput new];
         AVCaptureVideoDataOutput *videoOutput = [AVCaptureVideoDataOutput new];
+        probe.metadataOutput = metadataOutput;
+        probe.videoOutput = videoOutput;
+        probe.input = input;
+        probe.session = session;
         [metadataOutput setMetadataObjectsDelegate:delegate queue:dispatch_get_main_queue()];
         [videoOutput setSampleBufferDelegate:delegate queue:dispatch_get_main_queue()];
 
@@ -63,15 +90,37 @@ static BOOL ExerciseAutomaticOutputTeardown(
         [session commitConfiguration];
 
         // Releasing each output releases the fake connection associated with
-        // it; releasing the input likewise releases its fake port. The caller
-        // reports success on a later main-queue turn so queued frame work can
-        // drop its temporary output retains and the objects can deallocate.
+        // it; releasing the input likewise releases its fake port. Queued
+        // frame work may still hold temporary retains, so the caller polls the
+        // probe's weak references until every object has deallocated.
         metadataOutput = nil;
         videoOutput = nil;
         input = nil;
         session = nil;
     }
     return YES;
+}
+
+// Polls until every object tracked by the probe has deallocated, then reports
+// the result. Fails if any of them is still alive at the deadline, so the test
+// cannot pass without having exercised the dealloc path it guards.
+static void WaitForTeardownAndReport(SimCameraTeardownProbe *probe, NSDate *deadline) {
+    NSArray<NSString *> *live = [probe liveObjectNames];
+    if (live.count == 0) {
+        WriteResult(YES, @"Automatic metadata and video outputs deallocated safely");
+        return;
+    }
+    if ([deadline timeIntervalSinceNow] <= 0) {
+        WriteResult(NO, [NSString stringWithFormat:
+            @"Objects still alive after teardown, dealloc path was not exercised: %@",
+            [live componentsJoinedByString:@", "]]);
+        return;
+    }
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+            WaitForTeardownAndReport(probe, deadline);
+        });
 }
 
 @interface SimCameraConnectionTestDelegate : UIResponder <
@@ -94,20 +143,19 @@ static BOOL ExerciseAutomaticOutputTeardown(
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *mode = NSProcessInfo.processInfo.environment[@"SIMCAM_CONNECTION_TEST_MODE"];
         if ([mode isEqualToString:@"teardown"]) {
+            SimCameraTeardownProbe *probe = [SimCameraTeardownProbe new];
             NSString *message = nil;
             BOOL passed = NO;
             @try {
-                passed = ExerciseAutomaticOutputTeardown(self, &message);
+                passed = ExerciseAutomaticOutputTeardown(self, probe, &message);
             } @catch (NSException *exception) {
                 message = [NSString stringWithFormat:@"Exception: %@", exception.reason];
             }
-            dispatch_after(
-                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
-                dispatch_get_main_queue(), ^{
-                    WriteResult(passed, passed
-                        ? @"Automatic metadata and video outputs deallocated safely"
-                        : message);
-                });
+            if (!passed) {
+                WriteResult(NO, message);
+                return;
+            }
+            WaitForTeardownAndReport(probe, [NSDate dateWithTimeIntervalSinceNow:5.0]);
             return;
         }
 

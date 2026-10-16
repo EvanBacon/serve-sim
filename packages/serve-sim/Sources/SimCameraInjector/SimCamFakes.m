@@ -407,6 +407,10 @@ static char kSimCamOutputConnectionKey;
 // class_createInstance. AVFoundation's dealloc reads private state that was
 // never created (observed as a crash at address 0x30 on iOS 26.5), so keep
 // each fake connection alive for the injected process like the fake devices.
+//
+// This leak is intentional and bounded: one small object per distinct output
+// that ever receives a fake connection. The connection only references its
+// output weakly, so retaining it keeps no output, session, or delegate alive.
 static void SimCamRetainFakeConnection(AVCaptureConnection *connection) {
     if (!connection) return;
     static NSMutableSet *connections;
