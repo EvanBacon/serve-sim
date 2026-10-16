@@ -300,16 +300,21 @@ Host-shell features are off unless you pass `allowExec: true`. The middleware re
 
 ### Forward WebSocket upgrades
 
-Simulator input, the control channel, and DevTools are WebSockets, so forward your server's `upgrade` events to `handleUpgrade`:
+Simulator input, the control channel, and DevTools are WebSockets, so forward your server's `upgrade` events under the mount path to `handleUpgrade`. `handleUpgrade` closes any socket it doesn't own, so leave every other upgrade (HMR, your app's own sockets) to your server's existing handlers:
 
 ```ts
-const middleware = simMiddleware({ basePath: "/.sim" });
+const basePath = "/.sim";
+const middleware = simMiddleware({ basePath });
 app.use(middleware);
 
 const server = app.listen(3000);
-server.on("upgrade", (req, socket, head) =>
-  middleware.handleUpgrade(req, socket, head),
-);
+server.on("upgrade", (req, socket, head) => {
+  const { pathname } = new URL(req.url ?? "/", "http://localhost");
+  if (pathname === basePath || pathname.startsWith(`${basePath}/`)) {
+    middleware.handleUpgrade(req, socket, head);
+  }
+  // Anything else belongs to the host server's other upgrade listeners.
+});
 ```
 
 Without that, the page still loads video over HTTP but loses simulator input and DevTools (their sockets never reach the proxy). The same setup exposes the preview to remote viewers behind a single port (the way standalone `serve-sim` does), so the per-device helper port and inspect-webkit bridge can stay local to the host. When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.
