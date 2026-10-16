@@ -103,7 +103,7 @@ interface ExecChannelOptions {
   /**
    * Whether this upgrade may send `{id, rpc}` host actions. Same default as
    * `allowShell` (trusted loopback, loopback same-origin), but independent of
-   * `allowExec` and the exec token.
+   * the exec token. `allowExec` still gates `installApp` inside host-rpc.ts.
    */
   allowRpc?: (req: IncomingMessage) => boolean;
 }

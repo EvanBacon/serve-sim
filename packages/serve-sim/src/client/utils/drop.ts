@@ -116,15 +116,24 @@ export async function uploadFileToTmp(
   return tmpPath;
 }
 
+// Installing an arbitrary app is host code execution, so the server only
+// allows it with `--allow-exec` (and refuses to stage the upload otherwise).
+export const INSTALL_REQUIRES_EXEC_MESSAGE = "Installing apps requires serve-sim --allow-exec";
+
 export async function uploadDroppedFile(
   file: File,
   kind: DropKind,
   host: HostActionFn,
   udid: string,
   onProgress: (progress: number | null) => void,
+  { allowInstall = true }: { allowInstall?: boolean } = {},
 ) {
   if (file.size > DROP_MAX_FILE_SIZE) {
     throw new Error("File too large (max 500MB)");
+  }
+  // Fail before streaming a large .ipa the server would refuse anyway.
+  if (kind === "ipa" && !allowInstall) {
+    throw new Error(INSTALL_REQUIRES_EXEC_MESSAGE);
   }
 
   const ext = kind === "ipa" ? "ipa" : fileExtension(file);

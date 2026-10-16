@@ -96,7 +96,9 @@ export function useMediaDrop({
           continue;
         }
         const id = onUploadStart(file.name, kind);
-        uploadDroppedFile(file, kind, host, udid, (p) => onUploadProgress(id, p))
+        uploadDroppedFile(file, kind, host, udid, (p) => onUploadProgress(id, p), {
+          allowInstall: window.__SIM_PREVIEW__?.allowExec === true,
+        })
           .then(() => onUploadEnd(id, true))
           .catch((err) =>
             onUploadEnd(id, false, err instanceof Error ? err.message : "Upload failed"),

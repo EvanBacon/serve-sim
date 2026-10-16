@@ -1417,9 +1417,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   };
 
   // Narrow host actions for the page (screenshot, camera, permissions, …):
-  // validated params, fixed argv, no shell. Not gated on `allowExec`.
+  // validated params, fixed argv, no shell. Only installApp (host code
+  // execution via an arbitrary app) is gated on `allowExec`.
   const handleRpcRequest = createHostRpcHandler({
     serveSimBin,
+    allowExec,
     isKnownDevice: options?.isKnownDevice ?? (async (udid) => (await getBootedUdids())?.has(udid) ?? false),
     onCommandResult: (command, result) => recordCommandEvent(command, result),
   });

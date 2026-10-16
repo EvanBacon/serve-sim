@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   DROP_CHUNK_BYTES,
+  INSTALL_REQUIRES_EXEC_MESSAGE,
   arrayBufferToBase64,
   uploadDroppedFile,
   uploadFileToTmp,
@@ -104,6 +105,26 @@ describe("uploadDroppedFile", () => {
     expect(install?.params.udid).toBe("UDID");
     expect(String(install?.params.path)).toMatch(/^\/tmp\/serve-sim-install-.*\.ipa$/);
     expect(calls.some((c) => c.method === "addMedia")).toBe(false);
+  });
+
+  test("ipa drops are refused up front when the server lacks --allow-exec", async () => {
+    const file = new File([patternBytes(64)], "app.ipa", { type: "" });
+    const calls: Call[] = [];
+    await expect(
+      uploadDroppedFile(file, "ipa", recordingHost(calls), "UDID", () => {}, { allowInstall: false }),
+    ).rejects.toThrow(INSTALL_REQUIRES_EXEC_MESSAGE);
+    expect(calls).toEqual([]);
+  });
+
+  test("a server-side installApp refusal surfaces as the upload error", async () => {
+    const host = async (method: string): Promise<HostActionResult> =>
+      method === "uploadChunk"
+        ? { stdout: "", stderr: "installApp requires --allow-exec", exitCode: 126 }
+        : OK;
+    const file = new File([patternBytes(64)], "app.ipa", { type: "" });
+    await expect(uploadDroppedFile(file, "ipa", host, "UDID", () => {})).rejects.toThrow(
+      "installApp requires --allow-exec",
+    );
   });
 
   test("failed chunk write surfaces stderr and still cleans up", async () => {

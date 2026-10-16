@@ -390,7 +390,7 @@ describe("(b) host actions validate params and never reach a shell", () => {
       { method: "location", params: { udid: VALID_UDID, lat: `1;touch ${file}`, lng: 2 }, error: /invalid lat/ },
       { method: "addMedia", params: { udid: VALID_UDID, path: "/etc/passwd" }, error: /invalid path/ },
       { method: "addMedia", params: { udid: VALID_UDID, path: `/tmp/serve-sim-upload-${randomUUID()}.png${sh}` }, error: /invalid path/ },
-      { method: "installApp", params: { udid: VALID_UDID, path: `/tmp/serve-sim-install-${randomUUID()}.png` }, error: /invalid path/ },
+      { method: "installApp", params: { udid: VALID_UDID, path: `/tmp/serve-sim-install-${randomUUID()}.png` }, error: /invalid path|installApp requires --allow-exec/ },
       { method: "revealScreenshot", params: { path: `${tmpdir()}/../../etc/serve-sim-screenshot-x.png` }, error: /invalid path/ },
       { method: "screenshotThumbnail", params: { path: `/tmp/serve-sim-screenshot-$(touch ${file}).png` }, error: /invalid path/ },
       { method: "uploadChunk", params: { path: `/tmp/serve-sim-upload-../../${file}`, data: "AA==" }, error: /invalid path/ },
@@ -431,6 +431,19 @@ describe("(b) host actions validate params and never reach a shell", () => {
     expect(String(again.error)).toMatch(/EEXIST/);
     await session.request({ id: 4, rpc: { method: "uploadRemove", params: { path } } });
     expect(existsSync(path)).toBe(false);
+    session.close();
+  });
+
+  test("without --allow-exec, a spoofed loopback client cannot stage or install an app", async () => {
+    const path = `/tmp/serve-sim-install-${randomUUID()}.ipa`;
+    markers.push(path);
+    const session = await wsSession(execOff.port, {});
+    const data = Buffer.from("PK\x03\x04 not-an-app").toString("base64");
+    const staged = await session.request({ id: 1, rpc: { method: "uploadChunk", params: { path, data } } });
+    expect(staged.error).toBe("installApp requires --allow-exec");
+    expect(existsSync(path)).toBe(false);
+    const install = await session.request({ id: 2, rpc: { method: "installApp", params: { udid: VALID_UDID, path } } });
+    expect(install.error).toBe("installApp requires --allow-exec");
     session.close();
   });
 

@@ -20,9 +20,11 @@ import { getUiOption, setUiOption } from "./ui-settings";
 // the `/exec-ws` control channel. The page never sends shell text: every
 // method validates its params against strict formats/enums, checks that the
 // udid is a booted simulator, and spawns a fixed argv with no shell. These
-// stay available without `--allow-exec` (which only gates arbitrary
-// commands); the channel itself still applies the loopback/same-origin and
-// auth gates before a frame reaches here.
+// stay available without `--allow-exec` (which gates arbitrary commands),
+// except `installApp`: installing and launching an arbitrary .ipa runs
+// attacker-chosen code on the host, so it (and staging an install upload)
+// needs `--allow-exec` too. The channel itself still applies the
+// loopback/same-origin and auth gates before a frame reaches here.
 
 export interface RunResult {
   stdout: string;
@@ -43,6 +45,11 @@ export interface HostRpcOptions {
   onCommandResult?: (command: string, result: RunResult) => void;
   /** Home directory for screenshot paths. Default: `os.homedir()`. */
   homeDir?: string;
+  /**
+   * Whether the server opted in to host code execution (`--allow-exec`).
+   * Required for `installApp` and for staging `serve-sim-install-*` uploads.
+   */
+  allowExec?: boolean;
 }
 
 export type HostRpcHandler = (payload: unknown) => Promise<Record<string, unknown>>;
@@ -67,6 +74,8 @@ const PERMISSION_NAMES = new Set(PERMISSION_SERVICES.map((s) => s.key));
 const CAMERA_SOURCES = ["placeholder", "webcam", "image", "video"] as const;
 const MIRROR_VALUES = ["on", "off"] as const;
 const DISPLAYS = ["primary", "primary-1"] as const;
+
+export const INSTALL_REQUIRES_EXEC = "installApp requires --allow-exec";
 
 const WATCH_HOME_SCRIPT = [
   'tell application "System Events" to tell process "Simulator" to set frontmost to true',
@@ -375,6 +384,8 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
     // the bytes go straight to an owner-only file that must not be a symlink.
     async uploadChunk(p) {
       const path = uploadPathParam(p);
+      // An install upload is only ever consumed by installApp.
+      if (!opts.allowExec && UPLOAD_PATH_RE.exec(path)![1] === "install") fail(INSTALL_REQUIRES_EXEC);
       const data = p.data;
       if (typeof data !== "string" || data.length > Math.ceil(MAX_CHUNK_BYTES / 3) * 4 || !BASE64_RE.test(data)) {
         fail("invalid data");
@@ -414,6 +425,7 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
     },
 
     async installApp(p) {
+      if (!opts.allowExec) fail(INSTALL_REQUIRES_EXEC);
       const udid = udidParam(p);
       const path = uploadPathParam(p, "path", ["install"]);
       if (!path.endsWith(".ipa")) fail("invalid path");
