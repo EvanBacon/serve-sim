@@ -349,7 +349,7 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
             fontSize: 11,
             fontWeight: 500,
             lineHeight: 1,
-            boxShadow: "var(--serve-sim-shadow-popover, 0 4px 14px rgba(0,0,0,0.32))",
+            boxShadow: "0 4px 14px rgba(0,0,0,0.32)",
             transition: "opacity 0.12s ease, transform 0.12s ease",
             zIndex: 100,
           }}

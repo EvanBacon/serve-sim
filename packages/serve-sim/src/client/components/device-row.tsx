@@ -76,7 +76,7 @@ export function DeviceRow({
         </span>
         {dotColor && !helper && (
           <span
-            className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-2 ring-panel"
+            className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full ring-2 ring-panel-bg"
             style={{ background: dotColor }}
           />
         )}

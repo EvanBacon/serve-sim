@@ -36,6 +36,9 @@
   --color-control-selected: var(--serve-sim-control-selected);
   /* Booted-but-idle status (amber, distinct from the warning text color). */
   --color-caution: var(--serve-sim-caution);
+  /* Panel resize grabber pill (idle / dragging). */
+  --color-grabber: var(--serve-sim-grabber);
+  --color-grabber-active: var(--serve-sim-grabber-active);
   /* Label color on a solid success (emerald) button. */
   --color-on-success: var(--serve-sim-on-success);
 
@@ -108,6 +111,8 @@
   --serve-sim-system-icon-to: #162132;
   --serve-sim-system-icon-fg: #c8d7ff;
   --serve-sim-resize-idle: #686e78;
+  --serve-sim-grabber: #6e6e72;
+  --serve-sim-grabber-active: #9a9a9e;
   --serve-sim-resize-hover: #b7bbc2;
   --serve-sim-resize-drag: #f4f6fa;
   --serve-sim-live-icon: #202b3a;
@@ -138,12 +143,12 @@
   --serve-sim-tint: #007aff;
   --serve-sim-accent: #4f46e5;
   --serve-sim-success: #15803d;
-  --serve-sim-success-emerald: #047857;
-  --serve-sim-danger: #dc2626;
+  --serve-sim-success-emerald: #065f46;
+  --serve-sim-danger: #c81e1e;
   --serve-sim-danger-soft: #b91c1c;
   --serve-sim-warning: #b45309;
-  --serve-sim-warning-soft: #a16207;
-  --serve-sim-caution: #d97706;
+  --serve-sim-warning-soft: #92400e;
+  --serve-sim-caution: #c2410c;
   --serve-sim-on-success: #fff;
   --serve-sim-control-selected: #fff;
   --serve-sim-resize-outline: #fff;
@@ -151,7 +156,9 @@
   --serve-sim-system-icon-from: #eaf2ff;
   --serve-sim-system-icon-to: #d6e5fb;
   --serve-sim-system-icon-fg: #1d4f99;
-  --serve-sim-resize-idle: #8e8e96;
+  --serve-sim-resize-idle: #76767e;
+  --serve-sim-grabber: #a1a1a6;
+  --serve-sim-grabber-active: #6e6e73;
   --serve-sim-resize-hover: #5f6068;
   --serve-sim-resize-drag: #2c2c30;
   --serve-sim-live-icon: #e3eefc;
@@ -159,6 +166,12 @@
   --serve-sim-live-icon-fg: #0b4f9e;
   --serve-sim-shadow-panel: 0 0 0 0.5px rgba(0, 0, 0, 0.04), 0 12px 40px rgba(0, 0, 0, 0.12);
   --serve-sim-shadow-popover: 0 0 0 0.5px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+
+/* Paint the page color on the canvas itself so nothing UA-white shows before
+   the app mounts. */
+html {
+  background: var(--serve-sim-page);
 }
 
 /* Collapsible tool sections (<details>) animate open/close height with a

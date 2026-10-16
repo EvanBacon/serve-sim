@@ -1171,7 +1171,7 @@ function AppWithConfig({
               // No backdrop-blur here: the canvas underneath repaints every
               // stream frame, and backdrop-filter forces a full re-blur per
               // frame for the whole drag — the tint alone stays cheap.
-              className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-accent bg-[rgba(99,102,241,0.18)] text-accent pointer-events-none z-20"
+              className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-[#a5b4fc] bg-[rgba(99,102,241,0.18)] text-[#a5b4fc] pointer-events-none z-20"
               style={{ borderRadius: useChrome ? undefined : imgBorderRadius }}
             >
               <Upload size={32} strokeWidth={1.5} />

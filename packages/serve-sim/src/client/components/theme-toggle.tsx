@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useTheme } from "../hooks/use-theme";
 import type { ThemePreference } from "../utils/theme";
@@ -23,10 +24,23 @@ export function ThemeToggle({
   const preference = controlledPreference ?? theme.preference;
   const setPreference = onChange ?? theme.setPreference;
 
+  // Radio-group keyboard model: arrows move (and select) within the group.
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+    if (!step) return;
+    event.preventDefault();
+    const index = OPTIONS.findIndex((o) => o.value === preference);
+    const next = (index + step + OPTIONS.length) % OPTIONS.length;
+    setPreference(OPTIONS[next]!.value);
+    const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>("[role=radio]");
+    buttons[next]?.focus();
+  };
+
   return (
     <div
       role="radiogroup"
       aria-label="Appearance"
+      onKeyDown={onKeyDown}
       className={`flex shrink-0 items-center gap-px rounded-lg bg-ink/6 p-0.5 ${className}`.trim()}
     >
       {OPTIONS.map(({ value, label, Icon }) => {
@@ -37,6 +51,7 @@ export function ThemeToggle({
             type="button"
             role="radio"
             aria-checked={checked}
+            tabIndex={checked ? 0 : -1}
             aria-label={label}
             title={`${label} appearance`}
             onClick={() => setPreference(value)}

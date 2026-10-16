@@ -166,7 +166,7 @@ export function GridPanel({
                 ))}
               </div>
               {!query && hasMore && (
-                <div className="px-2 py-2 text-[11px] text-ink-35 text-center">
+                <div className="px-2 py-2 text-[11px] text-ink-40 text-center">
                   {devices ? `${devices.length} of ${total}` : null}
                 </div>
               )}

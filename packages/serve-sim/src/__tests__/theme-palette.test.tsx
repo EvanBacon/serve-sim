@@ -102,3 +102,18 @@ describe("ThemeToggle", () => {
     expect(html).toMatch(/aria-checked="true"[^>]*aria-label="System"/);
   });
 });
+
+describe("compiled Tailwind CSS", () => {
+  test("emits the ink utilities and both palettes", async () => {
+    const { default: tailwind } = await import("bun-plugin-tailwind");
+    const result = await Bun.build({ entrypoints: [join(clientDir, "global.css")], plugins: [tailwind] });
+    expect(result.success).toBe(true);
+    const css = await result.outputs[0]!.text();
+    // `text-ink-*` must stay distinct from the `text-ink-inverse` color utility.
+    expect(css).toMatch(/\.text-ink-55\s*\{[^}]*--serve-sim-text-k/);
+    expect(css).toMatch(/\.text-ink-inverse\s*\{\s*color:\s*var\(--color-ink-inverse\)/);
+    expect(css).toMatch(/\.bg-ink\\\/8\b/);
+    expect(css).toContain(':root[data-theme="light"]');
+    expect(css).toContain("--color-ink: var(--serve-sim-ink)");
+  });
+});
