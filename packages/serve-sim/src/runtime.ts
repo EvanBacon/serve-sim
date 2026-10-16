@@ -87,8 +87,14 @@ function isWebSocketUpgrade(headers: Record<string, string | string[]>): boolean
   return /websocket/i.test(upgradeValue) && /upgrade/i.test(connectionValue);
 }
 
-function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number): void {
-  const upstream = createConnection(port, "127.0.0.1");
+/** @internal Exported for tests; `connectUpstream` is a test hook. */
+export function proxyTcpToHttpServer(
+  socket: Socket,
+  firstChunk: Buffer,
+  port: number,
+  connectUpstream: (port: number) => Socket = (p) => createConnection(p, "127.0.0.1"),
+): void {
+  const upstream = connectUpstream(port);
   const destroyBoth = () => {
     socket.destroy();
     upstream.destroy();
@@ -99,10 +105,14 @@ function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number):
     // The internal server sees this pipe as a loopback client. Record the real
     // peer so the middleware's trust checks don't treat a LAN or tunnel client
     // as loopback (see request-trust.ts).
-    if (typeof upstream.localPort === "number") {
-      const unregister = registerProxiedPeer(upstream.localPort, socket.remoteAddress ?? "unknown");
-      upstream.once("close", unregister);
+    // Without a local port the peer can't be recorded, and the request would
+    // read as loopback: fail closed instead of forwarding it.
+    if (typeof upstream.localPort !== "number") {
+      destroyBoth();
+      return;
     }
+    const unregister = registerProxiedPeer(upstream.localPort, socket.remoteAddress ?? "unknown");
+    upstream.once("close", unregister);
     upstream.write(firstChunk);
     socket.pipe(upstream);
     upstream.pipe(socket);
