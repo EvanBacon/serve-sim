@@ -307,11 +307,12 @@ describe("(b) ssh -R / socat raw loopback forward with spoofed Host/Origin, no f
 // internal node:http server on 127.0.0.1; the forwarded client must see the
 // same answers through that pipe.
 describe.skipIf(!process.versions.bun)("(b) through the Bun front-server pipe", () => {
-  const PORT = 3571;
+  let PORT = 0;
   let preview: PreviewServer;
   beforeAll(async () => {
     const middleware = simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: DEVICE });
-    preview = await servePreview({ port: PORT, middleware, host: "127.0.0.1" });
+    preview = await servePreview({ port: 0, middleware, host: "127.0.0.1" });
+    PORT = preview.port;
   });
   afterAll(() => preview?.stop(true));
 

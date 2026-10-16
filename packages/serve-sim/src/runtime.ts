@@ -26,7 +26,10 @@ export async function isPortFree(port: number): Promise<boolean> {
 }
 
 export interface PreviewServer {
-  stop(force?: boolean): void;
+  /** The bound preview port (resolved when `port: 0` was requested). */
+  port: number;
+  /** Stop listening; resolves once every listener has closed. */
+  stop(force?: boolean): Promise<void>;
 }
 
 /** Connect-style middleware signature, matching what `simMiddleware` returns. */
@@ -109,8 +112,11 @@ function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number):
 function createPreviewFrontServer(
   middleware: PreviewMiddleware,
   internalPort: number,
+  sockets: Set<Socket>,
 ): NetServer {
   return createNetServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
     let buffered = Buffer.alloc(0);
     const onData = (chunk: Buffer) => {
       buffered = Buffer.concat([buffered, chunk]);
@@ -183,6 +189,12 @@ export async function servePreview(opts: {
   internalServer.headersTimeout = 0;
   internalServer.requestTimeout = 0;
   internalServer.timeout = 0;
+  // Every open socket (including upgraded ones), so `stop(true)` can drop them.
+  const openSockets = new Set<Socket>();
+  internalServer.on("connection", (socket: Socket) => {
+    openSockets.add(socket);
+    socket.once("close", () => openSockets.delete(socket));
+  });
   internalServer.on("upgrade", (req, socket, head) => {
     if (opts.middleware.handleUpgrade) {
       opts.middleware.handleUpgrade(req, socket as Socket, head);
@@ -219,7 +231,7 @@ export async function servePreview(opts: {
   if (isBun) {
     // works around a bug where Bun fails to proxy websockets
     // https://github.com/oven-sh/bun/issues/14522
-    const frontServer = createPreviewFrontServer(opts.middleware, internalAddress.port);
+    const frontServer = createPreviewFrontServer(opts.middleware, internalAddress.port, openSockets);
     maybeFrontServer = frontServer;
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error & { code?: string }) => {
@@ -239,10 +251,17 @@ export async function servePreview(opts: {
     });
   }
 
+  const frontAddress = maybeFrontServer?.address();
+  const port = frontAddress && typeof frontAddress === "object" ? frontAddress.port : internalAddress.port;
+  const close = (server: { close(cb: () => void): unknown }) =>
+    new Promise<void>((resolve) => server.close(() => resolve()));
+
   return {
-    stop: () => {
-      internalServer.close()
-      maybeFrontServer?.close()
+    port,
+    stop: async (force) => {
+      const closing = Promise.all([close(internalServer), ...(maybeFrontServer ? [close(maybeFrontServer)] : [])]);
+      if (force) for (const socket of openSockets) socket.destroy();
+      await closing;
     },
   };
 }

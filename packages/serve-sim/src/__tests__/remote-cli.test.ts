@@ -1,13 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "child_process";
 import { createServer, type IncomingHttpHeaders, type Server } from "http";
+import type { AddressInfo } from "net";
 import { join } from "path";
 import { WebSocketServer } from "ws";
 
 // `--url` / `SERVE_SIM_URL` point the input commands at a remote preview; the
 // auth token must ride along on both the /api lookup and the HID WebSocket.
 
-const PORT = 3564;
+// Ephemeral, assigned in beforeAll: a fixed port collides with other suites.
+let PORT = 0;
 const TOKEN = "remote-cli-test-token";
 const DEVICE = "REMOTE-CLI-DEVICE";
 const cli = join(import.meta.dir, "..", "index.ts");
@@ -39,10 +41,15 @@ beforeAll(async () => {
     wsHeaders.push(req.headers);
     wss.handleUpgrade(req, socket, head, (ws) => ws.on("message", (data) => wsFrames.push(Buffer.from(data as Buffer))));
   });
-  await new Promise<void>((r) => server.listen(PORT, "127.0.0.1", r));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  PORT = (server.address() as AddressInfo).port;
 });
 
-afterAll(() => server?.close());
+afterAll(async () => {
+  if (!server) return;
+  server.closeAllConnections();
+  await new Promise<void>((r) => server.close(() => r()));
+});
 
 // Async spawn: the fake server lives in this process, so a sync spawn would
 // block the event loop it needs to answer the CLI.

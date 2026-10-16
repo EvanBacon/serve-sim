@@ -246,9 +246,15 @@ beforeAll(async () => {
   }
 });
 
-afterAll(() => {
-  withToken.server.close();
-  noToken.server.close();
+/** Drop open (keep-alive) connections and wait for the listener to close. */
+function closeServer(server: Server | undefined): Promise<void> {
+  if (!server) return Promise.resolve();
+  server.closeAllConnections();
+  return new Promise((resolve) => server.close(() => resolve()));
+}
+
+afterAll(async () => {
+  await Promise.all([closeServer(withToken?.server), closeServer(noToken?.server)]);
 });
 
 const bearer = { Authorization: `Bearer ${AUTH_TOKEN}` };
@@ -566,7 +572,7 @@ describe("embedded basePath remote gate", () => {
   beforeAll(async () => {
     embedded = await listenEmbedded(AUTH_TOKEN);
   });
-  afterAll(() => embedded.server.close());
+  afterAll(() => closeServer(embedded?.server));
 
   const helperConfig = `${EMBED_BASE}/helper/${DEVICE}/config`;
   const bypassPaths = [
@@ -612,11 +618,12 @@ const lanAddress = Object.values(networkInterfaces())
   .find((i) => i && i.family === "IPv4" && !i.internal)?.address;
 
 describe.skipIf(!lanAddress || !process.versions.bun)("Bun front server keeps the real peer", () => {
-  const PORT = 3562;
+  let PORT = 0;
   let preview: PreviewServer;
   beforeAll(async () => {
     const middleware = simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: DEVICE, authToken: AUTH_TOKEN });
-    preview = await servePreview({ port: PORT, middleware, host: "0.0.0.0" });
+    preview = await servePreview({ port: 0, middleware, host: "0.0.0.0" });
+    PORT = preview.port;
   });
   afterAll(() => preview?.stop(true));
 
@@ -636,26 +643,27 @@ describe.skipIf(!lanAddress || !process.versions.bun)("Bun front server keeps th
 // servePreview's TCP front server writes the rejection itself, so the status
 // line is visible on Bun 1.3 even when node:http upgrade sockets swallow it.
 describe.skipIf(!process.versions.bun)("Bun front server shows upgrade rejection statuses", () => {
-  const PORT_AUTH = 3564;
-  const PORT_OPEN = 3565;
+  let PORT_AUTH = 0;
+  let PORT_OPEN = 0;
   let withAuth: PreviewServer;
   let noAuth: PreviewServer;
 
   beforeAll(async () => {
     withAuth = await servePreview({
-      port: PORT_AUTH,
+      port: 0,
       host: "127.0.0.1",
       middleware: simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: DEVICE, authToken: AUTH_TOKEN }),
     });
     noAuth = await servePreview({
-      port: PORT_OPEN,
+      port: 0,
       host: "127.0.0.1",
       middleware: simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: DEVICE }),
     });
+    PORT_AUTH = withAuth.port;
+    PORT_OPEN = noAuth.port;
   });
-  afterAll(() => {
-    withAuth?.stop(true);
-    noAuth?.stop(true);
+  afterAll(async () => {
+    await Promise.all([withAuth?.stop(true), noAuth?.stop(true)]);
   });
 
   test("remote-without-token and cross-origin upgrades return exact 401/403", async () => {
@@ -668,7 +676,7 @@ describe.skipIf(!process.versions.bun)("Bun front server shows upgrade rejection
 });
 
 describe("exec channel default is fail-closed for embedders", () => {
-  const PORT_DEFAULT = 3563;
+  let PORT_DEFAULT = 0;
   let srv: Server;
   beforeAll(async () => {
     const { createExecUpgradeHandler } = await import("../exec-ws");
@@ -678,9 +686,10 @@ describe("exec channel default is fail-closed for embedders", () => {
     srv.on("upgrade", (req, socket, head) => {
       if (!handle(req, socket, head)) socket.destroy();
     });
-    await new Promise<void>((r) => srv.listen(PORT_DEFAULT, "127.0.0.1", r));
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    PORT_DEFAULT = (srv.address() as AddressInfo).port;
   });
-  afterAll(() => srv?.close());
+  afterAll(() => closeServer(srv));
 
   function run(headers: Record<string, string>, token = "embed-token"): Promise<string> {
     return new Promise((resolve) => {
