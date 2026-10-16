@@ -1816,6 +1816,10 @@ async function serve(
   }
   if (resolveAuthToken(undefined)) {
     console.log("  - Remote:  non-loopback requests require the auth token");
+    // The token rides in the fragment, which browsers never send: it stays
+    // out of request lines and server/proxy logs.
+    const shareHost = exposedToLan && networkIP ? networkIP : "<host>";
+    console.log(`  - Share:   http://${shareHost}:${boundPort}/#token=<token> \x1b[2m(never ?token=)\x1b[0m`);
   } else if (exposedToLan) {
     console.log("  - Remote:  \x1b[33mrefused (no --auth-token); only this machine can connect\x1b[0m");
   }

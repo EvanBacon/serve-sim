@@ -192,6 +192,16 @@ serve-sim camera --stop-webcam
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
 
+### Remote access (`--auth-token`)
+
+Requests that don't come straight from this machine — LAN clients, tunnels, reverse proxies — are refused unless the server is started with `--auth-token <token>` (or `SERVE_SIM_AUTH_TOKEN`). CLI and scripted clients send `Authorization: Bearer <token>`. To share the preview with a browser, send the link with the token in the URL fragment:
+
+```
+http://<host>:3200/#token=<token>
+```
+
+Browsers never send the fragment to the server, so the token stays out of request lines and server/proxy logs. The page that loads first is a small auth bootstrap (it contains no secrets): it reads the fragment, removes it from the address bar and history, and POSTs it in a header to the same-origin `/auth` endpoint, which sets an HttpOnly, `SameSite=Lax` cookie and the page reloads. `/auth` only accepts same-origin `POST`s, compares in constant time, and locks out after 10 wrong tokens a minute. A `?token=` query parameter is never accepted.
+
 ### Host shell (`--allow-exec`)
 
 The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control channel, and `serve-sim exec` — runs commands on the host, so it is off unless the server is started with `--allow-exec`; otherwise `/exec` answers `403 {"error":"exec disabled; start with --allow-exec"}` and `{command}` frames get `exec disabled`. Installing an app (dropping an `.ipa` on the preview) runs arbitrary code on the host too, so it also requires `--allow-exec` (`installApp requires --allow-exec`). The other preview tools (screenshots, camera, permissions, location, media drops, reveal in Finder) don't need it: they use fixed, validated host actions with no shell, available to loopback same-origin pages. Even when enabled, `/exec` is loopback-only and requires a per-session token that is never sent in any HTTP response: the server writes it to an owner-only file under `$TMPDIR/serve-sim/exec-tokens/` (removed on stop), and `serve-sim exec` reads it from there. A raw TCP forward of the preview port (`ssh -R`, socat) looks like a local client, so only enable `--allow-exec` on a port nobody else can reach.

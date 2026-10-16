@@ -8,6 +8,7 @@ import WebSocket from "ws";
 import { simMiddleware } from "../middleware";
 import {
   AUTH_COOKIE,
+  AUTH_EXCHANGE_HEADER,
   authCookieValue,
   hasForwardingHeaders,
   isLoopbackSameOrigin,
@@ -520,26 +521,90 @@ describe("control channel (/exec-ws)", () => {
 });
 
 describe("remote browser cookie bootstrap", () => {
-  test("?token= on the preview page sets an HttpOnly cookie and redirects", async () => {
-    const r = await send(withToken.port, `/?token=${AUTH_TOKEN}&device=${DEVICE}`, { headers: PROXY });
-    expect(r.status).toBe(302);
-    expect(r.headers.location).toBe(`/?device=${DEVICE}`);
+  const origin = () => ({ Origin: `https://127.0.0.1:${withToken.port}` });
+  const authCookie = `${AUTH_COOKIE}=${authCookieValue(AUTH_TOKEN)}`;
+
+  test("?token= in the URL never authenticates", async () => {
+    const page = await send(withToken.port, `/?token=${AUTH_TOKEN}&device=${DEVICE}`, { headers: PROXY });
+    expect(page.status).toBe(401);
+    expect(page.headers["set-cookie"]).toBeUndefined();
+    expect(page.body).toContain("#token=");
+    const api = await send(withToken.port, `/api?token=${AUTH_TOKEN}`, { headers: PROXY });
+    expect(api.status).toBe(401);
+    expect(api.headers["set-cookie"]).toBeUndefined();
+  });
+
+  test("an unauthenticated page load gets the bootstrap, which holds no token", async () => {
+    const r = await send(withToken.port, `/?device=${DEVICE}`, { headers: PROXY });
+    expect(r.status).toBe(401);
+    expect(String(r.headers["content-type"])).toContain("text/html");
+    expect(r.headers["cache-control"]).toBe("no-store");
+    expect(r.body).toContain("location.hash");
+    expect(r.body).toContain("history.replaceState");
+    expect(r.body).toContain(JSON.stringify("/auth"));
+    expect(r.body).not.toContain(AUTH_TOKEN);
+    expect(r.body).not.toContain(authCookieValue(AUTH_TOKEN));
+    expect(r.body).not.toContain(EXEC_TOKEN);
+  });
+
+  test("the fragment exchange sets an HttpOnly cookie that authenticates", async () => {
+    const r = await send(withToken.port, "/auth", {
+      method: "POST",
+      headers: { ...PROXY, ...origin(), [AUTH_EXCHANGE_HEADER]: AUTH_TOKEN },
+    });
+    expect(r.status).toBe(204);
     const cookie = String(r.headers["set-cookie"]);
-    expect(cookie).toContain(`${AUTH_COOKIE}=${authCookieValue(AUTH_TOKEN)}`);
+    expect(cookie).toContain(authCookie);
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Lax");
     expect(cookie).toContain("Secure");
-    const api = await send(withToken.port, "/api", {
-      headers: { ...PROXY, Cookie: `${AUTH_COOKIE}=${authCookieValue(AUTH_TOKEN)}` },
-    });
+    expect(cookie).not.toContain(AUTH_TOKEN);
+    const api = await send(withToken.port, "/api", { headers: { ...PROXY, Cookie: authCookie } });
     expect(api.status).toBe(200);
   });
 
-  test("a wrong ?token= is just unauthorized", async () => {
-    expect((await send(withToken.port, "/?token=wrong", { headers: PROXY })).status).toBe(401);
+  test("a wrong token is rejected without a cookie", async () => {
+    const r = await send(withToken.port, "/auth", {
+      method: "POST",
+      headers: { ...PROXY, ...origin(), [AUTH_EXCHANGE_HEADER]: "wrong" },
+    });
+    expect(r.status).toBe(401);
+    expect(r.headers["set-cookie"]).toBeUndefined();
+  });
+
+  test("the exchange is POST-only and same-origin only", async () => {
+    const get = await send(withToken.port, "/auth", { headers: { ...PROXY, ...origin(), [AUTH_EXCHANGE_HEADER]: AUTH_TOKEN } });
+    expect(get.status).toBe(405);
+    expect(get.headers["set-cookie"]).toBeUndefined();
+    for (const o of [{}, { Origin: "https://evil.example" }] as Record<string, string>[]) {
+      const r = await send(withToken.port, "/auth", {
+        method: "POST",
+        headers: { ...PROXY, ...o, [AUTH_EXCHANGE_HEADER]: AUTH_TOKEN },
+      });
+      expect(r.status).toBe(403);
+      expect(r.headers["set-cookie"]).toBeUndefined();
+    }
+  });
+
+  test("repeated wrong tokens are rate-limited", async () => {
+    const server = await listen(AUTH_TOKEN);
+    try {
+      const attempt = (token: string) =>
+        send(server.port, "/auth", {
+          method: "POST",
+          headers: { ...PROXY, Origin: `https://127.0.0.1:${server.port}`, [AUTH_EXCHANGE_HEADER]: token },
+        });
+      const statuses: number[] = [];
+      for (let i = 0; i < 12; i++) statuses.push((await attempt("wrong")).status);
+      expect(statuses.slice(0, 10).every((s) => s === 401)).toBe(true);
+      expect(statuses.slice(10)).toEqual([429, 429]);
+      // Even the right token waits out the lockout.
+      expect((await attempt(AUTH_TOKEN)).status).toBe(429);
+    } finally {
+      await closeServer(server.server);
+    }
   });
 });
-
 
 // Embedded mounts (Metro/Expo at `/.sim`) must gate on the same normalized
 // pathname the helper/devtools routers use — otherwise `/x/../.sim/...` and

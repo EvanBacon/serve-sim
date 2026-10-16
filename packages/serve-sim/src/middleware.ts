@@ -42,9 +42,10 @@ import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { simctlBootStatusArguments } from "./simctl";
+import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
-  AUTH_QUERY_PARAM,
+  AUTH_EXCHANGE_HEADER,
   authCookieValue,
   isLoopbackSameOrigin,
   isTrustedLoopback,
@@ -1296,8 +1297,9 @@ export interface SimMiddlewareOptions {
    * Token required for every non-loopback request (HTTP routes, helper and
    * DevTools WebSockets, the control channel). Defaults to
    * `SERVE_SIM_AUTH_TOKEN`. Without one, remote requests are refused. Remote
-   * callers send `Authorization: Bearer <token>`; a browser can open the
-   * preview once with `?token=<token>` to receive an HttpOnly cookie.
+   * callers send `Authorization: Bearer <token>`; a browser opens the share
+   * link `<preview>/#token=<token>` once and trades the fragment for an
+   * HttpOnly cookie (a `?token=` query is never accepted: URLs get logged).
    */
   authToken?: string;
   /**
@@ -1394,31 +1396,62 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
     base === "" || pathname === base || pathname.startsWith(base + "/");
-  // A remote browser opens `<preview>/?token=<auth token>` once; it gets an
-  // HttpOnly, SameSite=Lax cookie and is redirected to the clean URL, so
-  // the page's own stream, API, and WebSocket requests authenticate without
-  // putting the token in every URL. Lax, not Strict: the token link is
-  // usually opened from another site (chat, docs), and a Strict cookie would
-  // be withheld from that navigation's redirect, so the page would 401.
-  // State-changing routes and upgrades still require a same-origin Origin.
-  const bootstrapAuthCookie = (req: SimReq, res: SimRes, rawUrl: string, pathname: string): boolean => {
-    if (!authToken || (req.method ?? "GET").toUpperCase() !== "GET") return false;
-    if (pathname !== base && pathname !== base + "/") return false;
-    const parsed = new URL(rawUrl, "http://serve-sim.local");
-    const presented = parsed.searchParams.get(AUTH_QUERY_PARAM);
-    if (!presented || !tokensEqual(presented, authToken)) return false;
-    parsed.searchParams.delete(AUTH_QUERY_PARAM);
+  // A remote browser opens the share link `<preview>/#token=<auth token>`.
+  // The fragment never reaches the server; the page's auth bootstrap (served
+  // with the 401 below) POSTs it in a header to `exchangePath`, which answers
+  // with an HttpOnly, SameSite=Lax cookie so the page's own stream, API, and
+  // WebSocket requests authenticate without a token in any URL. Lax, not
+  // Strict: the link is usually opened from another site (chat, docs), and a
+  // Strict cookie would be withheld from that navigation's reload, so the
+  // page would 401. State-changing routes and upgrades still require a
+  // same-origin Origin.
+  const pagePath = (pathname: string) => pathname === base || pathname === base + "/";
+  const exchangePath = `${base}/auth`;
+  const bootstrap = authBootstrapPage(exchangePath);
+  // Failed exchanges in the current window. Comparisons are constant-time;
+  // the cap keeps a remote guesser to a handful of tries a minute.
+  const EXCHANGE_MAX_FAILURES = 10;
+  const EXCHANGE_WINDOW_MS = 60_000;
+  let exchangeFailures: number[] = [];
+  const handleAuthExchange = (req: SimReq, res: SimRes): void => {
+    const deny = (status: number, error: string, headers: Record<string, string> = {}) => {
+      res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
+      res.end(JSON.stringify({ error }));
+    };
+    if ((req.method ?? "GET").toUpperCase() !== "POST") return deny(405, "method_not_allowed", { Allow: "POST" });
+    // Browsers always send Origin on a fetch POST; require this origin so
+    // another site can't log a visitor's browser into this preview.
+    if (originCheck(req) !== "same") return deny(403, "cross_origin_request_blocked");
+    if (!authToken) return deny(403, "remote_access_disabled");
+    const now = Date.now();
+    exchangeFailures = exchangeFailures.filter((t) => now - t < EXCHANGE_WINDOW_MS);
+    if (exchangeFailures.length >= EXCHANGE_MAX_FAILURES) {
+      return deny(429, "too_many_attempts", { "Retry-After": String(Math.ceil(EXCHANGE_WINDOW_MS / 1000)) });
+    }
+    const presented = String(req.headers[AUTH_EXCHANGE_HEADER] ?? "").trim();
+    if (!presented || !tokensEqual(presented, authToken)) {
+      exchangeFailures.push(now);
+      return deny(401, "unauthorized");
+    }
     const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0]!.trim();
     const secure = forwardedProto === "https" || (req.socket as { encrypted?: boolean }).encrypted === true;
-    res.writeHead(302, {
+    res.writeHead(204, {
       "Set-Cookie":
         `${AUTH_COOKIE}=${authCookieValue(authToken)}; Path=${base === "" ? "/" : base}; HttpOnly; SameSite=Lax` +
         (secure ? "; Secure" : ""),
-      Location: `${parsed.pathname}${parsed.search}`,
       "Cache-Control": "no-store",
     });
     res.end();
-    return true;
+  };
+  const sendAuthBootstrap = (res: SimRes): void => {
+    res.writeHead(401, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": bootstrap.csp,
+      "Referrer-Policy": "no-referrer",
+      "WWW-Authenticate": 'Bearer realm="serve-sim"',
+    });
+    res.end(bootstrap.html);
   };
 
   // Narrow host actions for the page (screenshot, camera, permissions, …):
@@ -1477,11 +1510,19 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (ownsPath(pathname)) {
       // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
       // token on every route, including the preview page itself.
+      if (pathname === exchangePath) {
+        handleAuthExchange(req, res);
+        return;
+      }
       if (!trustedLoopback) {
-        if (bootstrapAuthCookie(req, res, rawUrl, pathname)) return;
         const access = remoteAccess(req, authToken);
         if (!access.ok) {
-          sendAccessDenied(res, access);
+          const method = (req.method ?? "GET").toUpperCase();
+          if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
+            sendAuthBootstrap(res);
+          } else {
+            sendAccessDenied(res, access);
+          }
           return;
         }
       }

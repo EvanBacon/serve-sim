@@ -30,7 +30,12 @@ import type { IncomingHttpHeaders, IncomingMessage } from "http";
 
 export const AUTH_TOKEN_ENV = "SERVE_SIM_AUTH_TOKEN";
 export const AUTH_COOKIE = "serve_sim_auth";
-export const AUTH_QUERY_PARAM = "token";
+/**
+ * Header the preview's auth bootstrap uses to trade the share link's
+ * `#token=` fragment for the auth cookie. The token never travels in a URL:
+ * request lines end up in server and proxy logs, fragments are never sent.
+ */
+export const AUTH_EXCHANGE_HEADER = "x-serve-sim-auth";
 
 const FORWARDING_HEADERS = new Set([
   "forwarded",
