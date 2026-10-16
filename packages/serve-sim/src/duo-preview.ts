@@ -1,5 +1,5 @@
 import type { ServerResponse } from "http";
-import { DuoRenderer, type DuoProjection } from "./duo-renderer";
+import { DuoRenderer, DuoRendererError, type DuoProjection } from "./duo-renderer";
 import type { DuoPanel } from "./device-pose";
 
 /** Matches the cubic ease-out sweep in the Duo guest HID helper. */
@@ -7,6 +7,13 @@ export const DUO_FOLD_DURATION_MS = 800;
 const DUO_ROTATION_MS = 300;
 /** Quiet period before the single 1500px sharpen. Motion resets it; a sharpened frame does not. */
 export const DUO_SETTLE_MS = 180;
+/**
+ * A 3D response must get its first PNG within this window or it is answered
+ * with a 503 (stage `first_frame`) instead of a silent, never-ending stream.
+ * Below the client's 12s watchdog and above the renderer's 10s render timeout,
+ * so a timed-out render reports its own stage first.
+ */
+const DUO_FIRST_FRAME_TIMEOUT_MS = 11_000;
 const FRAME_TRAILER = Buffer.from("\r\n", "ascii");
 
 function copyBytes(jpeg: Uint8Array): Uint8Array {
@@ -24,6 +31,19 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 export type DuoPreviewRenderer = Pick<DuoRenderer, "render" | "close">;
+
+/** Renderer lifecycle notifications for logs, the event log, and diagnostics. */
+export type DuoRendererEvent =
+  | { phase: "ready"; firstFrameMs: number }
+  | { phase: "failed"; error: DuoRendererError };
+
+type PendingStart = { onFirstFrame: () => void; timer?: ReturnType<typeof setTimeout> };
+
+function asRendererError(error: unknown): DuoRendererError {
+  if (error instanceof DuoRendererError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  return new DuoRendererError("worker_exit", message);
+}
 
 type Fold = { from: number; target: number; began: number };
 
@@ -61,11 +81,22 @@ export class DuoPreview {
   private jpeg: Uint8Array | null = null;
   private closed = false;
   private readonly responses = new Set<ServerResponse>();
+  /** Responses whose headers are held until the first PNG (or a 503). */
+  private readonly starting = new Map<ServerResponse, PendingStart>();
+  private rendererStartedAt = 0;
+  private rendererReady = false;
+  private lastError?: { at: string; stage: string; reason: string };
+  private framesPublished = 0;
+  private lastFrameAt?: string;
 
   constructor(private readonly options: {
-    createRenderer: () => DuoPreviewRenderer;
+    /** `onFailure` reports worker failures that happen while no render is pending. */
+    createRenderer: (onFailure: (error: DuoRendererError) => void) => DuoPreviewRenderer;
     onProjection: (frame: Buffer) => void;
     onStreamError: (res: ServerResponse, error: unknown) => void;
+    onRendererEvent?: (event: DuoRendererEvent) => void;
+    onFrameDelivered?: (res: ServerResponse) => void;
+    firstFrameTimeoutMs?: number;
   }) {}
 
   get hinge(): number | undefined {
@@ -144,16 +175,40 @@ export class DuoPreview {
     tick();
   }
 
-  attach(res: ServerResponse): void {
+  /**
+   * Add a response. With `onFirstFrame`, nothing is written until the first
+   * PNG is ready: the hook runs first (the caller's `writeHead`), and setup or
+   * first-frame failures reach `onStreamError` while headers are still unsent.
+   * Renderer construction errors throw synchronously.
+   */
+  attach(res: ServerResponse, start?: { onFirstFrame: () => void }): void {
     if (!this.renderer) {
-      this.renderer = this.options.createRenderer();
+      let renderer: DuoPreviewRenderer;
+      try {
+        renderer = this.options.createRenderer((error) => this.onRendererFailure(renderer, error));
+      } catch (error) {
+        const failure = asRendererError(error);
+        this.noteFailure(failure);
+        throw failure;
+      }
+      this.renderer = renderer;
+      this.rendererStartedAt = performance.now();
+      this.rendererReady = false;
       this.busy = false;
+    }
+    if (start) {
+      const pending: PendingStart = { onFirstFrame: start.onFirstFrame };
+      const timeout = this.options.firstFrameTimeoutMs ?? DUO_FIRST_FRAME_TIMEOUT_MS;
+      pending.timer = setTimeout(() => this.failFirstFrame(res, timeout), timeout);
+      pending.timer.unref?.();
+      this.starting.set(res, pending);
     }
     this.responses.add(res);
     this.requestFrame();
   }
 
   detach(res: ServerResponse): void {
+    this.clearStart(res);
     this.responses.delete(res);
     if (this.responses.size) return;
     clearTimeout(this.settleTimer);
@@ -172,7 +227,59 @@ export class DuoPreview {
     this.cached = undefined;
     this.renderer?.close();
     this.renderer = undefined;
+    for (const res of this.starting.keys()) this.clearStart(res);
     this.responses.clear();
+  }
+
+  /** JSON-safe state for `/api/diagnostics`. */
+  diagnostics(): Record<string, unknown> {
+    return {
+      renderer: this.renderer ? (this.rendererReady ? "ready" : "starting") : "absent",
+      busy: this.busy,
+      attached: this.responses.size,
+      awaiting_first_frame: this.starting.size,
+      hinge_degrees: this.hingeDegrees ?? null,
+      panel: this.panel,
+      has_capture_frame: this.jpeg != null,
+      frames_published: this.framesPublished,
+      last_frame_at: this.lastFrameAt ?? null,
+      last_error: this.lastError ?? null,
+    };
+  }
+
+  private clearStart(res: ServerResponse): void {
+    const pending = this.starting.get(res);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.starting.delete(res);
+  }
+
+  private failFirstFrame(res: ServerResponse, timeoutMs: number): void {
+    if (!this.starting.has(res)) return;
+    // Say which precondition was missing: no capture frame, no hinge readback
+    // (the preview never renders without one), or a render that never returned.
+    const error = new DuoRendererError("first_frame", `No 3D frame within ${Math.round(timeoutMs / 1000)}s`, {
+      has_capture_frame: this.jpeg != null,
+      hinge_known: this.hingeDegrees != null || this.fold != null,
+      renderer: this.renderer ? "running" : "absent",
+      render_in_flight: this.busy,
+    });
+    this.noteFailure(error);
+    this.detach(res);
+    this.options.onStreamError(res, error);
+  }
+
+  private noteFailure(error: DuoRendererError): void {
+    this.lastError = { at: new Date().toISOString(), stage: error.stage, reason: error.reason };
+    this.options.onRendererEvent?.({ phase: "failed", error });
+  }
+
+  /** Worker died while idle (spawn error, crash between frames). */
+  private onRendererFailure(renderer: DuoPreviewRenderer | undefined, error: DuoRendererError): void {
+    if (!renderer || this.renderer !== renderer) return;
+    this.renderer = undefined;
+    this.noteFailure(error);
+    for (const response of [...this.responses]) this.options.onStreamError(response, error);
   }
 
   requestFrame(sharpen = false): void {
@@ -219,6 +326,10 @@ export class DuoPreview {
     this.rendering = { jpeg: snapshot, panel, angle, roll };
     void renderer.render(snapshot, panel, angle, roll, sharpen).then(({ jpeg: rendered, projection }) => {
       if (this.closed || this.renderer !== renderer) return;
+      if (!this.rendererReady) {
+        this.rendererReady = true;
+        this.options.onRendererEvent?.({ phase: "ready", firstFrameMs: Math.round(performance.now() - this.rendererStartedAt) });
+      }
       if (JSON.stringify(this.projection) !== JSON.stringify(projection)) {
         this.projection = projection;
         this.options.onProjection(Buffer.concat([Buffer.from([0x83]), Buffer.from(JSON.stringify(projection))]));
@@ -228,9 +339,10 @@ export class DuoPreview {
       this.publishCached();
     }).catch((error) => {
       if (this.renderer !== renderer) return;
-      for (const response of this.responses) this.options.onStreamError(response, error);
-      renderer.close();
       this.renderer = undefined;
+      this.noteFailure(asRendererError(error));
+      for (const response of [...this.responses]) this.options.onStreamError(response, error);
+      renderer.close();
     }).finally(() => {
       if (this.renderer !== renderer) return;
       this.rendering = undefined;
@@ -254,8 +366,16 @@ export class DuoPreview {
     for (const response of this.responses) {
       if (this.delivered.has(response)) continue;
       if (!response.destroyed && !response.writableEnded && response.writableLength === 0) {
+        const pending = this.starting.get(response);
+        if (pending) {
+          this.clearStart(response);
+          pending.onFirstFrame();
+        }
         this.writeFrame(response, png);
         this.delivered.add(response);
+        this.framesPublished++;
+        this.lastFrameAt = new Date().toISOString();
+        this.options.onFrameDelivered?.(response);
       }
     }
   }

@@ -32,9 +32,12 @@ actor H264Encoder {
     private var emittedDescription = false
     private var frameCount: Int64 = 0
 
-    init(fps: Int = 60, bitrate: Int = 6_000_000) {
+    private let diagnostics: EncoderDiagnostics?
+
+    init(fps: Int = 60, bitrate: Int = 6_000_000, diagnostics: EncoderDiagnostics? = nil) {
         self.fps = Int32(fps)
         self.bitrate = bitrate
+        self.diagnostics = diagnostics
     }
 
     deinit {
@@ -125,10 +128,16 @@ actor H264Encoder {
             )
         }
         var status = create(spec: lowLatencySpec)
+        var lowLatency = true
         if status != noErr || sess == nil {
             sess = nil
+            lowLatency = false
             status = create(spec: nil)
         }
+        diagnostics?.recordSession(
+            codec: "AVCC", width: Int(width), height: Int(height),
+            status: status, lowLatency: lowLatency
+        )
         guard status == noErr, let sess else { return }
 
         let props: [(CFString, Any)] = [

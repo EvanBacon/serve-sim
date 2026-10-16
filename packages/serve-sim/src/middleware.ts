@@ -14,7 +14,16 @@ import type { Socket } from "net";
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { readCameraStatus } from "./camera-helper";
-import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
+import { getDeviceSession, closeDeviceSession, liveDeviceSessions, type HidSocket } from "./device-session";
+import {
+  buildDiagnosticsBundle,
+  collectDeviceDiagnostics,
+  collectHostDiagnostics,
+  createRateLimiter,
+  createTtlCache,
+  type DiagnosticsBundle,
+  type DiagnosticsSources,
+} from "./doctor";
 import {
   eventLogEventForCommand,
   readEventLog,
@@ -760,6 +769,71 @@ async function handleCameraStatus(req: SimReq, res: SimRes, device: string): Pro
   }
 }
 
+const defaultDiagnosticsSources: DiagnosticsSources = {
+  host: () => collectHostDiagnostics(),
+  device: (udid) => collectDeviceDiagnostics(udid),
+  sessions: (device) => Promise.all(liveDeviceSessions(device).map((session) => session.diagnostics())),
+};
+
+export type DiagnosticsOptions = {
+  sources?: DiagnosticsSources;
+  /** Reuse a collection for this long. Default 2s. */
+  cacheTtlMs?: number;
+  /** Requests allowed back to back before 429. Default 5. */
+  burst?: number;
+  /** One more request is allowed per this interval. Default 2s. */
+  refillMs?: number;
+  now?: () => number;
+};
+
+/** Loopback-only, rate-limited, briefly cached `serve-sim doctor` bundle. */
+function createDiagnosticsHandler(options: DiagnosticsOptions = {}) {
+  const sources = options.sources ?? defaultDiagnosticsSources;
+  const limiter = createRateLimiter({ burst: options.burst ?? 5, refillMs: options.refillMs ?? 2000, now: options.now });
+  const cache = createTtlCache<DiagnosticsBundle>(options.cacheTtlMs ?? 2000, options.now);
+
+  const collect = async (device: string | null): Promise<DiagnosticsBundle> => {
+    const sessionDiagnostics = await sources.sessions(device);
+    const udids = device ? [device] : sessionDiagnostics.map((session) => String(session.udid));
+    const [host, devices] = await Promise.all([
+      sources.host(),
+      Promise.all(udids.map((udid) => sources.device(udid))),
+    ]);
+    return buildDiagnosticsBundle({
+      host,
+      devices,
+      sessions: sessionDiagnostics,
+      event_log: readEventLog({ device, limit: 100 }),
+    });
+  };
+
+  return async (req: SimReq, res: SimRes, device: string | null): Promise<void> => {
+    const send = (status: number, body: unknown, headers: Record<string, string> = {}) => {
+      res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
+      res.end(JSON.stringify(body, null, 2));
+    };
+    // Socket-only trust (see request-trust.ts): a remote peer is refused even
+    // with a valid --auth-token, and any proxied request (forwarding headers)
+    // or rebound Host is refused even from a loopback socket. Checked before
+    // the limiter so refused callers cannot drain the local budget.
+    if (!isTrustedLoopback(req)) {
+      send(403, { error: "loopback_only", message: "Diagnostics are only served to localhost. Run `serve-sim doctor` on the Mac." });
+      return;
+    }
+    const allowed = limiter.take();
+    if (!allowed.ok) {
+      const seconds = Math.max(1, Math.ceil(allowed.retryAfterMs / 1000));
+      send(429, { error: "rate_limited", message: `Too many diagnostics requests; retry in ${seconds}s.` }, { "Retry-After": String(seconds) });
+      return;
+    }
+    try {
+      send(200, await cache.get(device ?? "", () => collect(device)));
+    } catch (error) {
+      send(500, { error: "diagnostics_failed", message: error instanceof Error ? error.message : String(error) });
+    }
+  };
+}
+
 /**
  * Serve a device-scoped helper endpoint in-process. Camera status reads the
  * camera helper's persisted state; stream and input routes lazily create a
@@ -921,6 +995,7 @@ export function previewConfigForState(
   appStateEndpoint: string;
   eventLogEndpoint: string;
   eventLogEventsEndpoint: string;
+  diagnosticsEndpoint: string;
   axEndpoint: string;
   cameraStatusEndpoint: string;
   devtoolsEndpoint: string;
@@ -942,6 +1017,7 @@ export function previewConfigForState(
     appStateEndpoint: endpoint(base, "/appstate", state.device),
     eventLogEndpoint: endpoint(base, "/api/event-log", state.device),
     eventLogEventsEndpoint: endpoint(base, "/api/event-log/events", state.device),
+    diagnosticsEndpoint: endpoint(base, "/api/diagnostics", state.device),
     axEndpoint: endpoint(base, "/ax", state.device),
     cameraStatusEndpoint: `${base === "/" ? "" : base}/helper/${encodeURIComponent(state.device)}/camera/status`,
     devtoolsEndpoint: endpoint(base, "/devtools", state.device),
@@ -1340,6 +1416,8 @@ export interface SimMiddlewareOptions {
   serveSimBin?: string;
   /** Test hook: whether a udid may be targeted by host RPCs. Default: booted. */
   isKnownDevice?: (udid: string) => Promise<boolean>;
+  /** Test hook: `/api/diagnostics` collectors. Default: live host probes and sessions. */
+  diagnostics?: DiagnosticsOptions;
 }
 
 function safeEqualString(a: string, b: string): boolean {
@@ -1398,6 +1476,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
   const allowExec = options?.allowExec === true;
   const authToken = resolveAuthToken(options?.authToken);
+  const serveDiagnostics = createDiagnosticsHandler(options?.diagnostics);
   const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
@@ -1988,6 +2067,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         proxyHelpers,
         options?.initialState,
       ) : null));
+      return;
+    }
+
+    // JSON API: `serve-sim doctor` bundle. Loopback only: it lists host paths,
+    // installed Xcodes, and processes. It never includes the exec token.
+    if (url === base + "/api/diagnostics") {
+      await serveDiagnostics(req, res, requestedDevice);
       return;
     }
 

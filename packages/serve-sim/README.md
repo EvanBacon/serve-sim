@@ -111,6 +111,8 @@ serve-sim exec <command...> [-d udid] Run a host shell command through a server
                                       started with --allow-exec. One argument
                                       is a shell line (exec "xcrun simctl list");
                                       several are quoted as an argv
+serve-sim doctor [-d udid]            Collect redacted diagnostics for bug reports
+                                      (--json, --out <file>)
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app

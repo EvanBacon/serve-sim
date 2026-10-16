@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "events";
 import { createServer, type Server } from "http";
+import { homedir } from "os";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import {
@@ -32,6 +33,30 @@ describe("DeviceSession capture lifecycle", () => {
     });
     expect((await fetch(`${baseUrl}/health`)).status).toBe(200);
   });
+
+  for (const [kind, thrown] of [
+    ["Error", () => new Error(`dlopen ${homedir()}/Library/x.dylib: not found`)],
+    ["non-Error", () => `dlopen ${homedir()}/Library/x.dylib: not found`],
+  ] as const) {
+    test(`redacts the home from a ${kind} stream error in last_error and the 503 body`, async () => {
+      const session = new DeviceSession("TEST-UDID", dependencies({
+        start: async () => { throw thrown(); },
+      }));
+      const baseUrl = await serve(session);
+
+      const response = await fetch(`${baseUrl}/stream.mjpeg`);
+      expect(response.status).toBe(503);
+      const body = await response.text();
+      expect(body).not.toContain(homedir());
+      expect(JSON.parse(body)).toEqual({
+        error: "capture_unavailable",
+        message: "dlopen ~/Library/x.dylib: not found",
+      });
+      const streams = (await session.diagnostics()).streams as Record<string, { last_error?: { message: string } }>;
+      expect(streams.mjpeg!.last_error!.message).toBe("dlopen ~/Library/x.dylib: not found");
+      expect(JSON.stringify(streams)).not.toContain(homedir());
+    });
+  }
 
   test("closing while capture starts cannot resurrect or crash the session", async () => {
     let rejectStart!: (error: Error) => void;
@@ -445,11 +470,13 @@ test("3D attach and hinge updates render cached frames; stale worker failures ca
   const first = new FakeServerResponse();
   session.handleDuoMjpeg({ url: "/stream.3d.mjpeg?raw=1" } as IncomingMessage, first as unknown as ServerResponse);
   await waitFor(() => workers[0]?.angles.length === 1);
-  expect(first.headers["Content-Type"]).toBe("application/octet-stream");
+  // Headers wait for the first PNG so setup failures can still become a 503.
+  expect(first.headersSent).toBe(false);
   first.destroy();
   const second = new FakeServerResponse();
   session.handleDuoMjpeg({} as IncomingMessage, second as unknown as ServerResponse);
   await waitFor(() => second.chunks.length > 0);
+  expect(second.headers["Content-Type"]).toBe("multipart/x-mixed-replace; boundary=frame");
   workers[0]!.reject!(new Error("old worker exited"));
   update({ hingeDegrees: 140, orientations: {} });
   await waitFor(() => workers[1]!.angles.includes(140));
