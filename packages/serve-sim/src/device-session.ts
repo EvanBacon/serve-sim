@@ -142,7 +142,7 @@ async function writeAndDrain(
 
 type CaptureTransport = Pick<
   NativeCapture,
-  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "setPreferredScreenSize"
+  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "subscribeSize" | "snapshotJpeg" | "setPreferredScreenSize"
 > & Partial<Pick<NativeCapture, "diagnostics">>;
 
 export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
@@ -192,6 +192,7 @@ export class DeviceSession {
   private readonly capture: CaptureTransport;
   private readonly hid: HidTransport;
   private unsubscribeMjpeg?: Unsubscribe;
+  private unsubscribeSize?: Unsubscribe;
   private phase: "unstarted" | "starting" | "running" | "failed" | "stopped" = "unstarted";
   private startPromise?: Promise<void>;
 
@@ -234,7 +235,16 @@ export class DeviceSession {
     });
   }
 
-  /** Begin capture and retain one shared MJPEG subscription. Idempotent. */
+  /**
+   * Begin capture and track the screen size. Idempotent.
+   *
+   * Only foldables keep a shared per-frame JPEG subscription (the Duo 3D
+   * preview renders from it). Everything else encodes JPEGs only for MJPEG
+   * viewers, and seeds new viewers from an on-demand snapshot: a shared
+   * subscription JPEG-encodes every frame at full resolution on the CPU, which
+   * cost ~6 ms per frame (p95 ~19 ms) and contended with the H.264 path even
+   * when every viewer was on AVCC.
+   */
   start(): Promise<void> {
     if (this.phase === "stopped") {
       return Promise.reject(new Error(`Device session ${this.udid} is closed`));
@@ -246,14 +256,20 @@ export class DeviceSession {
       await this.capture.start();
       if (this.isStopped()) throw new Error(`Device session ${this.udid} closed while starting`);
 
-      const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
+      const unsubscribeSize = await this.capture.subscribeSize((size) => this.onScreenSize(size.width, size.height));
       if (this.isStopped()) {
-        await unsubscribe();
+        await unsubscribeSize();
         throw new Error(`Device session ${this.udid} closed while starting`);
       }
-      this.unsubscribeMjpeg = unsubscribe;
+      this.unsubscribeSize = unsubscribeSize;
       this.phase = "running";
       if (await this.hid.isFoldable?.() && !this.isStopped()) {
+        const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
+        if (this.isStopped()) {
+          await unsubscribe();
+          return;
+        }
+        this.unsubscribeMjpeg = unsubscribe;
         if (!this.dependencies?.createDuoMonitor) {
           void warnDeviceHubInput(this.udid).then((shadowed) => { this.deviceHubShadowed = shadowed; });
         }
@@ -299,6 +315,9 @@ export class DeviceSession {
     if (this.unsubscribeMjpeg) {
       this.runCleanup("shared MJPEG unsubscribe", this.unsubscribeMjpeg);
     }
+    if (this.unsubscribeSize) {
+      this.runCleanup("size unsubscribe", this.unsubscribeSize);
+    }
     this.hidSockets.clear();
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
@@ -333,14 +352,16 @@ export class DeviceSession {
 
   // ── Frame handling ───────────────────────────────────────────────────────
 
+  private onScreenSize(width: number, height: number): void {
+    if (width === this.width && height === this.height) return;
+    this.width = width;
+    this.height = height;
+    this.broadcastConfig();
+  }
+
   private async onSharedMjpegFrame(frame: MjpegFrame): Promise<void> {
     const { width, height, data: jpeg } = frame;
-
-    if (width !== this.width || height !== this.height) {
-      this.width = width;
-      this.height = height;
-      this.broadcastConfig();
-    }
+    this.onScreenSize(width, height);
 
     if (!this.latestJpegBuffer || this.latestJpegBuffer.length < jpeg.length) {
       const currentCapacity = this.latestJpegBuffer?.length ?? 0;
@@ -355,6 +376,26 @@ export class DeviceSession {
   private latestJpeg(): Buffer | null {
     if (!this.latestJpegBuffer) return null;
     return this.latestJpegBuffer.subarray(0, this.latestJpegLength);
+  }
+
+  /** A private copy of the shared JPEG cache, kept current only on foldables. */
+  private sharedJpegCopy(): Buffer | null {
+    const cached = this.unsubscribeMjpeg ? this.latestJpeg() : null;
+    return cached ? Buffer.from(cached) : null;
+  }
+
+  /**
+   * A private JPEG of the current screen for a new AVCC viewer: the shared
+   * cache on foldables, else a one-shot native snapshot (copy + CPU encode).
+   */
+  private async seedJpeg(): Promise<Uint8Array | null> {
+    const cached = this.sharedJpegCopy();
+    if (cached) return cached;
+    try {
+      return await this.capture.snapshotJpeg();
+    } catch {
+      return null;
+    }
   }
 
   /** Write a multipart JPEG part (header + shared frame + boundary) without copying the JPEG. */
@@ -410,6 +451,14 @@ export class DeviceSession {
     // slow client drains, so this neither interleaves parts nor grows a queue.
     let writeInFlight = false;
     let lastSentAt = 0;
+    // This viewer's last frame, replayed while the screen is static.
+    let replay: Buffer | null = null;
+    let replayLength = 0;
+    const remember = (jpeg: Uint8Array) => {
+      if (!replay || replay.length < jpeg.length) replay = Buffer.allocUnsafe(Math.max(jpeg.length, (replay?.length ?? 0) * 2));
+      replay.set(jpeg, 0);
+      replayLength = jpeg.length;
+    };
     const writeFrame = async (jpeg: Uint8Array): Promise<void> => {
       // This can only overlap when the idle replay timer wins the event-loop
       // turn immediately before a native frame. Prefer the in-flight write and
@@ -430,20 +479,24 @@ export class DeviceSession {
       }
     };
 
-    const latestJpeg = this.latestJpeg();
-    // The shared cache is reused in place. Copy this one on-connect seed before
-    // awaiting backpressure; native subscriber frames below remain zero-copy.
-    if (latestJpeg) await writeFrame(Buffer.from(latestJpeg));
+    // Subscribing forces an immediate native frame, so only foldables (whose
+    // shared cache is already encoded) send a seed. The copy is private, safe
+    // to hold across backpressure; subscriber frames below remain zero-copy.
+    const seed = this.sharedJpegCopy();
+    if (seed) {
+      remember(seed);
+      await writeFrame(seed);
+    }
     const unsubscribe = await this.capture.subscribeMjpeg(async (frame) => {
+      remember(frame.data);
       await writeFrame(frame.data);
     });
     const idleReplay = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
       if (Date.now() - lastSentAt < MJPEG_IDLE_REPLAY_MS) return;
-      const cached = this.latestJpeg();
-      // The shared cache is reused in place as fresh frames arrive. Copy only
+      // The replay buffer is reused in place as fresh frames arrive. Copy only
       // this low-frequency replay so it stays immutable across backpressure.
-      if (cached) void writeFrame(Buffer.from(cached));
+      if (replay) void writeFrame(Buffer.from(replay.subarray(0, replayLength)));
     }, MJPEG_IDLE_REPLAY_MS);
     this.bindSubscription(res, async () => {
       clearInterval(idleReplay);
@@ -466,12 +519,17 @@ export class DeviceSession {
     });
     if (!this.trackStreamResponse(res, "avcc")) return;
 
-    // Seed with the current screen; the per-client native AVCC subscription
-    // starts with its own decoder config and keyframe.
-    const latestJpeg = this.latestJpeg();
-    if (latestJpeg) res.write(avccSeed(latestJpeg));
+    // Seed with the current screen while the per-client native AVCC
+    // subscription (which forces an immediate frame) starts its own decoder
+    // config and keyframe. The seed is fetched concurrently and dropped if
+    // H.264 got there first — painting it then would rewind the picture.
+    let streaming = false;
+    void this.seedJpeg().then((seed) => {
+      if (seed && !streaming && !res.writableEnded && !res.destroyed) res.write(avccSeed(seed));
+    });
 
     const unsubscribe = await this.capture.subscribeAvcc(async (frame) => {
+      streaming = true;
       await writeAndDrain(res, () => res.write(frame.data));
       this.noteStreamFrame("avcc");
     });

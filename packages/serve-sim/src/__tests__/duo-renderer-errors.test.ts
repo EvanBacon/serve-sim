@@ -38,6 +38,8 @@ function duoSession(createDuoRenderer: DeviceSessionDependencies["createDuoRende
       stop: noop,
       subscribeMjpeg: async () => () => {},
       subscribeAvcc: async () => () => {},
+      subscribeSize: async () => () => {},
+      snapshotJpeg: async () => null,
       setPreferredScreenSize: noop,
     },
     hid: {

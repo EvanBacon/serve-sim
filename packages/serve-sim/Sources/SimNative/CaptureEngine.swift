@@ -13,11 +13,21 @@ import os
 struct Frame: Identifiable {
     let id = UUID()
     let pixelBuffer: CVPixelBuffer
+    /// False when `pixelBuffer` wraps SimulatorKit's live framebuffer surface
+    /// (no pixel consumer was attached, so the private copy was skipped). Such
+    /// frames are only good for their dimensions.
+    var isPrivateCopy = true
 }
 
 protocol FrameEncoder {
     associatedtype Encoded
+    /// Whether this encoder reads pixels (and so needs a private frame copy).
+    static var readsPixels: Bool { get }
     func encode(_ frame: Frame) async throws -> Encoded
+}
+
+extension FrameEncoder {
+    static var readsPixels: Bool { true }
 }
 
 protocol CaptureConsuming: Sendable {
@@ -66,6 +76,7 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
     }
 
     nonisolated func handleFrame(_ frame: Frame) {
+        if E.readsPixels, !frame.isPrivateCopy { return }
         continuation.yield(frame)
     }
 
@@ -90,6 +101,9 @@ actor CaptureEngine {
 
     private(set) var screenSize = Dimensions(width: 0, height: 0)
     private var consumers = [UUID: CaptureConsuming]()
+    /// Number of attached consumers that read pixels. FrameCapture only pays
+    /// for the private per-frame copy while this is non-zero.
+    private let pixelConsumers = PixelConsumerCount()
 
     init(deviceUDID: String) {
         self.deviceUDID = deviceUDID
@@ -124,8 +138,8 @@ actor CaptureEngine {
             bufferingPolicy: .bufferingNewest(1)
         )
         do {
-            try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
-                frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { pixelBuffer, _, isCopy in
+                frameContinuation.yield(Frame(pixelBuffer: pixelBuffer, isPrivateCopy: isCopy))
             }
         } catch {
             // Preserve retryability after an ordinary start failure, but never
@@ -161,13 +175,21 @@ actor CaptureEngine {
         }
         let id = UUID()
         consumers[id] = consumer
-        return { await self.removeConsumer(id) }
+        if E.readsPixels {
+            pixelConsumers.increment()
+            // Emit a copied frame now rather than waiting for the next screen
+            // change or idle tick, so a new viewer's first IDR is immediate.
+            Task { [frameCapture] in await frameCapture.requestFrame() }
+        }
+        return { await self.removeConsumer(id, readsPixels: E.readsPixels) }
     }
 
     private func removeConsumer(
-        _ id: UUID
+        _ id: UUID,
+        readsPixels: Bool
     ) {
-        consumers.removeValue(forKey: id)
+        guard consumers.removeValue(forKey: id) != nil else { return }
+        if readsPixels { pixelConsumers.decrement() }
     }
 
     private func handleFrame(_ frame: Frame) {
@@ -176,6 +198,27 @@ actor CaptureEngine {
         for consumer in consumers.values {
             consumer.handleFrame(frame)
         }
+    }
+
+    /// Reports the screen size with the first frame after subscribing (at most
+    /// one idle tick away) and whenever it changes, without encoding anything.
+    func addSizeConsumer(
+        onSize: sending @escaping (Dimensions) async -> Void
+    ) -> (@Sendable () async -> Void) {
+        var last: Dimensions?
+        return addConsumer(encoder: SizeEncoder()) { size in
+            guard size != last else { return }
+            last = size
+            await onSize(size)
+        }
+    }
+
+    /// JPEG of the current screen, encoded on demand. Used to seed new viewers
+    /// so the session doesn't JPEG-encode every frame just in case.
+    func snapshotJPEG() async throws -> (Dimensions, Data)? {
+        guard phase == .running, let pixelBuffer = await frameCapture.copyCurrentFrame() else { return nil }
+        let frame = Frame(pixelBuffer: pixelBuffer)
+        return (frame.pixelBuffer.dimensions, try await mjpegEncoder.encode(frame))
     }
 
     func addMJPEGConsumer(
@@ -224,7 +267,24 @@ actor CaptureEngine {
         phase = .stopped
         Task { [frameCapture] in await frameCapture.stop() }
         consumers.removeAll()
+        pixelConsumers.reset()
     }
+}
+
+struct SizeEncoder: FrameEncoder {
+    static var readsPixels: Bool { false }
+    func encode(_ frame: Frame) async throws -> Dimensions { frame.pixelBuffer.dimensions }
+}
+
+/// Lock-protected count shared by CaptureEngine (writer) and FrameCapture
+/// (reader on its capture queue).
+final class PixelConsumerCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    func decrement() { lock.lock(); count = max(0, count - 1); lock.unlock() }
+    func reset() { lock.lock(); count = 0; lock.unlock() }
+    var isEmpty: Bool { lock.lock(); defer { lock.unlock() }; return count == 0 }
 }
 
 actor MJPEGEncoder: FrameEncoder {
