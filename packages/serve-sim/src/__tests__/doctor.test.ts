@@ -7,6 +7,7 @@ import type { AddressInfo } from "net";
 import {
   buildDiagnosticsBundle,
   collectHostDiagnostics,
+  diagnosticsUrlForState,
   diagnosticsVerdicts,
   findSimulatorCrashReports,
   formatDiagnosticsSummary,
@@ -100,6 +101,28 @@ describe("serve-sim doctor bundle", () => {
     const summary = formatDiagnosticsSummary(bundle);
     expect(summary).toContain("xcode-select -p: /Applications/Xcode.app/Contents/Developer");
     expect(summary).toContain("duo renderer=absent hinge=unknown panel=inner");
+  });
+});
+
+describe("doctor diagnostics URL", () => {
+  test("targets the mounted /api/diagnostics recorded in streamUrl, on state.url's origin", () => {
+    expect(diagnosticsUrlForState({
+      url: "http://127.0.0.1:3200",
+      streamUrl: "http://127.0.0.1:3200/preview/helper/ABC/stream.mjpeg",
+    }).href).toBe("http://127.0.0.1:3200/preview/api/diagnostics");
+    expect(diagnosticsUrlForState({
+      url: "http://127.0.0.1:3200",
+      streamUrl: "http://localhost:9999/a/b/helper/ABC/stream.mjpeg",
+    }).href).toBe("http://127.0.0.1:3200/a/b/api/diagnostics");
+  });
+
+  test("falls back to the origin root without a mount prefix", () => {
+    expect(diagnosticsUrlForState({
+      url: "http://127.0.0.1:3200",
+      streamUrl: "http://127.0.0.1:3200/helper/ABC/stream.mjpeg",
+    }).href).toBe("http://127.0.0.1:3200/api/diagnostics");
+    expect(diagnosticsUrlForState({ url: "http://127.0.0.1:3200/x", streamUrl: "not a url" }).href)
+      .toBe("http://127.0.0.1:3200/api/diagnostics");
   });
 });
 

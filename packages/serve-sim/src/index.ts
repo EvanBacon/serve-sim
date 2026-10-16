@@ -71,6 +71,7 @@ import {
   buildDiagnosticsBundle,
   collectDeviceDiagnostics,
   collectHostDiagnostics,
+  diagnosticsUrlForState,
   findSimulatorCrashReports,
   formatDiagnosticsSummary,
   type DiagnosticsBundle,
@@ -824,7 +825,7 @@ async function doctor(deviceArg: string | undefined, opts: { json?: boolean; out
   if (state) {
     // The running server's view wins: its DEVELOPER_DIR and live stream state
     // are what the browser saw.
-    const url = new URL("/api/diagnostics", state.url);
+    const url = diagnosticsUrlForState(state);
     if (udid) url.searchParams.set("device", state.device);
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });

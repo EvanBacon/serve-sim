@@ -15,6 +15,21 @@ import { redactHome } from "./diagnostics-redact";
 
 const DIAGNOSTICS_SCHEMA_VERSION = 1;
 
+/**
+ * `/api/diagnostics` on a running server. The state file's `url` is the
+ * origin root, but the middleware may be mounted under a base path; the
+ * mount survives in `streamUrl` (`{mount}/helper/<udid>/stream.mjpeg`).
+ */
+export function diagnosticsUrlForState(state: { url: string; streamUrl: string }): URL {
+  let mount = "";
+  try {
+    const path = new URL(state.streamUrl).pathname;
+    const index = path.lastIndexOf("/helper/");
+    if (index > 0) mount = path.slice(0, index);
+  } catch {}
+  return new URL(`${mount}/api/diagnostics`, new URL(state.url).origin);
+}
+
 /** Run a command; resolve trimmed stdout, or null on any failure. Never throws. */
 export type Probe = (file: string, args: string[]) => Promise<string | null>;
 
