@@ -5,7 +5,7 @@
 /// emitted until the next idle tick (up to 200 ms later), so a callback that
 /// finds the seed unchanged re-checks on this schedule.
 public enum SeedRecheckSchedule {
-    static let delaysMs = [1, 1, 2, 4, 8]
+    static let delaysMs = [1, 1, 2, 4, 8, 16]
 
     /// Delay before re-check number `attempt` (0-based), or nil to give up.
     public static func delayMs(afterAttempt attempt: Int) -> Int? {
