@@ -403,6 +403,26 @@ static AVCaptureInputPort *SimCamFakeInputPortForInput(AVCaptureInput *input, AV
 
 static char kSimCamOutputConnectionKey;
 
+// SimCamFakeConnection bypasses AVCaptureConnection's native initializer with
+// class_createInstance. AVFoundation's dealloc reads private state that was
+// never created (observed as a crash at address 0x30 on iOS 26.5), so keep
+// each fake connection alive for the injected process like the fake devices.
+//
+// This leak is intentional and bounded: one small object per distinct output
+// that ever receives a fake connection. The connection only references its
+// output weakly, so retaining it keeps no output, session, or delegate alive.
+static void SimCamRetainFakeConnection(AVCaptureConnection *connection) {
+    if (!connection) return;
+    static NSMutableSet *connections;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        connections = [NSMutableSet new];
+    });
+    @synchronized (connections) {
+        [connections addObject:connection];
+    }
+}
+
 AVCaptureConnection *SimCamFakeConnectionForOutput(AVCaptureOutput *out) {
     if (!out) return nil;
     AVCaptureConnection *conn = objc_getAssociatedObject(out, &kSimCamOutputConnectionKey);
@@ -411,6 +431,7 @@ AVCaptureConnection *SimCamFakeConnectionForOutput(AVCaptureOutput *out) {
             connectionForOutput:out
                        position:SimCamPositionOf(out)];
         if (conn) {
+            SimCamRetainFakeConnection(conn);
             objc_setAssociatedObject(out, &kSimCamOutputConnectionKey, conn,
                 OBJC_ASSOCIATION_RETAIN);
         }
