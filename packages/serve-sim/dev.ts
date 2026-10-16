@@ -29,6 +29,7 @@ import {
   type ServeSimState,
 } from "./src/middleware";
 import { servePreview } from "./src/runtime";
+import { themeBootScript } from "./src/client/utils/theme";
 
 const PORT = Number(process.env.PORT) || 3200;
 const CLIENT_DIR = resolve(import.meta.dir, "src/client");
@@ -221,6 +222,7 @@ async function buildHtml(selectedDevice?: string | null): Promise<string> {
 <html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<script>${themeBootScript()}</script>
 <title>serve-sim dev</title>
 <style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}</style>
 <style>${tailwindCss}</style>
