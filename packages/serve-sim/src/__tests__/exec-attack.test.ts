@@ -371,7 +371,7 @@ describe("(b) control channel: shell commands need the exec token, not just loop
 
 describe("(b) host actions validate params and never reach a shell", () => {
   // Each payload would create the marker if any part reached `sh -c`.
-  function injections(file: string): Array<{ method: string; params: Record<string, unknown>; error: RegExp }> {
+  function injections(file: string, allowExec: boolean): Array<{ method: string; params: Record<string, unknown>; error: RegExp }> {
     const sh = `'; touch ${file}; '`;
     return [
       { method: "home", params: { udid: `'; touch ${file}` }, error: /invalid udid/ },
@@ -391,7 +391,7 @@ describe("(b) host actions validate params and never reach a shell", () => {
       { method: "location", params: { udid: VALID_UDID, lat: `1;touch ${file}`, lng: 2 }, error: /invalid lat/ },
       { method: "addMedia", params: { udid: VALID_UDID, path: "/etc/passwd" }, error: /invalid path/ },
       { method: "addMedia", params: { udid: VALID_UDID, path: `/tmp/serve-sim-upload-${randomUUID()}.png${sh}` }, error: /invalid path/ },
-      { method: "installApp", params: { udid: VALID_UDID, path: `/tmp/serve-sim-install-${randomUUID()}.png` }, error: /invalid path|installApp requires --allow-exec/ },
+      { method: "installApp", params: { udid: VALID_UDID, path: `/tmp/serve-sim-install-${randomUUID()}.png` }, error: allowExec ? /^invalid path$/ : /^installApp requires --allow-exec$/ },
       { method: "revealScreenshot", params: { path: `${tmpdir()}/../../etc/serve-sim-screenshot-x.png` }, error: /invalid path/ },
       { method: "screenshotThumbnail", params: { path: `/tmp/serve-sim-screenshot-$(touch ${file}).png` }, error: /invalid path/ },
       { method: "uploadChunk", params: { path: `/tmp/serve-sim-upload-../../${file}`, data: "AA==" }, error: /invalid path/ },
@@ -402,11 +402,11 @@ describe("(b) host actions validate params and never reach a shell", () => {
   }
 
   test("injection attempts are rejected and nothing runs (exec on and off)", async () => {
-    for (const { port } of [execOn, execOff]) {
+    for (const { port, allowExec } of [{ ...execOn, allowExec: true }, { ...execOff, allowExec: false }]) {
       const file = marker();
       const session = await wsSession(port, {});
       let id = 1;
-      for (const attempt of injections(file)) {
+      for (const attempt of injections(file, allowExec)) {
         const reply = await session.request({ id: id++, rpc: { method: attempt.method, params: attempt.params } });
         expect({ method: attempt.method, error: String(reply.error ?? "") }).toEqual({
           method: attempt.method,
@@ -417,6 +417,18 @@ describe("(b) host actions validate params and never reach a shell", () => {
       await Bun.sleep(200);
       expect(existsSync(file)).toBe(false);
     }
+  });
+
+  test("installApp is refused without --allow-exec and path-checked with it", async () => {
+    const path = `/tmp/serve-sim-install-${randomUUID()}.png`;
+    const off = await wsSession(execOff.port, {});
+    expect((await off.request({ id: 1, rpc: { method: "installApp", params: { udid: VALID_UDID, path } } })).error)
+      .toBe("installApp requires --allow-exec");
+    off.close();
+    const on = await wsSession(execOn.port, {});
+    expect((await on.request({ id: 1, rpc: { method: "installApp", params: { udid: VALID_UDID, path } } })).error)
+      .toBe("invalid path");
+    on.close();
   });
 
   test("uploads work without --allow-exec, confined to their own fresh file", async () => {
