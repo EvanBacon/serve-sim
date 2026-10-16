@@ -41,6 +41,7 @@ type ConnectMiddleware = (
 
 type PreviewMiddleware = ConnectMiddleware & {
   handleUpgrade?: (req: IncomingMessage, socket: Socket, head: Buffer) => void;
+  setServerPort?: (port: number) => void;
 };
 
 function parseHttpRequestHead(buffer: Buffer): {
@@ -236,6 +237,8 @@ export async function servePreview(opts: {
     internalServer.close();
     throw new Error("Failed to bind preview HTTP server");
   }
+  // The server that runs the middleware (the internal one under Bun).
+  opts.middleware.setServerPort?.(internalAddress.port);
 
   let maybeFrontServer: NetServer | undefined;
   if (isBun) {

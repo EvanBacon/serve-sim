@@ -106,6 +106,12 @@ interface ExecChannelOptions {
    * the exec token. `allowExec` still gates `installApp` inside host-rpc.ts.
    */
   allowRpc?: (req: IncomingMessage) => boolean;
+  /**
+   * Port of the plain-HTTP server this channel is mounted on, for SSE
+   * loopback requests. Preferred over the upgrade socket's local port; the
+   * client's Host header is never used.
+   */
+  serverPort?: () => number | undefined;
 }
 
 function tokenMatches(presented: unknown, expected: string | undefined): boolean {
@@ -313,13 +319,11 @@ export function createExecUpgradeHandler(opts: ExecChannelOptions) {
     const shellAllowed = (opts.allowShell ?? defaultAllowShell)(req);
     const rpcAllowed = (opts.allowRpc ?? defaultAllowShell)(req);
 
-    // Port for SSE loopback requests: prefer the socket's own local port,
-    // fall back to the Host header (Bun's upgrade socket may not expose it).
-    let serverPort = (socket as Socket).localPort;
-    if (!serverPort) {
-      const hostPort = Number((req.headers.host ?? "").split(":")[1]);
-      if (Number.isFinite(hostPort) && hostPort > 0) serverPort = hostPort;
-    }
+    // Port for SSE loopback requests: the server's known bound port, else the
+    // socket's own local port (Bun's upgrade socket may not expose it). Never
+    // the client-controlled Host header, which could aim the loopback request
+    // at any local port.
+    const serverPort = opts.serverPort?.() || (socket as Socket).localPort || undefined;
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       wireExecSocket(ws, serverPort, opts, shellAllowed, rpcAllowed);

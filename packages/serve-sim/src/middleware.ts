@@ -63,6 +63,12 @@ type SimNext = (err?: unknown) => Promise<void>;
 export type SimMiddleware = {
   (req: SimReq, res: SimRes, next?: SimNext): Promise<void>;
   handleUpgrade(req: SimReq, socket: Socket, head: Buffer): void;
+  /**
+   * Record the port of the plain-HTTP server this middleware runs in, so the
+   * `/exec-ws` channel can loop SSE requests back to it when the upgrade
+   * socket doesn't expose a local port. `servePreview` calls this.
+   */
+  setServerPort(port: number): void;
 };
 
 // Injected at build time as a base64-encoded string via `define`
@@ -2362,8 +2368,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // features use validated `{rpc}` actions instead. Servers mounting this
   // middleware should forward `upgrade` events here (the built-in preview
   // server does).
+  let knownServerPort: number | undefined;
   const handleExecUpgrade = createExecUpgradeHandler({
     path: `${base}/exec-ws`,
+    serverPort: () => knownServerPort,
     allowExec,
     execToken,
     // Shell commands and host actions only for a loopback same-origin socket;
@@ -2405,6 +2413,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     }
     if (handleExecUpgrade(req, socket, head)) return;
     handleProxyUpgrade(req, socket, head);
+  };
+  middleware.setServerPort = (port: number) => {
+    knownServerPort = port;
   };
   return middleware;
 }

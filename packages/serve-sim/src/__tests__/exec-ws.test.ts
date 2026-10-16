@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createServer, type Server } from "http";
+import type { AddressInfo, Socket } from "net";
 import { clearEventLogForTests, recordEventLogEvent } from "../event-log";
 import { simMiddleware } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
@@ -44,7 +46,7 @@ interface Reply {
   data?: string;
 }
 
-function connect(port = PORT, first: Record<string, unknown> = {}): Promise<{
+function connect(port = PORT, first: Record<string, unknown> = {}, host = `127.0.0.1:${port}`): Promise<{
   next: () => Promise<Reply>;
   send: (body: Record<string, unknown>) => void;
   close: () => void;
@@ -54,7 +56,7 @@ function connect(port = PORT, first: Record<string, unknown> = {}): Promise<{
     // Browsers always send Origin on WebSocket upgrades, and the control
     // channel requires it (loopback same-origin for shell access).
     const ws = new WebSocket(`ws://127.0.0.1:${port}/exec-ws`, {
-      headers: { Origin: `http://127.0.0.1:${port}` },
+      headers: { Host: host, Origin: `http://${host}` },
     } as never);
     const queue: Reply[] = [];
     const waiters: Array<(r: Reply) => void> = [];
@@ -280,5 +282,53 @@ describe("exec-ws control channel", () => {
     expect(payload.events?.map((event) => event.summary)).toEqual(["Button home"]);
     channel.send({ unsub: 9 });
     channel.close();
+  });
+
+  test("sse loopback uses the server's bound port, never the Host header", async () => {
+    // A decoy listener on the port a hostile Host header names.
+    let decoyHits = 0;
+    const decoy = createServer((_req, res) => {
+      decoyHits++;
+      res.end();
+    });
+    await new Promise<void>((r) => decoy.listen(0, "127.0.0.1", r));
+    const decoyPort = (decoy.address() as AddressInfo).port;
+    const listen = (middleware: ReturnType<typeof simMiddleware>) =>
+      new Promise<Server>((resolve) => {
+        const server = createServer((req, res) => void middleware(req, res));
+        // Simulate a runtime whose upgrade socket has no local port.
+        server.on("upgrade", (req, socket, head) => {
+          Object.defineProperty(socket, "localPort", { get: () => undefined });
+          middleware.handleUpgrade(req, socket as Socket, head);
+        });
+        server.listen(0, "127.0.0.1", () => resolve(server));
+      });
+    const portOf = (server: Server) => (server.address() as AddressInfo).port;
+    const withPort = simMiddleware({ basePath: "/", device: "DEVICE-A" });
+    const withoutPort = simMiddleware({ basePath: "/", device: "DEVICE-A" });
+    const known = await listen(withPort);
+    const unknown = await listen(withoutPort);
+    withPort.setServerPort(portOf(known));
+    try {
+      const channel = await connect(portOf(known), {}, `127.0.0.1:${decoyPort}`);
+      await channel.next(); // ready
+      channel.send({ sub: 10, path: "/api/events" });
+      const reply = await channel.next();
+      expect(reply.sub).toBe(10);
+      expect(typeof reply.data).toBe("string");
+      channel.close();
+
+      const blind = await connect(portOf(unknown), {}, `127.0.0.1:${decoyPort}`);
+      await blind.next(); // ready
+      blind.send({ sub: 11, path: "/api/events" });
+      expect(await blind.next()).toEqual({ sub: 11, end: true, error: "no local port" });
+      blind.close();
+      expect(decoyHits).toBe(0);
+    } finally {
+      for (const server of [decoy, known, unknown]) {
+        server.closeAllConnections();
+        server.close();
+      }
+    }
   });
 });
