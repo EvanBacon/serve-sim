@@ -3,6 +3,7 @@ import {
   DROP_CHUNK_BYTES,
   INSTALL_REQUIRES_EXEC_MESSAGE,
   arrayBufferToBase64,
+  fileExtension,
   uploadDroppedFile,
   uploadFileToTmp,
 } from "../client/utils/drop";
@@ -48,6 +49,41 @@ describe("arrayBufferToBase64", () => {
       if (decoded.charCodeAt(i) !== bytes[i]) {
         throw new Error(`byte ${i} mismatch`);
       }
+    }
+  });
+});
+
+describe("fileExtension", () => {
+  // Mirrors host-rpc.ts UPLOAD_PATH_RE's extension group.
+  const SERVER_EXT = /^[a-z0-9]{1,10}$/;
+  const ext = (name: string, type = "") => fileExtension(new File([], name, { type }));
+
+  test("keeps ordinary extensions, lowercased", () => {
+    expect(ext("Photo.JPG")).toBe("jpg");
+    expect(ext("clip.mp4")).toBe("mp4");
+  });
+
+  test("strips characters the server rejects and caps the length", () => {
+    expect(ext("weird.jp-g")).toBe("jpg");
+    expect(ext("x.tar_gz")).toBe("targz");
+    expect(ext("x.ÉXT")).toBe("xt");
+    expect(ext("x.abcdefghijklmnop")).toBe("abcdefghij");
+  });
+
+  test("falls back to bin when nothing usable is left", () => {
+    expect(ext("trailing.")).toBe("bin");
+    expect(ext("x.---")).toBe("bin");
+    expect(ext("x.日本")).toBe("bin");
+  });
+
+  test("names without a dot still use the MIME fallback", () => {
+    expect(ext("noext", "video/mp4")).toBe("mp4");
+    expect(ext("noext", "image/png")).toBe("jpg");
+  });
+
+  test("every result satisfies the server's upload path format", () => {
+    for (const name of ["a.JPG", "a.", "a.-_-", "a.x y", "a.ab.cd", "a.0123456789abc", "a.é", "a"]) {
+      expect(ext(name)).toMatch(SERVER_EXT);
     }
   });
 });

@@ -46,10 +46,12 @@ export async function addHostMediaToPhotos(
 
 export type DropKind = "media" | "ipa";
 
+// Lowercase alphanumeric, at most 10 chars: the server only accepts staged
+// upload paths ending in `.[a-z0-9]{1,10}`.
 export function fileExtension(file: File): string {
   const name = file.name;
   const dot = name.lastIndexOf(".");
-  if (dot >= 0) return name.slice(dot + 1).toLowerCase();
+  if (dot >= 0) return name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 10) || "bin";
   if (file.type.startsWith("video/")) return "mp4";
   return "jpg";
 }
