@@ -160,7 +160,7 @@ function newStreamHealth(): StreamHealth {
 
 /** 503 body for a Duo 3D stream that cannot produce a first frame. */
 function duoRendererErrorBody(error: DuoRendererError): { error: "duo_renderer_unavailable"; reason: string; stage: string; details: Record<string, unknown> } {
-  return { error: "duo_renderer_unavailable", reason: error.reason, stage: error.stage, details: redactHome(error.details) };
+  return { error: "duo_renderer_unavailable", reason: redactHome(error.reason), stage: error.stage, details: redactHome(error.details) };
 }
 type HidTransport = Pick<
   NativeHid,
@@ -899,7 +899,8 @@ export class DeviceSession {
     const { error } = event;
     logDuoRendererFailure(error);
     const key = `${error.stage}\u0000${error.reason}`;
-    const details = { phase: "failed", stage: error.stage, reason: error.reason, ...redactHome(error.details) };
+    const reason = redactHome(error.reason);
+    const details = { phase: "failed", stage: error.stage, reason, ...redactHome(error.details) };
     const previous = this.rendererFailureEvent;
     if (previous?.key === key && updateEventLogEvent(previous.id, { details: { ...details, count: previous.count + 1 } })) {
       previous.count++;
@@ -911,7 +912,7 @@ export class DeviceSession {
       kind: "duo.renderer",
       action: "failed",
       status: "error",
-      summary: `Duo renderer ${error.stage} failed: ${error.reason}`,
+      summary: `Duo renderer ${error.stage} failed: ${reason}`,
       details: { ...details, count: 1 },
     });
     this.rendererFailureEvent = { id: entry.id, key, count: 1 };

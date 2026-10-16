@@ -90,6 +90,21 @@ describe("Duo 3D stream setup failures", () => {
     session.close();
   });
 
+  test("home paths in the reason are redacted from the 503 body and the event log", async () => {
+    const model = `${homedir()}/Applications/Xcode-27.app/V68.usdz`;
+    const session = duoSession(() => {
+      throw new DuoRendererError("model_lookup", `Missing ${model}`, { model_path: model });
+    });
+    const response = await fetch(`${await serve(session)}/stream.3d.mjpeg?raw=1`);
+    expect(response.status).toBe(503);
+    const body = await response.json() as { reason: string };
+    expect(body.reason).toBe("Missing ~/Applications/Xcode-27.app/V68.usdz");
+    const [event] = readEventLog({ device: "DUO-UDID" }).filter((entry) => entry.kind === "duo.renderer");
+    expect(event!.summary).toBe("Duo renderer model_lookup failed: Missing ~/Applications/Xcode-27.app/V68.usdz");
+    expect(JSON.stringify(event)).not.toContain(homedir());
+    session.close();
+  });
+
   test("a worker that exits on the first render returns 503 with exit code, signal and stderr tail", async () => {
     const session = duoSession(() => ({
       close() {},
