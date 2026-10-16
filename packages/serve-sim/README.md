@@ -126,8 +126,9 @@ serve-sim camera --stop-webcam [-d udid]
 Options:
   -p, --port <port>   Starting port (preview default: 3200; helper default: 3100)
   -d, --detach        Spawn helper and exit (daemon mode)
-      --allow-exec    Enable the host shell (/exec, `serve-sim exec`, and the
-                      preview's shell-backed tools). Off by default
+      --allow-exec    Enable the host shell (/exec, {command} frames on
+                      /exec-ws, `serve-sim exec`) and .ipa installs from
+                      the preview. Off by default
   -q, --quiet         JSON-only output
       --no-preview    Skip the web UI; stream in foreground only
       --panes <panes> Initially open preview panes: devices, tools, devtools,
@@ -163,7 +164,7 @@ serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
 serve-sim --panes devices,tools --fit  # start with selected panes open and fit the simulator
 serve-sim --theme dark                 # start the simulator in Dark Mode
-serve-sim --allow-exec                 # enable host-shell tools and `serve-sim exec`
+serve-sim --allow-exec                 # enable `serve-sim exec` and .ipa drag-to-install
 
 # Type text into the focused field
 serve-sim type "Hello, world!"
@@ -193,9 +194,9 @@ Multiple booted simulators are supported — pass several device names, or leave
 
 ### Host shell (`--allow-exec`)
 
-The preview's `/exec` route runs shell commands on the host, so it is off unless the server is started with `--allow-exec`; otherwise it answers `403 {"error":"exec disabled; start with --allow-exec"}`. Preview tools that shell out (screenshots, camera, permissions, reveal in Finder) need it too. Even when enabled, `/exec` is loopback-only and requires a per-session token that is never sent in any HTTP response: the server writes it to an owner-only file under `$TMPDIR/serve-sim/exec-tokens/` (removed on stop), and `serve-sim exec` reads it from there. A raw TCP forward of the preview port (`ssh -R`, socat) looks like a local client, so only enable `--allow-exec` on a port nobody else can reach.
+The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control channel, and `serve-sim exec` — runs commands on the host, so it is off unless the server is started with `--allow-exec`; otherwise `/exec` answers `403 {"error":"exec disabled; start with --allow-exec"}` and `{command}` frames get `exec disabled`. Installing an app (dropping an `.ipa` on the preview) runs arbitrary code on the host too, so it also requires `--allow-exec` (`installApp requires --allow-exec`). The other preview tools (screenshots, camera, permissions, location, media drops, reveal in Finder) don't need it: they use fixed, validated host actions with no shell, available to loopback same-origin pages. Even when enabled, `/exec` is loopback-only and requires a per-session token that is never sent in any HTTP response: the server writes it to an owner-only file under `$TMPDIR/serve-sim/exec-tokens/` (removed on stop), and `serve-sim exec` reads it from there. A raw TCP forward of the preview port (`ssh -R`, socat) looks like a local client, so only enable `--allow-exec` on a port nobody else can reach.
 
-`--detach` and `--no-preview` reuse a running server only when it was started with the same `--auth-token` (or with none on both sides); otherwise they exit with an error — stop the old server with `serve-sim -k <udid>` first.
+`--detach` and `--no-preview` reuse a running server only when it was started with the same `--auth-token` (or with none on both sides) and the same `--allow-exec` setting (on or off on both sides); otherwise they exit with an error — stop the old server with `serve-sim -k <udid>` first.
 
 ### Camera
 

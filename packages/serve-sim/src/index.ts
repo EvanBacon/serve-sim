@@ -1879,8 +1879,10 @@ program
   )
   .option(
     "--allow-exec",
-    "Enable the host shell route (/exec and the preview's shell-backed tools). " +
-      "Off by default; `serve-sim exec` reads its token from an owner-only file.",
+    "Enable the host shell (/exec, {command} frames on /exec-ws, `serve-sim exec`) " +
+      "and .ipa installs from the preview. Off by default; other preview tools " +
+      "don't need it. `serve-sim exec` reads its token from an owner-only file. " +
+      "--detach/--no-preview won't reuse a running server whose --allow-exec differs.",
   )
   .option("--detach", "Spawn helper and exit (daemon mode)")
   .option(
@@ -1938,7 +1940,7 @@ Examples:
   serve-sim --theme dark                 Start the simulator in Dark Mode
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
-  serve-sim --allow-exec                 Enable host-shell tools and \`serve-sim exec\`
+  serve-sim --allow-exec                 Enable \`serve-sim exec\` and .ipa drag-to-install
   serve-sim --detach                     Start streaming in background (daemon)
   serve-sim --list                       Show all running streams
   serve-sim --kill                       Stop all streams`,
