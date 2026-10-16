@@ -38,14 +38,24 @@ final class FramebufferSourceCacheTests: XCTestCase {
         XCTAssertEqual(r.calls, 2)
     }
 
-    func testAMissingSourceIsRetriedOnTheNextFrame() {
+    func testAFailedResolveIsRetriedAtMostEvery100msByFrames() {
         var cache = FramebufferSourceCache<String>(maxAge: 1.0)
         let r = Resolver()
         r.next = nil
         XCTAssertNil(cache.source(for: .frame, now: 0, resolve: r.resolve))
         r.next = "surface-A"
-        XCTAssertEqual(cache.source(for: .frame, now: 0.016, resolve: r.resolve), "surface-A")
+        XCTAssertNil(cache.source(for: .frame, now: 0.016, resolve: r.resolve))
+        XCTAssertEqual(cache.source(for: .frame, now: 0.1, resolve: r.resolve), "surface-A")
         XCTAssertEqual(r.calls, 2)
+    }
+
+    func testAFailedResolveIsRetriedImmediatelyOnSurfaceChanges() {
+        var cache = FramebufferSourceCache<String>(maxAge: 1.0)
+        let r = Resolver()
+        r.next = nil
+        _ = cache.source(for: .frame, now: 0, resolve: r.resolve)
+        r.next = "surface-A"
+        XCTAssertEqual(cache.source(for: .surfacesChanged, now: 0.01, resolve: r.resolve), "surface-A")
     }
 
     func testInvalidateDropsTheCachedSource() {

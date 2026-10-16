@@ -52,6 +52,7 @@ actor FrameCapture {
     private var lastSelectionReason = "none"
     private var sizeChanges: [[String: Any]] = []
     private var sourceCache = FramebufferSourceCache<FramebufferSource>(maxAge: 1.0)
+    private var recheckGeneration: UInt64 = 0
 
     /// `onFrame(buffer, timestamp, isPrivateCopy)`: frames are deep-copied only
     /// while `pixelConsumers` is non-empty; otherwise the buffer wraps the live
@@ -251,7 +252,7 @@ actor FrameCapture {
             frameCallback: { [self, weak desc] in
                 assumeIsolated { capture in
                     let fromCached = desc != nil && capture.sourceCache.current?.descriptor === desc
-                    capture.captureFrame(trigger: fromCached ? .frame : .otherDescriptorFrame)
+                    capture.onFrameCallback(trigger: fromCached ? .frame : .otherDescriptorFrame)
                 }
             },
             surfacesChangedCallback: { [self] in assumeIsolated { $0.captureFrame(trigger: .surfacesChanged) } },
@@ -300,9 +301,12 @@ actor FrameCapture {
         return FramebufferSource(descriptor: desc, surface: unsafeBitCast(surfObj, to: IOSurface.self))
     }
 
-    private func captureFrame(force: Bool = false, trigger: FramebufferSourceCache<FramebufferSource>.Trigger = .frame) {
+    /// Returns false only when the frame was skipped because the surface seed
+    /// hadn't changed (see `onFrameCallback`).
+    @discardableResult
+    private func captureFrame(force: Bool = false, trigger: FramebufferSourceCache<FramebufferSource>.Trigger = .frame) -> Bool {
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
-        guard let source = sourceCache.source(for: trigger, now: now, resolve: resolveSource) else { return }
+        guard let source = sourceCache.source(for: trigger, now: now, resolve: resolveSource) else { return true }
         let desc = source.descriptor
         let surface = source.surface
 
@@ -314,12 +318,12 @@ actor FrameCapture {
         let key = ObjectIdentifier(desc)
         let seed = IOSurfaceGetSeed(surface)
         let seedChanged = lastSeeds[key] != seed
-        if frameCount > 0, !seedChanged, !force { return }
+        if frameCount > 0, !seedChanged, !force { return false }
         lastSeeds[key] = seed
 
         let w = IOSurfaceGetWidth(surface)
         let h = IOSurfaceGetHeight(surface)
-        guard w > 0, h > 0 else { return }
+        guard w > 0, h > 0 else { return true }
 
         if capturedWidth != w || capturedHeight != h {
             let from = "\(capturedWidth)x\(capturedHeight)"
@@ -342,17 +346,39 @@ actor FrameCapture {
             [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA] as CFDictionary,
             &pixelBuffer
         )
-        guard status == kCVReturnSuccess, let pb = pixelBuffer?.takeRetainedValue() else { return }
+        guard status == kCVReturnSuccess, let pb = pixelBuffer?.takeRetainedValue() else { return true }
 
         lastCaptureTime = .now
         frameCount += 1
         let timestamp = CMTime(value: CMTimeValue(frameCount), timescale: 60)
         if pixelConsumers?.isEmpty ?? false {
             onFrame?(pb, timestamp, false)
-            return
+            return true
         }
-        guard let copy = photocopier.copy(pb) else { return }
+        guard let copy = photocopier.copy(pb) else { return true }
         onFrame?(copy, timestamp, true)
+        return true
+    }
+
+    /// Frame callbacks can arrive before the surface seed reflects the new
+    /// frame. If this one finds the seed unchanged, re-check briefly instead of
+    /// leaving the frame for the idle tick. A newer callback supersedes it.
+    private func onFrameCallback(trigger: FramebufferSourceCache<FramebufferSource>.Trigger) {
+        recheckGeneration &+= 1
+        if captureFrame(trigger: trigger) { return }
+        scheduleSeedRecheck(generation: recheckGeneration, attempt: 0)
+    }
+
+    private func scheduleSeedRecheck(generation: UInt64, attempt: Int) {
+        guard let delay = SeedRecheckSchedule.delayMs(afterAttempt: attempt) else { return }
+        queue.asyncAfter(deadline: .now() + .milliseconds(delay)) { [weak self] in
+            self?.assumeIsolated { capture in
+                guard capture.recheckGeneration == generation, capture.onFrame != nil else { return }
+                if !capture.captureFrame() {
+                    capture.scheduleSeedRecheck(generation: generation, attempt: attempt + 1)
+                }
+            }
+        }
     }
 
     func getScreenSize() -> (width: Int, height: Int)? {

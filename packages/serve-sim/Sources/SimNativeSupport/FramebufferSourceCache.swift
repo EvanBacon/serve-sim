@@ -33,8 +33,8 @@ public struct FramebufferSourceCache<Source> {
     public var current: Source? { cached }
 
     public mutating func source(for trigger: Trigger, now: Double, resolve: () -> Source?) -> Source? {
+        let age = now - resolvedAt
         if let cached {
-            let age = now - resolvedAt
             switch trigger {
             case .frame where age < maxAge,
                  .otherDescriptorFrame where age < Self.otherDescriptorMaxAge:
@@ -42,6 +42,9 @@ public struct FramebufferSourceCache<Source> {
             default:
                 break
             }
+        } else if trigger == .frame || trigger == .otherDescriptorFrame, age < Self.otherDescriptorMaxAge {
+            // The last resolve failed; don't repeat its XPC on every frame.
+            return nil
         }
         cached = resolve()
         resolvedAt = now

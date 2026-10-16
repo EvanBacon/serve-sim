@@ -98,6 +98,9 @@ actor CaptureEngine {
     // mjpeg is stateless so we can share a single encoder instance
     private let mjpegEncoder = MJPEGEncoder()
     private let encoderDiagnostics = EncoderDiagnostics()
+    // Separate so viewer seeds don't queue behind (or evict the cache of)
+    // per-frame MJPEG viewer encodes.
+    private let snapshotEncoder = MJPEGEncoder()
 
     private(set) var screenSize = Dimensions(width: 0, height: 0)
     private var consumers = [UUID: CaptureConsuming]()
@@ -218,7 +221,7 @@ actor CaptureEngine {
     func snapshotJPEG() async throws -> (Dimensions, Data)? {
         guard phase == .running, let pixelBuffer = await frameCapture.copyCurrentFrame() else { return nil }
         let frame = Frame(pixelBuffer: pixelBuffer)
-        return (frame.pixelBuffer.dimensions, try await mjpegEncoder.encode(frame))
+        return (frame.pixelBuffer.dimensions, try await snapshotEncoder.encode(frame))
     }
 
     func addMJPEGConsumer(
