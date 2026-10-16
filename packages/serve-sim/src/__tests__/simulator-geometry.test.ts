@@ -104,6 +104,13 @@ describe("simulator geometry helpers", () => {
     expect(rawEdgeForDisplayEdge("landscape_right", HID_EDGE_BOTTOM)).toBe(HID_EDGE_LEFT);
   });
 
+  test("maps portrait and portrait_upside_down touch coordinates", () => {
+    expect(rawPointForDisplayPoint("portrait", 0.25, 0.75)).toEqual({ x: 0.25, y: 0.75 });
+    expect(rawPointForDisplayPoint(undefined, 0.25, 0.75)).toEqual({ x: 0.25, y: 0.75 });
+    expect(rawPointForDisplayPoint("portrait_upside_down", 0.25, 0.75)).toEqual({ x: 0.75, y: 0.25 });
+    expect(rotationDegreesForOrientation("portrait_upside_down")).toBe(180);
+  });
+
   test("rotates and remaps only when the raw frame remains portrait", () => {
     const rawPortraitLandscape = {
       width: 1320,
