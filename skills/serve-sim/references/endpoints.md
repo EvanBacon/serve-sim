@@ -23,7 +23,7 @@ This is the per-device binary started for each booted simulator. It serves the v
 | `GET` | `/ax` | JSON accessibility tree (axe-compatible flat-array shape). |
 | `GET` | `/foreground` | JSON `{bundleId: string, pid: number}` of the frontmost app. |
 
-CORS is wide-open (`Access-Control-Allow-Origin: *`) on this server.
+This server sends no CORS headers and accepts WebSockets only from a same-origin page. Browser pages on another origin should go through `simMiddleware`'s same-origin `{basePath}/helper/<device>/…` proxy; non-browser clients (curl, scripts) are unaffected.
 
 ### WebSocket message types
 

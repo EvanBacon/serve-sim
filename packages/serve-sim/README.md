@@ -285,14 +285,14 @@ app.use(simMiddleware({ basePath: "/.sim" }));
 // → state JSON  at /.sim/api
 ```
 
-Host-shell features are off unless you pass `allowExec: true`. The middleware reads the helper's state from `$TMPDIR/serve-sim/` and points the browser at the helper's stream, interaction WebSocket, and WebKit DevTools endpoints. By default those URLs target the helper's own port directly (CORS is wide-open on the helper), so a plain `app.use(...)` mount works without touching your server's WebSocket handling.
+Host-shell features are off unless you pass `allowExec: true`. The middleware reads the helper's state from `$TMPDIR/serve-sim/` and hands the browser same-origin `/.sim/helper/<device>` and `/.sim/devtools` URLs for the stream, interaction WebSocket, and WebKit DevTools; the middleware proxies them to the helper. The helper itself sends no CORS headers and only accepts same-origin WebSockets, so an embedded page can't talk to the helper's port directly.
 
-### Single-port / remote proxying
+### Forward WebSocket upgrades
 
-To expose the preview to remote viewers behind a single port (the way standalone `serve-sim` does), pass `proxyHelpers: true`. The browser then reaches the stream, control socket, and DevTools through same-origin `/.sim/helper/<device>` and `/.sim/devtools` URLs, so the per-device helper port and inspect-webkit bridge can stay local to the host. This routes WebSockets through the middleware, so you must forward your server's `upgrade` events to `handleUpgrade`:
+Simulator input, the control channel, and DevTools are WebSockets, so forward your server's `upgrade` events to `handleUpgrade`:
 
 ```ts
-const middleware = simMiddleware({ basePath: "/.sim", proxyHelpers: true });
+const middleware = simMiddleware({ basePath: "/.sim" });
 app.use(middleware);
 
 const server = app.listen(3000);
@@ -301,7 +301,9 @@ server.on("upgrade", (req, socket, head) =>
 );
 ```
 
-If you enable `proxyHelpers` but don't wire `upgrade`, the page still loads video over HTTP but loses simulator input and DevTools (their sockets never reach the proxy). When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.
+Without that, the page still loads video over HTTP but loses simulator input and DevTools (their sockets never reach the proxy). The same setup exposes the preview to remote viewers behind a single port (the way standalone `serve-sim` does), so the per-device helper port and inspect-webkit bridge can stay local to the host. When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.
+
+Pass `proxyHelpers: false` to hand the page the helper's direct URLs instead; that only works when the page is served from the helper's own origin.
 
 ## How it works
 

@@ -44,8 +44,6 @@ export interface HidSocket {
   close(): void;
 }
 
-
-
 // AVCC seed tag (StreamFormat.AVCCEnvelope.seedTag). description/keyframe/delta
 // envelopes are framed natively; only the on-connect JPEG seed is built here.
 const AVCC_SEED_TAG = 0x04;

@@ -1311,13 +1311,15 @@ export interface SimMiddlewareOptions {
   initialState?: PreviewInitialState;
   /**
    * Route the browser's helper stream/control and DevTools sockets through the
-   * preview's same-origin `/helper` and `/devtools` proxies instead of the
-   * helper's own loopback port — so a single exposed preview port is enough for
-   * remote viewers. Requires the mounting server to forward WebSocket `upgrade`
-   * events to {@link SimMiddleware.handleUpgrade}. Standalone `serve-sim`
-   * enables this; plain `app.use(simMiddleware(...))` mounts leave it off (and
-   * keep direct helper URLs) unless they also wire upgrades. See the README's
-   * "Embed in your dev server" section.
+   * preview's same-origin `{basePath}/helper` and `{basePath}/devtools`
+   * proxies instead of the helper's own loopback port. Default true: the
+   * helper sends no CORS headers and only accepts same-origin sockets, so an
+   * embedded page on another origin can't use its direct URLs. Simulator
+   * input and DevTools sockets then reach the proxy only if the mounting
+   * server forwards WebSocket `upgrade` events to
+   * {@link SimMiddleware.handleUpgrade}. Set false to hand the page the
+   * helper's direct URLs (only usable when the page shares the helper's
+   * origin). See the README's "Embed in your dev server" section.
    */
   proxyHelpers?: boolean;
   /** Test hook for supplying a fake inspect-webkit bridge. */
@@ -1380,7 +1382,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
   const helperPrefix = helperProxyPrefix(base);
   const devtoolsPrefix = devtoolsProxyPrefix(base);
-  const proxyHelpers = options?.proxyHelpers ?? false;
+  const proxyHelpers = options?.proxyHelpers ?? true;
   const getInspectWebKitBridge = options?.inspectWebKitBridge ?? ensureInspectWebKitBridge;
   // Per-process random token for POST /exec. Never served over HTTP; only a
   // local process that was handed it out of band (the CLI's token file) has it.
