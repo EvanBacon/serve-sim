@@ -950,10 +950,11 @@ export class DeviceSession {
   }
 
   private handleStreamError(res: ServerResponse, error: unknown, endpoint?: StreamEndpoint): void {
+    const message = redactHome(error instanceof Error ? error.message : String(error));
     if (endpoint) {
       this.streamHealth[endpoint].last_error = {
         at: new Date().toISOString(),
-        message: error instanceof Error ? error.message : String(error),
+        message,
         ...(error instanceof DuoRendererError ? { stage: error.stage } : {}),
       };
     }
@@ -968,7 +969,7 @@ export class DeviceSession {
     }
     this.sendJson(res, 503, {
       error: "capture_unavailable",
-      message: error instanceof Error ? error.message : String(error),
+      message,
     });
   }
 
