@@ -50,6 +50,7 @@ import {
   isLoopbackSameOrigin,
   isTrustedLoopback,
   originCheck,
+  peerAddress,
   remoteAccess,
   resolveAuthToken,
   tokensEqual,
@@ -1408,11 +1409,38 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const pagePath = (pathname: string) => pathname === base || pathname === base + "/";
   const exchangePath = `${base}/auth`;
   const bootstrap = authBootstrapPage(exchangePath);
-  // Failed exchanges in the current window. Comparisons are constant-time;
-  // the cap keeps a remote guesser to a handful of tries a minute.
+  // Failed exchanges per peer address in the current window. Comparisons are
+  // constant-time; the cap keeps each remote guesser to a handful of tries a
+  // minute without letting one peer lock every other share-link viewer out.
+  // Keyed on the real TCP peer (never a spoofable forwarding header), and
+  // bounded so a peer cycling addresses can't grow the map without limit.
   const EXCHANGE_MAX_FAILURES = 10;
   const EXCHANGE_WINDOW_MS = 60_000;
-  let exchangeFailures: number[] = [];
+  const EXCHANGE_MAX_PEERS = 1024;
+  const exchangeFailures = new Map<string, number[]>();
+  const recentExchangeFailures = (peer: string, now: number): number[] => {
+    const recent = (exchangeFailures.get(peer) ?? []).filter((t) => now - t < EXCHANGE_WINDOW_MS);
+    if (recent.length === 0) exchangeFailures.delete(peer);
+    else exchangeFailures.set(peer, recent);
+    return recent;
+  };
+  const recordExchangeFailure = (peer: string, now: number): void => {
+    const failures = exchangeFailures.get(peer);
+    if (failures) {
+      failures.push(now);
+      return;
+    }
+    if (exchangeFailures.size >= EXCHANGE_MAX_PEERS) {
+      for (const [key, times] of exchangeFailures) {
+        if (!times.some((t) => now - t < EXCHANGE_WINDOW_MS)) exchangeFailures.delete(key);
+      }
+      // Still full: drop the oldest-inserted peer.
+      if (exchangeFailures.size >= EXCHANGE_MAX_PEERS) {
+        exchangeFailures.delete(exchangeFailures.keys().next().value!);
+      }
+    }
+    exchangeFailures.set(peer, [now]);
+  };
   const handleAuthExchange = (req: SimReq, res: SimRes): void => {
     const deny = (status: number, error: string, headers: Record<string, string> = {}) => {
       res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
@@ -1424,13 +1452,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (originCheck(req) !== "same") return deny(403, "cross_origin_request_blocked");
     if (!authToken) return deny(403, "remote_access_disabled");
     const now = Date.now();
-    exchangeFailures = exchangeFailures.filter((t) => now - t < EXCHANGE_WINDOW_MS);
-    if (exchangeFailures.length >= EXCHANGE_MAX_FAILURES) {
+    const peer = peerAddress(req) ?? "unknown";
+    if (recentExchangeFailures(peer, now).length >= EXCHANGE_MAX_FAILURES) {
       return deny(429, "too_many_attempts", { "Retry-After": String(Math.ceil(EXCHANGE_WINDOW_MS / 1000)) });
     }
     const presented = String(req.headers[AUTH_EXCHANGE_HEADER] ?? "").trim();
     if (!presented || !tokensEqual(presented, authToken)) {
-      exchangeFailures.push(now);
+      recordExchangeFailure(peer, now);
       return deny(401, "unauthorized");
     }
     const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0]!.trim();

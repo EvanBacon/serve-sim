@@ -69,7 +69,8 @@ function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function peerAddress(req: Pick<IncomingMessage, "socket">): string | undefined {
+/** The real TCP peer: the socket's remote address, or the client the Bun front proxy piped in. */
+export function peerAddress(req: Pick<IncomingMessage, "socket">): string | undefined {
   const socket = req.socket as { remoteAddress?: string; remotePort?: number } | undefined;
   if (!socket) return undefined;
   const remote = socket.remoteAddress;

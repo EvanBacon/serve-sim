@@ -97,17 +97,19 @@ function rawRequest(
   port: number,
   target: string,
   headers: Record<string, string> = {},
-  opts: { method?: string; body?: string; host?: string } = {},
+  opts: { method?: string; body?: string; host?: string; peer?: string } = {},
 ): Promise<RawRes> {
   return new Promise((resolve) => {
     let settled = false;
     const socket = connect(port, opts.host ?? "127.0.0.1");
+    let unregisterPeer = () => {};
     let buf = Buffer.alloc(0);
     const finish = (result: RawRes) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
+      unregisterPeer();
       resolve(result);
     };
     const timer = setTimeout(() => finish({ status: -1, headers: {}, body: "" }), 4000);
@@ -177,7 +179,16 @@ function rawRequest(
     if (opts.body != null && opts.body !== "" && !provided.has("content-length")) {
       lines.push(`Content-Length: ${Buffer.byteLength(opts.body)}`);
     }
-    socket.write(`${lines.join("\r\n")}\r\n\r\n${opts.body ?? ""}`);
+    const payload = `${lines.join("\r\n")}\r\n\r\n${opts.body ?? ""}`;
+    if (opts.peer === undefined) {
+      socket.write(payload);
+      return;
+    }
+    // Pose as a piped Bun front-proxy client so the server sees `peer`.
+    socket.once("connect", () => {
+      unregisterPeer = registerProxiedPeer(socket.localPort!, opts.peer!);
+      socket.write(payload);
+    });
   });
 }
 
@@ -600,6 +611,33 @@ describe("remote browser cookie bootstrap", () => {
       expect(statuses.slice(10)).toEqual([429, 429]);
       // Even the right token waits out the lockout.
       expect((await attempt(AUTH_TOKEN)).status).toBe(429);
+    } finally {
+      await closeServer(server.server);
+    }
+  });
+
+  test("one peer exhausting its budget does not lock out another peer", async () => {
+    const server = await listen(AUTH_TOKEN);
+    try {
+      const attempt = (peer: string, token: string) =>
+        rawRequest(
+          server.port,
+          "/auth",
+          { Host: `127.0.0.1:${server.port}`, Origin: `http://127.0.0.1:${server.port}`, [AUTH_EXCHANGE_HEADER]: token },
+          { method: "POST", peer },
+        );
+      const attacker = "198.51.100.66";
+      const viewer = "192.168.1.20";
+      const statuses: number[] = [];
+      for (let i = 0; i < 11; i++) statuses.push((await attempt(attacker, "wrong")).status);
+      expect(statuses.slice(0, 10).every((s) => s === 401)).toBe(true);
+      expect(statuses[10]).toBe(429);
+      expect((await attempt(attacker, AUTH_TOKEN)).status).toBe(429);
+      // A different peer still gets its own budget and signs in.
+      expect((await attempt(viewer, "wrong")).status).toBe(401);
+      const ok = await attempt(viewer, AUTH_TOKEN);
+      expect(ok.status).toBe(204);
+      expect(String(ok.headers["set-cookie"])).toContain(AUTH_COOKIE);
     } finally {
       await closeServer(server.server);
     }
