@@ -78,16 +78,23 @@ export async function runStreamWithRetry(options: {
       } else {
         const push = options.connect();
         const reader = res.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!value?.length) continue;
-          if (!opened) {
-            opened = true;
-            failures = 0;
-            options.onOpen?.();
+        let ended = false;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) { ended = true; break; }
+            if (!value?.length) continue;
+            if (!opened) {
+              opened = true;
+              failures = 0;
+              options.onOpen?.();
+            }
+            push(value);
           }
-          push(value);
+        } finally {
+          // A throwing parser (or read) leaves the body open; release it
+          // before retrying so connections don't pile up.
+          if (!ended) await reader.cancel().catch(() => {});
         }
         error = { status: res.status, error: "stream_ended", reason: "The server closed the stream" };
       }

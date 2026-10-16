@@ -100,4 +100,23 @@ describe("stream retry backoff", () => {
     });
     expect(controller.signal.aborted).toBe(true);
   });
+
+  test("a throwing parser cancels the body reader before retrying", async () => {
+    const controller = new AbortController();
+    let cancelled = 0;
+    const errors: StreamError[] = [];
+    await runStreamWithRetry({
+      url: "http://x/stream.mjpeg",
+      signal: controller.signal,
+      fetch: (async () => new Response(new ReadableStream<Uint8Array>({
+        pull(c) { c.enqueue(new Uint8Array([1])); },
+        cancel() { cancelled++; throw new Error("cancel failed"); },
+      }), { status: 200 })) as unknown as typeof fetch,
+      connect: () => () => { throw new Error("bad frame"); },
+      onError: (error) => errors.push(error),
+      sleep: async () => { controller.abort(); },
+    });
+    expect(cancelled).toBe(1);
+    expect(errors.map((e) => e.error)).toEqual(["stream_interrupted"]);
+  });
 });
