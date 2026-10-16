@@ -40,11 +40,10 @@ import {
 } from "./icons";
 import { CollapsibleSection } from "./components/collapsible-section";
 import { Select } from "./components/select";
+import type { HostActionFn } from "./utils/exec";
 
 const TRAIL_MORPH_MS = 650;
 
-interface ExecResult { stdout: string; stderr: string; exitCode: number }
-type ExecFn = (cmd: string) => Promise<ExecResult>;
 
 const SPEED_MULTIPLIERS = [1, 2, 5, 20] as const;
 type SpeedMultiplier = (typeof SPEED_MULTIPLIERS)[number];
@@ -66,10 +65,11 @@ const INITIAL_PLAYBACK: PlaybackState = { status: "idle", arc: 0, elapsedMs: 0 }
 
 export function LocationEmulationTool({
   udid,
-  exec,
+  host,
 }: {
   udid: string;
-  exec: ExecFn;
+  /** Host action runner (`location` sets or clears the simulated fix). */
+  host: HostActionFn;
 }) {
   const [open, setOpen] = useState(false);
   const [trailId, setTrailId] = useState<string>(DEFAULT_TRAILS[0]!.id);
@@ -214,8 +214,7 @@ export function LocationEmulationTool({
       if (now - lastPushed < LOCATION_PUSH_INTERVAL_MS) return;
       lastPushed = now;
       const pt = pointAtDistance(trailRef.current, arcRef.current);
-      const cmd = `xcrun simctl location ${udid} set ${pt.lat.toFixed(7)},${pt.lng.toFixed(7)}`;
-      inflight = exec(cmd).then((res) => {
+      inflight = host("location", { udid, lat: pt.lat, lng: pt.lng }).then((res) => {
         if (cancelled) return;
         if (res.exitCode !== 0) {
           setError(parseSimctlError(res.stderr) || "simctl location set failed");
@@ -233,7 +232,7 @@ export function LocationEmulationTool({
       cancelled = true;
       clearInterval(id);
     };
-  }, [playback.status, udid, exec]);
+  }, [playback.status, udid, host]);
 
   // ── Controls ─────────────────────────────────────────────────────────────
   const onPlayPause = useCallback(() => {
@@ -267,14 +266,12 @@ export function LocationEmulationTool({
     setPlayback(INITIAL_PLAYBACK);
     const origin = sessionOriginRef.current;
     sessionOriginRef.current = null;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
-    void exec(cmd).then((res) => {
+    const params = origin ? { udid, lat: origin.lat, lng: origin.lng } : { udid };
+    void host("location", params).then((res) => {
       if (res.exitCode !== 0) setError(parseSimctlError(res.stderr) || null);
       else setError(null);
     });
-  }, [exec, udid]);
+  }, [host, udid]);
 
   const onTrailChange = useCallback((id: string) => {
     setTrailId(id);
@@ -288,11 +285,9 @@ export function LocationEmulationTool({
   useEffect(() => () => {
     if (statusRef.current === "idle") return;
     const origin = sessionOriginRef.current;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
-    void exec(cmd).catch(() => {});
-  }, [exec, udid]);
+    const params = origin ? { udid, lat: origin.lat, lng: origin.lng } : { udid };
+    void host("location", params).catch(() => {});
+  }, [host, udid]);
 
   // ── Render ───────────────────────────────────────────────────────────────
   const playing = playback.status === "playing";

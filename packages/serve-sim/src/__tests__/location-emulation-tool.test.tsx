@@ -3,12 +3,12 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LocationEmulationTool } from "../client/location-emulation-tool";
 
-const exec = async () => ({ stdout: "", stderr: "", exitCode: 0 });
+const host = async () => ({ stdout: "", stderr: "", exitCode: 0 });
 
 describe("LocationEmulationTool", () => {
   test("hides distance status while collapsed and keeps responsive summary sizing", () => {
     const html = renderToStaticMarkup(
-      <LocationEmulationTool udid="booted" exec={exec} />,
+      <LocationEmulationTool udid="booted" host={host} />,
     );
 
     expect(html).toContain("Location");

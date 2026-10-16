@@ -107,6 +107,10 @@ serve-sim fold <deg> [-d udid]  Set a Duo hinge angle (0–180)
 serve-sim repair-input [-d udid]         Repair Device Hub input (restarts apps)
 serve-sim memory-warning [-d udid]    Simulate a memory warning
 serve-sim event-log [-d udid]         Show recent simulator events
+serve-sim exec <command...> [-d udid] Run a host shell command through a server
+                                      started with --allow-exec. One argument
+                                      is a shell line (exec "xcrun simctl list");
+                                      several are quoted as an argv
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
@@ -122,6 +126,9 @@ serve-sim camera --stop-webcam [-d udid]
 Options:
   -p, --port <port>   Starting port (preview default: 3200; helper default: 3100)
   -d, --detach        Spawn helper and exit (daemon mode)
+      --allow-exec    Enable the host shell (/exec, {command} frames on
+                      /exec-ws, `serve-sim exec`) and .ipa installs from
+                      the preview. Off by default
   -q, --quiet         JSON-only output
       --no-preview    Skip the web UI; stream in foreground only
       --panes <panes> Initially open preview panes: devices, tools, devtools,
@@ -157,6 +164,7 @@ serve-sim --list                       # show running streams
 serve-sim --kill                       # stop all helpers
 serve-sim --panes devices,tools --fit  # start with selected panes open and fit the simulator
 serve-sim --theme dark                 # start the simulator in Dark Mode
+serve-sim --allow-exec                 # enable `serve-sim exec` and .ipa drag-to-install
 
 # Type text into the focused field
 serve-sim type "Hello, world!"
@@ -183,6 +191,22 @@ serve-sim camera --stop-webcam
 ```
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
+
+### Remote access (`--auth-token`)
+
+Requests that don't come straight from this machine — LAN clients, tunnels, reverse proxies — are refused unless the server is started with `--auth-token <token>` (or `SERVE_SIM_AUTH_TOKEN`). CLI and scripted clients send `Authorization: Bearer <token>`. To share the preview with a browser, send the link with the token in the URL fragment:
+
+```
+http://<host>:3200/#token=<token>
+```
+
+Browsers never send the fragment to the server, so the token stays out of request lines and server/proxy logs. The page that loads first is a small auth bootstrap (it contains no secrets): it reads the fragment, removes it from the address bar and history, and POSTs it in a header to the same-origin `/auth` endpoint, which sets an HttpOnly, `SameSite=Lax` cookie and the page reloads. `/auth` only accepts same-origin `POST`s, compares in constant time, and locks out after 10 wrong tokens a minute. A `?token=` query parameter is never accepted.
+
+### Host shell (`--allow-exec`)
+
+The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control channel, and `serve-sim exec` — runs commands on the host, so it is off unless the server is started with `--allow-exec`; otherwise `/exec` answers `403 {"error":"exec disabled; start with --allow-exec"}` and `{command}` frames get `exec disabled`. Installing an app (dropping an `.ipa` on the preview) runs arbitrary code on the host too, so it also requires `--allow-exec` (`installApp requires --allow-exec`). The other preview tools (screenshots, camera, permissions, location, media drops, reveal in Finder) don't need it: they use fixed, validated host actions with no shell, available to loopback same-origin pages. Even when enabled, `/exec` is loopback-only and requires a per-session token that is never sent in any HTTP response: the server writes it to an owner-only file under `$TMPDIR/serve-sim/exec-tokens/` (removed on stop), and `serve-sim exec` reads it from there. A raw TCP forward of the preview port (`ssh -R`, socat) looks like a local client, so only enable `--allow-exec` on a port nobody else can reach. Note that `installApp` needs no exec token: with `--allow-exec` it only requires a same-origin loopback page, so anyone who can reach an `--allow-exec` port through a raw `ssh -R` or socat forward can install (and so run) arbitrary apps on the host.
+
+`--detach` and `--no-preview` reuse a running server only when it was started with the same `--auth-token` (or with none on both sides) and the same `--allow-exec` setting (on or off on both sides); otherwise they exit with an error — stop the old server with `serve-sim -k <udid>` first.
 
 ### Camera
 
@@ -272,23 +296,30 @@ app.use(simMiddleware({ basePath: "/.sim" }));
 // → state JSON  at /.sim/api
 ```
 
-The middleware reads the helper's state from `$TMPDIR/serve-sim/` and points the browser at the helper's stream, interaction WebSocket, and WebKit DevTools endpoints. By default those URLs target the helper's own port directly (CORS is wide-open on the helper), so a plain `app.use(...)` mount works without touching your server's WebSocket handling.
+Host-shell features are off unless you pass `allowExec: true`. The middleware reads the helper's state from `$TMPDIR/serve-sim/` and hands the browser same-origin `/.sim/helper/<device>` and `/.sim/devtools` URLs for the stream, interaction WebSocket, and WebKit DevTools; the middleware proxies them to the helper. The helper itself sends no CORS headers and only accepts same-origin WebSockets, so an embedded page can't talk to the helper's port directly.
 
-### Single-port / remote proxying
+### Forward WebSocket upgrades
 
-To expose the preview to remote viewers behind a single port (the way standalone `serve-sim` does), pass `proxyHelpers: true`. The browser then reaches the stream, control socket, and DevTools through same-origin `/.sim/helper/<device>` and `/.sim/devtools` URLs, so the per-device helper port and inspect-webkit bridge can stay local to the host. This routes WebSockets through the middleware, so you must forward your server's `upgrade` events to `handleUpgrade`:
+Simulator input, the control channel, and DevTools are WebSockets, so forward your server's `upgrade` events under the mount path to `handleUpgrade`. `handleUpgrade` closes any socket it doesn't own, so leave every other upgrade (HMR, your app's own sockets) to your server's existing handlers:
 
 ```ts
-const middleware = simMiddleware({ basePath: "/.sim", proxyHelpers: true });
+const basePath = "/.sim";
+const middleware = simMiddleware({ basePath });
 app.use(middleware);
 
 const server = app.listen(3000);
-server.on("upgrade", (req, socket, head) =>
-  middleware.handleUpgrade(req, socket, head),
-);
+server.on("upgrade", (req, socket, head) => {
+  const { pathname } = new URL(req.url ?? "/", "http://localhost");
+  if (pathname === basePath || pathname.startsWith(`${basePath}/`)) {
+    middleware.handleUpgrade(req, socket, head);
+  }
+  // Anything else belongs to the host server's other upgrade listeners.
+});
 ```
 
-If you enable `proxyHelpers` but don't wire `upgrade`, the page still loads video over HTTP but loses simulator input and DevTools (their sockets never reach the proxy). When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.
+Without that, the page still loads video over HTTP but loses simulator input and DevTools (their sockets never reach the proxy). The same setup exposes the preview to remote viewers behind a single port (the way standalone `serve-sim` does), so the per-device helper port and inspect-webkit bridge can stay local to the host. When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.
+
+Pass `proxyHelpers: false` to hand the page the helper's direct URLs instead; that only works when the page is served from the helper's own origin.
 
 ## How it works
 

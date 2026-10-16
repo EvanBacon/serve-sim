@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { ReloadIcon } from "../icons";
-import { execOnHost, shellEscape } from "../utils/exec";
+import { hostAction } from "../utils/exec";
 import { CollapsibleSection } from "./collapsible-section";
 import {
   PERMISSION_SERVICES,
@@ -21,16 +21,10 @@ export function AppPermissionsTool({
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
-  // The `serve-sim permissions` subcommand handles the stores `simctl privacy`
-  // can't (push notifications via BulletinBoard, location's `i<bundleId>:`
-  // clients.plist keys), so the UI drives it instead of calling simctl directly.
-  const cliPrefix = useMemo(() => {
-    const bin = typeof window === "undefined" ? undefined : window.__SIM_PREVIEW__?.serveSimBin;
-    if (!bin) return "serve-sim";
-    if (/\.ts$/.test(bin)) return `bun ${shellEscape(bin)}`;
-    if (/\.js$/.test(bin)) return `node ${shellEscape(bin)}`;
-    return shellEscape(bin);
-  }, []);
+  // The `permissions` host action runs the `serve-sim permissions`
+  // subcommand, which handles the stores `simctl privacy` can't (push
+  // notifications via BulletinBoard, location's `i<bundleId>:` clients.plist
+  // keys).
 
   // Reset assumed state whenever the foreground app changes.
   useEffect(() => { setState({}); setError(null); }, [bundleId]);
@@ -42,9 +36,7 @@ export function AppPermissionsTool({
       setPending(key);
       setError(null);
       try {
-        const res = await execOnHost(
-          `${cliPrefix} permissions ${action} ${service} ${shellEscape(bundleId)} -d ${shellEscape(udid)}`,
-        );
+        const res = await hostAction("permissions", { udid, bundleId, action, service });
         if (res.exitCode !== 0) {
           setError(res.stderr.trim() || `serve-sim permissions failed (exit ${res.exitCode})`);
           return;
@@ -54,7 +46,7 @@ export function AppPermissionsTool({
         setPending(null);
       }
     },
-    [cliPrefix, udid, bundleId],
+    [udid, bundleId],
   );
 
   const resetAll = useCallback(async () => {
@@ -62,9 +54,7 @@ export function AppPermissionsTool({
     setPending("__all__");
     setError(null);
     try {
-      const res = await execOnHost(
-        `${cliPrefix} permissions reset all ${shellEscape(bundleId)} -d ${shellEscape(udid)}`,
-      );
+      const res = await hostAction("permissions", { udid, bundleId, action: "reset", service: "all" });
       if (res.exitCode !== 0) {
         setError(res.stderr.trim() || `serve-sim permissions failed (exit ${res.exitCode})`);
         return;
@@ -73,7 +63,7 @@ export function AppPermissionsTool({
     } finally {
       setPending(null);
     }
-  }, [cliPrefix, udid, bundleId]);
+  }, [udid, bundleId]);
 
   if (!bundleId) {
     return <AppPermissionsLoading />;

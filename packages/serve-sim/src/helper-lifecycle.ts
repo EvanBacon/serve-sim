@@ -11,6 +11,7 @@
  * poll uses setTimeout backoff, not a tight loop.
  */
 import { execFileSync } from "child_process";
+import { createHash } from "crypto";
 import { readFileSync, unlinkSync } from "fs";
 import { sleepSync } from "./runtime";
 import { getPortHolders } from "./ports";
@@ -142,6 +143,54 @@ export function persistRecoveredState(state: ServeSimDeviceState): void {
   } catch (err) {
     debugState("failed to rewrite recovered state for %s: %o", state.device, err);
   }
+}
+
+/** Fingerprint of an auth token as recorded in the state file (never the raw token). */
+export function authTokenFingerprint(token: string | undefined): string | undefined {
+  return token ? createHash("sha256").update(token).digest("hex") : undefined;
+}
+
+/**
+ * Whether a running server may be reused for a `--detach` / follow request
+ * with `authToken`. Reusing a server guarded by a different token (or none)
+ * would leave the caller with a server their token doesn't open — or an
+ * unauthenticated one they believe is protected. Returns an error message
+ * when it must not be reused.
+ */
+export function reuseAuthMismatch(
+  state: Pick<ServeSimDeviceState, "device" | "authTokenSha256">,
+  authToken: string | undefined,
+): string | null {
+  if (state.authTokenSha256 === authTokenFingerprint(authToken)) return null;
+  const reason = !authToken
+    ? "was started with an --auth-token, but none was given now"
+    : state.authTokenSha256
+      ? "was started with a different --auth-token"
+      : "was started without an --auth-token";
+  return (
+    `serve-sim is already running for ${state.device} but ${reason}. ` +
+    `Stop it with \`serve-sim -k ${state.device}\` and run this command again.`
+  );
+}
+
+/**
+ * Whether a running server may be reused for a `--detach` / follow request
+ * with `allowExec`. Reusing a server whose `--allow-exec` opt-in differs would
+ * leave the caller with a host shell they didn't ask for — or without one they
+ * did. Returns an error message when it must not be reused.
+ */
+export function reuseExecMismatch(
+  state: Pick<ServeSimDeviceState, "device" | "allowExec">,
+  allowExec: boolean,
+): string | null {
+  if ((state.allowExec === true) === allowExec) return null;
+  const reason = allowExec
+    ? "was started without --allow-exec"
+    : "was started with --allow-exec, but it was not given now";
+  return (
+    `serve-sim is already running for ${state.device} but ${reason}. ` +
+    `Stop it with \`serve-sim -k ${state.device}\` and run this command again.`
+  );
 }
 
 /** What to do with a live helper whose backing simulator may have been shut down. */
