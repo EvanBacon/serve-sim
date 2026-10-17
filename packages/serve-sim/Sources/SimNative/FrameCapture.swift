@@ -246,18 +246,36 @@ actor FrameCapture {
         let uuid = UUID()
         callbackUUIDs[ObjectIdentifier(desc)] = uuid
 
+        // Explicitly typed locals keep the type checker from choking on the
+        // dynamic AnyObject call (some Xcode swiftc builds crash otherwise).
+        let frameCallback: @convention(block) () -> Void = { [self, weak desc] in
+            assumeIsolated { capture in
+                capture.onFrameCallback(from: desc)
+            }
+        }
+        let surfacesChangedCallback: @convention(block) () -> Void = { [self] in
+            assumeIsolated { capture in
+                _ = capture.captureFrame(trigger: .surfacesChanged)
+            }
+        }
+        let propertiesChangedCallback: @convention(block) () -> Void = {}
+
         desc.registerScreenCallbacks(
             uuid: uuid,
             callbackQueue: queue,
-            frameCallback: { [self, weak desc] in
-                assumeIsolated { capture in
-                    let fromCached = desc != nil && capture.sourceCache.current?.descriptor === desc
-                    capture.onFrameCallback(trigger: fromCached ? .frame : .otherDescriptorFrame)
-                }
-            },
-            surfacesChangedCallback: { [self] in assumeIsolated { $0.captureFrame(trigger: .surfacesChanged) } },
-            propertiesChangedCallback: {}
+            frameCallback: frameCallback,
+            surfacesChangedCallback: surfacesChangedCallback,
+            propertiesChangedCallback: propertiesChangedCallback
         )
+    }
+
+    /// `desc` is nil once the registering descriptor has been released.
+    private func onFrameCallback(from desc: AnyObject?) {
+        var fromCached = false
+        if let desc, let current = sourceCache.current?.descriptor {
+            fromCached = current === desc
+        }
+        onFrameCallback(trigger: fromCached ? .frame : .otherDescriptorFrame)
     }
 
     private func startIdleTimer() {
