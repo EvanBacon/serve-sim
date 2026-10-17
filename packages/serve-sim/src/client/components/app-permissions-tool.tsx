@@ -8,6 +8,7 @@ import {
   type PermAction,
   type PermState,
 } from "../utils/permissions";
+import { inkText } from "../utils/theme";
 
 export function AppPermissionsTool({
   udid,
@@ -76,7 +77,7 @@ export function AppPermissionsTool({
       summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
       summary={
         <>
-          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Permissions</span>
+          <span className="text-[11px] font-semibold text-ink-50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Permissions</span>
           <span />
         </>
       }
@@ -93,9 +94,9 @@ export function AppPermissionsTool({
               const current = state[key];
               return (
                 <div key={key} className="flex items-center justify-between gap-2 px-0.5 py-1">
-                  <span className="text-[12px] text-white/90 overflow-hidden text-ellipsis whitespace-nowrap flex-1 min-w-0">{label}</span>
+                  <span className="text-[12px] text-ink-90 overflow-hidden text-ellipsis whitespace-nowrap flex-1 min-w-0">{label}</span>
                   <div
-                    className="flex gap-0.5 bg-white/[0.04] border border-white/8 rounded-md p-0.5"
+                    className="flex gap-0.5 bg-ink/[0.04] border border-ink/8 rounded-md p-0.5"
                     role="group"
                     aria-label={label}
                   >
@@ -131,15 +132,15 @@ export function AppPermissionsTool({
               );
             })}
           </div>
-          <div className="absolute top-0 left-0 right-0 h-[14px] pointer-events-none rounded-t-[10px] bg-[linear-gradient(to_bottom,#1c1c1e_0%,rgba(28,28,30,0)_100%)]" />
-          <div className="absolute bottom-0 left-0 right-0 h-[14px] pointer-events-none bg-[linear-gradient(to_top,#1c1c1e_0%,rgba(28,28,30,0)_100%)]" />
+          <div className="absolute top-0 left-0 right-0 h-[14px] pointer-events-none rounded-t-[10px] bg-[linear-gradient(to_bottom,var(--serve-sim-panel)_0%,var(--serve-sim-panel-transparent)_100%)]" />
+          <div className="absolute bottom-0 left-0 right-0 h-[14px] pointer-events-none bg-[linear-gradient(to_top,var(--serve-sim-panel)_0%,var(--serve-sim-panel-transparent)_100%)]" />
         </div>
 
       <div className="flex justify-end">
         <button
           onClick={resetAll}
           disabled={pending === "__all__"}
-          className="bg-transparent border border-white/12 text-white/70 text-[10px] px-2 py-[3px] rounded-[5px] cursor-pointer uppercase tracking-[0.04em]"
+          className="bg-transparent border border-ink/12 text-ink-70 text-[10px] px-2 py-[3px] rounded-[5px] cursor-pointer uppercase tracking-[0.04em]"
           title="serve-sim permissions reset all"
         >
           {pending === "__all__" ? "…" : "Reset all"}
@@ -157,7 +158,7 @@ export function AppPermissionsLoading() {
       aria-disabled="true"
       aria-busy="true"
     >
-      <div className="select-none text-white/55 min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)] grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left cursor-default">
+      <div className="select-none text-ink-55 min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)] grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left cursor-default">
         <span className="text-[11px] font-semibold uppercase tracking-[0.08em] leading-none inline-flex items-center">
           Permissions
         </span>
@@ -166,7 +167,7 @@ export function AppPermissionsLoading() {
           data-testid="permissions-loading-indicator"
           role="status"
           aria-label="Loading permissions"
-          className="size-2.5 rounded-full border border-[#5f6268] border-t-[#f4f4f5] animate-[grid-spin_0.7s_linear_infinite]"
+          className="size-2.5 rounded-full border border-ink/30 border-t-ink/95 animate-[grid-spin_0.7s_linear_infinite]"
         />
       </div>
     </div>
@@ -188,7 +189,8 @@ function PermBtn({
   title: string;
   children: ReactNode;
 }) {
-  const accent = variant === "grant" ? "#4ade80" : variant === "revoke" ? "#f87171" : "#a5b4fc";
+  const accent =
+    variant === "grant" ? "var(--serve-sim-success)" : variant === "revoke" ? "var(--serve-sim-danger)" : "var(--serve-sim-accent)";
   return (
     <button
       onClick={onClick}
@@ -197,8 +199,8 @@ function PermBtn({
       aria-label={title}
       className="w-6 h-5.5 flex items-center justify-center border-none rounded p-0 cursor-pointer [transition:background_0.12s,color_0.12s]"
       style={{
-        background: active ? `${accent}22` : "transparent",
-        color: active ? accent : "rgba(255,255,255,0.55)",
+        background: active ? `color-mix(in srgb, ${accent} 13%, transparent)` : "transparent",
+        color: active ? accent : inkText(0.55),
         opacity: pending ? 0.5 : 1,
       }}
     >

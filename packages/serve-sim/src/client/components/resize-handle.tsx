@@ -1,4 +1,5 @@
 import { useState, type PointerEvent as ReactPointerEvent } from "react";
+import { inkFill } from "../utils/theme";
 
 // Rendered as a fixed-positioned sibling of the panel, so the grabber can
 // straddle the panel's interior border without being clipped by overflow:hidden.
@@ -48,12 +49,12 @@ export function ResizeHandle({
         style={{
           transform: "translateX(-0.5px)",
           background:
-            "linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,0.28) 30%, rgba(255,255,255,0.28) 70%, rgba(255,255,255,0) 100%)",
+            `linear-gradient(to bottom, ${inkFill(0)} 0%, ${inkFill(0.28)} 30%, ${inkFill(0.28)} 70%, ${inkFill(0)} 100%)`,
         }}
       />
       {/* Centered pill grabber, straddling the panel's interior border. */}
       <div
-        className={`absolute top-1/2 left-1/2 w-1 h-7 rounded-xs -translate-x-1/2 -translate-y-1/2 z-1 pointer-events-none [transition:opacity_0.15s_ease,background_0.15s_ease] ${hot ? "opacity-100" : "opacity-0"} ${active ? "bg-[#9a9a9e]" : "bg-[#6e6e72]"}`}
+        className={`absolute top-1/2 left-1/2 w-1 h-7 rounded-xs -translate-x-1/2 -translate-y-1/2 z-1 pointer-events-none [transition:opacity_0.15s_ease,background_0.15s_ease] ${hot ? "opacity-100" : "opacity-0"} ${active ? "bg-grabber-active" : "bg-grabber"}`}
       />
     </div>
   );

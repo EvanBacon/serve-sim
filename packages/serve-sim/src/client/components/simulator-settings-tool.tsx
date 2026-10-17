@@ -86,8 +86,8 @@ export function SettingRow({
 }) {
   return (
     <div className="flex items-center justify-between gap-2 min-h-[30px]" data-setting-row={label}>
-      <span className="flex shrink-0 items-center gap-2 text-[12px] text-white/90 whitespace-nowrap">
-        <span className="flex size-[18px] items-center justify-center text-white">{icon}</span>
+      <span className="flex shrink-0 items-center gap-2 text-[12px] text-ink-90 whitespace-nowrap">
+        <span className="flex size-[18px] items-center justify-center text-ink">{icon}</span>
         {label}
       </span>
       {/* min-w-0 lets the control shrink instead of overflowing the panel
@@ -161,7 +161,7 @@ function TextSizeSlider({
       />
       <span aria-hidden className="pointer-events-none mt-[3px] flex justify-between px-[5.5px]">
         {TEXT_SIZE_CATEGORIES.map((category) => (
-          <span key={category} className="size-[2px] rounded-full bg-white/40" />
+          <span key={category} className="size-[2px] rounded-full bg-ink/40" />
         ))}
       </span>
     </span>
@@ -188,7 +188,7 @@ export function SettingSelect({
       options={options}
       disabled={disabled}
       onChange={onChange}
-      className="bg-white/[0.06] border border-white/10 rounded-md text-white/90 text-[12px] py-0.5 px-2 min-w-0 max-w-[150px] disabled:text-white/40"
+      className="bg-ink/[0.06] border border-ink/10 rounded-md text-ink-90 text-[12px] py-0.5 px-2 min-w-0 max-w-[150px] disabled:text-ink-40"
     />
   );
 }
@@ -376,7 +376,7 @@ export function SimulatorSettingsTool({
       summaryClassName="grid [grid-template-columns:auto_1fr_auto] items-center gap-2 text-left"
       summary={
         <>
-          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">
+          <span className="text-[11px] font-semibold text-ink-50 uppercase tracking-[0.08em] leading-none inline-flex items-center">
             Simulator
           </span>
           <span />
@@ -384,7 +384,7 @@ export function SimulatorSettingsTool({
       }
     >
       {!supported ? (
-        <div className="text-white/45 text-[11px] px-0.5 py-1">
+        <div className="text-ink-45 text-[11px] px-0.5 py-1">
           Simulator settings are available on iOS simulators only.
         </div>
       ) : (

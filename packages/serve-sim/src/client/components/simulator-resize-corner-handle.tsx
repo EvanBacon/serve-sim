@@ -14,6 +14,7 @@ import { usePrefersMoreContrast } from "../hooks/use-prefers-more-contrast";
 import { usePrefersReducedMotion } from "../hooks/use-prefers-reduced-motion";
 import {
   RESIZE_MAIN_STROKE,
+  RESIZE_OUTLINE_STROKE,
   RESIZE_MAIN_STROKE_W,
   RESIZE_HANDLE_OPACITY,
   RESIZE_SCALE,
@@ -129,11 +130,11 @@ function SimulatorResizeCornerSvg(
         <g style={{ pointerEvents: "none" }}>
           <path
             d={d}
-            stroke="#34363b"
             strokeWidth={mainStrokeW + 2.2 * vw}
             strokeLinecap="round"
             vectorEffect="non-scaling-stroke"
             style={{
+              stroke: RESIZE_OUTLINE_STROKE,
               opacity: Math.min(1, handleOpacity + 0.08),
               transition: `${motionStroke}, opacity ${dur} ${ease}`,
               filter: RESIZE_HANDLE_LIT_SHADOW,
@@ -141,11 +142,12 @@ function SimulatorResizeCornerSvg(
           />
           <path
             d={d}
-            stroke={RESIZE_MAIN_STROKE[phase]}
             strokeWidth={mainStrokeW}
             strokeLinecap="round"
             vectorEffect="non-scaling-stroke"
             style={{
+              // CSS variables only resolve in `style`, not presentation attributes.
+              stroke: RESIZE_MAIN_STROKE[phase],
               opacity: handleOpacity,
               transition: `${motionStroke}, opacity ${dur} ${ease}`,
               filter: RESIZE_HANDLE_LIT_SHADOW,

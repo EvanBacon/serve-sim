@@ -8,7 +8,7 @@ import { devicePosePresets, type DevicePoseId } from "../../device-pose";
 
 const poses = devicePosePresets();
 
-const pressedStyle: CSSProperties = { color: "#0a84ff" };
+const pressedStyle: CSSProperties = { color: "var(--serve-sim-tint)" };
 
 function PoseIcon({ pose }: { pose: DevicePoseId }) {
   if (pose === "closed") {
@@ -42,7 +42,7 @@ export function DeviceHingeControls({ angle, onChange, onPose, orientation = "po
         min={0} max={180} step={0.1} value={angle}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
         className="min-w-0 flex-1" />
-      <output className="w-11 text-right text-[11px] tabular-nums text-white/90">{Math.round(angle)}°</output>
+      <output className="w-11 text-right text-[11px] tabular-nums text-ink-90">{Math.round(angle)}°</output>
     </div> : poses.map((pose) => {
       const selected = Math.abs(angle - pose.hingeDegrees) < 0.6;
       return <SimulatorToolbar.Button key={pose.id}

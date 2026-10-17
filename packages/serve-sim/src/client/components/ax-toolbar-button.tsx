@@ -2,6 +2,7 @@ import { useState } from "react";
 import { SquareMousePointer } from "lucide-react";
 import { SimulatorToolbar } from "../simulator";
 import { useAxSnapshotContext } from "../hooks/use-ax-snapshot";
+import { inkFill, inkText } from "../utils/theme";
 
 export function AxToolbarButton({
   overlayEnabled,
@@ -27,8 +28,8 @@ export function AxToolbarButton({
       style={
         active
           ? {
-              background: hovered ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.08)",
-              color: "rgba(255,255,255,0.95)",
+              background: hovered ? inkFill(0.12) : inkFill(0.08),
+              color: inkText(0.95),
             }
           : undefined
       }

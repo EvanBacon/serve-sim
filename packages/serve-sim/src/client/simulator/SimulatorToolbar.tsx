@@ -14,6 +14,7 @@ import {
 import type { SimulatorOrientation } from "../types.js";
 import { getDeviceType, type DeviceType } from "./deviceFrames.js";
 import { ROTATE_LEFT_CYCLE } from "./orientation.js";
+import { inkFill, inkText } from "../utils/theme.js";
 
 type ExecFn = (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 type RotateFn = (orientation: SimulatorOrientation) => void | Promise<void>;
@@ -65,7 +66,7 @@ const toolbarStyle: CSSProperties = {
   padding: "8px 12px",
   borderRadius: 24,
   background: "var(--serve-sim-panel-bg, #181818)",
-  border: "1px solid rgba(255,255,255,0.1)",
+  border: `1px solid ${inkFill(0.1)}`,
   boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
   minWidth: 240,
   width: "100%",
@@ -127,7 +128,7 @@ const titleButtonStyle: CSSProperties = {
   textAlign: "left",
   background: "transparent",
   border: "none",
-  color: "#fff",
+  color: inkText(1),
   padding: "2px 4px",
   margin: "-2px -4px",
   borderRadius: 6,
@@ -163,7 +164,7 @@ const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
       }}
       style={{
         ...titleButtonStyle,
-        background: hover ? "rgba(255,255,255,0.1)" : "transparent",
+        background: hover ? inkFill(0.1) : "transparent",
         ...style,
       }}
       {...rest}
@@ -175,7 +176,7 @@ const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
           gap: 4,
           fontSize: 12,
           fontWeight: 600,
-          color: "#fff",
+          color: inkText(1),
           maxWidth: "100%",
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -193,7 +194,7 @@ const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
-            style={{ color: "rgba(255,255,255,0.6)", flexShrink: 0 }}
+            style={{ color: inkText(0.6), flexShrink: 0 }}
           >
             <polyline points="6 9 12 15 18 9" />
           </svg>
@@ -203,7 +204,7 @@ const Title = forwardRef<HTMLButtonElement, TitleProps>(function Title(
         <span
           style={{
             fontSize: 10,
-            color: "rgba(255,255,255,0.5)",
+            color: inkText(0.5),
             maxWidth: "100%",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -248,7 +249,7 @@ const buttonStyle: CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  color: "rgba(255,255,255,0.8)",
+  color: inkText(0.8),
   transition: "background-color 0.15s, color 0.15s",
   position: "relative",
   overflow: "visible",
@@ -318,9 +319,9 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
       }}
       style={{
         ...buttonStyle,
-        color: effectiveDisabled ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.8)",
+        color: effectiveDisabled ? inkText(0.25) : inkText(0.8),
         background:
-          hover && !effectiveDisabled ? "rgba(255,255,255,0.1)" : "transparent",
+          hover && !effectiveDisabled ? inkFill(0.1) : "transparent",
         cursor: effectiveDisabled ? "not-allowed" : "pointer",
         ...style,
       }}
@@ -343,8 +344,8 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
             padding: "4px 7px",
             borderRadius: 6,
             background: "var(--serve-sim-panel-bg, #181818)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            color: "rgba(255,255,255,0.92)",
+            border: `1px solid ${inkFill(0.12)}`,
+            color: inkText(0.92),
             fontSize: 11,
             fontWeight: 500,
             lineHeight: 1,

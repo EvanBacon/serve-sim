@@ -8,6 +8,7 @@ import { GridCapacityBanner } from "./grid-capacity-banner";
 import { DeviceRow } from "./device-row";
 import { PANEL_BACKGROUND, PANEL_BACKGROUND_TRANSPARENT } from "./panel-colors";
 import { ServeSimBrandLink } from "./serve-sim-brand-link";
+import { ThemeToggle } from "./theme-toggle";
 
 const DEVICE_SKELETON_ROWS = 12;
 
@@ -96,12 +97,12 @@ export function GridPanel({
   return (
     <Panel open={open} width={width} side={side} style={{ backgroundColor: PANEL_BACKGROUND }}>
       <PanelHeader
-        style={{ justifyContent: "flex-start", paddingLeft: 16, paddingTop: 16, gap: 4 }}
+        style={{ justifyContent: "flex-start", paddingLeft: 16, paddingRight: 16, paddingTop: 16, gap: 4 }}
       >
         <button
           type="button"
           onClick={onClose}
-          className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-md border-none bg-transparent text-[#8e8e93] [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="flex h-[30px] w-[30px] shrink-0 cursor-pointer items-center justify-center rounded-md border-none bg-transparent text-icon [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink"
           aria-label="Close devices sidebar"
           aria-pressed
           title="Devices"
@@ -109,23 +110,24 @@ export function GridPanel({
           <PanelLeft size={18} strokeWidth={1.75} />
         </button>
         <ServeSimBrandLink />
+        <ThemeToggle className="ml-auto" />
       </PanelHeader>
 
       <div className="px-4 pb-2 pt-0.5 shrink-0">
-        <label className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-white/6 focus-within:bg-white/10 [transition:background_0.12s]">
-          <Search size={14} strokeWidth={2} className="text-white/40 shrink-0" />
+        <label className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-ink/6 focus-within:bg-ink/10 [transition:background_0.12s]">
+          <Search size={14} strokeWidth={2} className="text-ink-40 shrink-0" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
-            className="min-w-0 flex-1 bg-transparent border-none outline-none text-[13px] text-white/90 placeholder:text-white/40"
+            className="min-w-0 flex-1 bg-transparent border-none outline-none text-[13px] text-ink-90 placeholder:text-ink-40"
           />
           {query && (
             <button
               type="button"
               aria-label="Clear search"
               onClick={() => setQuery("")}
-              className="shrink-0 grid place-items-center size-4 rounded-full bg-white/15 text-white/70 hover:bg-white/25"
+              className="shrink-0 grid place-items-center size-4 rounded-full bg-ink/15 text-ink-70 hover:bg-ink/25"
             >
               <X size={9} strokeWidth={3} />
             </button>
@@ -142,12 +144,12 @@ export function GridPanel({
           {filtered === null ? (
             <DeviceListSkeleton />
           ) : filtered.length === 0 ? (
-            <div className="px-2 py-6 text-white/40 text-[12px] text-center">
+            <div className="px-2 py-6 text-ink-40 text-[12px] text-center">
               {query ? "No matching simulators." : "No iOS simulators available."}
             </div>
           ) : (
             <>
-              <div className="pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+              <div className="pt-1 pb-1 text-[11px] font-semibold text-ink-40 uppercase tracking-wide">
                 Available
               </div>
               <div className="flex flex-col gap-0.5 pb-1">
@@ -164,7 +166,7 @@ export function GridPanel({
                 ))}
               </div>
               {!query && hasMore && (
-                <div className="px-2 py-2 text-[11px] text-white/35 text-center">
+                <div className="px-2 py-2 text-[11px] text-ink-40 text-center">
                   {devices ? `${devices.length} of ${total}` : null}
                 </div>
               )}
@@ -195,7 +197,7 @@ export function GridPanel({
 export function DeviceListSkeleton() {
   return (
     <>
-      <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-white/40 uppercase tracking-wide">
+      <div className="px-2 pt-1 pb-1 text-[11px] font-semibold text-ink-40 uppercase tracking-wide">
         Available
       </div>
       <div
@@ -223,14 +225,14 @@ function DeviceRowSkeleton({ index }: { index: number }) {
       className="flex items-center gap-2.5 px-2 py-1.5 rounded-lg select-none"
       aria-hidden="true"
     >
-      <div className="relative shrink-0 grid place-items-center size-9 rounded-[9px] overflow-hidden bg-white/6">
-        <span className="size-4 rounded-[4px] bg-white/[0.12]" />
+      <div className="relative shrink-0 grid place-items-center size-9 rounded-[9px] overflow-hidden bg-ink/6">
+        <span className="size-4 rounded-[4px] bg-ink/[0.12]" />
       </div>
       <div className="min-w-0 flex-1 flex flex-col gap-1.5">
-        <span className={`h-3 rounded-full bg-white/[0.12] ${nameWidth}`} />
-        <span className={`h-2.5 rounded-full bg-white/[0.08] ${statusWidth}`} />
+        <span className={`h-3 rounded-full bg-ink/[0.12] ${nameWidth}`} />
+        <span className={`h-2.5 rounded-full bg-ink/[0.08] ${statusWidth}`} />
       </div>
-      <span className={`shrink-0 h-2.5 rounded-full bg-white/[0.08] ${versionWidth}`} />
+      <span className={`shrink-0 h-2.5 rounded-full bg-ink/[0.08] ${versionWidth}`} />
     </div>
   );
 }

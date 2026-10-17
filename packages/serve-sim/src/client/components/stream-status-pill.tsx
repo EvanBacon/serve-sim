@@ -9,7 +9,11 @@ function streamErrorLabel(error: StreamError): string {
 
 export function StreamStatusPill({ streaming, error }: { streaming: boolean; error?: StreamError | null }) {
   const failed = !streaming && error != null;
-  const color = streaming ? "#4ade80" : failed ? "#f87171" : "#8e8e93";
+  const color = streaming
+    ? "var(--serve-sim-success)"
+    : failed
+      ? "var(--serve-sim-danger)"
+      : "var(--serve-sim-icon)";
   const label = streaming ? "live" : failed ? streamErrorLabel(error) : "connecting";
 
   return (

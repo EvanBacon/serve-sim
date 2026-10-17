@@ -23,6 +23,7 @@ import {
 } from "./screen-config-state.js";
 import { useAvccStream } from "./use-avcc-stream.js";
 import { isAvccSupported } from "../avcc-codec.js";
+import { inkFill, inkText } from "../utils/theme.js";
 
 // Custom round cursor matching the finger dot indicator
 const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='rgba(255,255,255,0.45)' stroke='rgba(0,0,0,0.55)' stroke-width='1.25' filter='drop-shadow(0 1px 2px rgba(0,0,0,0.45))'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -817,7 +818,7 @@ export function SimulatorView({
         display: "flex",
         flexDirection: "column",
         flex: 1,
-        ...(hideControls ? {} : { border: "1px solid rgba(255,255,255,0.12)" }),
+        ...(hideControls ? {} : { border: `1px solid ${inkFill(0.12)}` }),
         overflow: "hidden",
         minWidth: 0,
         minHeight: 0,
@@ -1203,15 +1204,15 @@ export function SimulatorView({
             alignItems: "center",
             justifyContent: "space-between",
             padding: "4px 8px",
-            borderTop: "1px solid rgba(255,255,255,0.12)",
+            borderTop: `1px solid ${inkFill(0.12)}`,
           }}
         >
           <button
             onClick={handleHomeClick}
             style={{
               background: "none",
-              border: "1px solid rgba(255,255,255,0.2)",
-              color: "#aaa",
+              border: `1px solid ${inkFill(0.2)}`,
+              color: inkText(0.65),
               fontSize: 11,
               fontFamily: "monospace",
               padding: "2px 10px",

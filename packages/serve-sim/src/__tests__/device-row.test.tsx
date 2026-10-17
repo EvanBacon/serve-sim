@@ -85,7 +85,7 @@ describe("DeviceRow", () => {
     );
 
     expect(html).toContain("Streaming");
-    expect(html).toContain("text-[#34d399]");
+    expect(html).toContain("text-success-emerald");
   });
 
   test("keeps the runtime and shutdown button in a stable trailing slot", () => {
@@ -126,7 +126,7 @@ describe("DeviceRow", () => {
       true,
     );
 
-    expect(html).toContain("bg-white/10");
+    expect(html).toContain("bg-ink/10");
     expect(html).not.toContain("bg-[#0a84ff]");
     expect(html).not.toContain("shadow-[inset");
   });

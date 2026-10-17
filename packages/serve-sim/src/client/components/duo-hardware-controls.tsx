@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Camera, Lock, Volume1, Volume2 } from "lucide-react";
 import { SimulatorToolbar } from "../simulator";
+import { inkText } from "../utils/theme";
 
 export const duoHardwareKeys = [
   { name: "Volume down", page: 12, usage: 234, Icon: Volume1 },
@@ -16,7 +17,7 @@ export function HardwareKey({ value, onPress, iconRotation = 0 }: { value: Key; 
   const release = useCallback(() => { if (held.current) { held.current = false; onPress(value, "up"); } }, [value, onPress]);
   useEffect(() => release, [release]);
   return <SimulatorToolbar.Button aria-label={value.name} title={value.name}
-    style={{ transform: `rotate(${iconRotation}deg)`, color: "#e5e5e7", transition: "opacity 180ms ease, background-color 150ms, color 150ms" }}
+    style={{ transform: `rotate(${iconRotation}deg)`, color: inkText(0.9), transition: "opacity 180ms ease, background-color 150ms, color 150ms" }}
     onPointerDown={(event) => {
       event.stopPropagation();
       if (event.button !== 0) return;
