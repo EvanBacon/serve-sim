@@ -1,5 +1,15 @@
-/** Named fold poses. 0° is closed (cover), 180° is flat open (inner). */
-export type DevicePoseId = "closed" | "open" | "book" | "tent" | "tabletop";
+/**
+ * The Duo's named fold poses, in toolbar order: exactly Closed · Book · Open.
+ * 0° is closed (cover), 180° is flat open (inner). This list is the single
+ * source of truth for the pose buttons; don't add intermediate hinge presets.
+ */
+export const DUO_POSES = [
+  { id: "closed", label: "Closed", hingeDegrees: 0 },
+  { id: "book", label: "Book", hingeDegrees: 130 },
+  { id: "open", label: "Open", hingeDegrees: 180 },
+] as const;
+
+export type DevicePoseId = (typeof DUO_POSES)[number]["id"];
 
 export type DevicePoseSpec = {
   id: DevicePoseId;
@@ -14,15 +24,7 @@ export const DUO_COVER_SIZE = { width: 1398, height: 2034 } as const;
 export const DUO_INNER_SIZE = { width: 2007, height: 2853 } as const;
 export const DUO_COVER_ACTIVE_BELOW_DEGREES = 90;
 
-const PRESETS: readonly DevicePoseSpec[] = (
-  [
-    ["closed", "Closed", 0],
-    ["tent", "Tent", 80],
-    ["tabletop", "Table", 100],
-    ["book", "Book", 130],
-    ["open", "Open", 180],
-  ] as const
-).map(([id, label, hingeDegrees]) => spec(id, label, hingeDegrees));
+const PRESETS: readonly DevicePoseSpec[] = DUO_POSES.map(({ id, label, hingeDegrees }) => spec(id, label, hingeDegrees));
 
 function spec(id: DevicePoseId, label: string, hingeDegrees: number): DevicePoseSpec {
   const coverActive = hingeDegrees < DUO_COVER_ACTIVE_BELOW_DEGREES;

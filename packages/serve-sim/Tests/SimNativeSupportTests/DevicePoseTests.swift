@@ -15,8 +15,12 @@ final class DevicePoseTests: XCTestCase {
         XCTAssertEqual(DevicePose.preset(named: "closed")?.hingeDegrees, 0)
         XCTAssertEqual(DevicePose.preset(named: "open")?.hingeDegrees, 180)
         XCTAssertEqual(DevicePose.preset(named: "book")?.hingeDegrees, 130)
-        XCTAssertEqual(DevicePose.preset(named: "tent")?.hingeDegrees, 80)
-        XCTAssertEqual(DevicePose.preset(named: "tabletop")?.hingeDegrees, 100)
+    }
+
+    func testOnlyClosedBookAndOpenPresets() {
+        XCTAssertEqual(DevicePose.presets.map(\.name), ["closed", "book", "open"])
+        XCTAssertNil(DevicePose.preset(named: "tent"))
+        XCTAssertNil(DevicePose.preset(named: "tabletop"))
     }
 
     func testCoverAndInnerAliases() {
