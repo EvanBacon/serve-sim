@@ -42,6 +42,7 @@ import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
 import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
+import { MAX_BITRATE_ENV, applyMaxBitrateOption, parseMaxBitrateMbps } from "./max-bitrate";
 import { shareHost } from "./share-host";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
@@ -2017,6 +2018,18 @@ program
       return v;
     },
   )
+  .option(
+    "--max-bitrate <Mbps>",
+    "Cap the H.264 stream bitrate in Mbps (default scales with screen size, " +
+      `6-30 Mbps). Also read from ${MAX_BITRATE_ENV}.`,
+    (value) => {
+      try {
+        return parseMaxBitrateMbps(value);
+      } catch (error) {
+        throw new InvalidArgumentError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2026,6 +2039,7 @@ Examples:
   serve-sim                              Open simulator preview at localhost:3200
   serve-sim -p 8080                      Preview on a custom port
   serve-sim --codec mjpeg                Force MJPEG (e.g. on VMs without H.264 encode)
+  serve-sim --max-bitrate 8              Cap the H.264 stream at 8 Mbps
   serve-sim --panes devices,tools --fit  Open panes and fit the simulator to the viewport
   serve-sim --theme dark                 Start the simulator in Dark Mode
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
@@ -2041,6 +2055,7 @@ Examples:
     if (typeof opts.authToken === "string" && opts.authToken.trim() !== "") {
       process.env[AUTH_TOKEN_ENV] = opts.authToken.trim();
     }
+    applyMaxBitrateOption(opts.maxBitrate);
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
