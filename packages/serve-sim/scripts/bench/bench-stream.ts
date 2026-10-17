@@ -270,6 +270,14 @@ async function serveSimMjpeg(base: string, signal: AbortSignal) {
 async function baguetteWs(url: string, signal: AbortSignal) {
   const ws = new WebSocket(url);
   baguetteSocket = ws;
+  // Without a listener a failed handshake is an uncaught EventEmitter error.
+  const closed = new Promise<void>((resolve, reject) => {
+    ws.on("close", () => resolve());
+    ws.on("error", (e) => {
+      console.error(`bench-stream: baguette stream WebSocket ${url} failed: ${e.message}`);
+      reject(e);
+    });
+  });
   ws.binaryType = "nodebuffer";
   signal.addEventListener("abort", () => ws.close());
   const jpeg = new URL(url).searchParams.get("format") !== "avcc";
@@ -282,7 +290,7 @@ async function baguetteWs(url: string, signal: AbortSignal) {
     if (sink) sink.chunk(t, data[0]!, data.subarray(1));
     else dec.push(t, data.length, data);
   });
-  await new Promise((r) => ws.on("close", r));
+  await closed;
 }
 
 
