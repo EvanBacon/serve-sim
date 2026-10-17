@@ -85,6 +85,14 @@ describe("client colors go through theme tokens", () => {
       expect({ file, hits }).toEqual({ file, hits: [] });
     }
   });
+
+  test("stream diagnostics UI (status pill, error panel) uses no color literals", () => {
+    for (const file of ["components/stream-status-pill.tsx", "components/stream-error-panel.tsx"]) {
+      const source = readFileSync(join(clientDir, file), "utf8").replace(/var\(--[\w-]+,[^)]*\)/g, "");
+      const hits = source.match(/#[0-9a-f]{3,8}\b|rgba?\([^)]*\)/gi) ?? [];
+      expect({ file, hits }).toEqual({ file, hits: [] });
+    }
+  });
 });
 
 describe("ThemeToggle", () => {

@@ -35,25 +35,23 @@ export function StreamErrorPanel({ title, error, diagnosticsEndpoint }: {
       className="absolute inset-0 flex items-center justify-center p-6 pointer-events-none"
     >
       <div
-        className="pointer-events-auto max-w-[420px] rounded-xl px-4 py-3 text-[13px] leading-[1.4]"
-        style={{ background: "rgba(28,28,30,0.92)", color: "#f2f2f7", border: "1px solid rgba(248,113,113,0.45)" }}
+        className="pointer-events-auto max-w-[420px] rounded-xl px-4 py-3 text-[13px] leading-[1.4] bg-panel/92 text-ink-95 border border-danger/45 shadow-popover"
       >
-        <div className="font-semibold" style={{ color: "#f87171" }}>{title}</div>
+        <div className="font-semibold text-danger">{title}</div>
         <div className="mt-1">{error.reason}</div>
-        <div className="mt-1 font-mono text-[11px]" style={{ color: "#8e8e93" }}>
+        <div className="mt-1 font-mono text-[11px] text-icon">
           {[error.error, error.stage && `stage=${error.stage}`, error.status ? `HTTP ${error.status}` : null].filter(Boolean).join(" · ")}
           {retry ? ` · ${retry}` : ""}
         </div>
         <div className="mt-2 flex items-center gap-2">
           <button
             type="button"
-            className="rounded-md px-2 py-1 text-[12px] font-medium"
-            style={{ background: "#3a3a3c", color: "#f2f2f7" }}
+            className="rounded-md px-2 py-1 text-[12px] font-medium bg-ink/12 text-ink-95"
             onClick={() => { void copyDiagnostics(diagnosticsEndpoint).then(setStatus); }}
           >
             Copy diagnostics
           </button>
-          {status && <span className="text-[11px]" style={{ color: "#8e8e93" }}>{status}</span>}
+          {status && <span className="text-[11px] text-icon">{status}</span>}
         </div>
       </div>
     </div>
