@@ -26,10 +26,11 @@
  */
 import { spawn, execFileSync, type ChildProcess } from "child_process";
 import { createServer } from "http";
-import { existsSync, writeFileSync } from "fs";
+import { writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket } from "ws";
+import { buildSwiftHelper } from "./swift-helper";
 
 type Args = Record<string, string>;
 function parseArgs(argv: string[]): Args {
@@ -115,15 +116,13 @@ function startPageServer(): Promise<void> {
 }
 const sendPage = (msg: object) => pageSocket?.send(JSON.stringify(msg));
 
+const BENCH_DIR = dirname(fileURLToPath(import.meta.url));
+
 // ── Native probe ───────────────────────────────────────────────────────────
 type ProbeFrame = { t: number; px: number };
 const probeFrames: ProbeFrame[] = [];
 function startProbe(): ChildProcess {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const bin = "/tmp/serve-sim-native-probe";
-  if (!existsSync(bin)) {
-    execFileSync("swiftc", ["-O", "-o", bin, join(here, "native-probe.swift")], { stdio: "inherit" });
-  }
+  const bin = buildSwiftHelper(join(BENCH_DIR, "native-probe.swift"));
   const p = spawn(bin, [UDID], { stdio: ["ignore", "pipe", "inherit"] });
   let buf = "";
   p.stdout!.on("data", (d) => {
@@ -164,10 +163,7 @@ class CentreDecoder {
   private last = "";
   private sawConfig = false;
   constructor(private readonly kind: "h264" | "mjpeg") {
-    const bin = "/tmp/serve-sim-frame-decoder";
-    if (!existsSync(bin)) {
-      execFileSync("swiftc", ["-O", "-o", bin, join(dirname(fileURLToPath(import.meta.url)), "frame-decoder.swift")], { stdio: "inherit" });
-    }
+    const bin = buildSwiftHelper(join(BENCH_DIR, "frame-decoder.swift"));
     this.proc = spawn(bin, [], { stdio: ["pipe", "pipe", "inherit"] });
     this.proc.stdin!.on("error", () => {});
     this.proc.stdout!.on("data", (d: Buffer) => {
