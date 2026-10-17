@@ -29,13 +29,15 @@ actor H264Encoder {
     private var width: Int32 = 0
     private var height: Int32 = 0
     private let fps: Int32
+    private let maxBitrate: Int?
     private var emittedDescription = false
     private var frameCount: Int64 = 0
 
     private let diagnostics: EncoderDiagnostics?
 
-    init(fps: Int = 60, diagnostics: EncoderDiagnostics? = nil) {
+    init(fps: Int = 60, maxBitrate: Int? = nil, diagnostics: EncoderDiagnostics? = nil) {
         self.fps = Int32(fps)
+        self.maxBitrate = maxBitrate
         self.diagnostics = diagnostics
     }
 
@@ -144,7 +146,7 @@ actor H264Encoder {
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel),
             (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse!),
             (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: StreamBitrate.average(
-                width: Int(width), height: Int(height), fps: Int(fps)
+                width: Int(width), height: Int(height), fps: Int(fps), cap: maxBitrate
             ))),
             (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: fps)),
             // 5s keyframe interval: IDRs are far larger than P-frames, so

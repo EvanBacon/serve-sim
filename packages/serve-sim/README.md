@@ -141,6 +141,10 @@ Options:
       --codec <codec> Stream codec for the preview UI: 'auto' (H.264 when the
                       browser can decode it) or 'mjpeg' (force software JPEG —
                       e.g. on VMs without H.264 encode)
+      --max-bitrate <Mbps>
+                      Cap the H.264 stream bitrate (default scales with
+                      screen size, 6-30 Mbps). Also read from
+                      SERVE_SIM_MAX_BITRATE
       --list [device] List running streams
       --kill [device] Kill running stream(s)
 
@@ -167,6 +171,7 @@ serve-sim --kill                       # stop all helpers
 serve-sim --panes devices,tools --fit  # start with selected panes open and fit the simulator
 serve-sim --theme dark                 # start the simulator in Dark Mode
 serve-sim --allow-exec                 # enable `serve-sim exec` and .ipa drag-to-install
+serve-sim --max-bitrate 8              # cap H.264 at 8 Mbps (slow links / shared hosts)
 
 # Type text into the focused field
 serve-sim type "Hello, world!"

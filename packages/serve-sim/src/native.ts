@@ -11,6 +11,7 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { maxBitrateFromEnv } from "./max-bitrate";
 
 const require = createRequire(import.meta.url);
 
@@ -48,7 +49,8 @@ interface SimCaptureHandle {
 
 interface NativeAddon {
   SimHID: new (udid: string, duoHelper: string) => SimHIDHandle;
-  SimCapture: new (udid: string) => SimCaptureHandle;
+  /** maxBitrate: H.264 cap in bits/s, or null for the resolution-scaled default. */
+  SimCapture: new (udid: string, maxBitrate: number | null) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
 }
@@ -222,8 +224,8 @@ export class NativeHid {
 export class NativeCapture {
   private readonly handle: SimCaptureHandle;
 
-  constructor(udid: string) {
-    this.handle = new (load().SimCapture)(udid);
+  constructor(udid: string, maxBitrate: number | undefined = maxBitrateFromEnv()) {
+    this.handle = new (load().SimCapture)(udid, maxBitrate ?? null);
   }
 
   /** Begin capturing. Rejects if the device isn't booted. */

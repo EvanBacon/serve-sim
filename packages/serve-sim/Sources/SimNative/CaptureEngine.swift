@@ -92,6 +92,8 @@ actor CaptureEngine {
     }
 
     private let deviceUDID: String
+    /// Optional cap (bits/s) on the resolution-scaled H.264 bitrate.
+    private let maxBitrate: Int?
     private let frameCapture = FrameCapture()
     private var phase = Phase.unstarted
 
@@ -108,8 +110,9 @@ actor CaptureEngine {
     /// for the private per-frame copy while this is non-zero.
     private let pixelConsumers = PixelConsumerCount()
 
-    init(deviceUDID: String) {
+    init(deviceUDID: String, maxBitrate: Int? = nil) {
         self.deviceUDID = deviceUDID
+        self.maxBitrate = maxBitrate
     }
 
     func setPreferredScreenSize(width: Int, height: Int) async {
@@ -236,7 +239,7 @@ actor CaptureEngine {
     func addAVCCConsumer(
         onFrame: sending @escaping (Dimensions, Data, Int32) async -> Void
     ) -> (@Sendable () async -> Void) {
-        addConsumer(encoder: AVCCEncoder(diagnostics: encoderDiagnostics)) { [weak self] encoded in
+        addConsumer(encoder: AVCCEncoder(diagnostics: encoderDiagnostics, maxBitrate: maxBitrate)) { [weak self] encoded in
             let flagDescription: Int32 = 1 << 0
             let flagKeyframe: Int32 = 1 << 1
 
@@ -310,8 +313,8 @@ actor AVCCEncoder: FrameEncoder {
     let h264Encoder: H264Encoder
     var forceKeyframe = true
 
-    init(diagnostics: EncoderDiagnostics? = nil) {
-        h264Encoder = H264Encoder(fps: 60, diagnostics: diagnostics)
+    init(diagnostics: EncoderDiagnostics? = nil, maxBitrate: Int? = nil) {
+        h264Encoder = H264Encoder(fps: 60, maxBitrate: maxBitrate, diagnostics: diagnostics)
     }
 
     func encode(_ frame: Frame) async throws -> H264Encoder.Encoded? {

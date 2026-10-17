@@ -117,13 +117,15 @@ private func u32(_ v: Int) -> UInt32 {
     private let engine: CaptureEngine
     private let queue: NodeAsyncQueue
 
-    @NodeConstructor init(_ udid: String) throws {
+    /// `maxBitrate`: optional cap (bits/s) on the resolution-scaled H.264
+    /// bitrate; null/undefined keeps the default.
+    @NodeConstructor init(_ udid: String, _ maxBitrate: Int?) throws {
         // unref'd by NodeAsyncQueue's init, so the frame pipeline alone won't
         // keep the event loop alive. Bounded queue + blocking AVCC preserves
         // inter-frame ordering; MJPEG is nonblocking and drops under backpressure.
         let queue = try NodeAsyncQueue(label: "simCapture", maxQueueSize: 16)
         self.queue = queue
-        self.engine = CaptureEngine(deviceUDID: udid)
+        self.engine = CaptureEngine(deviceUDID: udid, maxBitrate: maxBitrate)
     }
 
     // returns a function that can be called to unsubscribe
