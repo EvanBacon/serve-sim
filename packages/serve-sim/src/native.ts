@@ -11,6 +11,7 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { maxBitrateFromEnv } from "./max-bitrate";
 
 const require = createRequire(import.meta.url);
 
@@ -43,16 +44,18 @@ interface SimCaptureHandle {
   subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void | Promise<void>>;
   /** Absent in addons built before diagnostics existed. */
   diagnostics?(): Promise<string>;
+  snapshotJpeg(): Promise<Uint8Array | null>;
 }
 
 interface NativeAddon {
   SimHID: new (udid: string, duoHelper: string) => SimHIDHandle;
-  SimCapture: new (udid: string) => SimCaptureHandle;
+  /** maxBitrate: H.264 cap in bits/s, or null for the resolution-scaled default. */
+  SimCapture: new (udid: string, maxBitrate: number | null) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
 }
 
-// (codec, data, width, height, flags) — codec 0=MJPEG 1=AVCC; flags bit0=desc bit1=keyframe.
+// (data, width, height, flags) — codec 0=MJPEG 1=AVCC 2=size-only; flags bit0=desc bit1=keyframe.
 type RawFrameCallback = (
   data: Uint8Array,
   width: number,
@@ -62,11 +65,17 @@ type RawFrameCallback = (
 
 const CODEC_MJPEG = 0;
 const CODEC_AVCC = 1;
+const CODEC_SIZE = 2;
 const FLAG_DESCRIPTION = 1 << 0;
 const FLAG_KEYFRAME = 1 << 1;
 
 export type MjpegFrame = {
   data: Uint8Array;
+  width: number;
+  height: number;
+};
+
+export type ScreenSize = {
   width: number;
   height: number;
 };
@@ -215,8 +224,8 @@ export class NativeHid {
 export class NativeCapture {
   private readonly handle: SimCaptureHandle;
 
-  constructor(udid: string) {
-    this.handle = new (load().SimCapture)(udid);
+  constructor(udid: string, maxBitrate: number | undefined = maxBitrateFromEnv()) {
+    this.handle = new (load().SimCapture)(udid, maxBitrate ?? null);
   }
 
   /** Begin capturing. Rejects if the device isn't booted. */
@@ -251,6 +260,22 @@ export class NativeCapture {
   diagnostics(): Promise<string> {
     if (!this.handle.diagnostics) return Promise.reject(new Error("native capture diagnostics unavailable in this build"));
     return this.handle.diagnostics();
+  }
+
+  /**
+   * Screen size with the first frame after subscribing and on every change. Encodes
+   * nothing, so a session can track dimensions without paying for JPEG or
+   * H.264 work while nobody is watching.
+   */
+  subscribeSize(onSize: (size: ScreenSize) => void | Promise<void>): Promise<() => void | Promise<void>> {
+    return this.handle.subscribe(CODEC_SIZE, async (_data, width, height) => {
+      await onSize({ width, height });
+    });
+  }
+
+  /** JPEG of the latest frame, encoded on demand; null before the first frame. */
+  snapshotJpeg(): Promise<Uint8Array | null> {
+    return this.handle.snapshotJpeg();
   }
 
   /** Halt frame production. Full teardown happens when this object is GC'd. */

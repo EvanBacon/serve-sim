@@ -18,13 +18,14 @@ actor FrameCapture {
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
     private var photocopier = Photocopier()
-    private var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
+    private var onFrame: ((CVPixelBuffer, CMTime, Bool) -> Void)?
+    private var pixelConsumers: PixelConsumerCount?
     private var frameCount: UInt64 = 0
     private(set) var capturedWidth: Int = 0
     private(set) var capturedHeight: Int = 0
     private var idleTimer: Task<Void, Never>?
     private var lastCaptureTime: ContinuousClock.Instant = .now
-    private var lastSeeds: [ObjectIdentifier: UInt32] = [:]
+    private var lastStamps: [ObjectIdentifier: SurfaceFrameStamp] = [:]
     private var rewireTickCount: Int = 0
     /// Interval at which the idle timer re-emits the current frame even when
     /// the simulator isn't rendering anything new. This is load-bearing for two
@@ -50,9 +51,19 @@ actor FrameCapture {
     private var lastSelectedIndex: Int?
     private var lastSelectionReason = "none"
     private var sizeChanges: [[String: Any]] = []
+    private var sourceCache = FramebufferSourceCache<FramebufferSource>(maxAge: 1.0)
+    private var recheckGeneration: UInt64 = 0
 
-    func start(deviceUDID: String, onFrame: @escaping @Sendable (CVPixelBuffer, CMTime) -> Void) throws {
+    /// `onFrame(buffer, timestamp, isPrivateCopy)`: frames are deep-copied only
+    /// while `pixelConsumers` is non-empty; otherwise the buffer wraps the live
+    /// framebuffer surface and is only good for its dimensions.
+    func start(
+        deviceUDID: String,
+        pixelConsumers: PixelConsumerCount,
+        onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Bool) -> Void
+    ) throws {
         self.onFrame = onFrame
+        self.pixelConsumers = pixelConsumers
 
         SimFrameworks.load()
         guard let device = Self.findSimDevice(udid: deviceUDID) else {
@@ -105,7 +116,8 @@ actor FrameCapture {
             }
         }
         callbackUUIDs.removeAll()
-        lastSeeds.removeAll()
+        lastStamps.removeAll()
+        sourceCache.invalidate()
         descriptors = candidates
 
         // Registering screen callbacks is what causes SimulatorKit to wire the
@@ -234,13 +246,36 @@ actor FrameCapture {
         let uuid = UUID()
         callbackUUIDs[ObjectIdentifier(desc)] = uuid
 
+        // Explicitly typed locals keep the type checker from choking on the
+        // dynamic AnyObject call (some Xcode swiftc builds crash otherwise).
+        let frameCallback: @convention(block) () -> Void = { [self, weak desc] in
+            assumeIsolated { capture in
+                capture.onFrameCallback(from: desc)
+            }
+        }
+        let surfacesChangedCallback: @convention(block) () -> Void = { [self] in
+            assumeIsolated { capture in
+                _ = capture.captureFrame(trigger: .surfacesChanged)
+            }
+        }
+        let propertiesChangedCallback: @convention(block) () -> Void = {}
+
         desc.registerScreenCallbacks(
             uuid: uuid,
             callbackQueue: queue,
-            frameCallback: { [self] in assumeIsolated { $0.captureFrame() } },
-            surfacesChangedCallback: { [self] in assumeIsolated { $0.captureFrame() } },
-            propertiesChangedCallback: {}
+            frameCallback: frameCallback,
+            surfacesChangedCallback: surfacesChangedCallback,
+            propertiesChangedCallback: propertiesChangedCallback
         )
+    }
+
+    /// `desc` is nil once the registering descriptor has been released.
+    private func onFrameCallback(from desc: AnyObject?) {
+        var fromCached = false
+        if let desc, let current = sourceCache.current?.descriptor {
+            fromCached = current === desc
+        }
+        onFrameCallback(trigger: fromCached ? .frame : .otherDescriptorFrame)
     }
 
     private func startIdleTimer() {
@@ -256,7 +291,7 @@ actor FrameCapture {
     private func onIdleTimerTick() {
         let now = ContinuousClock.now
         guard (now - self.lastCaptureTime) >= Self.idleInterval else { return }
-        self.captureFrame(force: true)
+        self.captureFrame(force: true, trigger: .idleTick)
         // Self-heal: if we've never captured a frame, the cached descriptor
         // is likely stale. Re-wire the pipeline periodically (every ~1s)
         // until frames start flowing.
@@ -274,27 +309,41 @@ actor FrameCapture {
 
     // MARK: - Frame capture
 
-    private func captureFrame(force: Bool = false) {
-        guard let desc = pickBestDescriptor() else { return }
-
+    /// Resolve the selected descriptor and its current IOSurface. Every
+    /// `framebufferSurface` read is an XPC round-trip, so frame callbacks go
+    /// through `sourceCache` instead of calling this directly.
+    private func resolveSource() -> FramebufferSource? {
+        guard let desc = pickBestDescriptor() else { return nil }
         let surfSel = NSSelectorFromString("framebufferSurface")
-        guard let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { return }
-        let surface = unsafeBitCast(surfObj, to: IOSurface.self)
+        guard let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { return nil }
+        return FramebufferSource(descriptor: desc, surface: unsafeBitCast(surfObj, to: IOSurface.self))
+    }
+
+    /// Returns false only when the frame was skipped because the surface and
+    /// its seed hadn't changed (see `onFrameCallback`).
+    @discardableResult
+    private func captureFrame(force: Bool = false, trigger: FramebufferSourceCache<FramebufferSource>.Trigger = .frame) -> Bool {
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        guard let source = sourceCache.source(for: trigger, now: now, resolve: resolveSource) else { return true }
+        let desc = source.descriptor
+        let surface = source.surface
 
         // Seed-skip: when the simulator's framebuffer content hasn't changed,
         // don't spend cycles re-encoding the same pixels back-to-back from the
         // frame-callback path. BUT: we must still re-emit at the idle floor
         // (~5 fps) so that downstream consumers keep seeing a live stream —
-        // see the `idleInterval` doc-comment for why that matters.
+        // see the `idleInterval` doc-comment for why that matters. The surface
+        // ID is part of the stamp so a swapped-in surface whose seed happens to
+        // match the old one's still counts as new content.
         let key = ObjectIdentifier(desc)
-        let seed = IOSurfaceGetSeed(surface)
-        let seedChanged = lastSeeds[key] != seed
-        if frameCount > 0, !seedChanged, !force { return }
-        lastSeeds[key] = seed
+        let stamp = SurfaceFrameStamp(surfaceID: IOSurfaceGetID(surface), seed: IOSurfaceGetSeed(surface))
+        let contentChanged = lastStamps[key] != stamp
+        if frameCount > 0, !contentChanged, !force { return false }
+        lastStamps[key] = stamp
 
         let w = IOSurfaceGetWidth(surface)
         let h = IOSurfaceGetHeight(surface)
-        guard w > 0, h > 0 else { return }
+        guard w > 0, h > 0 else { return true }
 
         if capturedWidth != w || capturedHeight != h {
             let from = "\(capturedWidth)x\(capturedHeight)"
@@ -317,13 +366,39 @@ actor FrameCapture {
             [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA] as CFDictionary,
             &pixelBuffer
         )
-        guard status == kCVReturnSuccess, let pb = pixelBuffer?.takeRetainedValue() else { return }
+        guard status == kCVReturnSuccess, let pb = pixelBuffer?.takeRetainedValue() else { return true }
 
         lastCaptureTime = .now
         frameCount += 1
         let timestamp = CMTime(value: CMTimeValue(frameCount), timescale: 60)
-        guard let copy = photocopier.copy(pb) else { return }
-        onFrame?(copy, timestamp)
+        if pixelConsumers?.isEmpty ?? false {
+            onFrame?(pb, timestamp, false)
+            return true
+        }
+        guard let copy = photocopier.copy(pb) else { return true }
+        onFrame?(copy, timestamp, true)
+        return true
+    }
+
+    /// Frame callbacks can arrive before the surface seed reflects the new
+    /// frame. If this one finds the seed unchanged, re-check briefly instead of
+    /// leaving the frame for the idle tick. A newer callback supersedes it.
+    private func onFrameCallback(trigger: FramebufferSourceCache<FramebufferSource>.Trigger) {
+        recheckGeneration &+= 1
+        if captureFrame(trigger: trigger) { return }
+        scheduleSeedRecheck(generation: recheckGeneration, attempt: 0)
+    }
+
+    private func scheduleSeedRecheck(generation: UInt64, attempt: Int) {
+        guard let delay = SeedRecheckSchedule.delayMs(afterAttempt: attempt) else { return }
+        queue.asyncAfter(deadline: .now() + .milliseconds(delay)) { [weak self] in
+            self?.assumeIsolated { capture in
+                guard capture.recheckGeneration == generation, capture.onFrame != nil else { return }
+                if !capture.captureFrame() {
+                    capture.scheduleSeedRecheck(generation: generation, attempt: attempt + 1)
+                }
+            }
+        }
     }
 
     func getScreenSize() -> (width: Int, height: Int)? {
@@ -344,8 +419,10 @@ actor FrameCapture {
         }
         callbackUUIDs.removeAll()
         descriptors.removeAll()
-        lastSeeds.removeAll()
+        lastStamps.removeAll()
+        sourceCache.invalidate()
         onFrame = nil
+        pixelConsumers = nil
         frameCount = 0
         capturedWidth = 0
         capturedHeight = 0
@@ -362,6 +439,28 @@ actor FrameCapture {
         sizeChanges = []
     }
 
+    /// Emit the current screen now (e.g. a viewer just subscribed).
+    func requestFrame() {
+        captureFrame(force: true)
+    }
+
+    /// A private copy of the current screen, for one-off snapshots. Taken at
+    /// call time from the cached surface rather than retaining a wrapper of
+    /// SimulatorKit's live (recycled) framebuffer between frames.
+    func copyCurrentFrame() -> CVPixelBuffer? {
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        guard frameCount > 0,
+              let source = sourceCache.source(for: .frame, now: now, resolve: resolveSource) else { return nil }
+        var pixelBuffer: Unmanaged<CVPixelBuffer>?
+        let status = CVPixelBufferCreateWithIOSurface(
+            kCFAllocatorDefault, source.surface,
+            [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA] as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pb = pixelBuffer?.takeRetainedValue() else { return nil }
+        return photocopier.copy(pb)
+    }
+
     func setPreferredScreenSize(width: Int, height: Int) {
         if width > 0, height > 0 {
             preferredScreenSize = FramebufferSurfaceSize(width: width, height: height)
@@ -370,7 +469,7 @@ actor FrameCapture {
         }
         didLogRejectedPresentationSurface = false
         didLogMissingExpectedSurface = false
-        captureFrame(force: true)
+        captureFrame(force: true, trigger: .preferredSizeChanged)
     }
 
     /// JSON snapshot of display selection for `serve-sim doctor`.
@@ -500,6 +599,11 @@ actor FrameCapture {
             ($0.value(forKey: "UDID") as? NSUUID)?.uuidString == udid
         })
     }
+}
+
+struct FramebufferSource {
+    let descriptor: NSObject
+    let surface: IOSurface
 }
 
 @objc protocol FramebufferDescriptor {
