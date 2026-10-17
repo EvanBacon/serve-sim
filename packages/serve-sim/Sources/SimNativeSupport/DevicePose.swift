@@ -30,10 +30,9 @@ public enum DevicePose {
         return nil
     }
 
+    /// Mirrors `DUO_POSES` in src/device-pose.ts: exactly closed, book, open.
     public static let presets: [DevicePoseSpec] = [
         DevicePoseSpec(name: "closed", hingeDegrees: 0),
-        DevicePoseSpec(name: "tent", hingeDegrees: 80),
-        DevicePoseSpec(name: "tabletop", hingeDegrees: 100),
         DevicePoseSpec(name: "book", hingeDegrees: 130),
         DevicePoseSpec(name: "open", hingeDegrees: 180),
     ]

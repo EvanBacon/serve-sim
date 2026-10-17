@@ -40,8 +40,8 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and a [maintained 
 
 ## iPhone Duo
 
-With Xcode 27.1 and the iOS 27.1 runtime, the preview exposes **Folded**,
-**Semi-folded**, and **Fully open** controls for iPhone Duo. Selecting one drives
+With Xcode 27.1 and the iOS 27.1 runtime, the preview exposes **Closed**,
+**Book**, and **Open** controls for iPhone Duo. Selecting one drives
 the simulator's hinge and follows the active panel's framebuffer. Touches use the panel's own
 integrated digitizer; volume and power controls use a guest HID service.
 
@@ -71,9 +71,9 @@ press-and-hold. The main control bar has no volume menu or 2D/3D mode toggle.
 See the [feature contract and regression checklist](../../.agents/skills/serve-sim-duo-verification/references/expected-behavior.md)
 for appearance, folding, rotation, controls, screenshot, and performance checks.
 
-The preview follows hinge changes made in Device Hub. Closed (0°), Tent (80°),
-Table (100°), Book (130°), and Open (180°) are angle presets; use Rotate for
-orientation. SpringBoard primary-display events choose the captured panel,
+The preview follows hinge changes made in Device Hub. The pose toolbar offers
+exactly three presets: Closed (0°), Book (130°), and Open (180°). Set any other
+angle with `serve-sim fold <deg>`; use Rotate for orientation. SpringBoard primary-display events choose the captured panel,
 including intermediate poses that depend on whether you were opening or closing.
 Until guest readback arrives, a 90° threshold provides the initial fallback.
 The runtime decides which intermediate poses apps adopt.

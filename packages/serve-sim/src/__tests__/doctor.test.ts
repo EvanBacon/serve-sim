@@ -16,7 +16,8 @@ import {
 import { simMiddleware } from "../middleware";
 import { isTrustedLoopback } from "../request-trust";
 
-const HOME = "/Users/evan";
+// Not a prefix of any real home (e.g. /Users/evanbacon), or the substring checks below misfire.
+const HOME = "/Users/serve-sim-fixture";
 
 const probe: Probe = async (file, args) => {
   const key = [file, ...args].join(" ");
@@ -28,10 +29,10 @@ const probe: Probe = async (file, args) => {
     "/usr/bin/xcodebuild -version": "Xcode 27.0\nBuild version 27A5000",
     "/bin/ps -axo pid=,command=": [
       "  1 /sbin/launchd",
-      "  812 /Users/evan/Downloads/Xcode-beta.app/Contents/Applications/DeviceHub.app/Contents/MacOS/DeviceHub --serve",
+      `  812 ${HOME}/Downloads/Xcode-beta.app/Contents/Applications/DeviceHub.app/Contents/MacOS/DeviceHub --serve`,
     ].join("\n"),
     "/usr/bin/defaults read /Applications/Xcode.app/Contents/Info CFBundleShortVersionString": "27.0",
-    "/usr/bin/defaults read /Users/evan/Downloads/Xcode-beta.app/Contents/Info CFBundleShortVersionString": "27.1",
+    [`/usr/bin/defaults read ${HOME}/Downloads/Xcode-beta.app/Contents/Info CFBundleShortVersionString`]: "27.1",
   };
   return answers[key] ?? null;
 };
@@ -173,7 +174,7 @@ describe("simulator crash report pointer", () => {
       const t = new Date(now - ageHours * 3600_000);
       utimesSync(path, t, t);
     };
-    write("MyApp-2026-10-14-110000.ips", `${header("MyApp")}\n{"procPath":"/Users/evan/Library/Developer/CoreSimulator/Devices/${UDID}/data/Containers/Bundle/Application/X/MyApp.app/MyApp"}`, 1);
+    write("MyApp-2026-10-14-110000.ips", `${header("MyApp")}\n{"procPath":"${HOME}/Library/Developer/CoreSimulator/Devices/${UDID}/data/Containers/Bundle/Application/X/MyApp.app/MyApp"}`, 1);
     write("SpringBoard-2026-10-14-090000.ips", `${header("SpringBoard")}\n{"procPath":"\\/Library\\/Developer\\/CoreSimulator\\/Volumes\\/x\\/iOS 27.0.simruntime\\/Contents/Resources/RuntimeRoot/System/Library/CoreServices/SpringBoard.app/SpringBoard"}`, 3);
     write("maild-2026-10-14-080000.ips", `{"app_name":"maild","platform":7,"bug_type":"309"}\n{"procPath" : "\\/Volumes\\/VOLUME\\/*\\/EmailDaemon.framework\\/maild"}`, 4);
     write("Safari-2026-10-14-100000.ips", `{"app_name":"Safari","platform":1}\n{"procPath":"/Applications/Safari.app/Contents/MacOS/Safari"}`, 2);
