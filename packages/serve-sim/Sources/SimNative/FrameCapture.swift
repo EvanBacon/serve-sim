@@ -25,7 +25,7 @@ actor FrameCapture {
     private(set) var capturedHeight: Int = 0
     private var idleTimer: Task<Void, Never>?
     private var lastCaptureTime: ContinuousClock.Instant = .now
-    private var lastSeeds: [ObjectIdentifier: UInt32] = [:]
+    private var lastStamps: [ObjectIdentifier: SurfaceFrameStamp] = [:]
     private var rewireTickCount: Int = 0
     /// Interval at which the idle timer re-emits the current frame even when
     /// the simulator isn't rendering anything new. This is load-bearing for two
@@ -116,7 +116,7 @@ actor FrameCapture {
             }
         }
         callbackUUIDs.removeAll()
-        lastSeeds.removeAll()
+        lastStamps.removeAll()
         sourceCache.invalidate()
         descriptors = candidates
 
@@ -319,8 +319,8 @@ actor FrameCapture {
         return FramebufferSource(descriptor: desc, surface: unsafeBitCast(surfObj, to: IOSurface.self))
     }
 
-    /// Returns false only when the frame was skipped because the surface seed
-    /// hadn't changed (see `onFrameCallback`).
+    /// Returns false only when the frame was skipped because the surface and
+    /// its seed hadn't changed (see `onFrameCallback`).
     @discardableResult
     private func captureFrame(force: Bool = false, trigger: FramebufferSourceCache<FramebufferSource>.Trigger = .frame) -> Bool {
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
@@ -332,12 +332,14 @@ actor FrameCapture {
         // don't spend cycles re-encoding the same pixels back-to-back from the
         // frame-callback path. BUT: we must still re-emit at the idle floor
         // (~5 fps) so that downstream consumers keep seeing a live stream —
-        // see the `idleInterval` doc-comment for why that matters.
+        // see the `idleInterval` doc-comment for why that matters. The surface
+        // ID is part of the stamp so a swapped-in surface whose seed happens to
+        // match the old one's still counts as new content.
         let key = ObjectIdentifier(desc)
-        let seed = IOSurfaceGetSeed(surface)
-        let seedChanged = lastSeeds[key] != seed
-        if frameCount > 0, !seedChanged, !force { return false }
-        lastSeeds[key] = seed
+        let stamp = SurfaceFrameStamp(surfaceID: IOSurfaceGetID(surface), seed: IOSurfaceGetSeed(surface))
+        let contentChanged = lastStamps[key] != stamp
+        if frameCount > 0, !contentChanged, !force { return false }
+        lastStamps[key] = stamp
 
         let w = IOSurfaceGetWidth(surface)
         let h = IOSurfaceGetHeight(surface)
@@ -417,7 +419,7 @@ actor FrameCapture {
         }
         callbackUUIDs.removeAll()
         descriptors.removeAll()
-        lastSeeds.removeAll()
+        lastStamps.removeAll()
         sourceCache.invalidate()
         onFrame = nil
         pixelConsumers = nil
