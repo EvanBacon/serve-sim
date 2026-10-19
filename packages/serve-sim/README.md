@@ -22,6 +22,7 @@ https://github.com/user-attachments/assets/fbf890f4-c8c7-4684-82be-d677b8a188f8
 - Recent simulator actions are available in the browser tools panel and `serve-sim event-log`.
 - Drag and drop videos and images to add them to the simulator device.
 - Keyboard commands and hot keys are forwarded to the simulator, including CMD+SHIFT+H to go home.
+- Unicode text can be staged in the simulator clipboard from Tools → Clipboard.
 - Apple Watch, iPad, and iOS support.
 
 ## Why?
@@ -208,6 +209,23 @@ http://<host>:3200/#token=<token>
 ```
 
 Browsers never send the fragment to the server, so the token stays out of request lines and server/proxy logs. The page that loads first is a small auth bootstrap (it contains no secrets): it reads the fragment, removes it from the address bar and history, and POSTs it in a header to the same-origin `/auth` endpoint, which sets an HttpOnly, `SameSite=Lax` cookie and the page reloads. `/auth` only accepts same-origin `POST`s, compares in constant time, and locks out after 10 wrong tokens a minute. A `?token=` query parameter is never accepted.
+
+### Unicode clipboard input
+
+Open **Tools → Clipboard**, enter or paste text into **Text for simulator
+clipboard**, and click **Copy to simulator**. After the clipboard is verified,
+focus the destination field in the simulator and choose its **Paste** action.
+This supports Unicode, including combining characters and emoji; it does not
+turn browser `typeText` calls on the video canvas into guest keyboard input.
+
+The tool uses a fixed, validated host action over the existing loopback,
+same-origin control channel. It does **not** require `--allow-exec`. The server
+uses `xcrun devicectl device pasteboard` with UTF-8 stdin and exact readback;
+your selected Xcode must provide those commands for the target simulator.
+Unsupported commands, failed copies, or mismatched readback produce an error
+instead of success. Text is limited to 64 KiB of UTF-8 and is not added to the
+command event log. Another actor can change the clipboard after verification,
+so check the actual field after Paste.
 
 ### Host shell (`--allow-exec`)
 

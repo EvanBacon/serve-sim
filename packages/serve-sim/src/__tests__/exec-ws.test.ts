@@ -148,6 +148,17 @@ describe("exec-ws control channel", () => {
     channel.close();
   });
 
+  test("clipboard reaches typed validation without shell opt-in or an exec token", async () => {
+    const channel = await connect(PORT_NO_EXEC);
+    try {
+      expect((await channel.next()).ready).toBe(true);
+      channel.send({ id: 30, rpc: { method: "copyClipboard", params: { udid: "booted; echo nope", text: "ёж 👩‍🍳" } } });
+      expect((await channel.next()).error).toBe("invalid udid");
+    } finally {
+      channel.close();
+    }
+  });
+
   test("ui requests validate their payload", async () => {
     const channel = await connect();
     await channel.next(); // ready

@@ -32,7 +32,12 @@ export interface RunResult {
   exitCode: number;
 }
 
-export type HostRpcRunner = (file: string, args: string[]) => Promise<RunResult>;
+export interface HostRpcRunOptions {
+  input?: string;
+  timeout?: number;
+}
+
+export type HostRpcRunner = (file: string, args: string[], options?: HostRpcRunOptions) => Promise<RunResult>;
 
 export interface HostRpcOptions {
   /** CLI entry used for `serve-sim permissions|camera …` (see serveSimArgv). */
@@ -55,6 +60,8 @@ export interface HostRpcOptions {
 export type HostRpcHandler = (payload: unknown) => Promise<Record<string, unknown>>;
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_CLIPBOARD_BYTES = 64 * 1024;
+const CLIPBOARD_TIMEOUT_MS = 10_000;
 /** Matches the client's DROP_MAX_FILE_SIZE. */
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 /** Generous cap per chunk; the client sends 192KB slices. */
@@ -107,6 +114,28 @@ function enumParam<T extends string>(p: Params, key: string, values: readonly T[
   return v as T;
 }
 
+function clipboardTextParam(p: Params): string {
+  const value = p.text;
+  if (typeof value !== "string" || value.length === 0 || !isWellFormedUnicode(value) || Buffer.byteLength(value, "utf8") > MAX_CLIPBOARD_BYTES) {
+    fail("invalid clipboard text");
+  }
+  return value;
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function hasControlChar(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
@@ -145,16 +174,25 @@ export function serveSimArgv(bin: string, args: string[]): [string, string[]] {
   return [bin, args];
 }
 
-function defaultRun(file: string, args: string[]): Promise<RunResult> {
+function defaultRun(file: string, args: string[], options?: HostRpcRunOptions): Promise<RunResult> {
   return new Promise((resolve) => {
-    execFile(file, args, { maxBuffer: MAX_OUTPUT_BYTES, encoding: "utf-8" }, (err, stdout, stderr) => {
+    let inputFailed = false;
+    const child = execFile(file, args, {
+      maxBuffer: MAX_OUTPUT_BYTES,
+      encoding: "utf-8",
+      ...(options?.timeout === undefined ? {} : { timeout: options.timeout }),
+    }, (err, stdout, stderr) => {
       const code = (err as { code?: unknown } | null)?.code;
       resolve({
         stdout: String(stdout ?? ""),
         stderr: String(stderr ?? "") || (err && typeof code !== "number" ? err.message : ""),
-        exitCode: err ? (typeof code === "number" ? code : 127) : 0,
+        exitCode: err ? (typeof code === "number" ? code : 127) : inputFailed ? 127 : 0,
       });
     });
+    if (options?.input !== undefined && child.stdin) {
+      child.stdin.on("error", () => { inputFailed = true; });
+      child.stdin.end(options.input, "utf8");
+    }
   });
 }
 
@@ -166,6 +204,7 @@ function timestampSlug(): string {
 
 export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
   const runner = opts.run ?? defaultRun;
+  const clipboardQueues = new Map<string, Promise<void>>();
   const desktop = () => join(opts.homeDir ?? homedir(), "Desktop");
 
   const run = async (file: string, args: string[]): Promise<RunResult> => {
@@ -178,6 +217,43 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
     return result;
   };
   const serveSim = (args: string[]) => run(...serveSimArgv(opts.serveSimBin, args));
+
+  const withClipboardLock = async <T>(udid: string, work: () => Promise<T>): Promise<T> => {
+    const previous = clipboardQueues.get(udid) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    clipboardQueues.set(udid, current);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (clipboardQueues.get(udid) === current) clipboardQueues.delete(udid);
+    }
+  };
+
+  const copyClipboard = (udid: string, text: string) => withClipboardLock(udid, async () => {
+    const args = (action: "copy" | "paste") => [
+      "devicectl", "device", "pasteboard", action,
+      "--device", udid, "--timeout", "10", "--quiet",
+    ];
+    let copied: RunResult;
+    try {
+      copied = await runner("xcrun", args("copy"), { input: text, timeout: CLIPBOARD_TIMEOUT_MS });
+    } catch {
+      fail("clipboard copy failed");
+    }
+    if (copied.exitCode !== 0) fail("clipboard copy failed");
+
+    let pasted: RunResult;
+    try {
+      pasted = await runner("xcrun", args("paste"), { timeout: CLIPBOARD_TIMEOUT_MS });
+    } catch {
+      fail("clipboard verification failed");
+    }
+    if (pasted.exitCode !== 0 || pasted.stdout !== text) fail("clipboard verification failed");
+    return { verified: true };
+  });
 
   const requireDevice = async (udid: string) => {
     if (!(await opts.isKnownDevice(udid))) fail(`unknown or not booted device: ${udid}`);
@@ -203,6 +279,13 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
   const cameraFileArg = (p: Params): string => uploadPathParam(p, "filePath", ["camsrc"]);
 
   const methods: Record<string, (p: Params) => Promise<Record<string, unknown>>> = {
+    async copyClipboard(p) {
+      const udid = udidParam(p);
+      const text = clipboardTextParam(p);
+      await requireDevice(udid);
+      return copyClipboard(udid, text);
+    },
+
     async toggleAppearance(p) {
       const udid = udidParam(p);
       await requireDevice(udid);

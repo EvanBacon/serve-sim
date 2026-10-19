@@ -5,6 +5,7 @@ import { AppDetectionTool } from "./app-detection-tool";
 import { AppPermissionsTool } from "./app-permissions-tool";
 import { AxTreeTool } from "./ax-tree-tool";
 import { CameraTool } from "./camera-tool";
+import { ClipboardTool } from "./clipboard-tool";
 import { EventLogTool } from "./event-log-tool";
 import { PANEL_BACKGROUND } from "./panel-colors";
 import { SimulatorSettingsTool } from "./simulator-settings-tool";
@@ -55,6 +56,7 @@ export function ToolsPanel({
       {open && (
         <div className="p-3.5 overflow-y-auto flex-1 flex flex-col gap-3">
           <AppDetectionTool udid={udid} currentApp={currentApp} />
+          <ClipboardTool udid={udid} />
           <EventLogTool udid={udid} eventsEndpoint={eventLogEventsEndpoint} />
           <SimulatorSettingsTool udid={udid} runtime={deviceRuntime} />
           <AxTreeTool
