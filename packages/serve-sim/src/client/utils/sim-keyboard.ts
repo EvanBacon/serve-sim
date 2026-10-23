@@ -76,7 +76,7 @@ export function createSimKeyState() {
       if (META_USAGES.has(usage)) {
         // macOS browsers don't fire keyup for keys pressed while Cmd is down,
         // so release them along with Cmd; a key left held in the guest
-        // swallows its next press.
+        // swallows its next press (e.g. the toolbar Reload's R tap after Cmd+R).
         for (const other of [...held]) {
           if (isModifierUsage(other)) continue;
           held.delete(other);
