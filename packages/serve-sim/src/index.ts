@@ -2,10 +2,10 @@
 import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
 import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
-import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createHash, randomBytes } from "crypto";
 import { networkInterfaces } from "os";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
 import {
   STATE_DIR,
   stateFileForDevice,
@@ -44,6 +44,17 @@ import { formatEventLogLine } from "./event-log-format";
 import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
 import { MAX_BITRATE_ENV, applyMaxBitrateOption, parseMaxBitrateMbps } from "./max-bitrate";
 import { shareHost } from "./share-host";
+import {
+  MAX_RECORDING_MS,
+  RECORDING_SUMMARY_HEADER,
+  clampRecordingDuration,
+  parseRecordingDuration,
+  recordingFileName,
+  recordingPollOutcome,
+  recordingUrlForWsUrl,
+  uniqueRecordingFileName,
+} from "./recording";
+import { saveRecordingBody } from "./record-file";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
 
@@ -984,6 +995,162 @@ async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean
       reject(new Error("WebSocket connection failed"));
     };
   });
+}
+
+/**
+ * `serve-sim record`: start a native screen recording on the running server,
+ * stop on Ctrl+C (or after --duration), and save the MP4 the server returns.
+ */
+async function record(
+  deviceArg: string | undefined,
+  opts: { output?: string; duration?: string; codec?: string; fps?: string; bitrate?: string },
+) {
+  let durationMs: number | undefined;
+  if (opts.duration != null) {
+    const parsed = parseRecordingDuration(opts.duration);
+    if (parsed == null) {
+      console.error("record --duration must be a positive duration, e.g. 10, 10s, 1.5m, 500ms");
+      process.exit(1);
+    }
+    durationMs = clampRecordingDuration(parsed);
+    if (durationMs < parsed) {
+      console.error(`record --duration is capped at the server's ${MAX_RECORDING_MS / 60_000} min recording limit`);
+    }
+  }
+  // Fail before recording rather than after, when the file is in hand.
+  const outputPath = opts.output ? resolve(opts.output) : undefined;
+  if (outputPath) {
+    const dir = dirname(outputPath);
+    let isDir = false;
+    try { isDir = statSync(dir).isDirectory(); } catch {}
+    if (!isDir) {
+      console.error(`record --output: directory ${dir} does not exist`);
+      process.exit(1);
+    }
+  }
+  const target = await resolveInputTarget(deviceArg);
+  const startUrl = recordingUrlForWsUrl(target.wsUrl, "start");
+  const stopUrl = recordingUrlForWsUrl(target.wsUrl, "stop");
+  const statusUrl = recordingUrlForWsUrl(target.wsUrl);
+  if (!startUrl || !stopUrl || !statusUrl) {
+    console.error(`Cannot derive the recording endpoint from ${target.wsUrl}`);
+    process.exit(1);
+  }
+  const query = new URL(startUrl);
+  if (opts.codec) query.searchParams.set("codec", opts.codec);
+  if (opts.fps) query.searchParams.set("fps", opts.fps);
+  if (opts.bitrate) query.searchParams.set("bitrate", opts.bitrate);
+
+  const failed = async (what: string, res: Response): Promise<never> => {
+    const body = await res.json().catch(() => null) as { message?: string; error?: string } | null;
+    console.error(`${what} failed (HTTP ${res.status}): ${body?.message ?? body?.error ?? res.statusText}`);
+    process.exit(1);
+  };
+
+  // Own SIGINT/SIGTERM from before the start request until the file is
+  // saved: Ctrl+C during the start still stops (rather than orphaning a
+  // server-side recording), and Ctrl+C while saving doesn't drop the file.
+  let stopRequested = false;
+  let saving = false;
+  let abandonArmed = false;
+  // Set while the MP4 streams to disk, so abandoning doesn't leave half a file.
+  let partialOut: string | undefined;
+  let wake: (() => void) | undefined;
+  const onSignal = () => {
+    if (saving) {
+      if (abandonArmed) {
+        if (partialOut) try { unlinkSync(partialOut); } catch {}
+        process.exit(130);
+      }
+      abandonArmed = true;
+      console.error("Saving the recording… press Ctrl+C again to abandon it.");
+      return;
+    }
+    stopRequested = true;
+    wake?.();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  let out: string;
+  let stopRes: Response;
+  try {
+    const startRes = await fetch(query, { method: "POST", headers: target.headers }).catch((err) => {
+      console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+    if (!startRes.ok) await failed("Starting the recording", startRes);
+    const { token, startedAt } = await startRes.json().catch(() => ({})) as { token?: string; startedAt?: string };
+
+    if (!stopRequested) {
+      await new Promise<void>((resolveStop) => {
+        // Signal listeners don't keep the event loop alive; this timer does
+        // (and doubles as the --duration stop).
+        const timer = setTimeout(() => wake?.(), durationMs ?? 2 ** 31 - 1);
+        // At the server's duration cap the file is finalized and held for
+        // us (the token holder): notice and collect it. Any client may stop
+        // a running recording (e.g. the toolbar), taking the file with it:
+        // say so rather than keep "recording" until Ctrl+C fails.
+        const poll = setInterval(() => {
+          void fetch(statusUrl, { headers: target.headers })
+            .then((res) => res.ok ? res.json() as Promise<Parameters<typeof recordingPollOutcome>[0]> : null)
+            .then((status) => {
+              if (!wake) return;
+              const outcome = recordingPollOutcome(status, startedAt);
+              if (outcome === "limit") {
+                console.error(`Reached the server's ${MAX_RECORDING_MS / 60_000} min recording limit; saving.`);
+                wake();
+              } else if (outcome === "stopped-elsewhere") {
+                console.error("The recording was stopped elsewhere (another client such as the serve-sim toolbar, or the device session closed); nothing was saved here.");
+                process.exit(1);
+              }
+            })
+            .catch(() => {});
+        }, 1_000);
+        wake = () => {
+          wake = undefined;
+          clearTimeout(timer);
+          clearInterval(poll);
+          resolveStop();
+        };
+        if (durationMs != null) {
+          console.error(`Recording ${target.device} for ${durationMs / 1000}s… (Ctrl+C to stop early)`);
+        } else {
+          console.error(`Recording ${target.device}… press Ctrl+C to stop.`);
+        }
+      });
+    }
+
+    saving = true;
+    const stopQuery = new URL(stopUrl);
+    if (token) stopQuery.searchParams.set("token", token);
+    stopRes = await fetch(stopQuery, { method: "POST", headers: target.headers }).catch((err) => {
+      console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+    if (!stopRes.ok) await failed("Stopping the recording", stopRes);
+    // Don't clobber a recording saved earlier in the same second.
+    out = outputPath ?? resolve(uniqueRecordingFileName(recordingFileName(), (name) => existsSync(resolve(name))));
+    try {
+      if (!stopRes.body) throw new Error("empty response");
+      // Streamed, not buffered: a long recording can be several GB.
+      const savePath = out;
+      await saveRecordingBody(stopRes.body, out, { exclusive: !outputPath, onOpen: () => { partialOut = savePath; } });
+      partialOut = undefined;
+    } catch (err) {
+      const reason = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+      console.error(`Could not save the recording to ${out} (${reason}); the server has already discarded it.`);
+      process.exit(1);
+    }
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
+  let summary: { width?: number; height?: number; fps?: number; frames?: number; duration?: number } = {};
+  try { summary = JSON.parse(stopRes.headers.get(RECORDING_SUMMARY_HEADER) ?? "{}"); } catch {}
+  const detail = summary.width
+    ? ` (${summary.width}x${summary.height} @ ${summary.fps} fps, ${summary.frames} frames, ${summary.duration?.toFixed(2)}s)`
+    : "";
+  console.log(`Saved ${out}${detail}`);
 }
 
 async function typeText(
@@ -2114,6 +2281,17 @@ program
   .action((x: string, y: string, opts) => tap(x, y, opts.device, opts.raw));
 
 program
+  .command("record")
+  .description("Record the simulator screen to an MP4 (native resolution, 60 fps H.264); Ctrl+C stops")
+  .option(...deviceOpt)
+  .option("-o, --output <file>", "Output file (default: ./serve-sim-recording-<timestamp>.mp4)")
+  .option("-t, --duration <time>", "Stop automatically after this long, e.g. 10s, 1.5m, 500ms")
+  .option("--codec <codec>", "h264 (default) or hevc")
+  .option("--fps <fps>", "Constant output frame rate (default 60)")
+  .option("--bitrate <bps>", "Average bitrate in bits/s (default scales with resolution)")
+  .action((opts) => record(opts.device, opts));
+
+program
   .command("button")
   .description("Send a hardware button press")
   .argument("[name]", "Button name", "home")
@@ -2205,7 +2383,7 @@ program
 // Input subcommands can drive a remote preview (e.g. through an
 // authenticated tunnel) instead of the local state file.
 const REMOTE_INPUT_COMMANDS = new Set([
-  "gesture", "tap", "button", "type", "rotate", "fold", "ca-debug", "memory-warning", "event-log",
+  "gesture", "tap", "button", "type", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record",
 ]);
 for (const cmd of program.commands) {
   if (!REMOTE_INPUT_COMMANDS.has(cmd.name())) continue;

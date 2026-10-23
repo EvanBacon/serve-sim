@@ -539,6 +539,7 @@ function helperProxyTarget(rawUrl: string, prefix: string): { device: string | n
     "config",
     "foreground",
     "health",
+    "recording",
     "stream.avcc",
     "stream.mjpeg",
     "stream.3d.mjpeg",
@@ -861,6 +862,9 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
     case "/health": session.handleHealth(req, res); return true;
     case "/ax": session.handleAx(req, res); return true;
     case "/foreground": session.handleForeground(req, res); return true;
+    case "/recording": void session.handleRecording(req, res, "status"); return true;
+    case "/recording/start": void session.handleRecording(req, res, "start"); return true;
+    case "/recording/stop": void session.handleRecording(req, res, "stop"); return true;
     default: return false;
   }
 }

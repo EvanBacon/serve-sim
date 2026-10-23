@@ -30,6 +30,19 @@ import {
   axFrontmostAsync,
   type MjpegFrame,
 } from "./native";
+import { createReadStream } from "fs";
+import { mkdir, rm, stat } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { randomUUID } from "crypto";
+import {
+  MAX_RECORDING_MS,
+  RECORDING_HOLD_MS,
+  RECORDING_SUMMARY_HEADER,
+  parseRecordingQuery,
+  recordingFileName,
+  recordingRotation,
+} from "./recording";
 import { eventLogEventForHidMessage, formatEventLogPoint, recordEventLogEvent, updateEventLogEvent } from "./event-log";
 
 /**
@@ -143,7 +156,7 @@ async function writeAndDrain(
 type CaptureTransport = Pick<
   NativeCapture,
   "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "subscribeSize" | "snapshotJpeg" | "setPreferredScreenSize"
-> & Partial<Pick<NativeCapture, "diagnostics">>;
+> & Partial<Pick<NativeCapture, "diagnostics" | "startRecording" | "stopRecording" | "supportsRecording">>;
 
 export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
 
@@ -184,7 +197,30 @@ export interface DeviceSessionDependencies {
   hid: HidTransport;
   createDuoRenderer?: (onFailure: (error: DuoRendererError) => void) => Pick<DuoRenderer, "render" | "close">;
   createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  /** Server-side recording cap; defaults to `MAX_RECORDING_MS`. */
+  maxRecordingMs?: number;
+  /** How long a capped file is held for its owner; defaults to `RECORDING_HOLD_MS`. */
+  recordingHoldMs?: number;
 }
+
+type ActiveRecording = {
+  path: string;
+  startedAt: string;
+  /**
+   * Returned by start; only its holder may collect a file held at the cap,
+   * until the hold expires.
+   */
+  token: string;
+  phase: "starting" | "recording" | "stopping";
+  /** Native finalize, started by `/recording/stop` or the duration cap. */
+  finalizing?: Promise<string>;
+  limitTimer?: ReturnType<typeof setTimeout>;
+  /** When the duration cap's finalize settled (epoch ms); starts the hold. */
+  heldAt?: number;
+  /** Set once the hold lapses: any client may collect, a new start discards. */
+  holdExpired?: boolean;
+  holdTimer?: ReturnType<typeof setTimeout>;
+};
 
 type Unsubscribe = () => void | Promise<void>;
 
@@ -217,6 +253,8 @@ export class DeviceSession {
     "3d": newStreamHealth(),
   };
   private deviceHubShadowed?: boolean;
+  /** Active screen recording (one per session), or a start/stop in flight. */
+  private recording?: ActiveRecording;
   private rendererFailureEvent?: { id: number; key: string; count: number };
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
@@ -319,6 +357,18 @@ export class DeviceSession {
       this.runCleanup("size unsubscribe", this.unsubscribeSize);
     }
     this.hidSockets.clear();
+    // Capture stop cancels the native recorder; drop the partial temp file.
+    // A stop in flight owns its file (it's streaming it or cleaning it up).
+    if (this.recording) {
+      const active = this.recording;
+      this.recording = undefined;
+      if (active.limitTimer) clearTimeout(active.limitTimer);
+      if (active.holdTimer) clearTimeout(active.holdTimer);
+      if (active.phase !== "stopping") {
+        const finalized = active.finalizing?.catch(() => {}) ?? Promise.resolve();
+        this.runCleanup("recording cleanup", () => finalized.then(() => rm(active.path, { force: true })));
+      }
+    }
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
   }
@@ -565,6 +615,220 @@ export class DeviceSession {
         message: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // ── Screen recording ─────────────────────────────────────────────────────
+
+  /**
+   * `limitReached`: the duration cap finalized the file; it stays reported as
+   * recording until a `/recording/stop` collects it. `holdExpiresAt`: when
+   * the start's token stops being required to collect it.
+   */
+  recordingStatus(): { recording: boolean; startedAt?: string; limitReached?: boolean; holdExpiresAt?: string } {
+    const active = this.recording;
+    if (!active) return { recording: false };
+    const held = active.finalizing && active.phase === "recording";
+    return {
+      recording: true,
+      startedAt: active.startedAt,
+      ...(held ? { limitReached: true } : {}),
+      ...(held && active.heldAt != null
+        ? { holdExpiresAt: new Date(active.heldAt + this.recordingHoldMs()).toISOString() }
+        : {}),
+    };
+  }
+
+  private recordingHoldMs(): number {
+    return this.dependencies?.recordingHoldMs ?? RECORDING_HOLD_MS;
+  }
+
+  /** Drop a capped file whose hold expired, freeing the device to record. */
+  private async discardExpiredHold(): Promise<void> {
+    const active = this.recording;
+    if (!active || !active.holdExpired || active.phase !== "recording") return;
+    this.recording = undefined;
+    console.error(`[record] ${this.udid}: discarding the uncollected recording held at the duration limit`);
+    await active.finalizing?.catch(() => {});
+    await rm(active.path, { force: true }).catch(() => {});
+  }
+
+  /**
+   * `GET /recording` (status), `POST /recording/start`, `POST /recording/stop`.
+   * Stop streams the finished MP4 back as an attachment and deletes the temp
+   * file, so the browser (or `serve-sim record`) decides where it's saved.
+   */
+  async handleRecording(req: IncomingMessage, res: ServerResponse, action: "status" | "start" | "stop"): Promise<void> {
+    const method = (req.method ?? "GET").toUpperCase();
+    if (action === "status") {
+      this.sendJson(res, 200, this.recordingStatus());
+      return;
+    }
+    if (method !== "POST") {
+      res.setHeader("Allow", "POST");
+      this.sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+    try {
+      if (action === "start") await this.startRecording(req, res);
+      else await this.stopRecording(req, res);
+    } catch (error) {
+      if (res.headersSent || res.writableEnded) {
+        res.destroy();
+        return;
+      }
+      this.sendJson(res, 500, {
+        error: "recording_failed",
+        message: redactHome(error instanceof Error ? error.message : String(error)),
+      });
+    }
+  }
+
+  private async startRecording(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.capture.startRecording || !this.capture.stopRecording || this.capture.supportsRecording === false) {
+      this.sendJson(res, 501, { error: "recording_unsupported", message: "This native build cannot record" });
+      return;
+    }
+    const parsed = parseRecordingQuery(new URL(req.url ?? "", "http://x").searchParams);
+    if ("error" in parsed) {
+      this.sendJson(res, 400, { error: "invalid_recording_options", message: parsed.error });
+      return;
+    }
+    await this.discardExpiredHold();
+    if (this.recording) {
+      this.sendJson(res, 409, { error: "already_recording", ...this.recordingStatus() });
+      return;
+    }
+    const dir = join(tmpdir(), "serve-sim-recordings");
+    const path = join(dir, `${this.udid}-${randomUUID()}.mp4`);
+    const startedAt = new Date().toISOString();
+    const token = randomUUID();
+    const active: ActiveRecording = { path, startedAt, token, phase: "starting" };
+    this.recording = active;
+    const closedMeanwhile = () => {
+      // close() ran during the start: capture stop cancelled the recorder.
+      this.runCleanup("recording cleanup", () => rm(path, { force: true }));
+      this.sendJson(res, 409, { error: "session_closed", message: "The device session closed while the recording was starting" });
+    };
+    try {
+      await this.start();
+      await mkdir(dir, { recursive: true });
+      await this.capture.startRecording(path, { ...parsed, rotation: recordingRotation(this.screenConfig()) });
+    } catch (error) {
+      if (this.recording !== active) return closedMeanwhile();
+      this.recording = undefined;
+      await rm(path, { force: true }).catch(() => {});
+      throw error;
+    }
+    if (this.recording !== active) return closedMeanwhile();
+    active.phase = "recording";
+    const maxMs = this.dependencies?.maxRecordingMs ?? MAX_RECORDING_MS;
+    active.limitTimer = setTimeout(() => {
+      if (this.recording !== active || active.phase !== "recording") return;
+      console.error(`[record] ${this.udid}: reached the ${Math.round(maxMs / 60_000)} min limit; finalizing`);
+      this.finalizeRecording(active).catch((error) => {
+        console.error(`[record] ${this.udid}: finalize at the duration limit failed:`, error instanceof Error ? error.message : error);
+      }).finally(() => this.holdForOwner(active));
+    }, maxMs);
+    active.limitTimer.unref?.();
+    this.sendJson(res, 200, { recording: true, startedAt, token });
+  }
+
+  /**
+   * The cap finalized `active`: keep it for the start's token holder for a
+   * bounded time. The token lives only in that client's memory (a tab,
+   * `serve-sim record`), so if it went away the hold lapses rather than
+   * stranding the device: then any client may collect the file, and a new
+   * start discards it.
+   */
+  private holdForOwner(active: ActiveRecording): void {
+    if (this.recording !== active || active.phase !== "recording") return;
+    active.heldAt = Date.now();
+    active.holdTimer = setTimeout(() => {
+      active.holdTimer = undefined;
+      if (this.recording !== active || active.phase !== "recording") return;
+      active.holdExpired = true;
+      console.error(`[record] ${this.udid}: the recording held at the duration limit is now available to any client`);
+    }, this.recordingHoldMs());
+    active.holdTimer.unref?.();
+  }
+
+  /** Finalize natively once, whether triggered by stop or the duration cap. */
+  private finalizeRecording(active: ActiveRecording): Promise<string> {
+    if (active.limitTimer) clearTimeout(active.limitTimer);
+    active.limitTimer = undefined;
+    active.finalizing ??= this.capture.stopRecording!();
+    return active.finalizing;
+  }
+
+  private async stopRecording(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const active = this.recording;
+    if (!active || active.phase !== "recording" || !this.capture.stopRecording) {
+      this.sendJson(res, 409, { error: "not_recording", ...this.recordingStatus() });
+      return;
+    }
+    // A running recording can be stopped from anywhere (any tab, the CLI),
+    // but a file held at the duration cap goes only to the client that
+    // started it, so another tab's poll can't take the CLI's file. The hold
+    // is bounded (`holdForOwner`) so a vanished owner can't strand it.
+    if (
+      active.finalizing && !active.holdExpired &&
+      new URL(req.url ?? "", "http://x").searchParams.get("token") !== active.token
+    ) {
+      this.sendJson(res, 409, {
+        error: "not_owner",
+        message: "This recording hit the time limit and is held for the client that started it"
+          + (active.heldAt != null ? ` until ${new Date(active.heldAt + this.recordingHoldMs()).toLocaleTimeString()}` : ""),
+        ...this.recordingStatus(),
+      });
+      return;
+    }
+    if (active.holdTimer) clearTimeout(active.holdTimer);
+    active.holdTimer = undefined;
+    active.phase = "stopping";
+    // Finalizing a long recording takes a moment; notice if the client
+    // leaves. Runtimes differ in which of these fire for an aborted request.
+    // (Not req "close": Node also emits it once a request completes normally.)
+    let clientGone = req.aborted || res.destroyed;
+    const onGone = () => { clientGone = true; };
+    req.once("aborted", onGone);
+    res.once("close", onGone);
+    const stopWatching = () => {
+      req.off("aborted", onGone);
+      res.off("close", onGone);
+    };
+    let summary: string;
+    let size: number;
+    try {
+      summary = await this.finalizeRecording(active);
+      ({ size } = await stat(active.path));
+    } catch (error) {
+      await rm(active.path, { force: true }).catch(() => {});
+      throw error;
+    } finally {
+      stopWatching();
+      if (this.recording === active) this.recording = undefined;
+    }
+    if (clientGone || req.aborted || res.destroyed || req.socket?.destroyed) {
+      await rm(active.path, { force: true }).catch(() => {});
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "video/mp4",
+      "Content-Length": String(size),
+      "Content-Disposition": `attachment; filename="${recordingFileName()}"`,
+      "Cache-Control": "no-store",
+      [RECORDING_SUMMARY_HEADER]: publicRecordingSummary(summary),
+    });
+    await new Promise<void>((resolve) => {
+      const file = createReadStream(active.path);
+      const done = () => {
+        file.destroy();
+        void rm(active.path, { force: true }).finally(resolve);
+      };
+      file.once("error", () => { res.destroy(); done(); });
+      res.once("close", done);
+      file.pipe(res);
+    });
   }
 
   // ── HID WebSocket ────────────────────────────────────────────────────────
@@ -1089,4 +1353,17 @@ export function closeDeviceSession(udid: string): void {
     session.close();
     sessions.delete(udid);
   }
+}
+
+/** Native summary JSON for the response header, minus the server temp path. */
+function publicRecordingSummary(summary: string): string {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(summary) as Record<string, unknown>;
+  } catch {
+    return "{}";
+  }
+  delete parsed.path;
+  // Header-safe: JSON.stringify escapes control chars; drop anything non-ASCII.
+  return JSON.stringify(parsed).replace(/[^\x20-\x7e]/g, "");
 }

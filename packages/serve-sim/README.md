@@ -113,6 +113,9 @@ serve-sim exec <command...> [-d udid] Run a host shell command through a server
                                       several are quoted as an argv
 serve-sim doctor [-d udid]            Collect redacted diagnostics for bug reports
                                       (--json, --out <file>)
+serve-sim record [-d udid]            Record the screen to an MP4 (native resolution,
+                                      60 fps H.264); Ctrl+C stops. -o <file>,
+                                      -t <duration>, --codec h264|hevc, --fps, --bitrate
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
@@ -226,6 +229,17 @@ Sources:
 - **placeholder** — animated programmatic frames (default).
 - **file** — image (PNG/JPEG/HEIC/…) or video (mp4/mov/m4v/webm/…). The CLI sniffs the kind from the extension and falls back to magic bytes for files without an extension.
 - **webcam** — live `AVCaptureDevice` (built-in, Continuity, external).
+
+### Screen recording
+
+The record button in the preview toolbar and `serve-sim record` both drive a native recorder in the server: it encodes the simulator framebuffer directly (full native resolution, constant frame rate, hardware H.264/HEVC), independent of the stream codec the viewer uses. Stopping streams the finished MP4 to the client that stopped it (a browser download, or the `-o` file) and deletes the server's temp copy. One recording runs per device; any client may stop it, and a `serve-sim record` whose recording is stopped elsewhere exits with an error instead of saving.
+
+A recording is capped at 30 minutes. At the cap the server finalizes the file and holds it for the client that started it, which collects it automatically. If that client has gone away (tab closed, `serve-sim record` killed), the hold lapses after 5 minutes: then any client may collect it with Stop, and starting a new recording discards it.
+
+Limitations:
+
+- **Rotation is fixed at start.** The file's orientation comes from the simulator's orientation when recording starts; rotating mid-recording leaves the rest of the footage sideways. Stop and start a new recording after rotating.
+- **Size changes freeze the video.** A track can't change dimensions, so if the screen size changes mid-recording (e.g. switching the Duo's active panel), frames at the new size are dropped and the rest of the video repeats the last frame at the original size.
 
 ## Connectors
 

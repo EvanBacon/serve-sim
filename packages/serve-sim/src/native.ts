@@ -45,6 +45,9 @@ interface SimCaptureHandle {
   /** Absent in addons built before diagnostics existed. */
   diagnostics?(): Promise<string>;
   snapshotJpeg(): Promise<Uint8Array | null>;
+  /** Absent in addons built before screen recording existed. */
+  startRecording?(path: string, codec: string, fps: number, rotation: number, bitrate: number): Promise<void>;
+  stopRecording?(): Promise<string>;
 }
 
 interface NativeAddon {
@@ -86,6 +89,43 @@ export type AvccFrame = {
   height: number;
   isDescription: boolean;
   isKeyframe: boolean;
+};
+
+export type RecordingCodec = "h264" | "hevc";
+
+export type RecordingStartOptions = {
+  codec: RecordingCodec;
+  /** Constant output frame rate; static stretches repeat the last frame. */
+  fps: number;
+  /** Clockwise display rotation stored as the MP4 track transform. */
+  rotation: number;
+  /** Average bits/s; omitted picks the resolution-scaled default. */
+  bitrate?: number;
+};
+
+/** JSON summary the native recorder returns when a recording is finalized. */
+export type RecordingSummary = {
+  path: string;
+  width: number;
+  height: number;
+  fps: number;
+  codec?: RecordingCodec;
+  bitrate?: number;
+  rotation?: number;
+  /** Frames in the file (CFR: duration × fps). */
+  frames: number;
+  duration: number;
+  /** Frames delivered by capture while recording. */
+  captured?: number;
+  /** Captured frames written at their own slot. */
+  encoded?: number;
+  /** Slots filled by repeating the previous frame (static screen). */
+  repeated?: number;
+  /** Captured frames skipped (faster than fps, or a mid-recording size change). */
+  dropped?: number;
+  /** Of `dropped`, frames shed because the encoder backlog was full. */
+  backlogDropped?: number;
+  startedAt?: string;
 };
 
 export type TouchType = "begin" | "move" | "end";
@@ -276,6 +316,27 @@ export class NativeCapture {
   /** JPEG of the latest frame, encoded on demand; null before the first frame. */
   snapshotJpeg(): Promise<Uint8Array | null> {
     return this.handle.snapshotJpeg();
+  }
+
+  /** False for addons built before screen recording existed. */
+  get supportsRecording(): boolean {
+    return typeof this.handle.startRecording === "function" && typeof this.handle.stopRecording === "function";
+  }
+
+  /**
+   * Start recording the screen to an MP4 at `path`: native resolution,
+   * hardware H.264/HEVC straight from the captured frames (no stream
+   * re-encode), placed on a constant `fps` grid by capture time.
+   */
+  startRecording(path: string, options: RecordingStartOptions): Promise<void> {
+    if (!this.handle.startRecording) return Promise.reject(new Error("screen recording unavailable in this native build"));
+    return this.handle.startRecording(path, options.codec, options.fps, options.rotation, options.bitrate ?? 0);
+  }
+
+  /** Finalize the active recording; resolves with its JSON summary string. */
+  stopRecording(): Promise<string> {
+    if (!this.handle.stopRecording) return Promise.reject(new Error("screen recording unavailable in this native build"));
+    return this.handle.stopRecording();
   }
 
   /** Halt frame production. Full teardown happens when this object is GC'd. */
