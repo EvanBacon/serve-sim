@@ -347,6 +347,85 @@ describe("DeviceSession recording endpoints", () => {
     expect(await (await fetch(`${base}/recording`)).json()).toEqual({ recording: false });
   });
 
+  async function startAndHitCap(base: string, calls: RecordingCalls): Promise<{ token: string }> {
+    const body = await (await fetch(`${base}/recording/start`, { method: "POST" })).json() as { token: string };
+    for (let i = 0; i < 100 && calls.stops === 0; i++) await delay(5);
+    expect(calls.stops).toBe(1);
+    return body;
+  }
+
+  test("a capped file reports when its owner's hold ends", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: fakeCapture(calls),
+      hid: hid(),
+      maxRecordingMs: 20,
+      recordingHoldMs: 60_000,
+    }));
+    const before = Date.now();
+    await startAndHitCap(base, calls);
+    let status: { holdExpiresAt?: string } = {};
+    for (let i = 0; i < 50 && !status.holdExpiresAt; i++) {
+      status = await (await fetch(`${base}/recording`)).json() as typeof status;
+    }
+    const expires = Date.parse(status.holdExpiresAt!);
+    expect(expires).toBeGreaterThanOrEqual(before + 60_000);
+    expect(expires).toBeLessThanOrEqual(Date.now() + 60_000);
+  });
+
+  test("once the hold expires, any client may collect the capped file", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: fakeCapture(calls),
+      hid: hid(),
+      maxRecordingMs: 20,
+      recordingHoldMs: 40,
+    }));
+    await startAndHitCap(base, calls);
+    // Still the owner's: the starting tab reloaded and lost the token.
+    expect((await fetch(`${base}/recording/stop`, { method: "POST" })).status).toBe(409);
+    await delay(80);
+    const res = await fetch(`${base}/recording/stop`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).toString()).toBe("fake-mp4");
+    expect(await (await fetch(`${base}/recording`)).json()).toEqual({ recording: false });
+  });
+
+  test("a start after the hold expires discards the capped file and records again", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    // Only the first recording runs into the cap.
+    const deps: DeviceSessionDependencies = { capture: fakeCapture(calls), hid: hid(), maxRecordingMs: 20, recordingHoldMs: 40 };
+    const base = await serve(new DeviceSession("TEST-UDID", deps));
+    await startAndHitCap(base, calls);
+    deps.maxRecordingMs = 60_000;
+    const held = calls.starts[0]!.path;
+    expect(existsSync(held)).toBe(true);
+    // Within the hold the device stays reserved.
+    expect((await fetch(`${base}/recording/start`, { method: "POST" })).status).toBe(409);
+    await delay(80);
+    const res = await fetch(`${base}/recording/start`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(existsSync(held)).toBe(false);
+    expect(calls.starts).toHaveLength(2);
+    expect(await (await fetch(`${base}/recording`)).json()).toMatchObject({ recording: true });
+    expect((await (await fetch(`${base}/recording`)).json() as Record<string, unknown>).limitReached).toBeUndefined();
+  });
+
+  test("the owner can still collect after the hold expires", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: fakeCapture(calls),
+      hid: hid(),
+      maxRecordingMs: 20,
+      recordingHoldMs: 20,
+    }));
+    const { token } = await startAndHitCap(base, calls);
+    await delay(60);
+    const res = await fetch(`${base}/recording/stop?token=${token}`, { method: "POST" });
+    expect(res.status).toBe(200);
+    await res.arrayBuffer();
+  });
+
   test("any client may stop a recording that is still running", async () => {
     const calls: RecordingCalls = { starts: [], stops: 0 };
     const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(calls), hid: hid() }));

@@ -24,7 +24,7 @@
 /// Static fill: the recorder doesn't wait for the next frame to repeat the
 /// previous one across a static stretch (that would make the first frame of
 /// new motion write seconds of repeats first while the frames behind it pile
-/// up). A frame-interval timer instead fills `repeatsDue(at:)` as time passes,
+/// up). A frame-interval timer instead fills `repeatsDue(at:framesPending:)` as time passes,
 /// leaving `fillHeadroom` slots open for a frame that was captured but not yet
 /// delivered, and commits what it wrote with `didFill(through:)`.
 public struct RecordingFrameScheduler: Sendable {
@@ -83,9 +83,12 @@ public struct RecordingFrameScheduler: Sendable {
     }
 
     /// Static slots to repeat the last frame into by `time`: everything up to
-    /// `fillHeadroom` slots behind it. Empty before the first frame.
-    public func repeatsDue(at time: Double) -> Range<Int64> {
-        guard let origin else { return 0..<0 }
+    /// `fillHeadroom` slots behind it. Empty before the first frame, and while
+    /// captured frames are still queued for the writer (`framesPending > 0`):
+    /// under encoder backlog "now" can run past those frames' slots, and the
+    /// next one placed covers the gap with its own repeats anyway.
+    public func repeatsDue(at time: Double, framesPending: Int = 0) -> Range<Int64> {
+        guard let origin, framesPending == 0 else { return lastSlot + 1..<lastSlot + 1 }
         let target = Int64(((time - origin) * Double(fps)).rounded(.down)) - fillHeadroom
         return (lastSlot + 1)..<max(lastSlot + 1, target + 1)
     }

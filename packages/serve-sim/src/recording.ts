@@ -3,10 +3,11 @@
  * `serve-sim record` CLI, and the preview toolbar.
  *
  * Wire protocol (device-scoped helper routes, `…/helper/<udid>/recording`):
- *   GET  /recording        → { recording, startedAt?, limitReached? }
+ *   GET  /recording        → { recording, startedAt?, limitReached?, holdExpiresAt? }
  *   POST /recording/start  → ?codec=h264|hevc&fps=1..120&bitrate=<bits/s>
  *                            → { recording, startedAt, token }
- *   POST /recording/stop   → ?token=<start token> (required once limitReached)
+ *   POST /recording/stop   → ?token=<start token> (required once limitReached,
+ *                            until holdExpiresAt)
  *                            → the finished MP4 (video/mp4, attachment), with the
  *                            native summary JSON in `X-Serve-Sim-Recording`.
  */
@@ -18,10 +19,17 @@ export const RECORDING_SUMMARY_HEADER = "X-Serve-Sim-Recording";
 export const DEFAULT_RECORDING_FPS = 60;
 /**
  * Server-side cap on one recording. At the cap the file is finalized and held
- * (status reports `limitReached`) until a `/recording/stop` carrying the
- * start's token collects it.
+ * (status reports `limitReached`) for a `/recording/stop` carrying the start's
+ * token, for up to `RECORDING_HOLD_MS`.
  */
 export const MAX_RECORDING_MS = 30 * 60_000;
+
+/**
+ * How long a file finalized at the cap is reserved for its starter. After
+ * that any client may collect it, and a new start discards it, so a closed
+ * tab or killed `serve-sim record` can't leave the device unable to record.
+ */
+export const RECORDING_HOLD_MS = 5 * 60_000;
 
 const CODECS = new Set<RecordingCodec>(["h264", "hevc"]);
 
@@ -99,6 +107,21 @@ export function recordingUrlForWsUrl(wsUrl: string, action?: "start" | "stop"): 
   url.pathname = url.pathname.slice(0, -"ws".length) + (action ? `recording/${action}` : "recording");
   url.search = "";
   return url.toString();
+}
+
+/**
+ * What `serve-sim record` should do after a status poll: keep recording,
+ * collect the file the duration cap holds for it, or give up because another
+ * client stopped (or stopped and replaced) its recording.
+ */
+export function recordingPollOutcome(
+  status: { recording?: boolean; startedAt?: string; limitReached?: boolean } | null,
+  startedAt: string | undefined,
+): "recording" | "limit" | "stopped-elsewhere" {
+  if (!status) return "recording";
+  if (!status.recording) return "stopped-elsewhere";
+  if (startedAt && status.startedAt && status.startedAt !== startedAt) return "stopped-elsewhere";
+  return status.limitReached ? "limit" : "recording";
 }
 
 /** Parse a CLI duration like `10`, `10s`, `1.5m`, or `500ms` to milliseconds. */

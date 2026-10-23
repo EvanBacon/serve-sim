@@ -37,6 +37,7 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 import {
   MAX_RECORDING_MS,
+  RECORDING_HOLD_MS,
   RECORDING_SUMMARY_HEADER,
   parseRecordingQuery,
   recordingFileName,
@@ -198,17 +199,27 @@ export interface DeviceSessionDependencies {
   createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
   /** Server-side recording cap; defaults to `MAX_RECORDING_MS`. */
   maxRecordingMs?: number;
+  /** How long a capped file is held for its owner; defaults to `RECORDING_HOLD_MS`. */
+  recordingHoldMs?: number;
 }
 
 type ActiveRecording = {
   path: string;
   startedAt: string;
-  /** Returned by start; only its holder may collect a file held at the cap. */
+  /**
+   * Returned by start; only its holder may collect a file held at the cap,
+   * until the hold expires.
+   */
   token: string;
   phase: "starting" | "recording" | "stopping";
   /** Native finalize, started by `/recording/stop` or the duration cap. */
   finalizing?: Promise<string>;
   limitTimer?: ReturnType<typeof setTimeout>;
+  /** When the duration cap's finalize settled (epoch ms); starts the hold. */
+  heldAt?: number;
+  /** Set once the hold lapses: any client may collect, a new start discards. */
+  holdExpired?: boolean;
+  holdTimer?: ReturnType<typeof setTimeout>;
 };
 
 type Unsubscribe = () => void | Promise<void>;
@@ -352,6 +363,7 @@ export class DeviceSession {
       const active = this.recording;
       this.recording = undefined;
       if (active.limitTimer) clearTimeout(active.limitTimer);
+      if (active.holdTimer) clearTimeout(active.holdTimer);
       if (active.phase !== "stopping") {
         const finalized = active.finalizing?.catch(() => {}) ?? Promise.resolve();
         this.runCleanup("recording cleanup", () => finalized.then(() => rm(active.path, { force: true })));
@@ -609,16 +621,35 @@ export class DeviceSession {
 
   /**
    * `limitReached`: the duration cap finalized the file; it stays reported as
-   * recording until a `/recording/stop` collects it.
+   * recording until a `/recording/stop` collects it. `holdExpiresAt`: when
+   * the start's token stops being required to collect it.
    */
-  recordingStatus(): { recording: boolean; startedAt?: string; limitReached?: boolean } {
+  recordingStatus(): { recording: boolean; startedAt?: string; limitReached?: boolean; holdExpiresAt?: string } {
     const active = this.recording;
     if (!active) return { recording: false };
+    const held = active.finalizing && active.phase === "recording";
     return {
       recording: true,
       startedAt: active.startedAt,
-      ...(active.finalizing && active.phase === "recording" ? { limitReached: true } : {}),
+      ...(held ? { limitReached: true } : {}),
+      ...(held && active.heldAt != null
+        ? { holdExpiresAt: new Date(active.heldAt + this.recordingHoldMs()).toISOString() }
+        : {}),
     };
+  }
+
+  private recordingHoldMs(): number {
+    return this.dependencies?.recordingHoldMs ?? RECORDING_HOLD_MS;
+  }
+
+  /** Drop a capped file whose hold expired, freeing the device to record. */
+  private async discardExpiredHold(): Promise<void> {
+    const active = this.recording;
+    if (!active || !active.holdExpired || active.phase !== "recording") return;
+    this.recording = undefined;
+    console.error(`[record] ${this.udid}: discarding the uncollected recording held at the duration limit`);
+    await active.finalizing?.catch(() => {});
+    await rm(active.path, { force: true }).catch(() => {});
   }
 
   /**
@@ -662,6 +693,7 @@ export class DeviceSession {
       this.sendJson(res, 400, { error: "invalid_recording_options", message: parsed.error });
       return;
     }
+    await this.discardExpiredHold();
     if (this.recording) {
       this.sendJson(res, 409, { error: "already_recording", ...this.recordingStatus() });
       return;
@@ -695,10 +727,29 @@ export class DeviceSession {
       console.error(`[record] ${this.udid}: reached the ${Math.round(maxMs / 60_000)} min limit; finalizing`);
       this.finalizeRecording(active).catch((error) => {
         console.error(`[record] ${this.udid}: finalize at the duration limit failed:`, error instanceof Error ? error.message : error);
-      });
+      }).finally(() => this.holdForOwner(active));
     }, maxMs);
     active.limitTimer.unref?.();
     this.sendJson(res, 200, { recording: true, startedAt, token });
+  }
+
+  /**
+   * The cap finalized `active`: keep it for the start's token holder for a
+   * bounded time. The token lives only in that client's memory (a tab,
+   * `serve-sim record`), so if it went away the hold lapses rather than
+   * stranding the device: then any client may collect the file, and a new
+   * start discards it.
+   */
+  private holdForOwner(active: ActiveRecording): void {
+    if (this.recording !== active || active.phase !== "recording") return;
+    active.heldAt = Date.now();
+    active.holdTimer = setTimeout(() => {
+      active.holdTimer = undefined;
+      if (this.recording !== active || active.phase !== "recording") return;
+      active.holdExpired = true;
+      console.error(`[record] ${this.udid}: the recording held at the duration limit is now available to any client`);
+    }, this.recordingHoldMs());
+    active.holdTimer.unref?.();
   }
 
   /** Finalize natively once, whether triggered by stop or the duration cap. */
@@ -717,15 +768,22 @@ export class DeviceSession {
     }
     // A running recording can be stopped from anywhere (any tab, the CLI),
     // but a file held at the duration cap goes only to the client that
-    // started it, so another tab's poll can't take the CLI's file.
-    if (active.finalizing && new URL(req.url ?? "", "http://x").searchParams.get("token") !== active.token) {
+    // started it, so another tab's poll can't take the CLI's file. The hold
+    // is bounded (`holdForOwner`) so a vanished owner can't strand it.
+    if (
+      active.finalizing && !active.holdExpired &&
+      new URL(req.url ?? "", "http://x").searchParams.get("token") !== active.token
+    ) {
       this.sendJson(res, 409, {
         error: "not_owner",
-        message: "This recording hit the time limit and is held for the client that started it",
+        message: "This recording hit the time limit and is held for the client that started it"
+          + (active.heldAt != null ? ` until ${new Date(active.heldAt + this.recordingHoldMs()).toLocaleTimeString()}` : ""),
         ...this.recordingStatus(),
       });
       return;
     }
+    if (active.holdTimer) clearTimeout(active.holdTimer);
+    active.holdTimer = undefined;
     active.phase = "stopping";
     // Finalizing a long recording takes a moment; notice if the client
     // leaves. Runtimes differ in which of these fire for an aborted request.

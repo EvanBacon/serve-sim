@@ -50,9 +50,11 @@ import {
   clampRecordingDuration,
   parseRecordingDuration,
   recordingFileName,
+  recordingPollOutcome,
   recordingUrlForWsUrl,
   uniqueRecordingFileName,
 } from "./recording";
+import { saveRecordingBody } from "./record-file";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
 
@@ -1051,10 +1053,15 @@ async function record(
   let stopRequested = false;
   let saving = false;
   let abandonArmed = false;
+  // Set while the MP4 streams to disk, so abandoning doesn't leave half a file.
+  let partialOut: string | undefined;
   let wake: (() => void) | undefined;
   const onSignal = () => {
     if (saving) {
-      if (abandonArmed) process.exit(130);
+      if (abandonArmed) {
+        if (partialOut) try { unlinkSync(partialOut); } catch {}
+        process.exit(130);
+      }
       abandonArmed = true;
       console.error("Saving the recording… press Ctrl+C again to abandon it.");
       return;
@@ -1072,7 +1079,7 @@ async function record(
       process.exit(1);
     });
     if (!startRes.ok) await failed("Starting the recording", startRes);
-    const { token } = await startRes.json().catch(() => ({})) as { token?: string };
+    const { token, startedAt } = await startRes.json().catch(() => ({})) as { token?: string; startedAt?: string };
 
     if (!stopRequested) {
       await new Promise<void>((resolveStop) => {
@@ -1080,14 +1087,22 @@ async function record(
         // (and doubles as the --duration stop).
         const timer = setTimeout(() => wake?.(), durationMs ?? 2 ** 31 - 1);
         // At the server's duration cap the file is finalized and held for
-        // us (the token holder): notice and collect it.
+        // us (the token holder): notice and collect it. Any client may stop
+        // a running recording (e.g. the toolbar), taking the file with it:
+        // say so rather than keep "recording" until Ctrl+C fails.
         const poll = setInterval(() => {
           void fetch(statusUrl, { headers: target.headers })
-            .then((res) => res.ok ? res.json() as Promise<{ limitReached?: boolean }> : null)
+            .then((res) => res.ok ? res.json() as Promise<Parameters<typeof recordingPollOutcome>[0]> : null)
             .then((status) => {
-              if (!status?.limitReached || !wake) return;
-              console.error(`Reached the server's ${MAX_RECORDING_MS / 60_000} min recording limit; saving.`);
-              wake();
+              if (!wake) return;
+              const outcome = recordingPollOutcome(status, startedAt);
+              if (outcome === "limit") {
+                console.error(`Reached the server's ${MAX_RECORDING_MS / 60_000} min recording limit; saving.`);
+                wake();
+              } else if (outcome === "stopped-elsewhere") {
+                console.error("The recording was stopped elsewhere (another client such as the serve-sim toolbar, or the device session closed); nothing was saved here.");
+                process.exit(1);
+              }
             })
             .catch(() => {});
         }, 1_000);
@@ -1113,11 +1128,14 @@ async function record(
       process.exit(1);
     });
     if (!stopRes.ok) await failed("Stopping the recording", stopRes);
-    const data = Buffer.from(await stopRes.arrayBuffer());
     // Don't clobber a recording saved earlier in the same second.
     out = outputPath ?? resolve(uniqueRecordingFileName(recordingFileName(), (name) => existsSync(resolve(name))));
     try {
-      writeFileSync(out, data, outputPath ? undefined : { flag: "wx" });
+      if (!stopRes.body) throw new Error("empty response");
+      // Streamed, not buffered: a long recording can be several GB.
+      const savePath = out;
+      await saveRecordingBody(stopRes.body, out, { exclusive: !outputPath, onOpen: () => { partialOut = savePath; } });
+      partialOut = undefined;
     } catch (err) {
       const reason = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
       console.error(`Could not save the recording to ${out} (${reason}); the server has already discarded it.`);

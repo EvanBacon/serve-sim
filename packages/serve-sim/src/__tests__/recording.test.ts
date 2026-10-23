@@ -8,6 +8,7 @@ import {
   recordingRotation,
   uniqueRecordingFileName,
   recordingUrlForWsUrl,
+  recordingPollOutcome,
 } from "../recording";
 
 describe("parseRecordingQuery", () => {
@@ -93,5 +94,30 @@ describe("clampRecordingDuration", () => {
   test("caps longer durations (and ones too large for a timer) at the server limit", () => {
     expect(clampRecordingDuration(MAX_RECORDING_MS + 1)).toBe(MAX_RECORDING_MS);
     expect(clampRecordingDuration(parseRecordingDuration("999999999m")!)).toBe(MAX_RECORDING_MS);
+  });
+});
+
+describe("recordingPollOutcome", () => {
+  const startedAt = "2026-10-23T00:00:00.000Z";
+
+  test("keeps recording while the server reports our recording", () => {
+    expect(recordingPollOutcome({ recording: true, startedAt }, startedAt)).toBe("recording");
+  });
+
+  test("collects once the duration cap holds the file for us", () => {
+    expect(recordingPollOutcome({ recording: true, startedAt, limitReached: true }, startedAt)).toBe("limit");
+  });
+
+  test("notices another client stopped the recording", () => {
+    expect(recordingPollOutcome({ recording: false }, startedAt)).toBe("stopped-elsewhere");
+  });
+
+  test("notices our recording was replaced by another one", () => {
+    expect(recordingPollOutcome({ recording: true, startedAt: "2026-10-23T00:05:00.000Z" }, startedAt))
+      .toBe("stopped-elsewhere");
+  });
+
+  test("ignores unreadable status", () => {
+    expect(recordingPollOutcome(null, startedAt)).toBe("recording");
   });
 });

@@ -213,10 +213,11 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
     /// Repeat the last frame into the slots that have gone by with no new
     /// frame. Usually one slot per tick. Never waits on the encoder: a slot it
     /// can't write yet stays owed to the next tick (or the next frame's
-    /// placement), so the queue stays free for captured frames.
+    /// placement), so the queue stays free for captured frames. Skipped while
+    /// frames wait behind a slow encoder: their slots must stay open.
     private func fillStaticSlots() {
         guard !finished, failure == nil, let lastBuffer else { return }
-        for slot in scheduler.repeatsDue(at: Self.now()) {
+        for slot in scheduler.repeatsDue(at: Self.now(), framesPending: pendingFrames.pending) {
             guard write(lastBuffer, slot: slot, waitForEncoder: false) else { break }
             scheduler.didFill(through: slot)
             repeated += 1

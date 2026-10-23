@@ -171,4 +171,23 @@ final class RecordingFrameSchedulerTests: XCTestCase {
         XCTAssertEqual(end?.repeats, 59..<61)
         XCTAssertEqual(end?.endSlot, 61)
     }
+
+    /// Encoder backlog: the writer queue is ~300 ms behind, so a fill tick
+    /// runs after "now" has passed frames still queued for the writer. It
+    /// must leave their slots open rather than fill them with stale repeats.
+    func testFillDefersToFramesQueuedBehindASlowEncoder() {
+        var scheduler = RecordingFrameScheduler(fps: 60)
+        _ = scheduler.place(captureTime: 0)
+        // Frames captured at slots 1...18 are queued; the tick sees now = 0.3 s.
+        XCTAssertTrue(scheduler.repeatsDue(at: 0.3, framesPending: 18).isEmpty)
+        var slots: [Int64] = []
+        for i in 1...18 {
+            let placement = scheduler.place(captureTime: Double(i) * frame)
+            XCTAssertNotNil(placement, "queued frame \(i) dropped")
+            slots.append(placement!.slot)
+        }
+        XCTAssertEqual(slots, Array(1...18))
+        // Backlog drained: the fill resumes behind the last real frame.
+        XCTAssertEqual(scheduler.repeatsDue(at: 0.5 + 0.001, framesPending: 0), 19..<29)
+    }
 }
