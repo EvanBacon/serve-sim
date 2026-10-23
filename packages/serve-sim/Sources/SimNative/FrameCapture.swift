@@ -54,7 +54,7 @@ actor FrameCapture {
     private var sourceCache = FramebufferSourceCache<FramebufferSource>(maxAge: 1.0)
     private var recheckGeneration: UInt64 = 0
 
-    /// `onFrame(buffer, timestamp, isPrivateCopy)`: frames are deep-copied only
+    /// `onFrame(buffer, captureTime, isPrivateCopy)`: frames are deep-copied only
     /// while `pixelConsumers` is non-empty; otherwise the buffer wraps the live
     /// framebuffer surface and is only good for its dimensions.
     func start(
@@ -370,7 +370,8 @@ actor FrameCapture {
 
         lastCaptureTime = .now
         frameCount += 1
-        let timestamp = CMTime(value: CMTimeValue(frameCount), timescale: 60)
+        // Monotonic capture time (uptime ns): recordings place frames by it.
+        let timestamp = CMTime(value: CMTimeValue(DispatchTime.now().uptimeNanoseconds), timescale: 1_000_000_000)
         if pixelConsumers?.isEmpty ?? false {
             onFrame?(pb, timestamp, false)
             return true

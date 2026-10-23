@@ -44,6 +44,12 @@ import { formatEventLogLine } from "./event-log-format";
 import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
 import { MAX_BITRATE_ENV, applyMaxBitrateOption, parseMaxBitrateMbps } from "./max-bitrate";
 import { shareHost } from "./share-host";
+import {
+  RECORDING_SUMMARY_HEADER,
+  parseRecordingDuration,
+  recordingFileName,
+  recordingUrlForWsUrl,
+} from "./recording";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
 
@@ -984,6 +990,80 @@ async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean
       reject(new Error("WebSocket connection failed"));
     };
   });
+}
+
+/**
+ * `serve-sim record`: start a native screen recording on the running server,
+ * stop on Ctrl+C (or after --duration), and save the MP4 the server returns.
+ */
+async function record(
+  deviceArg: string | undefined,
+  opts: { output?: string; duration?: string; codec?: string; fps?: string; bitrate?: string },
+) {
+  let durationMs: number | undefined;
+  if (opts.duration != null) {
+    const parsed = parseRecordingDuration(opts.duration);
+    if (parsed == null) {
+      console.error("record --duration must be a positive duration, e.g. 10, 10s, 1.5m, 500ms");
+      process.exit(1);
+    }
+    durationMs = parsed;
+  }
+  const target = await resolveInputTarget(deviceArg);
+  const startUrl = recordingUrlForWsUrl(target.wsUrl, "start");
+  const stopUrl = recordingUrlForWsUrl(target.wsUrl, "stop");
+  if (!startUrl || !stopUrl) {
+    console.error(`Cannot derive the recording endpoint from ${target.wsUrl}`);
+    process.exit(1);
+  }
+  const query = new URL(startUrl);
+  if (opts.codec) query.searchParams.set("codec", opts.codec);
+  if (opts.fps) query.searchParams.set("fps", opts.fps);
+  if (opts.bitrate) query.searchParams.set("bitrate", opts.bitrate);
+
+  const failed = async (what: string, res: Response): Promise<never> => {
+    const body = await res.json().catch(() => null) as { message?: string; error?: string } | null;
+    console.error(`${what} failed (HTTP ${res.status}): ${body?.message ?? body?.error ?? res.statusText}`);
+    process.exit(1);
+  };
+
+  const startRes = await fetch(query, { method: "POST", headers: target.headers }).catch((err) => {
+    console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+  if (!startRes.ok) await failed("Starting the recording", startRes);
+
+  await new Promise<void>((resolveStop) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      if (timer) clearTimeout(timer);
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+      resolveStop();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    if (durationMs != null) {
+      timer = setTimeout(stop, durationMs);
+      console.error(`Recording ${target.device} for ${durationMs / 1000}s… (Ctrl+C to stop early)`);
+    } else {
+      console.error(`Recording ${target.device}… press Ctrl+C to stop.`);
+    }
+  });
+
+  const stopRes = await fetch(stopUrl, { method: "POST", headers: target.headers }).catch((err) => {
+    console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+  if (!stopRes.ok) await failed("Stopping the recording", stopRes);
+  const out = resolve(opts.output ?? recordingFileName());
+  writeFileSync(out, Buffer.from(await stopRes.arrayBuffer()));
+  let summary: { width?: number; height?: number; fps?: number; frames?: number; duration?: number } = {};
+  try { summary = JSON.parse(stopRes.headers.get(RECORDING_SUMMARY_HEADER) ?? "{}"); } catch {}
+  const detail = summary.width
+    ? ` (${summary.width}x${summary.height} @ ${summary.fps} fps, ${summary.frames} frames, ${summary.duration?.toFixed(2)}s)`
+    : "";
+  console.log(`Saved ${out}${detail}`);
 }
 
 async function typeText(
@@ -2114,6 +2194,17 @@ program
   .action((x: string, y: string, opts) => tap(x, y, opts.device, opts.raw));
 
 program
+  .command("record")
+  .description("Record the simulator screen to an MP4 (native resolution, 60 fps H.264); Ctrl+C stops")
+  .option(...deviceOpt)
+  .option("-o, --output <file>", "Output file (default: ./serve-sim-recording-<timestamp>.mp4)")
+  .option("-t, --duration <time>", "Stop automatically after this long, e.g. 10s, 1.5m, 500ms")
+  .option("--codec <codec>", "h264 (default) or hevc")
+  .option("--fps <fps>", "Constant output frame rate (default 60)")
+  .option("--bitrate <bps>", "Average bitrate in bits/s (default scales with resolution)")
+  .action((opts) => record(opts.device, opts));
+
+program
   .command("button")
   .description("Send a hardware button press")
   .argument("[name]", "Button name", "home")
@@ -2205,7 +2296,7 @@ program
 // Input subcommands can drive a remote preview (e.g. through an
 // authenticated tunnel) instead of the local state file.
 const REMOTE_INPUT_COMMANDS = new Set([
-  "gesture", "tap", "button", "type", "rotate", "fold", "ca-debug", "memory-warning", "event-log",
+  "gesture", "tap", "button", "type", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record",
 ]);
 for (const cmd of program.commands) {
   if (!REMOTE_INPUT_COMMANDS.has(cmd.name())) continue;

@@ -54,8 +54,12 @@ struct Photocopier {
         let dstStride = CVPixelBufferGetBytesPerRow(dst)
         let rows = CVPixelBufferGetHeight(source)
         let copyBytes = min(srcStride, dstStride)
-        for row in 0..<rows {
-            memcpy(dstAddr + row * dstStride, srcAddr + row * srcStride, copyBytes)
+        if srcStride == dstStride {
+            memcpy(dstAddr, srcAddr, srcStride * rows)
+        } else {
+            for row in 0..<rows {
+                memcpy(dstAddr + row * dstStride, srcAddr + row * srcStride, copyBytes)
+            }
         }
         return dst
     }

@@ -17,6 +17,10 @@ struct Frame: Identifiable {
     /// (no pixel consumer was attached, so the private copy was skipped). Such
     /// frames are only good for their dimensions.
     var isPrivateCopy = true
+    /// Monotonic capture time (`DispatchTime` uptime, seconds) taken when
+    /// FrameCapture read the surface; screen recordings are timed from this
+    /// rather than from when the frame reached a consumer.
+    var captureTime: Double = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
 }
 
 protocol FrameEncoder {
@@ -140,12 +144,18 @@ actor CaptureEngine {
         // (e.g. device not booted), a later retry should still be allowed.
         let (frames, frameContinuation) = AsyncStream.makeStream(
             of: Frame.self,
-            // drop old frames if there's backpressure
-            bufferingPolicy: .bufferingNewest(1)
+            // Fan-out is cheap (each consumer applies its own backpressure),
+            // so keep a few frames rather than dropping on a momentary actor
+            // hop delay: a screen recording needs every captured frame.
+            bufferingPolicy: .bufferingNewest(4)
         )
         do {
-            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { pixelBuffer, _, isCopy in
-                frameContinuation.yield(Frame(pixelBuffer: pixelBuffer, isPrivateCopy: isCopy))
+            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { pixelBuffer, timestamp, isCopy in
+                frameContinuation.yield(Frame(
+                    pixelBuffer: pixelBuffer,
+                    isPrivateCopy: isCopy,
+                    captureTime: timestamp.seconds
+                ))
             }
         } catch {
             // Preserve retryability after an ordinary start failure, but never
@@ -268,9 +278,52 @@ actor CaptureEngine {
         }
     }
 
+    // MARK: - Recording
+
+    private var recording: (recorder: ScreenRecorder, id: UUID)?
+
+    var isRecording: Bool { recording != nil }
+
+    /// Start recording the screen to an MP4 at `options.path`. One recording
+    /// per capture session; the recorder is a pixel consumer, so frames are
+    /// copied (and timestamped) for it even when no viewer is attached.
+    func startRecording(_ options: ScreenRecorder.Options) throws {
+        guard phase == .running else { throw RecordingErrors.notRunning }
+        guard recording == nil else { throw RecordingErrors.alreadyRecording }
+        let recorder = ScreenRecorder(options: options)
+        let id = UUID()
+        consumers[id] = recorder
+        pixelConsumers.increment()
+        recording = (recorder, id)
+        Task { [frameCapture] in await frameCapture.requestFrame() }
+    }
+
+    /// Finish the active recording; returns its JSON summary.
+    func stopRecording() async throws -> String {
+        guard let (recorder, id) = recording else { throw RecordingErrors.notRecording }
+        recording = nil
+        if consumers.removeValue(forKey: id) != nil { pixelConsumers.decrement() }
+        return try await recorder.finish()
+    }
+
+    enum RecordingErrors: Error, CustomStringConvertible {
+        case notRunning, alreadyRecording, notRecording
+        var description: String {
+            switch self {
+            case .notRunning: return "Capture is not running"
+            case .alreadyRecording: return "A recording is already in progress"
+            case .notRecording: return "No recording in progress"
+            }
+        }
+    }
+
     func stop() {
         if phase == .stopped { return }
         phase = .stopped
+        if let (recorder, _) = recording {
+            recorder.cancel()
+            recording = nil
+        }
         Task { [frameCapture] in await frameCapture.stop() }
         consumers.removeAll()
         pixelConsumers.reset()

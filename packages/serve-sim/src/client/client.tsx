@@ -57,6 +57,8 @@ import type { StreamError } from "./utils/stream-retry";
 import { useAvccStream } from "./hooks/use-avcc-stream";
 import { useResizableWidth } from "./hooks/use-resizable-width";
 import { useScreenshotToast } from "./hooks/use-screenshot-toast";
+import { useScreenRecording } from "./hooks/use-screen-recording";
+import { RecordToolbarButton } from "./components/record-toolbar-button";
 import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
@@ -959,6 +961,7 @@ function AppWithConfig({
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
+  const screenRecording = useScreenRecording(config.device);
   const mediaDrop = useMediaDrop({
     host: hostAction,
     udid: config.device,
@@ -1243,6 +1246,7 @@ function AppWithConfig({
                 title="Screenshot"
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
+              <RecordToolbarButton state={screenRecording.state} onToggle={screenRecording.toggle} />
               <SimulatorToolbar.RotateButton title="Rotate device" />
               {!foldable && !!activeChrome && (
                 <ChromeToolbarButton

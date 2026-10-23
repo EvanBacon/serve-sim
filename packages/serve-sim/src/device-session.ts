@@ -30,6 +30,17 @@ import {
   axFrontmostAsync,
   type MjpegFrame,
 } from "./native";
+import { createReadStream } from "fs";
+import { mkdir, rm, stat } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { randomUUID } from "crypto";
+import {
+  RECORDING_SUMMARY_HEADER,
+  parseRecordingQuery,
+  recordingFileName,
+  recordingRotation,
+} from "./recording";
 import { eventLogEventForHidMessage, formatEventLogPoint, recordEventLogEvent, updateEventLogEvent } from "./event-log";
 
 /**
@@ -143,7 +154,7 @@ async function writeAndDrain(
 type CaptureTransport = Pick<
   NativeCapture,
   "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "subscribeSize" | "snapshotJpeg" | "setPreferredScreenSize"
-> & Partial<Pick<NativeCapture, "diagnostics">>;
+> & Partial<Pick<NativeCapture, "diagnostics" | "startRecording" | "stopRecording">>;
 
 export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
 
@@ -217,6 +228,8 @@ export class DeviceSession {
     "3d": newStreamHealth(),
   };
   private deviceHubShadowed?: boolean;
+  /** Active screen recording (one per session), or a start/stop in flight. */
+  private recording?: { path: string; startedAt: string; phase: "starting" | "recording" | "stopping" };
   private rendererFailureEvent?: { id: number; key: string; count: number };
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
@@ -319,6 +332,12 @@ export class DeviceSession {
       this.runCleanup("size unsubscribe", this.unsubscribeSize);
     }
     this.hidSockets.clear();
+    // Capture stop cancels the native recorder; drop the partial temp file.
+    if (this.recording) {
+      const { path } = this.recording;
+      this.recording = undefined;
+      this.runCleanup("recording cleanup", () => rm(path, { force: true }));
+    }
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
   }
@@ -565,6 +584,109 @@ export class DeviceSession {
         message: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // ── Screen recording ─────────────────────────────────────────────────────
+
+  recordingStatus(): { recording: boolean; startedAt?: string } {
+    return this.recording
+      ? { recording: true, startedAt: this.recording.startedAt }
+      : { recording: false };
+  }
+
+  /**
+   * `GET /recording` (status), `POST /recording/start`, `POST /recording/stop`.
+   * Stop streams the finished MP4 back as an attachment and deletes the temp
+   * file, so the browser (or `serve-sim record`) decides where it's saved.
+   */
+  async handleRecording(req: IncomingMessage, res: ServerResponse, action: "status" | "start" | "stop"): Promise<void> {
+    const method = (req.method ?? "GET").toUpperCase();
+    if (action === "status") {
+      this.sendJson(res, 200, this.recordingStatus());
+      return;
+    }
+    if (method !== "POST") {
+      res.setHeader("Allow", "POST");
+      this.sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+    try {
+      if (action === "start") await this.startRecording(req, res);
+      else await this.stopRecording(res);
+    } catch (error) {
+      if (res.headersSent || res.writableEnded) {
+        res.destroy();
+        return;
+      }
+      this.sendJson(res, 500, {
+        error: "recording_failed",
+        message: redactHome(error instanceof Error ? error.message : String(error)),
+      });
+    }
+  }
+
+  private async startRecording(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.capture.startRecording) {
+      this.sendJson(res, 501, { error: "recording_unsupported", message: "This native build cannot record" });
+      return;
+    }
+    const parsed = parseRecordingQuery(new URL(req.url ?? "", "http://x").searchParams);
+    if ("error" in parsed) {
+      this.sendJson(res, 400, { error: "invalid_recording_options", message: parsed.error });
+      return;
+    }
+    if (this.recording) {
+      this.sendJson(res, 409, { error: "already_recording", ...this.recordingStatus() });
+      return;
+    }
+    const dir = join(tmpdir(), "serve-sim-recordings");
+    const path = join(dir, `${this.udid}-${randomUUID()}.mp4`);
+    const startedAt = new Date().toISOString();
+    this.recording = { path, startedAt, phase: "starting" };
+    try {
+      await this.start();
+      await mkdir(dir, { recursive: true });
+      await this.capture.startRecording(path, { ...parsed, rotation: recordingRotation(this.screenConfig()) });
+    } catch (error) {
+      if (this.recording?.path === path) this.recording = undefined;
+      throw error;
+    }
+    if (this.recording?.path !== path) return; // session closed meanwhile
+    this.recording.phase = "recording";
+    this.sendJson(res, 200, { recording: true, startedAt });
+  }
+
+  private async stopRecording(res: ServerResponse): Promise<void> {
+    const active = this.recording;
+    if (!active || active.phase !== "recording" || !this.capture.stopRecording) {
+      this.sendJson(res, 409, { error: "not_recording", ...this.recordingStatus() });
+      return;
+    }
+    active.phase = "stopping";
+    let summary: string;
+    try {
+      summary = await this.capture.stopRecording();
+    } finally {
+      if (this.recording === active) this.recording = undefined;
+    }
+    const { size } = await stat(active.path);
+    res.writeHead(200, {
+      "Content-Type": "video/mp4",
+      "Content-Length": String(size),
+      "Content-Disposition": `attachment; filename="${recordingFileName()}"`,
+      "Cache-Control": "no-store",
+      [RECORDING_SUMMARY_HEADER]: publicRecordingSummary(summary),
+    });
+    await new Promise<void>((resolve) => {
+      const file = createReadStream(active.path);
+      const done = () => {
+        file.destroy();
+        void rm(active.path, { force: true }).finally(resolve);
+      };
+      file.once("error", () => { res.destroy(); done(); });
+      res.once("close", done);
+      file.pipe(res);
+    });
   }
 
   // ── HID WebSocket ────────────────────────────────────────────────────────
@@ -1089,4 +1211,17 @@ export function closeDeviceSession(udid: string): void {
     session.close();
     sessions.delete(udid);
   }
+}
+
+/** Native summary JSON for the response header, minus the server temp path. */
+function publicRecordingSummary(summary: string): string {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(summary) as Record<string, unknown>;
+  } catch {
+    return "{}";
+  }
+  delete parsed.path;
+  // Header-safe: JSON.stringify escapes control chars; drop anything non-ASCII.
+  return JSON.stringify(parsed).replace(/[^\x20-\x7e]/g, "");
 }
