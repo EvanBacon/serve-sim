@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { saveRecordingBody } from "../record-file";
+import { readChunks, saveRecordingBody } from "../record-file";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -63,5 +63,30 @@ describe("saveRecordingBody", () => {
     await expect(saveRecordingBody(streamOf([new Uint8Array(1024), new Error("socket hang up")]), out, { exclusive: true }))
       .rejects.toThrow("socket hang up");
     expect(existsSync(out)).toBe(false);
+  });
+
+  test("an onOpen that throws removes the new file and releases the body", async () => {
+    const out = join(tempDir(), "open.mp4");
+    let cancelled = false;
+    await expect(saveRecordingBody(streamOf([new Uint8Array([1])], () => { cancelled = true; }), out, {
+      exclusive: true,
+      onOpen: () => { throw new Error("boom"); },
+    })).rejects.toThrow("boom");
+    expect(existsSync(out)).toBe(false);
+    expect(cancelled).toBe(true);
+  });
+});
+
+describe("readChunks", () => {
+  test("an abort mid-read cancels the body without waiting for the read", async () => {
+    let cancelled = false;
+    // Never produces a chunk: the read stays pending until cancelled.
+    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }, { highWaterMark: 0 });
+    const controller = new AbortController();
+    const reading = readChunks(body, controller.signal).next();
+    controller.abort(new Error("write failed"));
+    await expect(reading).rejects.toThrow("write failed");
+    expect(cancelled).toBe(true);
+    expect(body.locked).toBe(false);
   });
 });

@@ -23,10 +23,17 @@ export async function saveRecordingBody(
     await body.cancel().catch(() => {});
     throw error;
   }
-  onOpen?.();
   try {
-    await pipeline(readChunks(body), file);
+    onOpen?.();
+    await pipeline(({ signal } = {}) => readChunks(body, signal), file);
   } catch (error) {
+    // pipeline already destroyed the file; this covers an `onOpen` throw.
+    if (!file.closed) {
+      const closed = once(file, "close");
+      file.destroy();
+      await closed.catch(() => {});
+    }
+    await body.cancel().catch(() => {});
     await rm(path, { force: true }).catch(() => {});
     throw error;
   }
@@ -35,22 +42,35 @@ export async function saveRecordingBody(
 
 // Read via the web reader rather than `Readable.fromWeb`: some Bun releases
 // (1.3.x) never surface a mid-stream body error through `fromWeb`, so the
-// pipeline hangs. If the write side fails first, cancel the body so the
-// underlying connection is released.
-async function* readChunks(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
+// pipeline hangs. If the write side fails first, pipeline aborts `signal`:
+// cancel the body right away (even mid-read) so a stalled body can't hang the
+// pipeline, and the underlying connection is released.
+export async function* readChunks(
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<Uint8Array> {
   const reader = body.getReader();
-  let done = false;
+  let settled = false; // The body ended, errored, or was already cancelled.
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
   try {
+    if (signal?.aborted) cancel();
     while (true) {
       const result = await reader.read();
-      if (result.done) { done = true; return; }
+      signal?.throwIfAborted();
+      if (result.done) { settled = true; return; }
       yield result.value;
     }
   } catch (error) {
-    done = true; // The body already errored; nothing to cancel.
+    settled = true;
     throw error;
   } finally {
-    if (!done) await reader.cancel().catch(() => {});
+    signal?.removeEventListener("abort", cancel);
+    cancel();
     reader.releaseLock();
   }
 }
