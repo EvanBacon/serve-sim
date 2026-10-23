@@ -56,6 +56,16 @@ export function isInteractiveTarget(target: EventTarget | null): boolean {
 }
 
 /**
+ * Clicking the sim cancels mousedown (so the browser never moves focus), which
+ * would leave an earlier-clicked page control focused and keeping
+ * Enter/Space/Tab. Blur it so a click into the sim really takes the keyboard.
+ */
+export function releaseFocusToSim(doc: Pick<Document, "activeElement" | "body">): void {
+  const active = doc.activeElement as { blur?: () => void } | null;
+  if (active && active !== doc.body && typeof active.blur === "function") active.blur();
+}
+
+/**
  * Tracks which keys the simulator currently believes are held so forwarded
  * key events never leave a key stuck down in the guest.
  */

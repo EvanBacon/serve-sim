@@ -78,6 +78,7 @@ import {
   isInteractiveTarget,
   isReloadShortcut,
   keepsNativeButtonKey,
+  releaseFocusToSim,
 } from "./utils/sim-keyboard";
 import {
   DEVICE_SIDEBAR_WIDTH,
@@ -927,8 +928,10 @@ function AppWithConfig({
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as Node;
+      const inSim = !!simContainerRef.current?.contains(target);
+      if (inSim) releaseFocusToSim(document);
       const inside =
-        !!simContainerRef.current?.contains(target) ||
+        inSim ||
         (!!simActionsRef.current?.contains(target) && !isFormControlTarget(target));
       setSimFocused(inside);
     };

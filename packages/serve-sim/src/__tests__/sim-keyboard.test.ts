@@ -6,6 +6,7 @@ import {
   isInteractiveTarget,
   isReloadShortcut,
   keepsNativeButtonKey,
+  releaseFocusToSim,
 } from "../client/utils/sim-keyboard";
 
 const META_LEFT = 0xe3;
@@ -214,5 +215,31 @@ describe("isInteractiveTarget", () => {
     expect(isInteractiveTarget(el(null) as unknown as EventTarget)).toBe(false);
     expect(isInteractiveTarget(null)).toBe(false);
     expect(isInteractiveTarget({} as EventTarget)).toBe(false);
+  });
+});
+
+describe("releaseFocusToSim", () => {
+  // A page with a sidebar button that keeps focus until something blurs it.
+  function page() {
+    const body = { closest: () => null };
+    const button = { closest: () => ({}), blur: () => (doc.activeElement = body) };
+    const doc: { activeElement: unknown; body: unknown } = { activeElement: body, body };
+    return { doc, body, button };
+  }
+
+  test("control focused, then sim clicked, then Space reaches the sim", () => {
+    const { doc, button } = page();
+    doc.activeElement = button; // clicked a sidebar button earlier
+    expect(keepsNativeButtonKey("Space") && isInteractiveTarget(doc.activeElement as EventTarget)).toBe(true);
+    releaseFocusToSim(doc as unknown as Document); // pointerdown inside the sim
+    // Keydown targets the active element (now the body), so Space is forwarded.
+    expect(isInteractiveTarget(doc.activeElement as EventTarget)).toBe(false);
+  });
+
+  test("leaves the body alone", () => {
+    const { doc, body } = page();
+    releaseFocusToSim(doc as unknown as Document);
+    expect(doc.activeElement).toBe(body);
+    releaseFocusToSim({ activeElement: null, body } as unknown as Document);
   });
 });
