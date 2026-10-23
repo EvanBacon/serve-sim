@@ -2359,14 +2359,18 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       }
       // The body is only `{ bundleId }`; cap it so a runaway POST can't
       // grow memory. Over the cap answers 413 (sent: false → client taps R).
-      let body = "";
+      // Count raw bytes, not decoded characters, so multibyte UTF-8 can't
+      // slip past the cap; decode once at the end.
+      let chunks: Buffer[] = [];
+      let bodyBytes = 0;
       let tooLarge = false;
       req.on("data", (chunk: Buffer) => {
         if (tooLarge) return;
-        body += chunk;
-        if (body.length > RELOAD_BODY_LIMIT_BYTES) {
+        chunks.push(chunk);
+        bodyBytes += chunk.length;
+        if (bodyBytes > RELOAD_BODY_LIMIT_BYTES) {
           tooLarge = true;
-          body = "";
+          chunks = [];
           res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
           res.end(JSON.stringify({ sent: false, error: "Body too large" }));
         }
@@ -2374,6 +2378,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       req.on("end", async () => {
         if (tooLarge) return;
         try {
+          const body = Buffer.concat(chunks).toString("utf8");
           const parsed = (body ? JSON.parse(body) : {}) as { bundleId?: unknown };
           const bundleId = typeof parsed.bundleId === "string" ? parsed.bundleId : "";
           let result: MetroReloadResult = { sent: false, reason: "no-metro" };

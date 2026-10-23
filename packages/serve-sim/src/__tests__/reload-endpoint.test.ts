@@ -66,6 +66,16 @@ describe("POST /reload", () => {
     });
   });
 
+  test("the 4 KB cap counts bytes, so multibyte bodies under 4K characters still get 413", async () => {
+    const body = JSON.stringify({ bundleId: "com.example.app", pad: "é".repeat(3 * 1024) });
+    expect(body.length).toBeLessThan(4 * 1024);
+    expect(Buffer.byteLength(body)).toBeGreaterThan(4 * 1024);
+    expect(await postReload(body)).toEqual({
+      status: 413,
+      json: { sent: false, error: "Body too large" },
+    });
+  });
+
   test("malformed bodies send nothing", async () => {
     const { status, json } = await postReload("{");
     expect(status).toBe(400);
