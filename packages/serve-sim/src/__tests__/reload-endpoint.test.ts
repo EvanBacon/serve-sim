@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createServer as createHttpServer } from "http";
 import type { AddressInfo } from "net";
-import { METRO_RELOAD_SERVER_BUDGET_MS } from "../metro-reload";
-import { simMiddleware } from "../middleware";
+import { METRO_RELOAD_SERVER_BUDGET_MS, reloadViaMetro } from "../metro-reload";
+import { simMiddleware, simulatorName } from "../middleware";
 
 async function postReload(
   body: string,
@@ -62,5 +62,45 @@ describe("POST /reload", () => {
     const { status, json } = await postReload("{");
     expect(status).toBe(400);
     expect(json.sent).toBe(false);
+  });
+});
+
+describe("simulatorName", () => {
+  const SIM = "iPhone 17 Pro";
+  const sim = (udid: string, state = "Booted") => ({ udid, name: SIM, state });
+
+  test("lists afresh on every call, so a twin booted since the last call is seen", async () => {
+    let sims = [sim("a"), sim("b", "Shutdown")];
+    const list = async () => sims;
+    expect(await simulatorName("a", list)).toBe(SIM);
+    sims = [sim("a"), sim("b")];
+    expect(await simulatorName("a", list)).toBeUndefined();
+  });
+
+  test("a failed listing gives no name instead of a stale one", async () => {
+    expect(await simulatorName("a", async () => [sim("a")])).toBe(SIM);
+    expect(await simulatorName("a", async () => [])).toBeUndefined();
+  });
+
+  test("a listing that outlasts the lookup budget sends no reload", async () => {
+    const sent: number[] = [];
+    let finishListing!: () => void;
+    const listing = new Promise<void>((resolve) => (finishListing = resolve));
+    const slowList = async () => {
+      await listing;
+      return [sim("a")];
+    };
+    const result = await reloadViaMetro("com.example.devclient", simulatorName("a", slowList), [8083], {
+      fetchJson: async () => [{ appId: "com.example.devclient", deviceName: SIM, reactNative: { logicalDeviceId: SIM } }],
+      sendReload: async (port) => {
+        sent.push(port);
+        return "targeted";
+      },
+      lookupBudgetMs: 20,
+    });
+    expect(result).toEqual({ sent: false, reason: "timeout" });
+    finishListing();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toEqual([]);
   });
 });

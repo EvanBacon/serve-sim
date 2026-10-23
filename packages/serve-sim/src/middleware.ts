@@ -1219,23 +1219,17 @@ interface SimctlDevice {
   runtime: string;
 }
 
-// Simulators by udid, for matching Metro's `/json/list` deviceName.
-// `simctl list` is slow on a cold start, so POST /reload answers from this
-// cache and refreshes it in the background (renames are picked up next time).
-const simulatorCache = new Map<string, SimctlDevice>();
-
-async function refreshSimulatorCache(): Promise<void> {
-  const sims = await listAllSimulators();
-  if (sims.length === 0) return;
-  simulatorCache.clear();
-  for (const d of sims) simulatorCache.set(d.udid, d);
-}
-
-/** Metro device name for `udid`; undefined if another booted sim shares it. */
-async function simulatorName(udid: string): Promise<string | undefined> {
-  const refresh = refreshSimulatorCache();
-  if (!simulatorCache.has(udid)) await refresh;
-  return uniqueSimulatorName(simulatorCache.values(), udid);
+/**
+ * Metro device name for `udid`; undefined if another booted sim shares it or
+ * the listing fails. Always lists afresh — a cached listing could miss a twin
+ * booted since — and POST /reload's lookup budget bounds the wait, falling
+ * back to tapping R rather than reloading from stale data.
+ */
+export async function simulatorName(
+  udid: string,
+  listSimulators: () => Promise<readonly { udid: string; name: string; state: string }[]> = listAllSimulators,
+): Promise<string | undefined> {
+  return uniqueSimulatorName(await listSimulators(), udid);
 }
 
 function listAllSimulators(): Promise<SimctlDevice[]> {
