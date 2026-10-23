@@ -31,6 +31,7 @@ import {
   subscribeEventLog,
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
+import { reloadViaMetro, supportsMetroReload, uniqueSimulatorName, type MetroReloadResult } from "./metro-reload";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import {
   authTokenFingerprint,
@@ -153,6 +154,10 @@ const axStreamerCache = createAxStreamerCache();
 // A malformed log entry without a newline can't grow this beyond 1 MB;
 // the partial line is dropped rather than retained indefinitely.
 const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
+
+/** POST /reload only carries `{ bundleId }`. */
+const RELOAD_BODY_LIMIT_BYTES = 4 * 1024;
+
 let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
 function eventLogLimit(rawUrl: string): number | undefined {
@@ -997,6 +1002,7 @@ export function previewConfigForState(
 ): ServeSimState & {
   basePath: string;
   appStateEndpoint: string;
+  reloadEndpoint: string;
   eventLogEndpoint: string;
   eventLogEventsEndpoint: string;
   diagnosticsEndpoint: string;
@@ -1019,6 +1025,7 @@ export function previewConfigForState(
     ...publicState(state),
     basePath: base,
     appStateEndpoint: endpoint(base, "/appstate", state.device),
+    reloadEndpoint: endpoint(base, "/reload", state.device),
     eventLogEndpoint: endpoint(base, "/api/event-log", state.device),
     eventLogEventsEndpoint: endpoint(base, "/api/event-log/events", state.device),
     diagnosticsEndpoint: endpoint(base, "/api/diagnostics", state.device),
@@ -1218,6 +1225,19 @@ interface SimctlDevice {
   isAvailable?: boolean;
   deviceTypeIdentifier?: string;
   runtime: string;
+}
+
+/**
+ * Metro device name for `udid`; undefined if another booted sim shares it or
+ * the listing fails. Always lists afresh — a cached listing could miss a twin
+ * booted since — and POST /reload's lookup budget bounds the wait, falling
+ * back to tapping R rather than reloading from stale data.
+ */
+export async function simulatorName(
+  udid: string,
+  listSimulators: () => Promise<readonly { udid: string; name: string; state: string }[]> = listAllSimulators,
+): Promise<string | undefined> {
+  return uniqueSimulatorName(await listSimulators(), udid);
 }
 
 function listAllSimulators(): Promise<SimctlDevice[]> {
@@ -2323,6 +2343,70 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
             exitCode,
           }));
         });
+      });
+      return;
+    }
+
+    // POST /reload — reload the foreground React Native app through its
+    // Metro dev server, like `r` in the `expo start` terminal. Body:
+    // { bundleId }. Metro doesn't acknowledge reloads, so `sent: true` means
+    // the reload went out (unconfirmed) and the client must not also tap R;
+    // `sent: false` means nothing was sent and the client falls back to
+    // tapping R in the guest. See metro-reload.ts.
+    if (url === base + "/reload" && req.method === "POST") {
+      // Without a device the lookup would fall back to the first running
+      // helper and could reload the app on a different simulator.
+      if (!selectedDevice) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ sent: false, error: "Missing device" }));
+        return;
+      }
+      // The body is only `{ bundleId }`; cap it so a runaway POST can't
+      // grow memory. Over the cap answers 413 (sent: false → client taps R).
+      // Count raw bytes, not decoded characters, so multibyte UTF-8 can't
+      // slip past the cap; decode once at the end.
+      let chunks: Buffer[] = [];
+      let bodyBytes = 0;
+      let tooLarge = false;
+      req.on("data", (chunk: Buffer) => {
+        if (tooLarge) return;
+        chunks.push(chunk);
+        bodyBytes += chunk.length;
+        if (bodyBytes > RELOAD_BODY_LIMIT_BYTES) {
+          tooLarge = true;
+          chunks = [];
+          res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+          res.end(JSON.stringify({ sent: false, error: "Body too large" }));
+        }
+      });
+      req.on("end", async () => {
+        if (tooLarge) return;
+        try {
+          const body = Buffer.concat(chunks).toString("utf8");
+          const parsed = (body ? JSON.parse(body) : {}) as { bundleId?: unknown };
+          const bundleId = typeof parsed.bundleId === "string" ? parsed.bundleId : "";
+          let result: MetroReloadResult = { sent: false, reason: "no-metro" };
+          if (bundleId && !supportsMetroReload(bundleId)) {
+            result = { sent: false, reason: "unsupported-app" };
+          } else if (bundleId) {
+            // The device lookup runs alongside the Metro probes, inside
+            // reloadViaMetro's time budget, so this answers before the
+            // client gives up and taps R itself.
+            const name = readServeSimStates().then((states) => {
+              const state = selectServeSimState(states, selectedDevice);
+              return state ? simulatorName(state.device) : undefined;
+            });
+            result = await reloadViaMetro(bundleId, name);
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ...result, confirmed: false }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            sent: false,
+            error: err instanceof Error ? err.message : "Failed to reload",
+          }));
+        }
       });
       return;
     }

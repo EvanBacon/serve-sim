@@ -73,7 +73,15 @@ import {
 import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
-import { createSimKeyState } from "./utils/sim-keyboard";
+import { requestMetroReload } from "./utils/metro-reload-request";
+import {
+  createSimKeyState,
+  isFormControlTarget,
+  isInteractiveTarget,
+  isReloadShortcut,
+  keepsNativeButtonKey,
+  releaseFocusToSim,
+} from "./utils/sim-keyboard";
 import {
   DEVICE_SIDEBAR_WIDTH,
   DEVTOOLS_PANEL_WIDTH,
@@ -871,19 +879,37 @@ function AppWithConfig({
 
   // Keys the sim currently holds; see createSimKeyState.
   const [simKeys] = useState(createSimKeyState);
+  const currentAppRef = useRef(currentApp);
+  useEffect(() => {
+    currentAppRef.current = currentApp;
+  }, [currentApp]);
 
-  // R to reload the RN/Expo bundle.
+  // Reload the RN/Expo bundle. Prefer asking the app's Metro server (works
+  // with a text field focused, where an R tap would just type "r"). Tap R
+  // only when the server reports it sent nothing (Expo Go, no Metro, Metro
+  // shared with other devices; see metro-reload.ts): Metro doesn't confirm
+  // reloads, so tapping after a sent or timed-out request could reload twice.
+  // RN handles the R tap when nothing is first responder.
   // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
   // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
   // react-native https://github.com/react/react-native/blob/c1652651c09506b8dda0b9515b5f0e5829220f0d/packages/react-native/React/Base/RCTKeyCommands.m#L69-L74
+  const reloadEndpoint =
+    config.reloadEndpoint ?? `${simEndpoint("reload")}?device=${encodeURIComponent(config.device)}`;
   const sendReactNativeReload = useCallback(async () => {
-    const R = 0x15;
-    sendKey("down", R);
+    const bundleId = currentAppRef.current?.bundleId;
+    if (bundleId && (await requestMetroReload(reloadEndpoint, bundleId)) !== "not-sent") return;
+    const { release, tap } = simKeys.reloadEvents();
+    for (const ev of release) sendKey(ev.type, ev.usage);
+    sendKey("down", tap);
     await new Promise((r) => setTimeout(r, 30));
-    sendKey("up", R);
-  }, [sendKey]);
+    sendKey("up", tap);
+    for (const ev of simKeys.restoreEvents()) sendKey(ev.type, ev.usage);
+  }, [sendKey, simKeys, reloadEndpoint]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
+  // The action toolbar under the device (reload, home, ...) is sim chrome:
+  // clicking it must not move keyboard focus away from the simulator.
+  const simActionsRef = useRef<HTMLDivElement | null>(null);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
   const [deviceRenderedHeight, setDeviceRenderedHeight] = useState(0);
   useEffect(() => {
@@ -903,7 +929,12 @@ function AppWithConfig({
 
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
-      const inside = !!simContainerRef.current?.contains(e.target as Node);
+      const target = e.target as Node;
+      const inSim = !!simContainerRef.current?.contains(target);
+      if (inSim) releaseFocusToSim(document);
+      const inside =
+        inSim ||
+        (!!simActionsRef.current?.contains(target) && !isFormControlTarget(target));
       setSimFocused(inside);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
@@ -915,9 +946,23 @@ function AppWithConfig({
     for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
   }, [simFocused, sendWs, simKeys]);
 
+  // Keyups that happen while the window is in the background never reach
+  // us (e.g. Cmd+Tab away), so lift everything the sim holds on blur.
+  useEffect(() => {
+    const onBlur = () => {
+      for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [sendWs, simKeys]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
+      // A focused form control (e.g. the Duo hinge slider) keeps its keys.
+      if (isFormControlTarget(e.target)) return;
+      // A focused button or link (toolbar or elsewhere) keeps Enter/Space/Tab.
+      if (keepsNativeButtonKey(e.code) && isInteractiveTarget(e.target)) return;
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) sendWs(0x04, { button: "home" });
@@ -942,6 +987,11 @@ function AppWithConfig({
         if (type === "down" && !e.repeat) sendWs(0x0c, {});
         return;
       }
+      if (isReloadShortcut(e) && currentAppRef.current?.isReactNative) {
+        e.preventDefault();
+        if (type === "down" && !e.repeat) void sendReactNativeReload();
+        return;
+      }
       const usage = hidUsageForCode(e.code);
       if (usage == null) return;
       e.preventDefault();
@@ -955,7 +1005,7 @@ function AppWithConfig({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device, rotateBy, simKeys]);
+  }, [sendWs, config.device, rotateBy, sendReactNativeReload, simKeys]);
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
@@ -1202,7 +1252,7 @@ function AppWithConfig({
             </>
           )}
         </div>
-        <div className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
+        <div ref={simActionsRef} className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
           <SimulatorToolbar
             exec={noHostShell}
             onRotate={rotateDevice}
@@ -1227,7 +1277,7 @@ function AppWithConfig({
               {currentApp?.isReactNative && (
                 <SimulatorToolbar.Button
                   aria-label="Reload React Native bundle"
-                  title="Reload (R)"
+                  title="Reload (R, ⌘R)"
                   onClick={() => void sendReactNativeReload()}
                 >
                   <ReloadIcon />
