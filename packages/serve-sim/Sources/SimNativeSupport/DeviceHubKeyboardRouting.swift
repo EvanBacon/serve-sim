@@ -145,3 +145,47 @@ public enum HIDKeyboardMapping {
         0xE4: 62, 0xE5: 60, 0xE6: 61, 0xE7: 54,
     ]
 }
+
+/// Picks the pid that keyboard events for Device Hub should target.
+///
+/// NSRunningApplication can report -1 for a running Device Hub (seen with
+/// Xcode 27.0 on macOS 27.0.1, consistently across relaunches) even though
+/// LaunchServices holds the real pid. AX and CGEvent then address no process
+/// at all. In that case the caller supplies the current user's processes whose
+/// executable is Device Hub's executable, and only an unambiguous match is used:
+/// keystrokes must reach exactly one Device Hub.
+public enum DeviceHubProcessResolver {
+    public static func resolve(
+        reportedProcessIdentifier: Int32,
+        executableMatches: () -> [Int32]
+    ) -> Int32? {
+        if reportedProcessIdentifier > 0 { return reportedProcessIdentifier }
+        let matches = Set(executableMatches().filter { $0 > 0 })
+        return matches.count == 1 ? matches.first : nil
+    }
+}
+
+/// The Device Hub process a key sequence is latched to.
+///
+/// Resolving the process can mean walking the whole process table (see
+/// `DeviceHubProcessResolver`), so it happens once at the start of a sequence.
+/// Every later key only re-observes this one pid and checks that it is still
+/// the same executable owned by the same user, which also rejects a pid that
+/// was recycled by an unrelated process.
+public struct DeviceHubProcessIdentity: Equatable {
+    public let processIdentifier: Int32
+    public let executablePath: String
+    public let userIdentifier: UInt32
+
+    public init(processIdentifier: Int32, executablePath: String, userIdentifier: UInt32) {
+        self.processIdentifier = processIdentifier
+        self.executablePath = executablePath
+        self.userIdentifier = userIdentifier
+    }
+
+    /// `observedExecutablePath` / `observedUserIdentifier` describe whatever
+    /// currently runs as `processIdentifier`, or nil when nothing does.
+    public func isSameProcess(observedExecutablePath: String?, observedUserIdentifier: UInt32?) -> Bool {
+        observedExecutablePath == executablePath && observedUserIdentifier == userIdentifier
+    }
+}
