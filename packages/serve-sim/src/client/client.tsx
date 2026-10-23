@@ -71,7 +71,12 @@ import {
 import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
-import { createSimKeyState, isReloadShortcut } from "./utils/sim-keyboard";
+import {
+  createSimKeyState,
+  isFormControlTarget,
+  isReloadShortcut,
+  keepsNativeButtonKey,
+} from "./utils/sim-keyboard";
 import {
   DEVICE_SIDEBAR_WIDTH,
   DEVTOOLS_PANEL_WIDTH,
@@ -870,19 +875,38 @@ function AppWithConfig({
   // Keys the sim currently holds; see createSimKeyState.
   const [simKeys] = useState(createSimKeyState);
   const currentAppRef = useRef(currentApp);
-  currentAppRef.current = currentApp;
+  useEffect(() => {
+    currentAppRef.current = currentApp;
+  }, [currentApp]);
 
-  // R to reload the RN/Expo bundle.
+  // Reload the RN/Expo bundle. Prefer asking the app's Metro server (works
+  // with a text field focused, where an R tap would just type "r"); fall
+  // back to tapping R (always for Expo Go, see metro-reload.ts), which RN
+  // handles when nothing is first responder.
   // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
   // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
   // react-native https://github.com/react/react-native/blob/c1652651c09506b8dda0b9515b5f0e5829220f0d/packages/react-native/React/Base/RCTKeyCommands.m#L69-L74
+  const reloadEndpoint = config.reloadEndpoint ?? simEndpoint("reload");
   const sendReactNativeReload = useCallback(async () => {
-    const { release, tap } = simKeys.reloadEvents();
+    const bundleId = currentAppRef.current?.bundleId;
+    if (bundleId) {
+      try {
+        const res = await fetch(reloadEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bundleId }),
+        });
+        const result = (await res.json()) as { reloaded?: boolean };
+        if (result.reloaded) return;
+      } catch {}
+    }
+    const { release, tap, restore } = simKeys.reloadEvents();
     for (const ev of release) sendKey(ev.type, ev.usage);
     sendKey("down", tap);
     await new Promise((r) => setTimeout(r, 30));
     sendKey("up", tap);
-  }, [sendKey, simKeys]);
+    for (const ev of restore) sendKey(ev.type, ev.usage);
+  }, [sendKey, simKeys, reloadEndpoint]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
   // The action toolbar under the device (reload, home, ...) is sim chrome:
@@ -909,7 +933,8 @@ function AppWithConfig({
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as Node;
       const inside =
-        !!simContainerRef.current?.contains(target) || !!simActionsRef.current?.contains(target);
+        !!simContainerRef.current?.contains(target) ||
+        (!!simActionsRef.current?.contains(target) && !isFormControlTarget(target));
       setSimFocused(inside);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
@@ -921,9 +946,21 @@ function AppWithConfig({
     for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
   }, [simFocused, sendWs, simKeys]);
 
+  // Keyups that happen while the window is in the background never reach
+  // us (e.g. Cmd+Tab away), so lift everything the sim holds on blur.
+  useEffect(() => {
+    const onBlur = () => {
+      for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [sendWs, simKeys]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
+      // A focused toolbar button keeps Enter/Space/Tab for itself.
+      if (keepsNativeButtonKey(e.code) && simActionsRef.current?.contains(e.target as Node)) return;
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) sendWs(0x04, { button: "home" });

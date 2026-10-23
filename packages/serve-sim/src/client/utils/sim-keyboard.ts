@@ -13,11 +13,33 @@ type ModifierState = Pick<KeyboardEvent, "code" | "metaKey" | "ctrlKey" | "altKe
 
 /**
  * Cmd+R. Browsers let pages cancel it, so the preview can turn it into a
- * React Native reload instead of reloading itself. Cmd+Shift+R stays a hard
- * browser reload.
+ * React Native reload instead of reloading itself. Cmd+Shift+R is not
+ * matched: like any other chord it is forwarded to the sim as keys.
  */
 export function isReloadShortcut(e: ModifierState): boolean {
   return e.code === "KeyR" && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+}
+
+/** Keys that activate or move between focused toolbar buttons. */
+const BUTTON_KEY_CODES = new Set(["Tab", "Enter", "NumpadEnter", "Space"]);
+
+/**
+ * Whether a key should keep its native browser behavior instead of going to
+ * the sim because a toolbar control under the device has DOM focus (Enter
+ * and Space press the button, Tab moves between buttons).
+ */
+export function keepsNativeButtonKey(code: string): boolean {
+  return BUTTON_KEY_CODES.has(code);
+}
+
+/**
+ * Form controls in the toolbar (e.g. the Duo hinge slider) need real DOM
+ * focus for their own keyboard handling, so clicking them hands the keyboard
+ * to the browser rather than keeping it on the sim.
+ */
+export function isFormControlTarget(target: EventTarget | null): boolean {
+  const el = target as { closest?: (selector: string) => unknown } | null;
+  return typeof el?.closest === "function" && el.closest("input, select, textarea") != null;
 }
 
 /**
@@ -66,11 +88,17 @@ export function createSimKeyState() {
      * React Native (RCTKeyCommands, Expo Go, expo-dev-client) reloads on a
      * bare `r` when no text field is first responder, but the guest never
      * reloads for Cmd+R injected through Indigo. Lift every held key (a held
-     * Cmd would turn the tap back into Cmd+R, a held R would swallow it), then
-     * tap R.
+     * Cmd would turn the tap back into Cmd+R, a held R would swallow it), tap
+     * R, then press the released modifiers again since the user is still
+     * holding them and their keyup will be forwarded later.
      */
-    reloadEvents(): { release: SimKeyEvent[]; tap: number } {
-      return { release: releaseAll(), tap: HID_KEY_R };
+    reloadEvents(): { release: SimKeyEvent[]; tap: number; restore: SimKeyEvent[] } {
+      const release = releaseAll();
+      const restore = release
+        .filter((ev) => isModifierUsage(ev.usage))
+        .map((ev): SimKeyEvent => ({ type: "down", usage: ev.usage }));
+      for (const ev of restore) held.add(ev.usage);
+      return { release, tap: HID_KEY_R, restore };
     },
   };
 }

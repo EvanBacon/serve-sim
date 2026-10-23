@@ -11,6 +11,7 @@ declare global {
       axEndpoint?: string;
       cameraStatusEndpoint?: string;
       appStateEndpoint?: string;
+      reloadEndpoint?: string;
       eventLogEndpoint?: string;
       eventLogEventsEndpoint?: string;
       /** Loopback-only `serve-sim doctor` JSON (copied by "Copy diagnostics"). */

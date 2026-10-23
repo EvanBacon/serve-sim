@@ -31,6 +31,7 @@ import {
   subscribeEventLog,
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
+import { reloadViaMetro } from "./metro-reload";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import {
   authTokenFingerprint,
@@ -993,6 +994,7 @@ export function previewConfigForState(
 ): ServeSimState & {
   basePath: string;
   appStateEndpoint: string;
+  reloadEndpoint: string;
   eventLogEndpoint: string;
   eventLogEventsEndpoint: string;
   diagnosticsEndpoint: string;
@@ -1015,6 +1017,7 @@ export function previewConfigForState(
     ...publicState(state),
     basePath: base,
     appStateEndpoint: endpoint(base, "/appstate", state.device),
+    reloadEndpoint: endpoint(base, "/reload", state.device),
     eventLogEndpoint: endpoint(base, "/api/event-log", state.device),
     eventLogEventsEndpoint: endpoint(base, "/api/event-log/events", state.device),
     diagnosticsEndpoint: endpoint(base, "/api/diagnostics", state.device),
@@ -2319,6 +2322,37 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
             exitCode,
           }));
         });
+      });
+      return;
+    }
+
+    // POST /reload — reload the foreground React Native app through its
+    // Metro dev server, like `r` in the `expo start` terminal. Body:
+    // { bundleId }. `{ reloaded: false }` tells the client to fall back to
+    // tapping R in the guest.
+    if (url === base + "/reload" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const parsed = (body ? JSON.parse(body) : {}) as { bundleId?: unknown };
+          const states = await readServeSimStates();
+          const state = selectServeSimState(states, selectedDevice);
+          let ports: number[] = [];
+          if (state && typeof parsed.bundleId === "string" && parsed.bundleId) {
+            const sims = await listAllSimulators();
+            const name = sims.find((d) => d.udid === state.device)?.name;
+            ports = await reloadViaMetro(parsed.bundleId, name);
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ reloaded: ports.length > 0, ports }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            reloaded: false,
+            error: err instanceof Error ? err.message : "Failed to reload",
+          }));
+        }
       });
       return;
     }

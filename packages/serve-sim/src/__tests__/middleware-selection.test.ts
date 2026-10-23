@@ -48,6 +48,7 @@ describe("previewConfigForState", () => {
       ...state,
       basePath: "/preview",
       appStateEndpoint: "/preview/appstate?device=DEVICE-B",
+      reloadEndpoint: "/preview/reload?device=DEVICE-B",
       eventLogEndpoint: "/preview/api/event-log?device=DEVICE-B",
       eventLogEventsEndpoint: "/preview/api/event-log/events?device=DEVICE-B",
       diagnosticsEndpoint: "/preview/api/diagnostics?device=DEVICE-B",
