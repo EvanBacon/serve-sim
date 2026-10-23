@@ -870,19 +870,16 @@ function AppWithConfig({
   // Keys the sim currently holds; see createSimKeyState.
   const [simKeys] = useState(createSimKeyState);
 
-  // R to reload the RN/Expo bundle. Lift any key still held in the guest
-  // first, or the tap is swallowed (e.g. right after Cmd+R).
+  // R to reload the RN/Expo bundle.
   // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
   // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
   // react-native https://github.com/react/react-native/blob/c1652651c09506b8dda0b9515b5f0e5829220f0d/packages/react-native/React/Base/RCTKeyCommands.m#L69-L74
   const sendReactNativeReload = useCallback(async () => {
-    const { release, tap } = simKeys.reloadEvents();
-    for (const ev of release) sendKey(ev.type, ev.usage);
-    sendKey("down", tap);
+    const R = 0x15;
+    sendKey("down", R);
     await new Promise((r) => setTimeout(r, 30));
-    sendKey("up", tap);
-    for (const ev of simKeys.restoreEvents()) sendKey(ev.type, ev.usage);
-  }, [sendKey, simKeys]);
+    sendKey("up", R);
+  }, [sendKey]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
