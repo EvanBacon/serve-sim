@@ -177,6 +177,34 @@ describe("hierarchy-3d routes", () => {
     });
     expect(res.status).toBe(403);
   });
+
+  test("remote viewers need the auth token and may never relaunch apps", async () => {
+    const launched: string[] = [];
+    const AUTH = "hierarchy-3d-remote-token";
+    const origin = await listen({
+      basePath: "/.sim", device: DEVICE, authToken: AUTH, experimentalHierarchy3d: true,
+      hierarchy3dDeps: fakeDeps({ launchWithAgent: async (_u, b) => { launched.push(b); return { pid: 5000 }; } }),
+    });
+    // A proxied hop makes the request remote even though the socket is loopback.
+    const remote = { "X-Forwarded-For": "203.0.113.9" };
+    const page = await fetch(`${origin}/.sim/hierarchy-3d`, { headers: remote });
+    expect(page.status).toBe(401);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(await page.text()).not.toContain("__SIM_HIERARCHY_3D__");
+    expect((await fetch(`${origin}/.sim/hierarchy-3d/api/capture?device=${DEVICE}`, { headers: remote })).status).toBe(401);
+    expect((await fetch(`${origin}/.sim/hierarchy-3d/api/screenshot?device=${DEVICE}`, { headers: remote })).status).toBe(401);
+
+    const authed = { ...remote, Authorization: `Bearer ${AUTH}` };
+    const body = (await (await fetch(`${origin}/.sim/hierarchy-3d/api/capture?device=${DEVICE}`, { headers: authed })).json()) as HierarchyCaptureResponse;
+    expect(body.canInject).toBe(false);
+    const inject = await fetch(`${origin}/.sim/hierarchy-3d/api/inject?device=${DEVICE}`, {
+      method: "POST",
+      headers: { ...authed, "Content-Type": "application/json" },
+      body: JSON.stringify({ bundleId: "dev.example" }),
+    });
+    expect(inject.status).toBe(403);
+    expect(launched).toEqual([]);
+  });
 });
 
 describe("hierarchy agent registry", () => {

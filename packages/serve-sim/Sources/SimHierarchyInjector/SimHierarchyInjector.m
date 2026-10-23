@@ -376,10 +376,25 @@ static NSArray<UIWindow *> *VisibleWindows(UIScreen **outScreen) {
   return windows;
 }
 
+/// Run `work` on the main thread, waiting at most `seconds`. On timeout the
+/// block still runs later (callers must tolerate that) and NO is returned,
+/// so a hung main thread can't park connection threads forever.
+static BOOL RunOnMainBounded(dispatch_block_t work, double seconds) {
+  if ([NSThread isMainThread]) {
+    work();
+    return YES;
+  }
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    work();
+    dispatch_semaphore_signal(done);
+  });
+  return dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC))) == 0;
+}
+
 static NSDictionary *InfoDict(void) {
   __block NSString *state = @"unknown";
-  void (^read)(void) = ^{ state = AppStateName(UIApplication.sharedApplication.applicationState); };
-  if ([NSThread isMainThread]) read(); else dispatch_sync(dispatch_get_main_queue(), read);
+  RunOnMainBounded(^{ state = AppStateName(UIApplication.sharedApplication.applicationState); }, 2);
   return @{
     @"protocol": @1,
     @"pid": @(getpid()),
@@ -388,7 +403,9 @@ static NSDictionary *InfoDict(void) {
   };
 }
 
-static NSDictionary *CaptureHierarchy(BOOL snapshots, CGFloat requestedScale) {
+/// `onFinished` runs once the walk has actually finished on the main thread,
+/// which after a timeout is later than this function returns.
+static NSDictionary *CaptureHierarchy(BOOL snapshots, CGFloat requestedScale, dispatch_block_t onFinished) {
   __block NSDictionary *result = nil;
   dispatch_block_t work = ^{
     @autoreleasepool {
@@ -438,19 +455,11 @@ static NSDictionary *CaptureHierarchy(BOOL snapshots, CGFloat requestedScale) {
         @"windows": roots,
       };
     }
+    onFinished();
   };
-  if ([NSThread isMainThread]) {
-    work();
-    return result;
-  }
   // Don't block a connection thread forever on a busy/hung main thread. On
-  // timeout the block still runs later; its result is simply dropped.
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  dispatch_async(dispatch_get_main_queue(), ^{
-    work();
-    dispatch_semaphore_signal(done);
-  });
-  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0) return nil;
+  // timeout the walk still runs later; its result is simply dropped.
+  if (!RunOnMainBounded(work, 20)) return nil;
   return result;
 }
 
@@ -596,8 +605,10 @@ static void HandleConnection(int fd) {
       if (dispatch_semaphore_wait(captureGate, DISPATCH_TIME_NOW) != 0) {
         RespondJSON(fd, 503, @{ @"error": @"capture_in_progress" });
       } else {
-        NSDictionary *capture = CaptureHierarchy(snaps, scale);
-        dispatch_semaphore_signal(captureGate);
+        // Released when the walk finishes, not when we stop waiting for it:
+        // after a timeout the walk is still queued on the main thread, and
+        // letting the next request queue another would pile them up.
+        NSDictionary *capture = CaptureHierarchy(snaps, scale, ^{ dispatch_semaphore_signal(captureGate); });
         RespondJSON(fd, capture ? 200 : 503, capture ?: @{ @"error": @"main_thread_timeout" });
       }
     } else if ([path hasPrefix:@"/snapshot/"]) {
