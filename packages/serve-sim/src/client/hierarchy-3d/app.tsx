@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ancestorIds, layoutHierarchy, type DepthMode, type Layout } from "../../hierarchy-3d/layout";
 import type { HierarchyCaptureResponse, HierarchyNode, HierarchyPropValue, HierarchyRect } from "../../hierarchy-3d/model";
 import { fitDistance, panTarget, type OrbitCamera } from "./projection";
@@ -153,19 +153,24 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
 
   const capture = response?.capture ?? null;
 
+  // Only the newest request may update state: an older capture finishing
+  // late must not replace a newer one (its textures may be evicted already).
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${api}/capture?${deviceQuery}`, { cache: "no-store" });
       const body = (await res.json()) as HierarchyCaptureResponse & { message?: string };
+      if (seq !== loadSeq.current) return;
       if (!res.ok) throw new Error(body.message ?? body.error ?? `HTTP ${res.status}`);
       setResponse(body);
       if (body.error && !body.capture) setError(body.error);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (seq === loadSeq.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [api, deviceQuery]);
 
@@ -199,16 +204,19 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   }, [capture]);
   const selectedNode = selectedId ? nodeById.get(selectedId) ?? null : null;
 
-  // Initial selection from ?select=<id | accessibilityIdentifier>.
+  // Initial selection from ?select=<id | accessibilityIdentifier>, applied
+  // once (not again after the user deselects and refreshes).
+  const initialSelectApplied = useRef(false);
   useEffect(() => {
-    if (!params.select || !capture || selectedId) return;
+    if (!params.select || !capture || initialSelectApplied.current) return;
     for (const n of nodeById.values()) {
       if (n.id === params.select || n.accessibilityIdentifier === params.select) {
+        initialSelectApplied.current = true;
         setSelectedId(n.id);
         break;
       }
     }
-  }, [capture, nodeById, params.select, selectedId]);
+  }, [capture, nodeById, params.select]);
 
   // Scene lifecycle.
   useEffect(() => {
@@ -216,9 +224,15 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
     if (!canvas) return;
     let scene: HierarchyScene;
     try {
+      // Textures arrive one by one; coalesce progress updates so dozens of
+      // loads don't each re-render the page.
+      let progressTimer: ReturnType<typeof setTimeout> | null = null;
       scene = new HierarchyScene(canvas, () => {
         drawRef.current();
-        setTextureProgress(scene.textureProgress());
+        progressTimer ??= setTimeout(() => {
+          progressTimer = null;
+          if (sceneRef.current === scene) setTextureProgress(scene.textureProgress());
+        }, 150);
       });
     } catch (e) {
       setSceneError(e instanceof Error ? e.message : String(e));
@@ -391,7 +405,7 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement | null)?.tagName === "INPUT") return;
+      if ((e.target as HTMLElement | null)?.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "r") void load();
       else if (e.key === "f") resetCamera();
       else if (e.key === "Escape") setSelectedId(null);
@@ -404,6 +418,15 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   }, [load, resetCamera, selectedId, layout]);
+
+  const toggleCollapsed = useCallback((id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   const rows = useMemo(() => (capture ? flattenTree(capture.windows, collapsed, filter) : []), [capture, collapsed, filter]);
 
@@ -496,45 +519,15 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
       <div className="h3d-main">
         <aside className="h3d-tree">
           <input className="h3d-filter" type="search" placeholder="Filter views" value={filter} onInput={(e) => setFilter((e.target as HTMLInputElement).value)} />
-          <div className="h3d-rows" role="tree">
-            {rows.map(({ node, depth, hasChildren }) => {
-              const inLayout = layout?.indexById.has(node.id) ?? false;
-              const isSel = node.id === selectedId;
-              const isHover = hoveredNode?.id === node.id;
-              const summary = nodeSummary(node);
-              return (
-                <div
-                  key={node.id}
-                  data-node-id={node.id}
-                  role="treeitem"
-                  aria-selected={isSel}
-                  className={`h3d-row${isSel ? " is-selected" : ""}${isHover ? " is-hovered" : ""}${inLayout ? "" : " is-hidden"}`}
-                  style={{ paddingLeft: 6 + depth * 12 }}
-                  onClick={() => setSelectedId(node.id)}
-                  onMouseEnter={() => setHovered(layout?.indexById.get(node.id) ?? -1)}
-                  onMouseLeave={() => setHovered(-1)}
-                >
-                  <span
-                    className="h3d-disclosure"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!hasChildren) return;
-                      setCollapsed((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(node.id)) next.delete(node.id);
-                        else next.add(node.id);
-                        return next;
-                      });
-                    }}
-                  >
-                    {hasChildren ? <Disclosure open={!collapsed.has(node.id)} /> : null}
-                  </span>
-                  <span className="h3d-class">{node.class}</span>
-                  {summary && <span className="h3d-summary">{summary}</span>}
-                </div>
-              );
-            })}
-          </div>
+          <TreeList
+            rows={rows}
+            selectedId={selectedId}
+            collapsed={collapsed}
+            layout={layout}
+            onSelect={setSelectedId}
+            onHover={setHovered}
+            onToggle={toggleCollapsed}
+          />
         </aside>
 
         <section className="h3d-viewport">
@@ -561,6 +554,55 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
     </div>
   );
 }
+
+/**
+ * Memoized so 3D hover / texture progress re-renders skip it; hovering a row
+ * still highlights the view in 3D through `onHover`.
+ */
+const TreeList = memo(function TreeList({ rows, selectedId, collapsed, layout, onSelect, onHover, onToggle }: {
+  rows: TreeRow[];
+  selectedId: string | null;
+  collapsed: Set<string>;
+  layout: Layout | null;
+  onSelect: (id: string) => void;
+  onHover: (index: number) => void;
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <div className="h3d-rows" role="tree">
+      {rows.map(({ node, depth, hasChildren }) => {
+        const inLayout = layout?.indexById.has(node.id) ?? false;
+        const isSel = node.id === selectedId;
+        const summary = nodeSummary(node);
+        return (
+          <div
+            key={node.id}
+            data-node-id={node.id}
+            role="treeitem"
+            aria-selected={isSel}
+            className={`h3d-row${isSel ? " is-selected" : ""}${inLayout ? "" : " is-hidden"}`}
+            style={{ paddingLeft: 6 + depth * 12 }}
+            onClick={() => onSelect(node.id)}
+            onMouseEnter={() => onHover(layout?.indexById.get(node.id) ?? -1)}
+            onMouseLeave={() => onHover(-1)}
+          >
+            <span
+              className="h3d-disclosure"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (hasChildren) onToggle(node.id);
+              }}
+            >
+              {hasChildren ? <Disclosure open={!collapsed.has(node.id)} /> : null}
+            </span>
+            <span className="h3d-class">{node.class}</span>
+            {summary && <span className="h3d-summary">{summary}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
 
 function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (

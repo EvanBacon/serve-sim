@@ -86,7 +86,7 @@ input[type="checkbox"] { accent-color: var(--h3d-accent); margin: 0 3px 0 0; ver
   display: flex; align-items: center; gap: 4px; height: 22px; padding-right: 8px;
   white-space: nowrap; cursor: default;
 }
-.h3d-row:hover, .h3d-row.is-hovered { background: var(--h3d-row-hover); }
+.h3d-row:hover { background: var(--h3d-row-hover); }
 .h3d-row.is-selected { background: var(--h3d-row-selected); color: #fff; }
 .h3d-row.is-hidden .h3d-class { font-style: italic; color: var(--h3d-muted); }
 .h3d-row.is-selected .h3d-class, .h3d-row.is-selected .h3d-summary { color: #fff; }

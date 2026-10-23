@@ -60,6 +60,12 @@ export function intersectRects(a: HierarchyRect, b: HierarchyRect): HierarchyRec
   return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
+/** Allocation-free `intersectRects(a, b) !== null` for the O(n²) overlap scan. */
+function overlaps(a: HierarchyRect, b: HierarchyRect): boolean {
+  return Math.min(a.x + a.width, b.x + b.width) > Math.max(a.x, b.x)
+    && Math.min(a.y + a.height, b.y + b.height) > Math.max(a.y, b.y);
+}
+
 function hasArea(r: HierarchyRect | null): r is HierarchyRect {
   return r !== null && r.width > 0 && r.height > 0;
 }
@@ -121,7 +127,7 @@ export function layoutHierarchy(windows: HierarchyNode[], options: LayoutOptions
         for (let i = 0; i < obstacles.length; i++) {
           const other = items[obstacles[i]!]!;
           if (other.level + 1 <= level) continue;
-          if (intersectRects(own, other.visibleRect!)) level = other.level + 1;
+          if (overlaps(own, other.visibleRect!)) level = other.level + 1;
         }
       }
       stackLevel = level;

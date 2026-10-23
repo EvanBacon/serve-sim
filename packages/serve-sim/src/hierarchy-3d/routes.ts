@@ -38,7 +38,7 @@ export interface Hierarchy3dDeps {
   describeAx(udid: string): Promise<unknown>;
   screenshot(udid: string): Promise<Buffer>;
   launchWithAgent(udid: string, bundleId: string): Promise<{ pid: number | null }>;
-  waitForAgent(udid: string, pid: number | null): Promise<AgentRecord | null>;
+  waitForAgent(udid: string, bundleId: string, pid: number | null): Promise<AgentRecord | null>;
   /** The page HTML; null when this build doesn't include it. */
   pageHtml(): string | null;
 }
@@ -94,7 +94,7 @@ function defaultDeps(): Hierarchy3dDeps {
     describeAx: async (udid) => JSON.parse(await axDescribeAsync(udid)),
     screenshot: simctlScreenshot,
     launchWithAgent,
-    waitForAgent: (udid, pid) => waitForAgent(udid, pid),
+    waitForAgent: (udid, bundleId, pid) => waitForAgent(udid, bundleId, pid),
     pageHtml: builtPageHtml,
   };
 }
@@ -138,11 +138,22 @@ export function createHierarchy3dHandler(options: { base: string; deps?: Partial
   const deps: Hierarchy3dDeps = { ...defaultDeps(), ...options.deps };
   let axCaptureSeq = 0;
 
+  // A capture's textures arrive as hundreds of snapshot requests; don't
+  // re-scan the registry (sync fs + kill(0) per entry) for each of them.
+  const agentCache = new Map<string, { at: number; records: AgentRecord[] }>();
+  const agentsFor = (udid: string, fresh = false): AgentRecord[] => {
+    const hit = agentCache.get(udid);
+    if (!fresh && hit && Date.now() - hit.at < 2000) return hit.records;
+    const records = deps.readAgents(udid);
+    agentCache.set(udid, { at: Date.now(), records });
+    return records;
+  };
+
   const deviceQuery = (udid: string) => `device=${encodeURIComponent(udid)}`;
 
   async function capture(udid: string, params: URLSearchParams, trustedLoopback: boolean): Promise<HierarchyCaptureResponse> {
     const foreground = await deps.frontmost(udid);
-    const agents = deps.readAgents(udid);
+    const agents = agentsFor(udid, true);
     const agent = pickAgent(agents, foreground);
     const snapshots = params.get("snapshots") === "0" ? "0" : "1";
     let notice: string | undefined;
@@ -213,7 +224,7 @@ export function createHierarchy3dHandler(options: { base: string; deps?: Partial
       const pid = Number(params.get("pid"));
       const captureId = params.get("capture") ?? "";
       const id = params.get("id") ?? "";
-      const agent = deps.readAgents(udid).find((r) => r.pid === pid);
+      const agent = agentsFor(udid).find((r) => r.pid === pid);
       if (!agent || !/^[\w-]{1,64}$/.test(captureId) || !/^0x[0-9a-f]{1,16}$/i.test(id)) {
         sendJson(res, 404, { error: "not_found" });
         return true;
@@ -259,7 +270,7 @@ export function createHierarchy3dHandler(options: { base: string; deps?: Partial
       }
       try {
         const { pid } = await deps.launchWithAgent(udid, bundleId);
-        const agent = await deps.waitForAgent(udid, pid);
+        const agent = await deps.waitForAgent(udid, bundleId, pid);
         sendJson(res, agent ? 200 : 504, agent
           ? { ok: true, pid: agent.pid, bundleId }
           : { error: "agent_timeout", message: `${bundleId} relaunched but the inspector agent didn't register.` });

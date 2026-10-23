@@ -159,26 +159,29 @@ export interface PickPlane {
 
 /**
  * Index of the plane under the pointer that is closest to the camera, or -1.
- * Ties (same depth) go to the later plane, which is drawn on top.
+ * All planes are parallel (constant z), so along the pointer ray the nearest
+ * one is simply the one whose z is closest to the eye's — unlike the depth of
+ * a plane's centre, which misorders a big plane behind a small one at an
+ * angle. Ties (same z) go to the later plane, which is drawn on top.
  */
-export function pickPlane(m: Mat4, planes: Array<PickPlane | null>, px: number, py: number, width: number, height: number): number {
+export function pickPlane(m: Mat4, eyeZ: number, planes: Array<PickPlane | null>, px: number, py: number, width: number, height: number): number {
   let best = -1;
-  let bestW = Infinity;
+  let bestDistance = Infinity;
+  const corners: Array<{ x: number; y: number }> = [];
   for (let i = 0; i < planes.length; i++) {
     const p = planes[i];
     if (!p) continue;
-    const corners: Vec3[] = [[p.x0, p.y0, p.z], [p.x1, p.y0, p.z], [p.x1, p.y1, p.z], [p.x0, p.y1, p.z]];
-    const projected = corners.map((c) => projectToScreen(m, c, width, height));
-    if (projected.some((c) => c === null)) continue;
-    const quad = projected as Array<{ x: number; y: number; w: number }>;
-    if (!pointInConvexQuad(px, py, quad)) continue;
-    // Depth at the pointer ≈ mean w of the corners (planes are small relative
-    // to camera distance and all parallel, so this orders them correctly).
-    const w = (quad[0]!.w + quad[1]!.w + quad[2]!.w + quad[3]!.w) / 4;
-    if (w <= bestW + 1e-6) {
-      best = i;
-      bestW = w;
+    const distance = Math.abs(eyeZ - p.z);
+    if (distance > bestDistance + 1e-6) continue;
+    corners.length = 0;
+    for (const [x, y] of [[p.x0, p.y0], [p.x1, p.y0], [p.x1, p.y1], [p.x0, p.y1]] as const) {
+      const c = projectToScreen(m, [x, y, p.z], width, height);
+      if (!c) break;
+      corners.push(c);
     }
+    if (corners.length !== 4 || !pointInConvexQuad(px, py, corners)) continue;
+    best = i;
+    bestDistance = distance;
   }
   return best;
 }

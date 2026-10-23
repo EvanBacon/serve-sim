@@ -179,7 +179,17 @@ typedef struct {
 /// Render `view`'s own layer content (its subview layers hidden) and crop to
 /// the drawn pixels. Returns nil for fully transparent views. `outRect` is the
 /// cropped rect in the view's bounds coordinate space.
+static NSData *SnapshotViewUnpooled(UIView *view, SnapshotConfig *cfg, CGRect *outRect);
+
+/// Per-view pool: the full-size bitmap behind each cropped image would
+/// otherwise stay alive until the whole walk finishes.
 static NSData *SnapshotView(UIView *view, SnapshotConfig *cfg, CGRect *outRect) {
+  @autoreleasepool {
+    return SnapshotViewUnpooled(view, cfg, outRect);
+  }
+}
+
+static NSData *SnapshotViewUnpooled(UIView *view, SnapshotConfig *cfg, CGRect *outRect) {
   if (!cfg->enabled || view.hidden || view.layer.hidden) return nil;
   CGRect bounds = view.layer.bounds;
   double w = bounds.size.width, h = bounds.size.height;
@@ -247,6 +257,9 @@ static NSData *SnapshotView(UIView *view, SnapshotConfig *cfg, CGRect *outRect) 
     }
   }
   if (!any) {
+    // Transparent containers are common (and often full-screen); don't let
+    // them spend the budget the views with real content need.
+    cfg->pixelBudget += (double)pw * (double)ph;
     CGContextRelease(ctx);
     return nil;
   }
@@ -426,7 +439,18 @@ static NSDictionary *CaptureHierarchy(BOOL snapshots, CGFloat requestedScale) {
       };
     }
   };
-  if ([NSThread isMainThread]) work(); else dispatch_sync(dispatch_get_main_queue(), work);
+  if ([NSThread isMainThread]) {
+    work();
+    return result;
+  }
+  // Don't block a connection thread forever on a busy/hung main thread. On
+  // timeout the block still runs later; its result is simply dropped.
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    work();
+    dispatch_semaphore_signal(done);
+  });
+  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0) return nil;
   return result;
 }
 
@@ -443,7 +467,9 @@ static void WriteAll(int fd, const void *buf, size_t len) {
 }
 
 static void Respond(int fd, int status, NSString *contentType, NSData *body) {
-  NSString *reason = status == 200 ? @"OK" : status == 401 ? @"Unauthorized" : status == 404 ? @"Not Found" : @"Bad Request";
+  NSString *reason = status == 200 ? @"OK" : status == 401 ? @"Unauthorized" : status == 404 ? @"Not Found"
+                   : status == 500 ? @"Internal Server Error"
+                   : status == 503 ? @"Service Unavailable" : @"Bad Request";
   NSString *head = [NSString stringWithFormat:
                     @"HTTP/1.1 %d %@\r\nContent-Type: %@\r\nContent-Length: %lu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
                     status, reason, contentType, (unsigned long)body.length];
@@ -452,8 +478,36 @@ static void Respond(int fd, int status, NSString *contentType, NSData *body) {
   if (body.length) WriteAll(fd, body.bytes, body.length);
 }
 
+/// NSJSONSerialization throws on NaN/Inf (degenerate transforms can produce
+/// them in frames); replace non-finite numbers so serializing can't crash the app.
+static id SanitizeJSON(id obj) {
+  if ([obj isKindOfClass:[NSDictionary class]]) {
+    NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:[obj count]];
+    [(NSDictionary *)obj enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+      out[key] = SanitizeJSON(value);
+    }];
+    return out;
+  }
+  if ([obj isKindOfClass:[NSArray class]]) {
+    NSMutableArray *out = [NSMutableArray arrayWithCapacity:[obj count]];
+    for (id value in (NSArray *)obj) [out addObject:SanitizeJSON(value)];
+    return out;
+  }
+  if ([obj isKindOfClass:[NSNumber class]] && !isfinite([obj doubleValue])) return @0;
+  return obj;
+}
+
 static void RespondJSON(int fd, int status, id obj) {
-  NSData *body = [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil] ?: [NSData data];
+  NSData *body = nil;
+  @try {
+    body = [NSJSONSerialization dataWithJSONObject:SanitizeJSON(obj) options:0 error:nil];
+  } @catch (NSException *e) {
+    shlog(@"JSON serialization failed: %@", e);
+  }
+  if (!body) {
+    status = 500;
+    body = [@"{\"error\":\"serialization_failed\"}" dataUsingEncoding:NSUTF8StringEncoding];
+  }
   Respond(fd, status, @"application/json", body);
 }
 
@@ -534,8 +588,18 @@ static void HandleConnection(int fd) {
     } else if ([path isEqualToString:@"/hierarchy"]) {
       BOOL snaps = ![query[@"snapshots"] isEqualToString:@"0"];
       CGFloat scale = [query[@"scale"] doubleValue];
-      NSDictionary *capture = CaptureHierarchy(snaps, scale);
-      RespondJSON(fd, 200, capture ?: @{ @"error": @"capture_failed" });
+      // One capture at a time: overlapping requests would queue several
+      // full walks back-to-back on the app's main thread.
+      static dispatch_semaphore_t captureGate;
+      static dispatch_once_t once;
+      dispatch_once(&once, ^{ captureGate = dispatch_semaphore_create(1); });
+      if (dispatch_semaphore_wait(captureGate, DISPATCH_TIME_NOW) != 0) {
+        RespondJSON(fd, 503, @{ @"error": @"capture_in_progress" });
+      } else {
+        NSDictionary *capture = CaptureHierarchy(snaps, scale);
+        dispatch_semaphore_signal(captureGate);
+        RespondJSON(fd, capture ? 200 : 503, capture ?: @{ @"error": @"main_thread_timeout" });
+      }
     } else if ([path hasPrefix:@"/snapshot/"]) {
       NSArray<NSString *> *seg = [[path substringFromIndex:10] componentsSeparatedByString:@"/"];
       NSData *png = nil;
@@ -560,8 +624,11 @@ static void *AcceptLoop(void *arg) {
     int fd = accept(listener, NULL, NULL);
     if (fd < 0) {
       if (errno == EINTR) continue;
+      // ECONNABORTED / EMFILE etc. are transient; back off instead of
+      // going deaf for the rest of the process's life.
       shlog(@"accept failed: %d", errno);
-      break;
+      usleep(100 * 1000);
+      continue;
     }
     dispatch_async(q, ^{ HandleConnection(fd); });
   }

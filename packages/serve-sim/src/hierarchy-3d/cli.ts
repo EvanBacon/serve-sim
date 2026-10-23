@@ -52,7 +52,7 @@ export async function hierarchyCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
   const { pid, dylib } = await launchWithAgent(udid, bundleId);
-  const agent = await waitForAgent(udid, pid);
+  const agent = await waitForAgent(udid, bundleId, pid);
   if (!agent) {
     console.error(`Launched ${bundleId} (pid ${pid ?? "?"}) but the hierarchy agent didn't register.`);
     process.exit(1);

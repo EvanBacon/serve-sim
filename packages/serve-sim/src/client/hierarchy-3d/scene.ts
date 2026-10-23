@@ -77,6 +77,7 @@ export class HierarchyScene {
   private layout: Layout | null = null;
   private screen = { width: 1, height: 1 };
   private lastMvp: Float32Array | null = null;
+  private lastEyeZ = 0;
   private lastOptions: SceneOptions | null = null;
   private disposed = false;
 
@@ -228,6 +229,7 @@ export class HierarchyScene {
 
     const mvp = viewProjection(camera, w / h);
     this.lastMvp = mvp;
+    this.lastEyeZ = cameraEye(camera)[2];
     gl.useProgram(this.program);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
     gl.enableVertexAttribArray(this.loc.pos);
@@ -311,7 +313,7 @@ export class HierarchyScene {
       if (!p || item.level < options.minLevel || item.level > options.maxLevel) return null;
       return { ...p, z: this.zFor(item.level, options) };
     });
-    return pickPlane(mvp, planes, x, y, this.canvas.clientWidth, this.canvas.clientHeight);
+    return pickPlane(mvp, this.lastEyeZ, planes, x, y, this.canvas.clientWidth, this.canvas.clientHeight);
   }
 
   screenSize(): { width: number; height: number } {

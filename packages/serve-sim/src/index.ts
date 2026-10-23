@@ -2075,6 +2075,9 @@ Examples:
       return;
     }
     const startPort: number | undefined = opts.port;
+    if (opts.experimentalHierarchy3d && (opts.detach || opts.preview === false)) {
+      console.error("[serve-sim] --experimental-hierarchy-3d needs the preview server; ignored with --detach / --no-preview.");
+    }
     if (opts.detach) {
       const states = await detach(devices, startPort ?? 3100, !!opts.allowExec);
       printStatesJSON(states);

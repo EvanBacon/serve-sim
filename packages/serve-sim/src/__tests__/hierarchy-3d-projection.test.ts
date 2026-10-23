@@ -77,9 +77,9 @@ describe("pickPlane", () => {
       null,
       { x0: 200, y0: 200, x1: 300, y1: 300, z: 80 },
     ];
-    expect(pickPlane(m, planes, 250, 250, 500, 500)).toBe(1);
-    expect(pickPlane(m, planes, 200, 250, 500, 500)).toBe(0);
-    expect(pickPlane(m, planes, 5, 5, 500, 500)).toBe(-1);
+    expect(pickPlane(m, 1000, planes, 250, 250, 500, 500)).toBe(1);
+    expect(pickPlane(m, 1000, planes, 200, 250, 500, 500)).toBe(0);
+    expect(pickPlane(m, 1000, planes, 5, 5, 500, 500)).toBe(-1);
   });
 
   test("from behind, the deepest plane is nearest", () => {
@@ -88,7 +88,19 @@ describe("pickPlane", () => {
       { x0: -100, y0: -100, x1: 100, y1: 100, z: 0 },
       { x0: -50, y0: -50, x1: 50, y1: 50, z: 40 },
     ];
-    expect(pickPlane(back, planes, 250, 250, 500, 500)).toBe(0);
+    expect(pickPlane(back, -1000, planes, 250, 250, 500, 500)).toBe(0);
+  });
+
+  test("a small plane in front wins over a big plane behind it, even off-center at an angle", () => {
+    // Regression: ranking by each plane's centre depth picked the big window
+    // behind a small view near its edge when viewed at the default angle.
+    const cam: OrbitCamera = { yaw: -32, pitch: 14, distance: 1500, target: [0, 0, 0] };
+    const vp = viewProjection(cam, 1);
+    const eyeZ = cameraEye(cam)[2];
+    const small = { x0: -200, y0: 300, x1: -150, y1: 340, z: 30 };
+    const planes = [{ x0: -201, y0: -437, x1: 201, y1: 437, z: 0 }, small];
+    const hit = projectToScreen(vp, [-175, 320, 30], 800, 800)!;
+    expect(pickPlane(vp, eyeZ, planes, hit.x, hit.y, 800, 800)).toBe(1);
   });
 
   test("equal depth goes to the later (top-drawn) plane", () => {
@@ -96,6 +108,6 @@ describe("pickPlane", () => {
       { x0: -100, y0: -100, x1: 100, y1: 100, z: 0 },
       { x0: -100, y0: -100, x1: 100, y1: 100, z: 0 },
     ];
-    expect(pickPlane(m, planes, 250, 250, 500, 500)).toBe(1);
+    expect(pickPlane(m, 1000, planes, 250, 250, 500, 500)).toBe(1);
   });
 });

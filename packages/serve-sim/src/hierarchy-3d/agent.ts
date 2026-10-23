@@ -98,6 +98,8 @@ export function readAgentRecords(
  * The agent to inspect: the one running as the foreground app if we know it,
  * otherwise none — an injected app sitting in the background would show a
  * stale (or empty) tree, which is worse than the accessibility fallback.
+ * When the foreground app is unknown (AX bridge not ready), a lone agent is
+ * the best guess.
  */
 export function pickAgent(records: AgentRecord[], foreground: { bundleId: string; pid: number | null } | null): AgentRecord | null {
   if (!foreground) return records.length === 1 ? records[0]! : null;
@@ -218,12 +220,13 @@ export function launchWithAgent(udid: string, bundleId: string): Promise<{ pid: 
 /** Wait for a freshly launched agent to register and answer. */
 export async function waitForAgent(
   udid: string,
+  bundleId: string,
   pid: number | null,
   { timeoutMs = 10_000, intervalMs = 150, dir = HIERARCHY_REGISTRY_DIR } = {},
 ): Promise<AgentRecord | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const record = readAgentRecords(udid, dir).find((r) => pid == null || r.pid === pid);
+    const record = readAgentRecords(udid, dir).find((r) => r.bundleId === bundleId && (pid == null || r.pid === pid));
     if (record) {
       try {
         const res = await agentGet(record, "/info", { timeoutMs: 1000 });

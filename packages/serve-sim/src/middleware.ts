@@ -1643,7 +1643,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         const access = remoteAccess(req, authToken);
         if (!access.ok) {
           const method = (req.method ?? "GET").toUpperCase();
-          if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
+          const isHierarchyPage = handleHierarchy3d !== null &&
+            (pathname === `${base}${HIERARCHY_3D_PATH}` || pathname === `${base}${HIERARCHY_3D_PATH}/`);
+          if (access.status === 401 && (method === "GET" || method === "HEAD") && (pagePath(pathname) || isHierarchyPage)) {
             sendAuthBootstrap(res);
           } else {
             sendAccessDenied(res, access);
