@@ -58,6 +58,14 @@ describe("POST /reload", () => {
     expect(json.sent).toBe(false);
   });
 
+  test("bodies over 4 KB are rejected with 413 and send nothing", async () => {
+    const body = JSON.stringify({ bundleId: "com.example.app", pad: "x".repeat(8 * 1024) });
+    expect(await postReload(body)).toEqual({
+      status: 413,
+      json: { sent: false, error: "Body too large" },
+    });
+  });
+
   test("malformed bodies send nothing", async () => {
     const { status, json } = await postReload("{");
     expect(status).toBe(400);

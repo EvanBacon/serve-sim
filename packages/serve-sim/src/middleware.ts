@@ -154,6 +154,10 @@ const axStreamerCache = createAxStreamerCache();
 // A malformed log entry without a newline can't grow this beyond 1 MB;
 // the partial line is dropped rather than retained indefinitely.
 const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
+
+/** POST /reload only carries `{ bundleId }`. */
+const RELOAD_BODY_LIMIT_BYTES = 4 * 1024;
+
 let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
 function eventLogLimit(rawUrl: string): number | undefined {
@@ -2353,9 +2357,22 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ sent: false, error: "Missing device" }));
         return;
       }
+      // The body is only `{ bundleId }`; cap it so a runaway POST can't
+      // grow memory. Over the cap answers 413 (sent: false → client taps R).
       let body = "";
-      req.on("data", (chunk: Buffer) => (body += chunk));
+      let tooLarge = false;
+      req.on("data", (chunk: Buffer) => {
+        if (tooLarge) return;
+        body += chunk;
+        if (body.length > RELOAD_BODY_LIMIT_BYTES) {
+          tooLarge = true;
+          body = "";
+          res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+          res.end(JSON.stringify({ sent: false, error: "Body too large" }));
+        }
+      });
       req.on("end", async () => {
+        if (tooLarge) return;
         try {
           const parsed = (body ? JSON.parse(body) : {}) as { bundleId?: unknown };
           const bundleId = typeof parsed.bundleId === "string" ? parsed.bundleId : "";

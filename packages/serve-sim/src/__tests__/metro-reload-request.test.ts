@@ -25,6 +25,7 @@ describe("requestMetroReload", () => {
   test("not-sent on error responses and servers without the endpoint", async () => {
     expect(await requestMetroReload("/reload", "x", { fetchImpl: respond(400, { sent: false }) })).toBe("not-sent");
     expect(await requestMetroReload("/reload", "x", { fetchImpl: respond(404, "Not found") })).toBe("not-sent");
+    expect(await requestMetroReload("/reload", "x", { fetchImpl: respond(413, { sent: false, error: "Body too large" }) })).toBe("not-sent");
   });
 
   test("not-sent when the request never reaches the server", async () => {
