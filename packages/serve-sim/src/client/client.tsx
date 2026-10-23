@@ -71,6 +71,7 @@ import {
 import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
+import { createSimKeyState } from "./utils/sim-keyboard";
 import {
   DEVICE_SIDEBAR_WIDTH,
   DEVTOOLS_PANEL_WIDTH,
@@ -866,6 +867,9 @@ function AppWithConfig({
     return () => { if (timer) clearTimeout(timer); es.close(); };
   }, [config.appStateEndpoint]);
 
+  // Keys the sim currently holds; see createSimKeyState.
+  const [simKeys] = useState(createSimKeyState);
+
   // R to reload the RN/Expo bundle.
   // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
   // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
@@ -894,7 +898,6 @@ function AppWithConfig({
   const [simFocused, setSimFocused] = useState(true);
   const simFocusedRef = useRef(true);
   simFocusedRef.current = simFocused;
-  const pressedKeysRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
@@ -907,11 +910,8 @@ function AppWithConfig({
 
   useEffect(() => {
     if (simFocused) return;
-    const held = pressedKeysRef.current;
-    if (held.size === 0) return;
-    for (const usage of held) sendWs(0x06, { type: "up", usage });
-    held.clear();
-  }, [simFocused, sendWs]);
+    for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
+  }, [simFocused, sendWs, simKeys]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
@@ -943,9 +943,7 @@ function AppWithConfig({
       const usage = hidUsageForCode(e.code);
       if (usage == null) return;
       e.preventDefault();
-      if (type === "down") pressedKeysRef.current.add(usage);
-      else pressedKeysRef.current.delete(usage);
-      sendWs(0x06, { type, usage });
+      for (const ev of simKeys.forward(type, usage)) sendWs(0x06, ev);
     };
     const down = (e: KeyboardEvent) => onKey(e, "down");
     const up = (e: KeyboardEvent) => onKey(e, "up");
@@ -955,7 +953,7 @@ function AppWithConfig({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device, rotateBy]);
+  }, [sendWs, config.device, rotateBy, simKeys]);
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
