@@ -2353,6 +2353,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // `sent: false` means nothing was sent and the client falls back to
     // tapping R in the guest. See metro-reload.ts.
     if (url === base + "/reload" && req.method === "POST") {
+      // Without a device the lookup would fall back to the first running
+      // helper and could reload the app on a different simulator.
+      if (!selectedDevice) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ sent: false, error: "Missing device" }));
+        return;
+      }
       let body = "";
       req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {

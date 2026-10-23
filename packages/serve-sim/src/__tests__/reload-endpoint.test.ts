@@ -4,7 +4,10 @@ import type { AddressInfo } from "net";
 import { METRO_RELOAD_SERVER_BUDGET_MS } from "../metro-reload";
 import { simMiddleware } from "../middleware";
 
-async function postReload(body: string): Promise<{ status: number; json: Record<string, unknown> }> {
+async function postReload(
+  body: string,
+  path = "/reload?device=SERVE-SIM-TEST-DEVICE",
+): Promise<{ status: number; json: Record<string, unknown> }> {
   const middleware = simMiddleware({ basePath: "/", proxyHelpers: true });
   const server = createHttpServer((req, res) => {
     void middleware(req, res, async () => {
@@ -15,7 +18,7 @@ async function postReload(body: string): Promise<{ status: number; json: Record<
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/reload`, {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
@@ -27,6 +30,13 @@ async function postReload(body: string): Promise<{ status: number; json: Record<
 }
 
 describe("POST /reload", () => {
+  test("rejects requests without a device instead of picking the first simulator", async () => {
+    expect(await postReload(JSON.stringify({ bundleId: "com.example.app" }), "/reload")).toEqual({
+      status: 400,
+      json: { sent: false, error: "Missing device" },
+    });
+  });
+
   test("Expo Go is reported as not sent before any device lookup", async () => {
     expect(await postReload(JSON.stringify({ bundleId: "host.exp.Exponent" }))).toEqual({
       status: 200,
