@@ -13,6 +13,7 @@ import type { Socket } from "net";
 // importing the dependency keeps the proxy working regardless of runtime.
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
+import { createHierarchy3dHandler, HIERARCHY_3D_PATH, type Hierarchy3dDeps } from "./hierarchy-3d/routes";
 import { readCameraStatus } from "./camera-helper";
 import { getDeviceSession, closeDeviceSession, liveDeviceSessions, type HidSocket } from "./device-session";
 import {
@@ -1418,6 +1419,14 @@ export interface SimMiddlewareOptions {
   isKnownDevice?: (udid: string) => Promise<boolean>;
   /** Test hook: `/api/diagnostics` collectors. Default: live host probes and sessions. */
   diagnostics?: DiagnosticsOptions;
+  /**
+   * Experimental: serve the 3D view-hierarchy inspector at
+   * `{basePath}/hierarchy-3d` (`serve-sim --experimental-hierarchy-3d`).
+   * Default false — the routes don't exist.
+   */
+  experimentalHierarchy3d?: boolean;
+  /** Test hook: data sources for the experimental hierarchy routes. */
+  hierarchy3dDeps?: Partial<Hierarchy3dDeps>;
 }
 
 function safeEqualString(a: string, b: string): boolean {
@@ -1478,6 +1487,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const authToken = resolveAuthToken(options?.authToken);
   const serveDiagnostics = createDiagnosticsHandler(options?.diagnostics);
   const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
+  const handleHierarchy3d = options?.experimentalHierarchy3d
+    ? createHierarchy3dHandler({ base, ...(options.hierarchy3dDeps ? { deps: options.hierarchy3dDeps } : {}) })
+    : null;
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
@@ -1631,7 +1643,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         const access = remoteAccess(req, authToken);
         if (!access.ok) {
           const method = (req.method ?? "GET").toUpperCase();
-          if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
+          const isHierarchyPage = handleHierarchy3d !== null &&
+            (pathname === `${base}${HIERARCHY_3D_PATH}` || pathname === `${base}${HIERARCHY_3D_PATH}/`);
+          if (access.status === 401 && (method === "GET" || method === "HEAD") && (pagePath(pathname) || isHierarchyPage)) {
             sendAuthBootstrap(res);
           } else {
             sendAccessDenied(res, access);
@@ -1706,6 +1720,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(err instanceof Error ? err.message : "Failed to load DevTools frontend");
       }
       return;
+    }
+
+    if (handleHierarchy3d && ownsPath(pathname) && pathname.startsWith(`${base}${HIERARCHY_3D_PATH}`)) {
+      const state = selectServeSimState(await readServeSimStates(), selectedDevice);
+      if (await handleHierarchy3d({ req, res, pathname, rawUrl, udid: state?.device ?? null, trustedLoopback })) return;
     }
 
     // Serve the preview page
