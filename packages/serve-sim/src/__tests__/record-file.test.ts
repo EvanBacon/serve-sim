@@ -15,9 +15,10 @@ function tempDir(): string {
   return dir;
 }
 
-function streamOf(chunks: Array<Uint8Array | Error>): ReadableStream<Uint8Array> {
+function streamOf(chunks: Array<Uint8Array | Error>, onCancel?: () => void): ReadableStream<Uint8Array> {
   let i = 0;
   return new ReadableStream({
+    cancel() { onCancel?.(); },
     pull(controller) {
       const next = chunks[i++];
       if (next === undefined) controller.close();
@@ -42,9 +43,12 @@ describe("saveRecordingBody", () => {
   test("an exclusive save never clobbers an existing file", async () => {
     const out = join(tempDir(), "taken.mp4");
     writeFileSync(out, "earlier");
-    await expect(saveRecordingBody(streamOf([new Uint8Array([1])]), out, { exclusive: true }))
+    let cancelled = false;
+    await expect(saveRecordingBody(streamOf([new Uint8Array([1])], () => { cancelled = true; }), out, { exclusive: true }))
       .rejects.toMatchObject({ code: "EEXIST" });
     expect(readFileSync(out, "utf8")).toBe("earlier");
+    // The response body is released, not left holding the connection open.
+    expect(cancelled).toBe(true);
   });
 
   test("--output overwrites", async () => {
