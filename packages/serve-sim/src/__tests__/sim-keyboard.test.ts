@@ -79,28 +79,58 @@ describe("createSimKeyState", () => {
     expect(keys.reloadEvents()).toEqual({
       release: [{ type: "up", usage: META_LEFT }],
       tap: HID_KEY_R,
-      restore: [{ type: "down", usage: META_LEFT }],
     });
+    expect(keys.restoreEvents()).toEqual([{ type: "down", usage: META_LEFT }]);
   });
 
-  test("reloadEvents re-presses still-held modifiers but not other keys", () => {
+  test("restoreEvents re-presses still-held modifiers but not other keys", () => {
     const keys = createSimKeyState();
     keys.forward("down", META_LEFT);
     keys.forward("down", KEY_A);
-    const { release, restore } = keys.reloadEvents();
+    const { release } = keys.reloadEvents();
     expect(release).toEqual([
       { type: "up", usage: META_LEFT },
       { type: "up", usage: KEY_A },
     ]);
-    expect(restore).toEqual([{ type: "down", usage: META_LEFT }]);
+    expect(keys.restoreEvents()).toEqual([{ type: "down", usage: META_LEFT }]);
     expect([...keys.held]).toEqual([META_LEFT]);
     // Letting go of Cmd afterwards is forwarded, so Cmd isn't left stuck.
     expect(keys.forward("up", META_LEFT)).toEqual([{ type: "up", usage: META_LEFT }]);
     expect(keys.held.size).toBe(0);
   });
 
+  test("a modifier released during the tap is not pressed again", () => {
+    const keys = createSimKeyState();
+    keys.forward("down", META_LEFT);
+    keys.reloadEvents();
+    // Cmd goes up between the R down and up; the sim already has it up.
+    expect(keys.forward("up", META_LEFT)).toEqual([]);
+    expect(keys.restoreEvents()).toEqual([]);
+    expect(keys.held.size).toBe(0);
+  });
+
+  test("a modifier pressed again during the tap is not pressed twice", () => {
+    const keys = createSimKeyState();
+    keys.forward("down", META_LEFT);
+    keys.reloadEvents();
+    keys.forward("up", META_LEFT);
+    expect(keys.forward("down", META_LEFT)).toEqual([{ type: "down", usage: META_LEFT }]);
+    expect(keys.restoreEvents()).toEqual([]);
+    expect([...keys.held]).toEqual([META_LEFT]);
+  });
+
+  test("releaseAll during the tap cancels the restore", () => {
+    const keys = createSimKeyState();
+    keys.forward("down", META_LEFT);
+    keys.reloadEvents();
+    keys.releaseAll();
+    expect(keys.restoreEvents()).toEqual([]);
+  });
+
   test("reloadEvents with nothing held is a bare tap", () => {
-    expect(createSimKeyState().reloadEvents()).toEqual({ release: [], tap: HID_KEY_R, restore: [] });
+    const keys = createSimKeyState();
+    expect(keys.reloadEvents()).toEqual({ release: [], tap: HID_KEY_R });
+    expect(keys.restoreEvents()).toEqual([]);
   });
 });
 

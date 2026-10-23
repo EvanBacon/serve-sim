@@ -71,6 +71,7 @@ import {
 import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
+import { requestMetroReload } from "./utils/metro-reload-request";
 import {
   createSimKeyState,
   isFormControlTarget,
@@ -880,32 +881,24 @@ function AppWithConfig({
   }, [currentApp]);
 
   // Reload the RN/Expo bundle. Prefer asking the app's Metro server (works
-  // with a text field focused, where an R tap would just type "r"); fall
-  // back to tapping R (always for Expo Go, see metro-reload.ts), which RN
-  // handles when nothing is first responder.
+  // with a text field focused, where an R tap would just type "r"). Tap R
+  // only when the server reports it sent nothing (Expo Go, no Metro, Metro
+  // shared with other devices; see metro-reload.ts): Metro doesn't confirm
+  // reloads, so tapping after a sent or timed-out request could reload twice.
+  // RN handles the R tap when nothing is first responder.
   // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
   // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
   // react-native https://github.com/react/react-native/blob/c1652651c09506b8dda0b9515b5f0e5829220f0d/packages/react-native/React/Base/RCTKeyCommands.m#L69-L74
   const reloadEndpoint = config.reloadEndpoint ?? simEndpoint("reload");
   const sendReactNativeReload = useCallback(async () => {
     const bundleId = currentAppRef.current?.bundleId;
-    if (bundleId) {
-      try {
-        const res = await fetch(reloadEndpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ bundleId }),
-        });
-        const result = (await res.json()) as { reloaded?: boolean };
-        if (result.reloaded) return;
-      } catch {}
-    }
-    const { release, tap, restore } = simKeys.reloadEvents();
+    if (bundleId && (await requestMetroReload(reloadEndpoint, bundleId)) !== "not-sent") return;
+    const { release, tap } = simKeys.reloadEvents();
     for (const ev of release) sendKey(ev.type, ev.usage);
     sendKey("down", tap);
     await new Promise((r) => setTimeout(r, 30));
     sendKey("up", tap);
-    for (const ev of restore) sendKey(ev.type, ev.usage);
+    for (const ev of simKeys.restoreEvents()) sendKey(ev.type, ev.usage);
   }, [sendKey, simKeys, reloadEndpoint]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
@@ -959,6 +952,8 @@ function AppWithConfig({
   useEffect(() => {
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
+      // A focused form control (e.g. the Duo hinge slider) keeps its keys.
+      if (isFormControlTarget(e.target)) return;
       // A focused toolbar button keeps Enter/Space/Tab for itself.
       if (keepsNativeButtonKey(e.code) && simActionsRef.current?.contains(e.target as Node)) return;
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {

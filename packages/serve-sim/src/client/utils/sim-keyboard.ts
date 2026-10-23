@@ -48,10 +48,14 @@ export function isFormControlTarget(target: EventTarget | null): boolean {
  */
 export function createSimKeyState() {
   const held = new Set<number>();
+  // Modifiers lifted for a reload tap that the user is still holding; pressed
+  // again by restoreEvents() unless released (or re-pressed) meanwhile.
+  const toRestore = new Set<number>();
 
   const releaseAll = (): SimKeyEvent[] => {
     const events = [...held].map((usage): SimKeyEvent => ({ type: "up", usage }));
     held.clear();
+    toRestore.clear();
     return events;
   };
 
@@ -60,6 +64,7 @@ export function createSimKeyState() {
 
     /** Events to send to the sim for a browser keydown/keyup. */
     forward(type: "down" | "up", usage: number): SimKeyEvent[] {
+      toRestore.delete(usage);
       if (type === "down") {
         held.add(usage);
         return [{ type, usage }];
@@ -88,17 +93,27 @@ export function createSimKeyState() {
      * React Native (RCTKeyCommands, Expo Go, expo-dev-client) reloads on a
      * bare `r` when no text field is first responder, but the guest never
      * reloads for Cmd+R injected through Indigo. Lift every held key (a held
-     * Cmd would turn the tap back into Cmd+R, a held R would swallow it), tap
-     * R, then press the released modifiers again since the user is still
-     * holding them and their keyup will be forwarded later.
+     * Cmd would turn the tap back into Cmd+R, a held R would swallow it) and
+     * tap R. Call restoreEvents() after the tap.
      */
-    reloadEvents(): { release: SimKeyEvent[]; tap: number; restore: SimKeyEvent[] } {
+    reloadEvents(): { release: SimKeyEvent[]; tap: number } {
       const release = releaseAll();
-      const restore = release
-        .filter((ev) => isModifierUsage(ev.usage))
-        .map((ev): SimKeyEvent => ({ type: "down", usage: ev.usage }));
-      for (const ev of restore) held.add(ev.usage);
-      return { release, tap: HID_KEY_R, restore };
+      for (const ev of release) if (isModifierUsage(ev.usage)) toRestore.add(ev.usage);
+      return { release, tap: HID_KEY_R };
+    },
+
+    /**
+     * Press the modifiers lifted by reloadEvents() again, so the sim matches
+     * what the user holds and their later keyup is forwarded. A modifier
+     * released during the tap is not pressed again, or it would stay stuck.
+     */
+    restoreEvents(): SimKeyEvent[] {
+      const events = [...toRestore]
+        .filter((usage) => !held.has(usage))
+        .map((usage): SimKeyEvent => ({ type: "down", usage }));
+      for (const ev of events) held.add(ev.usage);
+      toRestore.clear();
+      return events;
     },
   };
 }

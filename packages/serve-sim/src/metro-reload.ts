@@ -1,23 +1,39 @@
-// Reload a React Native app through its Metro dev server, the way pressing
-// `r` in the `expo start` / `react-native start` terminal does: broadcast a
-// `reload` message on Metro's `/message` socket. Unlike tapping R in the
-// guest, this works while a text field is first responder.
+// Reload a React Native app through its Metro dev server, like pressing `r`
+// in the `expo start` / `react-native start` terminal. Unlike tapping R in
+// the guest, this works while a text field is first responder.
 //
-// Both Expo CLI (createMessageSocket) and the RN community CLI accept
-// client broadcasts of `reload` from loopback sockets without an Origin.
+// Metro's `/message` socket has no device-targeted reload: a `reload`
+// broadcast reaches every app connected to that Metro, and app sockets only
+// identify themselves by platform (`?role=ios`). So a reload is only sent
+// when the Metro serves this app on this simulator and nothing else:
+//   - `/json/list` (inspector targets) shows exactly one device, ours;
+//   - `getpeers` shows exactly one connected app socket, which is then the
+//     only recipient of a targeted `reload` request. Metros that don't answer
+//     `getpeers` get a broadcast, which by the check above reaches only this
+//     device.
+// Anything else (no Metro, several devices or apps, Expo Go) is reported as
+// not sent so the caller can tap R in the guest instead.
+//
+// Metro does not acknowledge `reload`, so `sent` means it was delivered to
+// Metro for this app's socket, not that the app finished reloading.
 import { WebSocket } from "ws";
 
 /** Expo CLI picks the next free port after 8081 when it is taken. */
 const DEFAULT_METRO_PORTS: readonly number[] = Array.from({ length: 10 }, (_, i) => 8081 + i);
 
 /**
- * Apps that ignore Metro's `reload` broadcast. RCTDevSettings only registers
+ * Apps that ignore Metro's `reload` message. RCTDevSettings only registers
  * the packager `reload` handler for the first RN instance, which in Expo Go
  * is its own home app, so the project never reloads. (A CDP `Page.reload`
  * does reload Expo Go, but without its kernel modules: the project red-boxes
  * on "Cannot find native module 'ExpoAsset'".)
  */
 const METRO_RELOAD_UNSUPPORTED = new Set(["host.exp.Exponent"]);
+
+/** Whether `bundleId` can be reloaded through Metro at all. */
+export function supportsMetroReload(bundleId: string): boolean {
+  return !METRO_RELOAD_UNSUPPORTED.has(bundleId);
+}
 
 /** Metro protocol version for `/message` frames. */
 const MESSAGE_PROTOCOL_VERSION = 2;
@@ -26,26 +42,64 @@ const MESSAGE_PROTOCOL_VERSION = 2;
 interface MetroTarget {
   appId?: string;
   deviceName?: string;
+  reactNative?: { logicalDeviceId?: string };
+}
+
+/** Devices with an inspector connection to a Metro, keyed by logical id. */
+function connectedDevices(targets: readonly MetroTarget[]): Map<string, string | undefined> {
+  const devices = new Map<string, string | undefined>();
+  for (const t of targets) {
+    if (!t.appId) continue;
+    const key = t.reactNative?.logicalDeviceId ?? t.deviceName ?? t.appId;
+    devices.set(key, t.deviceName);
+  }
+  return devices;
 }
 
 /**
- * Whether a Metro instance serves `bundleId` on this simulator. `/json/list`
- * names the app by `appId` and the device by its iOS name (the simulator's
- * name), so a Metro serving the same app to another device is skipped.
+ * Whether a Metro instance serves `bundleId` on `deviceName` (the
+ * simulator's name, which is what iOS reports in `/json/list`).
  */
 export function metroServesApp(
   targets: readonly MetroTarget[],
   bundleId: string,
-  deviceName?: string | null,
+  deviceName: string,
 ): boolean {
-  return targets.some((t) =>
-    t.appId === bundleId && (!deviceName || !t.deviceName || t.deviceName === deviceName),
-  );
+  return targets.some((t) => t.appId === bundleId && t.deviceName === deviceName);
 }
+
+/**
+ * Whether a `reload` sent to this Metro could only reach `deviceName`: it
+ * serves `bundleId` there and no other device is connected.
+ */
+export function metroServesOnlyDevice(
+  targets: readonly MetroTarget[],
+  bundleId: string,
+  deviceName: string,
+): boolean {
+  if (!metroServesApp(targets, bundleId, deviceName)) return false;
+  const devices = connectedDevices(targets);
+  return devices.size === 1 && [...devices.values()][0] === deviceName;
+}
+
+export type MetroReloadResult =
+  | { sent: true; port: number; targeted: boolean }
+  | {
+      sent: false;
+      reason: "unsupported-app" | "unknown-device" | "no-metro" | "ambiguous" | "send-failed";
+      ports?: number[];
+    };
+
+/**
+ * Outcome of one `/message` session: `targeted`/`broadcast` were sent,
+ * `ambiguous` means several app sockets are connected, `failed` means
+ * nothing was sent.
+ */
+export type MetroSendOutcome = "targeted" | "broadcast" | "ambiguous" | "failed";
 
 export interface MetroReloadDeps {
   fetchJson?: (url: string) => Promise<unknown>;
-  broadcast?: (port: number, method: string) => Promise<boolean>;
+  sendReload?: (port: number) => Promise<MetroSendOutcome>;
 }
 
 async function defaultFetchJson(url: string): Promise<unknown> {
@@ -54,56 +108,109 @@ async function defaultFetchJson(url: string): Promise<unknown> {
   return res.json();
 }
 
-/** Send one broadcast frame on Metro's message socket. */
-export function broadcastMetroMessage(port: number, method: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/message`);
-    const done = (ok: boolean) => {
-      clearTimeout(timer);
-      resolve(ok);
-      try { ws.close(); } catch {}
-    };
-    const timer = setTimeout(() => done(false), 1500);
-    ws.on("open", () => {
-      ws.send(JSON.stringify({ version: MESSAGE_PROTOCOL_VERSION, method }), (err) => done(!err));
-    });
-    ws.on("error", () => done(false));
-  });
-}
-
-/** Ports of running Metro servers that serve `bundleId` on `deviceName`. */
-export async function findMetroPortsForApp(
-  bundleId: string,
-  deviceName: string | null | undefined,
-  ports: readonly number[] = DEFAULT_METRO_PORTS,
-  { fetchJson = defaultFetchJson }: MetroReloadDeps = {},
-): Promise<number[]> {
-  const matches = await Promise.all(ports.map(async (port) => {
-    try {
-      const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`);
-      return Array.isArray(targets) && metroServesApp(targets as MetroTarget[], bundleId, deviceName);
-    } catch {
-      return false;
-    }
-  }));
-  return ports.filter((_, i) => matches[i]);
+/** App sockets in a `getpeers` result; tools connect without a `role`. */
+export function appPeerIds(peers: unknown): string[] {
+  if (!peers || typeof peers !== "object") return [];
+  return Object.entries(peers as Record<string, unknown>)
+    .filter(([, query]) => typeof query === "string" && new URLSearchParams(query).has("role"))
+    .map(([id]) => id);
 }
 
 /**
- * Ask the Metro serving the foreground app to reload it. Resolves to the
- * ports that accepted the broadcast; empty means the caller should fall back
- * to tapping R in the guest (Expo Go, no Metro found, or an app without an
- * inspector connection such as a release build).
+ * Send `reload` on Metro's message socket. Asks Metro for its peers first;
+ * with exactly one app connected the reload is addressed to that socket
+ * only. If Metro doesn't answer `getpeers` the reload is broadcast, which
+ * the caller only allows when a single device is connected.
+ */
+export function sendMetroReload(
+  port: number,
+  { peersTimeoutMs = 500, timeoutMs = 1200 }: { peersTimeoutMs?: number; timeoutMs?: number } = {},
+): Promise<MetroSendOutcome> {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/message`);
+    const peersId = `serve-sim-peers-${Date.now()}`;
+    let peersTimer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    // Once the reload frame is handed to the socket it may reach the app, so
+    // a timeout after that point must not be reported as "nothing sent".
+    let pending: MetroSendOutcome | null = null;
+    const done = (outcome: MetroSendOutcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(peersTimer);
+      resolve(outcome);
+      try { ws.close(); } catch {}
+    };
+    const timer = setTimeout(() => done(pending ?? "failed"), timeoutMs);
+    const send = (frame: Record<string, unknown>, outcome: MetroSendOutcome) => {
+      if (settled || pending) return;
+      clearTimeout(peersTimer);
+      pending = outcome;
+      ws.send(JSON.stringify({ version: MESSAGE_PROTOCOL_VERSION, ...frame }), (err) =>
+        done(err ? "failed" : outcome),
+      );
+    };
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ version: MESSAGE_PROTOCOL_VERSION, id: peersId, method: "getpeers", target: "server" }));
+      peersTimer = setTimeout(() => send({ method: "reload" }, "broadcast"), peersTimeoutMs);
+    });
+    ws.on("message", (data) => {
+      let msg: { id?: unknown; result?: unknown };
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (msg.id !== peersId || pending) return;
+      const apps = appPeerIds(msg.result);
+      if (apps.length === 1) send({ method: "reload", target: apps[0] }, "targeted");
+      else done(apps.length === 0 ? "failed" : "ambiguous");
+    });
+    ws.on("error", () => done(pending ?? "failed"));
+  });
+}
+
+/** `/json/list` of each Metro port that answers, keyed by port. */
+async function probeMetros(
+  ports: readonly number[],
+  fetchJson: (url: string) => Promise<unknown>,
+): Promise<Map<number, MetroTarget[]>> {
+  const lists = await Promise.all(ports.map(async (port) => {
+    try {
+      const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`);
+      return Array.isArray(targets) ? (targets as MetroTarget[]) : null;
+    } catch {
+      return null;
+    }
+  }));
+  const found = new Map<number, MetroTarget[]>();
+  ports.forEach((port, i) => {
+    if (lists[i]) found.set(port, lists[i]!);
+  });
+  return found;
+}
+
+/**
+ * Reload the foreground app through the Metro that serves it on this
+ * simulator. `sent: false` means no reload went out and the caller should
+ * tap R in the guest instead.
  */
 export async function reloadViaMetro(
   bundleId: string,
   deviceName: string | null | undefined,
   ports: readonly number[] = DEFAULT_METRO_PORTS,
-  deps: MetroReloadDeps = {},
-): Promise<number[]> {
-  if (METRO_RELOAD_UNSUPPORTED.has(bundleId)) return [];
-  const broadcast = deps.broadcast ?? broadcastMetroMessage;
-  const candidates = await findMetroPortsForApp(bundleId, deviceName, ports, deps);
-  const sent = await Promise.all(candidates.map((port) => broadcast(port, "reload")));
-  return candidates.filter((_, i) => sent[i]);
+  { fetchJson = defaultFetchJson, sendReload = (port) => sendMetroReload(port) }: MetroReloadDeps = {},
+): Promise<MetroReloadResult> {
+  if (!supportsMetroReload(bundleId)) return { sent: false, reason: "unsupported-app" };
+  if (!deviceName) return { sent: false, reason: "unknown-device" };
+  const metros = await probeMetros(ports, fetchJson);
+  const serving = [...metros].filter(([, targets]) => metroServesApp(targets, bundleId, deviceName));
+  if (serving.length === 0) return { sent: false, reason: "no-metro" };
+  const servingPorts = serving.map(([port]) => port);
+  if (serving.length > 1 || !metroServesOnlyDevice(serving[0]![1], bundleId, deviceName)) {
+    return { sent: false, reason: "ambiguous", ports: servingPorts };
+  }
+  const port = servingPorts[0]!;
+  const outcome = await sendReload(port);
+  if (outcome === "targeted" || outcome === "broadcast") {
+    return { sent: true, port, targeted: outcome === "targeted" };
+  }
+  return { sent: false, reason: outcome === "ambiguous" ? "ambiguous" : "send-failed", ports: servingPorts };
 }

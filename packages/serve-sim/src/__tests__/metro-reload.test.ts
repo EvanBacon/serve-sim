@@ -1,118 +1,243 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 import {
-  broadcastMetroMessage,
-  findMetroPortsForApp,
+  appPeerIds,
   metroServesApp,
+  metroServesOnlyDevice,
   reloadViaMetro,
+  sendMetroReload,
+  supportsMetroReload,
+  type MetroSendOutcome,
 } from "../metro-reload";
 
 const EXPO_GO = "host.exp.Exponent";
 const DEV_CLIENT = "com.example.devclient";
+const SIM = "iPhone 17 Pro";
+
+const target = (appId: string, deviceName: string, logicalDeviceId = deviceName) => ({
+  appId,
+  deviceName,
+  reactNative: { logicalDeviceId },
+});
 
 describe("metroServesApp", () => {
   test("matches the app on this simulator", () => {
-    expect(metroServesApp([{ appId: EXPO_GO, deviceName: "iPhone 17 Pro" }], EXPO_GO, "iPhone 17 Pro")).toBe(true);
+    expect(metroServesApp([target(DEV_CLIENT, SIM)], DEV_CLIENT, SIM)).toBe(true);
   });
 
   test("skips the same app served to another device", () => {
-    expect(metroServesApp([{ appId: EXPO_GO, deviceName: "iPhone 16e" }], EXPO_GO, "iPhone 17 Pro")).toBe(false);
+    expect(metroServesApp([target(DEV_CLIENT, "iPhone 16e")], DEV_CLIENT, SIM)).toBe(false);
   });
 
-  test("falls back to the app id when either device name is unknown", () => {
-    expect(metroServesApp([{ appId: EXPO_GO }], EXPO_GO, "iPhone 17 Pro")).toBe(true);
-    expect(metroServesApp([{ appId: EXPO_GO, deviceName: "iPhone 16e" }], EXPO_GO, null)).toBe(true);
+  test("requires the device name to match", () => {
+    expect(metroServesApp([{ appId: DEV_CLIENT }], DEV_CLIENT, SIM)).toBe(false);
   });
 
   test("ignores other apps and empty target lists", () => {
-    expect(metroServesApp([{ appId: "com.example.other" }], EXPO_GO, null)).toBe(false);
-    expect(metroServesApp([], EXPO_GO, null)).toBe(false);
+    expect(metroServesApp([target("com.example.other", SIM)], DEV_CLIENT, SIM)).toBe(false);
+    expect(metroServesApp([], DEV_CLIENT, SIM)).toBe(false);
   });
 });
 
-describe("findMetroPortsForApp", () => {
+describe("metroServesOnlyDevice", () => {
+  test("true when this simulator is the only connected device", () => {
+    expect(metroServesOnlyDevice([target(DEV_CLIENT, SIM), target(DEV_CLIENT, SIM)], DEV_CLIENT, SIM)).toBe(true);
+  });
+
+  test("false when another device shares the Metro", () => {
+    expect(metroServesOnlyDevice([target(DEV_CLIENT, SIM), target(DEV_CLIENT, "Pixel 9")], DEV_CLIENT, SIM)).toBe(false);
+  });
+
+  test("false when another simulator has the same name", () => {
+    expect(
+      metroServesOnlyDevice([target(DEV_CLIENT, SIM, "a"), target(DEV_CLIENT, SIM, "b")], DEV_CLIENT, SIM),
+    ).toBe(false);
+  });
+
+  test("false when the app isn't served here", () => {
+    expect(metroServesOnlyDevice([target(DEV_CLIENT, "Pixel 9")], DEV_CLIENT, SIM)).toBe(false);
+  });
+});
+
+describe("appPeerIds", () => {
+  test("keeps app sockets (with a role) and drops tools", () => {
+    expect(appPeerIds({ "1": "role=ios", "2": {}, "3": "", "4": "role=android&x=1" })).toEqual(["1", "4"]);
+  });
+
+  test("handles junk", () => {
+    expect(appPeerIds(null)).toEqual([]);
+    expect(appPeerIds("nope")).toEqual([]);
+  });
+});
+
+describe("reloadViaMetro", () => {
   const lists: Record<number, unknown> = {
     8081: [],
-    8082: [{ appId: DEV_CLIENT, deviceName: "iPhone 16e" }],
-    8083: [{ appId: DEV_CLIENT, deviceName: "iPhone 17 Pro" }],
+    8082: [target(DEV_CLIENT, "iPhone 16e")],
+    8083: [target(DEV_CLIENT, SIM)],
     8084: "Upgrade Required",
-    8085: [{ appId: EXPO_GO, deviceName: "iPhone 17 Pro" }],
+    8085: [target(EXPO_GO, SIM)],
+    8086: [target(DEV_CLIENT, SIM), target(DEV_CLIENT, "Pixel 9")],
+    8087: [target(DEV_CLIENT, SIM)],
   };
   const fetchJson = async (url: string) => {
     const port = Number(new URL(url).port);
     if (!(port in lists)) throw new Error("ECONNREFUSED");
     return lists[port];
   };
-  const recordBroadcasts = () => {
-    const sent: Array<[number, string]> = [];
-    const broadcast = async (port: number, method: string) => {
-      sent.push([port, method]);
-      return true;
+  const recordSends = (outcome: MetroSendOutcome = "targeted") => {
+    const sent: number[] = [];
+    const sendReload = async (port: number) => {
+      sent.push(port);
+      return outcome;
     };
-    return { sent, broadcast };
+    return { sent, sendReload };
   };
 
-  test("finds the Metro serving the app on this simulator", async () => {
-    expect(await findMetroPortsForApp(DEV_CLIENT, "iPhone 17 Pro", [8081, 8082, 8083, 8084, 8090], { fetchJson })).toEqual([8083]);
-  });
-
-  test("returns nothing when no Metro serves the app", async () => {
-    expect(await findMetroPortsForApp("com.example.app", "iPhone 17 Pro", [8081, 8082, 8090], { fetchJson })).toEqual([]);
-  });
-
-  test("reloadViaMetro broadcasts reload only to matching ports", async () => {
-    const { sent, broadcast } = recordBroadcasts();
-    const ports = await reloadViaMetro(DEV_CLIENT, "iPhone 17 Pro", [8081, 8082, 8083], { fetchJson, broadcast });
-    expect(ports).toEqual([8083]);
-    expect(sent).toEqual([[8083, "reload"]]);
-  });
-
-  test("reloadViaMetro reports failure when the broadcast fails", async () => {
-    const ports = await reloadViaMetro(DEV_CLIENT, "iPhone 17 Pro", [8083], {
-      fetchJson,
-      broadcast: async () => false,
+  test("reloads through the Metro serving only this simulator", async () => {
+    const { sent, sendReload } = recordSends();
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8081, 8082, 8083, 8084, 8090], { fetchJson, sendReload })).toEqual({
+      sent: true,
+      port: 8083,
+      targeted: true,
     });
-    expect(ports).toEqual([]);
+    expect(sent).toEqual([8083]);
   });
 
-  test("reloadViaMetro skips Expo Go, which ignores the broadcast", async () => {
-    const { sent, broadcast } = recordBroadcasts();
-    expect(await reloadViaMetro(EXPO_GO, "iPhone 17 Pro", [8085], { fetchJson, broadcast })).toEqual([]);
+  test("reports a broadcast as sent but untargeted", async () => {
+    const { sendReload } = recordSends("broadcast");
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8083], { fetchJson, sendReload })).toEqual({
+      sent: true,
+      port: 8083,
+      targeted: false,
+    });
+  });
+
+  test("nothing sent when no Metro serves the app here", async () => {
+    const { sent, sendReload } = recordSends();
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8081, 8082, 8090], { fetchJson, sendReload })).toEqual({
+      sent: false,
+      reason: "no-metro",
+    });
+    expect(sent).toEqual([]);
+  });
+
+  test("nothing sent when another device shares the Metro", async () => {
+    const { sent, sendReload } = recordSends();
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8086], { fetchJson, sendReload })).toMatchObject({
+      sent: false,
+      reason: "ambiguous",
+    });
+    expect(sent).toEqual([]);
+  });
+
+  test("nothing sent when several Metros serve the app here", async () => {
+    const { sent, sendReload } = recordSends();
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8083, 8087], { fetchJson, sendReload })).toEqual({
+      sent: false,
+      reason: "ambiguous",
+      ports: [8083, 8087],
+    });
+    expect(sent).toEqual([]);
+  });
+
+  test("nothing sent when the simulator name is unknown", async () => {
+    const { sent, sendReload } = recordSends();
+    expect(await reloadViaMetro(DEV_CLIENT, null, [8083], { fetchJson, sendReload })).toEqual({
+      sent: false,
+      reason: "unknown-device",
+    });
+    expect(sent).toEqual([]);
+  });
+
+  test("passes on send failures and several connected apps", async () => {
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8083], { fetchJson, sendReload: recordSends("failed").sendReload }))
+      .toMatchObject({ sent: false, reason: "send-failed" });
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8083], { fetchJson, sendReload: recordSends("ambiguous").sendReload }))
+      .toMatchObject({ sent: false, reason: "ambiguous" });
+  });
+
+  test("skips Expo Go, which ignores the reload, without probing", async () => {
+    let probed = false;
+    const { sent, sendReload } = recordSends();
+    expect(supportsMetroReload(EXPO_GO)).toBe(false);
+    expect(
+      await reloadViaMetro(EXPO_GO, SIM, [8085], {
+        fetchJson: async (url) => { probed = true; return fetchJson(url); },
+        sendReload,
+      }),
+    ).toEqual({ sent: false, reason: "unsupported-app" });
+    expect(probed).toBe(false);
     expect(sent).toEqual([]);
   });
 });
 
-describe("broadcastMetroMessage", () => {
+describe("sendMetroReload", () => {
   let server: WebSocketServer | null = null;
   afterEach(() => {
     server?.close();
     server = null;
   });
 
-  test("sends a protocol v2 broadcast on /message", async () => {
+  /** A fake Metro `/message` server; `peers` answers getpeers (null = ignore it). */
+  async function fakeMetro(peers: Record<string, unknown> | null) {
     server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
     await new Promise<void>((r) => server!.once("listening", () => r()));
     const port = (server.address() as { port: number }).port;
-    const received = new Promise<{ path?: string; origin?: string; data: string }>((resolve) => {
-      server!.on("connection", (socket, req) => {
-        socket.on("message", (data) =>
-          resolve({ path: req.url, origin: req.headers.origin, data: data.toString() }),
-        );
+    const frames: unknown[] = [];
+    let info: { path?: string; origin?: string } = {};
+    server.on("connection", (socket: WebSocket, req) => {
+      info = { path: req.url, origin: req.headers.origin };
+      socket.on("message", (data) => {
+        const msg = JSON.parse(data.toString());
+        frames.push(msg);
+        if (msg.method === "getpeers" && peers) {
+          socket.send(JSON.stringify({ id: msg.id, result: peers }));
+        }
       });
     });
-    expect(await broadcastMetroMessage(port, "reload")).toBe(true);
-    const msg = await received;
-    expect(msg.path).toBe("/message");
-    // Expo CLI only trusts broadcasts without a browser Origin.
-    expect(msg.origin).toBeUndefined();
-    expect(JSON.parse(msg.data)).toEqual({ version: 2, method: "reload" });
+    return { port, frames, info: () => info };
+  }
+
+  const waitFor = async (cond: () => boolean) => {
+    for (let i = 0; i < 50 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+  };
+
+  test("targets the only connected app", async () => {
+    const metro = await fakeMetro({ "7": "role=ios", "8": {} });
+    expect(await sendMetroReload(metro.port)).toBe("targeted");
+    await waitFor(() => metro.frames.length >= 2);
+    expect(metro.info().path).toBe("/message");
+    // Expo CLI only trusts clients without a browser Origin.
+    expect(metro.info().origin).toBeUndefined();
+    expect(metro.frames[0]).toMatchObject({ version: 2, method: "getpeers", target: "server" });
+    expect(metro.frames[1]).toEqual({ version: 2, method: "reload", target: "7" });
   });
 
-  test("resolves false when nothing is listening", async () => {
+  test("sends nothing when several apps are connected", async () => {
+    const metro = await fakeMetro({ "7": "role=ios", "9": "role=ios" });
+    expect(await sendMetroReload(metro.port)).toBe("ambiguous");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(metro.frames).toHaveLength(1);
+  });
+
+  test("sends nothing when no app is connected", async () => {
+    const metro = await fakeMetro({});
+    expect(await sendMetroReload(metro.port)).toBe("failed");
+  });
+
+  test("broadcasts when Metro doesn't answer getpeers", async () => {
+    const metro = await fakeMetro(null);
+    expect(await sendMetroReload(metro.port, { peersTimeoutMs: 20 })).toBe("broadcast");
+    await waitFor(() => metro.frames.length >= 2);
+    expect(metro.frames[1]).toEqual({ version: 2, method: "reload" });
+  });
+
+  test("fails when nothing is listening", async () => {
     const probe = new WebSocketServer({ port: 0, host: "127.0.0.1" });
     await new Promise<void>((r) => probe.once("listening", () => r()));
     const port = (probe.address() as { port: number }).port;
     await new Promise<void>((r) => probe.close(() => r()));
-    expect(await broadcastMetroMessage(port, "reload")).toBe(false);
+    expect(await sendMetroReload(port)).toBe("failed");
   });
 });

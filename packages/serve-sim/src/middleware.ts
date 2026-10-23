@@ -31,7 +31,7 @@ import {
   subscribeEventLog,
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
-import { reloadViaMetro } from "./metro-reload";
+import { reloadViaMetro, supportsMetroReload, type MetroReloadResult } from "./metro-reload";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import {
   authTokenFingerprint,
@@ -2328,28 +2328,35 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
     // POST /reload — reload the foreground React Native app through its
     // Metro dev server, like `r` in the `expo start` terminal. Body:
-    // { bundleId }. `{ reloaded: false }` tells the client to fall back to
-    // tapping R in the guest.
+    // { bundleId }. Metro doesn't acknowledge reloads, so `sent: true` means
+    // the reload went out (unconfirmed) and the client must not also tap R;
+    // `sent: false` means nothing was sent and the client falls back to
+    // tapping R in the guest. See metro-reload.ts.
     if (url === base + "/reload" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {
         try {
           const parsed = (body ? JSON.parse(body) : {}) as { bundleId?: unknown };
-          const states = await readServeSimStates();
-          const state = selectServeSimState(states, selectedDevice);
-          let ports: number[] = [];
-          if (state && typeof parsed.bundleId === "string" && parsed.bundleId) {
-            const sims = await listAllSimulators();
-            const name = sims.find((d) => d.udid === state.device)?.name;
-            ports = await reloadViaMetro(parsed.bundleId, name);
+          const bundleId = typeof parsed.bundleId === "string" ? parsed.bundleId : "";
+          let result: MetroReloadResult = { sent: false, reason: "no-metro" };
+          if (bundleId && !supportsMetroReload(bundleId)) {
+            result = { sent: false, reason: "unsupported-app" };
+          } else if (bundleId) {
+            const states = await readServeSimStates();
+            const state = selectServeSimState(states, selectedDevice);
+            if (state) {
+              const sims = await listAllSimulators();
+              const name = sims.find((d) => d.udid === state.device)?.name;
+              result = await reloadViaMetro(bundleId, name);
+            }
           }
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ reloaded: ports.length > 0, ports }));
+          res.end(JSON.stringify({ ...result, confirmed: false }));
         } catch (err) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({
-            reloaded: false,
+            sent: false,
             error: err instanceof Error ? err.message : "Failed to reload",
           }));
         }
