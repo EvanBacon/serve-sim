@@ -71,6 +71,7 @@ import {
 import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
+import { createSimKeyState, isReloadShortcut } from "./utils/sim-keyboard";
 import {
   DEVICE_SIDEBAR_WIDTH,
   DEVTOOLS_PANEL_WIDTH,
@@ -866,18 +867,27 @@ function AppWithConfig({
     return () => { if (timer) clearTimeout(timer); es.close(); };
   }, [config.appStateEndpoint]);
 
+  // Keys the sim currently holds; see createSimKeyState.
+  const [simKeys] = useState(createSimKeyState);
+  const currentAppRef = useRef(currentApp);
+  currentAppRef.current = currentApp;
+
   // R to reload the RN/Expo bundle.
   // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
   // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
   // react-native https://github.com/react/react-native/blob/c1652651c09506b8dda0b9515b5f0e5829220f0d/packages/react-native/React/Base/RCTKeyCommands.m#L69-L74
   const sendReactNativeReload = useCallback(async () => {
-    const R = 0x15;
-    sendKey("down", R);
+    const { release, tap } = simKeys.reloadEvents();
+    for (const ev of release) sendKey(ev.type, ev.usage);
+    sendKey("down", tap);
     await new Promise((r) => setTimeout(r, 30));
-    sendKey("up", R);
-  }, [sendKey]);
+    sendKey("up", tap);
+  }, [sendKey, simKeys]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
+  // The action toolbar under the device (reload, home, ...) is sim chrome:
+  // clicking it must not move keyboard focus away from the simulator.
+  const simActionsRef = useRef<HTMLDivElement | null>(null);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
   const [deviceRenderedHeight, setDeviceRenderedHeight] = useState(0);
   useEffect(() => {
@@ -894,11 +904,12 @@ function AppWithConfig({
   const [simFocused, setSimFocused] = useState(true);
   const simFocusedRef = useRef(true);
   simFocusedRef.current = simFocused;
-  const pressedKeysRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
-      const inside = !!simContainerRef.current?.contains(e.target as Node);
+      const target = e.target as Node;
+      const inside =
+        !!simContainerRef.current?.contains(target) || !!simActionsRef.current?.contains(target);
       setSimFocused(inside);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
@@ -907,11 +918,8 @@ function AppWithConfig({
 
   useEffect(() => {
     if (simFocused) return;
-    const held = pressedKeysRef.current;
-    if (held.size === 0) return;
-    for (const usage of held) sendWs(0x06, { type: "up", usage });
-    held.clear();
-  }, [simFocused, sendWs]);
+    for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
+  }, [simFocused, sendWs, simKeys]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
@@ -940,12 +948,15 @@ function AppWithConfig({
         if (type === "down" && !e.repeat) sendWs(0x0c, {});
         return;
       }
+      if (isReloadShortcut(e) && currentAppRef.current?.isReactNative) {
+        e.preventDefault();
+        if (type === "down" && !e.repeat) void sendReactNativeReload();
+        return;
+      }
       const usage = hidUsageForCode(e.code);
       if (usage == null) return;
       e.preventDefault();
-      if (type === "down") pressedKeysRef.current.add(usage);
-      else pressedKeysRef.current.delete(usage);
-      sendWs(0x06, { type, usage });
+      for (const ev of simKeys.forward(type, usage)) sendWs(0x06, ev);
     };
     const down = (e: KeyboardEvent) => onKey(e, "down");
     const up = (e: KeyboardEvent) => onKey(e, "up");
@@ -955,7 +966,7 @@ function AppWithConfig({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device, rotateBy]);
+  }, [sendWs, config.device, rotateBy, sendReactNativeReload, simKeys]);
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
@@ -1201,7 +1212,7 @@ function AppWithConfig({
             </>
           )}
         </div>
-        <div className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
+        <div ref={simActionsRef} className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
           <SimulatorToolbar
             exec={noHostShell}
             onRotate={rotateDevice}
@@ -1226,7 +1237,7 @@ function AppWithConfig({
               {currentApp?.isReactNative && (
                 <SimulatorToolbar.Button
                   aria-label="Reload React Native bundle"
-                  title="Reload (R)"
+                  title="Reload (R, ⌘R)"
                   onClick={() => void sendReactNativeReload()}
                 >
                   <ReloadIcon />
