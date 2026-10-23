@@ -123,6 +123,8 @@ export type RecordingSummary = {
   repeated?: number;
   /** Captured frames skipped (faster than fps, or a mid-recording size change). */
   dropped?: number;
+  /** Of `dropped`, frames shed because the encoder backlog was full. */
+  backlogDropped?: number;
   startedAt?: string;
 };
 

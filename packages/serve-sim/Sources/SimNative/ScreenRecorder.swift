@@ -15,7 +15,9 @@ import SimNativeSupport
 /// simulator rather than the encoder or JS event loop.
 ///
 /// All writer state is confined to `queue`. `handleFrame` only enqueues, so a
-/// slow encoder never stalls capture or the live stream consumers.
+/// slow encoder never stalls capture or the live stream consumers; the
+/// backlog is capped (`maxPendingFrames`) so a stalled encoder can't pin an
+/// unbounded number of full-resolution buffers.
 final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
     struct Options {
         var path: String
@@ -40,7 +42,11 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
         }
     }
 
+    /// ~200 ms at 60 fps; each pending frame holds a full-res BGRA copy.
+    static let maxPendingFrames = 12
+
     private let queue = DispatchQueue(label: "screen-recorder", qos: .userInitiated)
+    private let pendingFrames = PendingFrameLimiter(limit: ScreenRecorder.maxPendingFrames)
     private let options: Options
     private let startedAt = Date()
 
@@ -67,7 +73,13 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
 
     func handleFrame(_ frame: Frame) {
         guard frame.isPrivateCopy else { return }
-        queue.async { self.append(frame) }
+        // Over the cap the frame is dropped here (counted in `backlogDropped`);
+        // the CFR scheduler repeats the previous frame across the gap.
+        guard pendingFrames.tryAcquire() else { return }
+        queue.async {
+            defer { self.pendingFrames.release() }
+            self.append(frame)
+        }
     }
 
     /// Pad to "now", close the file, and return a JSON summary.
@@ -221,13 +233,14 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
             "captured": captured,
             "encoded": encoded,
             "repeated": repeated,
-            "dropped": dropped,
+            "dropped": dropped + pendingFrames.dropped,
+            "backlogDropped": pendingFrames.dropped,
             "encoderBusy": encoderBusy,
             "startedAt": isoTimestamp(startedAt),
         ]
         writer.finishWriting {
             if writer.status == .completed {
-                print("[record] Saved \(self.options.path) (\(summary["frames"] ?? 0) frames, \(self.captured) captured, \(self.repeated) repeated, \(self.dropped) dropped)")
+                print("[record] Saved \(self.options.path) (\(summary["frames"] ?? 0) frames, \(self.captured) captured, \(self.repeated) repeated, \(self.dropped + self.pendingFrames.dropped) dropped)")
                 completion(.success(jsonString(summary)))
             } else {
                 let message = writer.error.map { String(describing: $0) } ?? "status \(writer.status.rawValue)"

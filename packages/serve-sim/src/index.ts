@@ -49,6 +49,7 @@ import {
   parseRecordingDuration,
   recordingFileName,
   recordingUrlForWsUrl,
+  uniqueRecordingFileName,
 } from "./recording";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
@@ -1027,37 +1028,70 @@ async function record(
     process.exit(1);
   };
 
-  const startRes = await fetch(query, { method: "POST", headers: target.headers }).catch((err) => {
-    console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  });
-  if (!startRes.ok) await failed("Starting the recording", startRes);
-
-  await new Promise<void>((resolveStop) => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const stop = () => {
-      if (timer) clearTimeout(timer);
-      process.off("SIGINT", stop);
-      process.off("SIGTERM", stop);
-      resolveStop();
-    };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-    if (durationMs != null) {
-      timer = setTimeout(stop, durationMs);
-      console.error(`Recording ${target.device} for ${durationMs / 1000}s… (Ctrl+C to stop early)`);
-    } else {
-      console.error(`Recording ${target.device}… press Ctrl+C to stop.`);
+  // Own SIGINT/SIGTERM from before the start request until the file is
+  // saved: Ctrl+C during the start still stops (rather than orphaning a
+  // server-side recording), and Ctrl+C while saving doesn't drop the file.
+  let stopRequested = false;
+  let saving = false;
+  let abandonArmed = false;
+  let wake: (() => void) | undefined;
+  const onSignal = () => {
+    if (saving) {
+      if (abandonArmed) process.exit(130);
+      abandonArmed = true;
+      console.error("Saving the recording… press Ctrl+C again to abandon it.");
+      return;
     }
-  });
+    stopRequested = true;
+    wake?.();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  let out: string;
+  let stopRes: Response;
+  try {
+    const startRes = await fetch(query, { method: "POST", headers: target.headers }).catch((err) => {
+      console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+    if (!startRes.ok) await failed("Starting the recording", startRes);
 
-  const stopRes = await fetch(stopUrl, { method: "POST", headers: target.headers }).catch((err) => {
-    console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  });
-  if (!stopRes.ok) await failed("Stopping the recording", stopRes);
-  const out = resolve(opts.output ?? recordingFileName());
-  writeFileSync(out, Buffer.from(await stopRes.arrayBuffer()));
+    if (!stopRequested) {
+      await new Promise<void>((resolveStop) => {
+        // Signal listeners don't keep the event loop alive; this timer does
+        // (and doubles as the --duration stop).
+        const timer = setTimeout(() => wake?.(), durationMs ?? 2 ** 31 - 1);
+        wake = () => {
+          clearTimeout(timer);
+          resolveStop();
+        };
+        if (durationMs != null) {
+          console.error(`Recording ${target.device} for ${durationMs / 1000}s… (Ctrl+C to stop early)`);
+        } else {
+          console.error(`Recording ${target.device}… press Ctrl+C to stop.`);
+        }
+      });
+    }
+
+    saving = true;
+    stopRes = await fetch(stopUrl, { method: "POST", headers: target.headers }).catch((err) => {
+      console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+    if (!stopRes.ok) await failed("Stopping the recording", stopRes);
+    const data = Buffer.from(await stopRes.arrayBuffer());
+    if (opts.output) {
+      out = resolve(opts.output);
+      writeFileSync(out, data);
+    } else {
+      // Don't clobber a recording saved earlier in the same second.
+      out = resolve(uniqueRecordingFileName(recordingFileName(), (name) => existsSync(resolve(name))));
+      writeFileSync(out, data, { flag: "wx" });
+    }
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
   let summary: { width?: number; height?: number; fps?: number; frames?: number; duration?: number } = {};
   try { summary = JSON.parse(stopRes.headers.get(RECORDING_SUMMARY_HEADER) ?? "{}"); } catch {}
   const detail = summary.width

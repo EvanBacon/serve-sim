@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "http";
 import { existsSync, writeFileSync } from "fs";
+import { setTimeout as delay } from "timers/promises";
 import type { AddressInfo } from "net";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
 import type { RecordingStartOptions } from "../native";
@@ -204,5 +205,136 @@ describe("DeviceSession recording endpoints", () => {
     session.close();
     expect(cancelled).toBe(1);
     expect(session.recordingStatus()).toEqual({ recording: false });
+  });
+
+  async function waitForRemoval(path: string): Promise<void> {
+    for (let i = 0; i < 100 && existsSync(path); i++) await delay(5);
+  }
+
+  test("a native stop failure removes the partial temp file", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: fakeCapture(calls, {
+        stopRecording: async () => {
+          calls.stops++;
+          writeFileSync(calls.starts[0]!.path, "partial");
+          throw new Error("Recording failed: encoder died");
+        },
+      }),
+      hid: hid(),
+    }));
+    await fetch(`${base}/recording/start`, { method: "POST" });
+    const res = await fetch(`${base}/recording/stop`, { method: "POST" });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "recording_failed", message: "Recording failed: encoder died" });
+    expect(existsSync(calls.starts[0]!.path)).toBe(false);
+    expect(await (await fetch(`${base}/recording`)).json()).toEqual({ recording: false });
+  });
+
+  test("a missing output file after finalize is reported and leaves the session idle", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: fakeCapture(calls, { stopRecording: async () => { calls.stops++; return "{}"; } }),
+      hid: hid(),
+    }));
+    await fetch(`${base}/recording/start`, { method: "POST" });
+    const res = await fetch(`${base}/recording/stop`, { method: "POST" });
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBe("recording_failed");
+    expect(existsSync(calls.starts[0]!.path)).toBe(false);
+    expect(await (await fetch(`${base}/recording`)).json()).toEqual({ recording: false });
+  });
+
+  test("closing the session while a start is in flight answers 409 and drops the file", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    let session!: DeviceSession;
+    session = new DeviceSession("TEST-UDID", {
+      capture: fakeCapture(calls, {
+        startRecording: async (path, options) => {
+          calls.starts.push({ path, options });
+          writeFileSync(path, "partial");
+          session.close();
+        },
+      }),
+      hid: hid(),
+    });
+    const base = await serve(session);
+    const res = await fetch(`${base}/recording/start`, { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("session_closed");
+    await waitForRemoval(calls.starts[0]!.path);
+    expect(existsSync(calls.starts[0]!.path)).toBe(false);
+    expect(session.recordingStatus()).toEqual({ recording: false });
+  });
+
+  test("a client that disconnects during finalize doesn't leave the file behind", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    let finishStop!: () => void;
+    const capture = fakeCapture(calls);
+    const realStop = capture.stopRecording!;
+    capture.stopRecording = async () => {
+      await new Promise<void>((resolve) => { finishStop = resolve; });
+      return realStop();
+    };
+    const base = await serve(new DeviceSession("TEST-UDID", { capture, hid: hid() }));
+    await fetch(`${base}/recording/start`, { method: "POST" });
+    const abort = new AbortController();
+    const pending = fetch(`${base}/recording/stop`, { method: "POST", signal: abort.signal }).catch(() => null);
+    for (let i = 0; i < 100 && !finishStop; i++) await delay(5);
+    abort.abort();
+    expect(await pending).toBeNull();
+    await delay(20); // let the server see the socket close
+    finishStop();
+    const tempPath = calls.starts[0]!.path;
+    for (let i = 0; i < 100 && (calls.stops === 0 || existsSync(tempPath)); i++) await delay(5);
+    expect(calls.stops).toBe(1);
+    expect(existsSync(tempPath)).toBe(false);
+    expect(await (await fetch(`${base}/recording`)).json()).toEqual({ recording: false });
+  });
+
+  test("closing the session mid-stop leaves the file for the stop to stream", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    let finishStop!: () => void;
+    const capture = fakeCapture(calls);
+    const realStop = capture.stopRecording!;
+    capture.stopRecording = async () => {
+      writeFileSync(calls.starts[0]!.path, "in-progress");
+      await new Promise<void>((resolve) => { finishStop = resolve; });
+      return realStop();
+    };
+    const session = new DeviceSession("TEST-UDID", { capture, hid: hid() });
+    const base = await serve(session);
+    await fetch(`${base}/recording/start`, { method: "POST" });
+    const pending = fetch(`${base}/recording/stop`, { method: "POST" });
+    for (let i = 0; i < 100 && !finishStop; i++) await delay(5);
+    session.close();
+    await delay(20);
+    expect(existsSync(calls.starts[0]!.path)).toBe(true);
+    finishStop();
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).toString()).toBe("fake-mp4");
+  });
+
+  test("the server caps recording length and holds the file for stop", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: fakeCapture(calls),
+      hid: hid(),
+      maxRecordingMs: 20,
+    }));
+    await fetch(`${base}/recording/start`, { method: "POST" });
+    for (let i = 0; i < 100 && calls.stops === 0; i++) await delay(5);
+    expect(calls.stops).toBe(1);
+    const status = await (await fetch(`${base}/recording`)).json() as { recording: boolean; limitReached?: boolean };
+    expect(status).toMatchObject({ recording: true, limitReached: true });
+    // A second start still conflicts until the capped file is collected.
+    expect((await fetch(`${base}/recording/start`, { method: "POST" })).status).toBe(409);
+
+    const res = await fetch(`${base}/recording/stop`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).toString()).toBe("fake-mp4");
+    expect(calls.stops).toBe(1);
+    expect(await (await fetch(`${base}/recording`)).json()).toEqual({ recording: false });
   });
 });

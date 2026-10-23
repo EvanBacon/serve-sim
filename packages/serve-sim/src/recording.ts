@@ -3,7 +3,7 @@
  * `serve-sim record` CLI, and the preview toolbar.
  *
  * Wire protocol (device-scoped helper routes, `…/helper/<udid>/recording`):
- *   GET  /recording        → { recording, startedAt? }
+ *   GET  /recording        → { recording, startedAt?, limitReached? }
  *   POST /recording/start  → ?codec=h264|hevc&fps=1..120&bitrate=<bits/s>
  *   POST /recording/stop   → the finished MP4 (video/mp4, attachment), with the
  *                            native summary JSON in `X-Serve-Sim-Recording`.
@@ -14,6 +14,11 @@ import { streamDisplayGeometry } from "./client/simulator/orientation";
 
 export const RECORDING_SUMMARY_HEADER = "X-Serve-Sim-Recording";
 export const DEFAULT_RECORDING_FPS = 60;
+/**
+ * Server-side cap on one recording. At the cap the file is finalized and held
+ * (status reports `limitReached`) until a `/recording/stop` collects it.
+ */
+export const MAX_RECORDING_MS = 30 * 60_000;
 
 const CODECS = new Set<RecordingCodec>(["h264", "hevc"]);
 
@@ -59,6 +64,20 @@ export function recordingFileName(date = new Date()): string {
     pad(date.getHours()), pad(date.getMinutes()), pad(date.getSeconds()),
   ].join("-");
   return `serve-sim-recording-${stamp}.mp4`;
+}
+
+/**
+ * `name`, or `name-2.mp4`, `name-3.mp4`, … when taken (two recordings saved
+ * within the same second share a timestamp).
+ */
+export function uniqueRecordingFileName(name: string, exists: (name: string) => boolean): string {
+  if (!exists(name)) return name;
+  const dot = name.lastIndexOf(".");
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}${ext}`;
+    if (!exists(candidate)) return candidate;
+  }
 }
 
 /**

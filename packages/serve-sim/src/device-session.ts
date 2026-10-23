@@ -36,6 +36,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import {
+  MAX_RECORDING_MS,
   RECORDING_SUMMARY_HEADER,
   parseRecordingQuery,
   recordingFileName,
@@ -195,7 +196,18 @@ export interface DeviceSessionDependencies {
   hid: HidTransport;
   createDuoRenderer?: (onFailure: (error: DuoRendererError) => void) => Pick<DuoRenderer, "render" | "close">;
   createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  /** Server-side recording cap; defaults to `MAX_RECORDING_MS`. */
+  maxRecordingMs?: number;
 }
+
+type ActiveRecording = {
+  path: string;
+  startedAt: string;
+  phase: "starting" | "recording" | "stopping";
+  /** Native finalize, started by `/recording/stop` or the duration cap. */
+  finalizing?: Promise<string>;
+  limitTimer?: ReturnType<typeof setTimeout>;
+};
 
 type Unsubscribe = () => void | Promise<void>;
 
@@ -229,7 +241,7 @@ export class DeviceSession {
   };
   private deviceHubShadowed?: boolean;
   /** Active screen recording (one per session), or a start/stop in flight. */
-  private recording?: { path: string; startedAt: string; phase: "starting" | "recording" | "stopping" };
+  private recording?: ActiveRecording;
   private rendererFailureEvent?: { id: number; key: string; count: number };
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
@@ -333,10 +345,15 @@ export class DeviceSession {
     }
     this.hidSockets.clear();
     // Capture stop cancels the native recorder; drop the partial temp file.
+    // A stop in flight owns its file (it's streaming it or cleaning it up).
     if (this.recording) {
-      const { path } = this.recording;
+      const active = this.recording;
       this.recording = undefined;
-      this.runCleanup("recording cleanup", () => rm(path, { force: true }));
+      if (active.limitTimer) clearTimeout(active.limitTimer);
+      if (active.phase !== "stopping") {
+        const finalized = active.finalizing?.catch(() => {}) ?? Promise.resolve();
+        this.runCleanup("recording cleanup", () => finalized.then(() => rm(active.path, { force: true })));
+      }
     }
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
@@ -588,10 +605,18 @@ export class DeviceSession {
 
   // ── Screen recording ─────────────────────────────────────────────────────
 
-  recordingStatus(): { recording: boolean; startedAt?: string } {
-    return this.recording
-      ? { recording: true, startedAt: this.recording.startedAt }
-      : { recording: false };
+  /**
+   * `limitReached`: the duration cap finalized the file; it stays reported as
+   * recording until a `/recording/stop` collects it.
+   */
+  recordingStatus(): { recording: boolean; startedAt?: string; limitReached?: boolean } {
+    const active = this.recording;
+    if (!active) return { recording: false };
+    return {
+      recording: true,
+      startedAt: active.startedAt,
+      ...(active.finalizing && active.phase === "recording" ? { limitReached: true } : {}),
+    };
   }
 
   /**
@@ -642,18 +667,43 @@ export class DeviceSession {
     const dir = join(tmpdir(), "serve-sim-recordings");
     const path = join(dir, `${this.udid}-${randomUUID()}.mp4`);
     const startedAt = new Date().toISOString();
-    this.recording = { path, startedAt, phase: "starting" };
+    const active: ActiveRecording = { path, startedAt, phase: "starting" };
+    this.recording = active;
+    const closedMeanwhile = () => {
+      // close() ran during the start: capture stop cancelled the recorder.
+      this.runCleanup("recording cleanup", () => rm(path, { force: true }));
+      this.sendJson(res, 409, { error: "session_closed", message: "The device session closed while the recording was starting" });
+    };
     try {
       await this.start();
       await mkdir(dir, { recursive: true });
       await this.capture.startRecording(path, { ...parsed, rotation: recordingRotation(this.screenConfig()) });
     } catch (error) {
-      if (this.recording?.path === path) this.recording = undefined;
+      if (this.recording !== active) return closedMeanwhile();
+      this.recording = undefined;
+      await rm(path, { force: true }).catch(() => {});
       throw error;
     }
-    if (this.recording?.path !== path) return; // session closed meanwhile
-    this.recording.phase = "recording";
+    if (this.recording !== active) return closedMeanwhile();
+    active.phase = "recording";
+    const maxMs = this.dependencies?.maxRecordingMs ?? MAX_RECORDING_MS;
+    active.limitTimer = setTimeout(() => {
+      if (this.recording !== active || active.phase !== "recording") return;
+      console.error(`[record] ${this.udid}: reached the ${Math.round(maxMs / 60_000)} min limit; finalizing`);
+      this.finalizeRecording(active).catch((error) => {
+        console.error(`[record] ${this.udid}: finalize at the duration limit failed:`, error instanceof Error ? error.message : error);
+      });
+    }, maxMs);
+    active.limitTimer.unref?.();
     this.sendJson(res, 200, { recording: true, startedAt });
+  }
+
+  /** Finalize natively once, whether triggered by stop or the duration cap. */
+  private finalizeRecording(active: ActiveRecording): Promise<string> {
+    if (active.limitTimer) clearTimeout(active.limitTimer);
+    active.limitTimer = undefined;
+    active.finalizing ??= this.capture.stopRecording!();
+    return active.finalizing;
   }
 
   private async stopRecording(res: ServerResponse): Promise<void> {
@@ -663,13 +713,26 @@ export class DeviceSession {
       return;
     }
     active.phase = "stopping";
+    // Finalizing a long recording takes a moment; notice if the client leaves.
+    let clientGone = false;
+    const onClose = () => { clientGone = true; };
+    res.once("close", onClose);
     let summary: string;
+    let size: number;
     try {
-      summary = await this.capture.stopRecording();
+      summary = await this.finalizeRecording(active);
+      ({ size } = await stat(active.path));
+    } catch (error) {
+      await rm(active.path, { force: true }).catch(() => {});
+      throw error;
     } finally {
+      res.off("close", onClose);
       if (this.recording === active) this.recording = undefined;
     }
-    const { size } = await stat(active.path);
+    if (clientGone || res.destroyed) {
+      await rm(active.path, { force: true }).catch(() => {});
+      return;
+    }
     res.writeHead(200, {
       "Content-Type": "video/mp4",
       "Content-Length": String(size),

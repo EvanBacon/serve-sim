@@ -4,6 +4,7 @@ import {
   parseRecordingQuery,
   recordingFileName,
   recordingRotation,
+  uniqueRecordingFileName,
   recordingUrlForWsUrl,
 } from "../recording";
 
@@ -43,6 +44,17 @@ describe("recordingRotation", () => {
 
 test("recordingFileName is a sortable local timestamp", () => {
   expect(recordingFileName(new Date(2026, 9, 2, 3, 4, 5))).toBe("serve-sim-recording-2026-10-02-03-04-05.mp4");
+});
+
+describe("uniqueRecordingFileName", () => {
+  test("keeps the timestamped name when it's free", () => {
+    expect(uniqueRecordingFileName("serve-sim-recording-x.mp4", () => false)).toBe("serve-sim-recording-x.mp4");
+  });
+
+  test("suffixes a counter when recordings land in the same second", () => {
+    const taken = new Set(["a.mp4", "a-2.mp4"]);
+    expect(uniqueRecordingFileName("a.mp4", (name) => taken.has(name))).toBe("a-3.mp4");
+  });
 });
 
 describe("recordingUrlForWsUrl", () => {

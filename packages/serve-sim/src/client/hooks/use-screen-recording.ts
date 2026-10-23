@@ -36,51 +36,50 @@ function download(blob: Blob, fileName: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+type RecordingStatusBody = { recording?: boolean; startedAt?: string; limitReached?: boolean };
+
+/** How often the toolbar re-checks the server (other tabs, CLI, duration cap). */
+export const RECORDING_STATUS_POLL_MS = 2_000;
+
+function recordingState(startedAtIso: string | undefined): Extract<ScreenRecordingState, { status: "recording" }> {
+  const startedAt = startedAtIso ? Date.parse(startedAtIso) : Date.now();
+  return { status: "recording", startedAt: Number.isFinite(startedAt) ? startedAt : Date.now() };
+}
+
+async function fetchRecordingStatus(device: string): Promise<RecordingStatusBody | null> {
+  try {
+    const res = await fetch(recordingEndpoint(device));
+    return res.ok ? await res.json() as RecordingStatusBody : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Start/stop a native screen recording on the server and download the MP4.
  * The server records at native resolution from the capture path, so this
- * works the same whether the viewer is on H.264 or MJPEG.
+ * works the same whether the viewer is on H.264 or MJPEG. The server is the
+ * source of truth: its status is polled so recordings started or stopped
+ * elsewhere (another tab, `serve-sim record`, the duration cap) show up here.
  */
-export function useScreenRecording(device: string | null | undefined) {
+export function useScreenRecording(
+  device: string | null | undefined,
+  { pollMs = RECORDING_STATUS_POLL_MS }: { pollMs?: number } = {},
+) {
   const [state, setState] = useState<ScreenRecordingState>({ status: "idle" });
-  const deviceRef = useRef(device);
-  deviceRef.current = device;
-
-  // Pick up a recording already running on the server (page reload, second tab).
-  useEffect(() => {
-    setState({ status: "idle" });
-    if (!device) return;
-    let cancelled = false;
-    void fetch(recordingEndpoint(device))
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { recording?: boolean; startedAt?: string } | null) => {
-        if (cancelled || !body?.recording) return;
-        const startedAt = body.startedAt ? Date.parse(body.startedAt) : Date.now();
-        setState({ status: "recording", startedAt: Number.isFinite(startedAt) ? startedAt : Date.now() });
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [device]);
-
-  const start = useCallback(async () => {
-    const udid = deviceRef.current;
-    if (!udid) return;
-    setState({ status: "starting" });
-    try {
-      const res = await fetch(recordingEndpoint(udid, "start"), { method: "POST" });
-      if (!res.ok) throw new Error(await errorMessage(res));
-      const body = await res.json() as { startedAt?: string };
-      const startedAt = body.startedAt ? Date.parse(body.startedAt) : Date.now();
-      setState({ status: "recording", startedAt: Number.isFinite(startedAt) ? startedAt : Date.now() });
-    } catch (error) {
-      setState({ status: "idle" });
-      toast.error(`Could not start recording: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, []);
+  // The device whose recording this hook drives; cleared on unmount/switch so
+  // in-flight requests can tell their result is stale.
+  const deviceRef = useRef<string | null | undefined>(undefined);
+  // Bumped by every start/stop so a status read issued earlier can't clobber it.
+  const epochRef = useRef(0);
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
 
   const stop = useCallback(async () => {
     const udid = deviceRef.current;
     if (!udid) return;
+    epochRef.current++;
+    const previous = stateRef.current;
     setState({ status: "saving" });
     try {
       const res = await fetch(recordingEndpoint(udid, "stop"), { method: "POST" });
@@ -88,10 +87,79 @@ export function useScreenRecording(device: string | null | undefined) {
       const fileName = attachmentFileName(res.headers.get("content-disposition")) ?? recordingFileName();
       download(await res.blob(), fileName);
       toast.success(`Saved ${fileName}`);
+      if (deviceRef.current === udid) setState({ status: "idle" });
     } catch (error) {
       toast.error(`Could not save recording: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setState({ status: "idle" });
+      // The stop may have failed while the recording is still running; ask
+      // the server rather than assume. Unreachable server: keep what we had.
+      const body = await fetchRecordingStatus(udid);
+      if (deviceRef.current !== udid) return;
+      if (!body) setState(previous.status === "saving" ? { status: "idle" } : previous);
+      else setState(body.recording ? recordingState(body.startedAt) : { status: "idle" });
+    }
+  }, []);
+
+  // Track the device and pick up a recording already running on the server
+  // (page reload, second tab), then keep polling while idle or recording.
+  useEffect(() => {
+    deviceRef.current = device;
+    setState({ status: "idle" });
+    if (!device) return;
+    let cancelled = false;
+    const sync = async () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      const epoch = epochRef.current;
+      const body = await fetchRecordingStatus(device);
+      if (cancelled || !body || epoch !== epochRef.current) return;
+      const current = stateRef.current;
+      // A start/stop in flight owns the state until it settles.
+      if (current.status === "starting" || current.status === "saving") return;
+      if (!body.recording) {
+        if (current.status !== "idle") setState({ status: "idle" });
+        return;
+      }
+      if (body.limitReached && current.status === "recording") {
+        // The server finalized at its duration cap: collect the file.
+        toast.message("Recording reached the server's time limit; saving");
+        void stop();
+        return;
+      }
+      const next = recordingState(body.startedAt);
+      if (current.status !== "recording" || current.startedAt !== next.startedAt) setState(next);
+    };
+    void sync();
+    const timer = setInterval(() => { void sync(); }, pollMs);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      if (deviceRef.current === device) deviceRef.current = undefined;
+    };
+  }, [device, pollMs, stop]);
+
+  const start = useCallback(async () => {
+    const udid = deviceRef.current;
+    if (!udid) return;
+    epochRef.current++;
+    setState({ status: "starting" });
+    try {
+      const res = await fetch(recordingEndpoint(udid, "start"), { method: "POST" });
+      if (!res.ok) throw new Error(await errorMessage(res));
+      const body = await res.json() as { startedAt?: string };
+      if (deviceRef.current !== udid) {
+        // Unmounted or switched devices mid-start: don't orphan a recording
+        // nobody can see. The server drops the file when we hang up.
+        void fetch(recordingEndpoint(udid, "stop"), { method: "POST" })
+          .then((stopRes) => stopRes.body?.cancel())
+          .catch(() => {});
+        return;
+      }
+      setState(recordingState(body.startedAt));
+    } catch (error) {
+      toast.error(`Could not start recording: ${error instanceof Error ? error.message : String(error)}`);
+      // e.g. 409: another tab or the CLI is already recording this device.
+      const body = await fetchRecordingStatus(udid);
+      if (deviceRef.current !== udid) return;
+      setState(body?.recording ? recordingState(body.startedAt) : { status: "idle" });
     }
   }, []);
 
