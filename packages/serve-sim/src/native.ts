@@ -318,6 +318,11 @@ export class NativeCapture {
     return this.handle.snapshotJpeg();
   }
 
+  /** False for addons built before screen recording existed. */
+  get supportsRecording(): boolean {
+    return typeof this.handle.startRecording === "function" && typeof this.handle.stopRecording === "function";
+  }
+
   /**
    * Start recording the screen to an MP4 at `path`: native resolution,
    * hardware H.264/HEVC straight from the captured frames (no stream

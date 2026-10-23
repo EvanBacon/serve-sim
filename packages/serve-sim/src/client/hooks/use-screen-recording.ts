@@ -9,8 +9,9 @@ export type ScreenRecordingState =
   | { status: "recording"; startedAt: number }
   | { status: "saving" };
 
-function recordingEndpoint(device: string, action?: "start" | "stop"): string {
-  return simEndpoint(`helper/${encodeURIComponent(device)}/recording${action ? `/${action}` : ""}`);
+function recordingEndpoint(device: string, action?: "start" | "stop", token?: string): string {
+  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  return simEndpoint(`helper/${encodeURIComponent(device)}/recording${action ? `/${action}` : ""}${query}`);
 }
 
 /** `filename="…"` from a Content-Disposition header, if present. */
@@ -72,6 +73,10 @@ export function useScreenRecording(
   const deviceRef = useRef<string | null | undefined>(undefined);
   // Bumped by every start/stop so a status read issued earlier can't clobber it.
   const epochRef = useRef(0);
+  // Monotonic id per status poll: a slow response older than the latest is dropped.
+  const pollIdRef = useRef(0);
+  // Token from the start this hook made: only it may auto-collect at the cap.
+  const ownedRef = useRef<{ device: string; token: string } | null>(null);
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
@@ -81,9 +86,11 @@ export function useScreenRecording(
     epochRef.current++;
     const previous = stateRef.current;
     setState({ status: "saving" });
+    const owned = ownedRef.current?.device === udid ? ownedRef.current.token : undefined;
     try {
-      const res = await fetch(recordingEndpoint(udid, "stop"), { method: "POST" });
+      const res = await fetch(recordingEndpoint(udid, "stop", owned), { method: "POST" });
       if (!res.ok) throw new Error(await errorMessage(res));
+      if (ownedRef.current?.token === owned) ownedRef.current = null;
       const fileName = attachmentFileName(res.headers.get("content-disposition")) ?? recordingFileName();
       download(await res.blob(), fileName);
       toast.success(`Saved ${fileName}`);
@@ -109,17 +116,20 @@ export function useScreenRecording(
     const sync = async () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       const epoch = epochRef.current;
+      const pollId = ++pollIdRef.current;
       const body = await fetchRecordingStatus(device);
-      if (cancelled || !body || epoch !== epochRef.current) return;
+      if (cancelled || !body || epoch !== epochRef.current || pollId !== pollIdRef.current) return;
       const current = stateRef.current;
       // A start/stop in flight owns the state until it settles.
       if (current.status === "starting" || current.status === "saving") return;
       if (!body.recording) {
+        if (ownedRef.current?.device === device) ownedRef.current = null;
         if (current.status !== "idle") setState({ status: "idle" });
         return;
       }
-      if (body.limitReached && current.status === "recording") {
-        // The server finalized at its duration cap: collect the file.
+      if (body.limitReached && current.status === "recording" && ownedRef.current?.device === device) {
+        // The server finalized our recording at its duration cap: collect it.
+        // Other tabs (and the CLI's recordings) are left to their owner.
         toast.message("Recording reached the server's time limit; saving");
         void stop();
         return;
@@ -144,15 +154,16 @@ export function useScreenRecording(
     try {
       const res = await fetch(recordingEndpoint(udid, "start"), { method: "POST" });
       if (!res.ok) throw new Error(await errorMessage(res));
-      const body = await res.json() as { startedAt?: string };
+      const body = await res.json() as { startedAt?: string; token?: string };
       if (deviceRef.current !== udid) {
         // Unmounted or switched devices mid-start: don't orphan a recording
         // nobody can see. The server drops the file when we hang up.
-        void fetch(recordingEndpoint(udid, "stop"), { method: "POST" })
+        void fetch(recordingEndpoint(udid, "stop", body.token), { method: "POST" })
           .then((stopRes) => stopRes.body?.cancel())
           .catch(() => {});
         return;
       }
+      ownedRef.current = body.token ? { device: udid, token: body.token } : null;
       setState(recordingState(body.startedAt));
     } catch (error) {
       toast.error(`Could not start recording: ${error instanceof Error ? error.message : String(error)}`);

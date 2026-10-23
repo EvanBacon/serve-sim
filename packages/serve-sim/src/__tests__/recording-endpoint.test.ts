@@ -90,9 +90,10 @@ describe("DeviceSession recording endpoints", () => {
 
     const res = await fetch(`${base}/recording/start`, { method: "POST" });
     expect(res.status).toBe(200);
-    const body = await res.json() as { recording: boolean; startedAt: string };
+    const body = await res.json() as { recording: boolean; startedAt: string; token: string };
     expect(body.recording).toBe(true);
     expect(typeof body.startedAt).toBe("string");
+    expect(typeof body.token).toBe("string");
     expect(calls.starts).toHaveLength(1);
     expect(calls.starts[0]!.path).toMatch(/\.mp4$/);
     expect(calls.starts[0]!.options).toEqual({ codec: "h264", fps: 60, rotation: 0 });
@@ -323,18 +324,48 @@ describe("DeviceSession recording endpoints", () => {
       hid: hid(),
       maxRecordingMs: 20,
     }));
-    await fetch(`${base}/recording/start`, { method: "POST" });
+    const { token } = await (await fetch(`${base}/recording/start`, { method: "POST" })).json() as { token: string };
     for (let i = 0; i < 100 && calls.stops === 0; i++) await delay(5);
     expect(calls.stops).toBe(1);
-    const status = await (await fetch(`${base}/recording`)).json() as { recording: boolean; limitReached?: boolean };
+    const status = await (await fetch(`${base}/recording`)).json() as Record<string, unknown>;
     expect(status).toMatchObject({ recording: true, limitReached: true });
+    expect(status.token).toBeUndefined();
     // A second start still conflicts until the capped file is collected.
     expect((await fetch(`${base}/recording/start`, { method: "POST" })).status).toBe(409);
 
-    const res = await fetch(`${base}/recording/stop`, { method: "POST" });
+    // Only the client that started it may collect the held file.
+    for (const query of ["", "?token=someone-else"]) {
+      const other = await fetch(`${base}/recording/stop${query}`, { method: "POST" });
+      expect(other.status).toBe(409);
+      expect(await other.json()).toMatchObject({ error: "not_owner", limitReached: true });
+    }
+
+    const res = await fetch(`${base}/recording/stop?token=${token}`, { method: "POST" });
     expect(res.status).toBe(200);
     expect(Buffer.from(await res.arrayBuffer()).toString()).toBe("fake-mp4");
     expect(calls.stops).toBe(1);
     expect(await (await fetch(`${base}/recording`)).json()).toEqual({ recording: false });
+  });
+
+  test("any client may stop a recording that is still running", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(calls), hid: hid() }));
+    await fetch(`${base}/recording/start`, { method: "POST" });
+    const res = await fetch(`${base}/recording/stop?token=stale`, { method: "POST" });
+    expect(res.status).toBe(200);
+    await res.arrayBuffer();
+  });
+
+  test("an addon without recording answers 501", async () => {
+    const calls: RecordingCalls = { starts: [], stops: 0 };
+    const capture = fakeCapture(calls);
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: { ...capture, supportsRecording: false },
+      hid: hid(),
+    }));
+    const res = await fetch(`${base}/recording/start`, { method: "POST" });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toMatchObject({ error: "recording_unsupported" });
+    expect(calls.starts).toHaveLength(0);
   });
 });

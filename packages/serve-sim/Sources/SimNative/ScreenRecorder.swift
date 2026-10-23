@@ -12,7 +12,10 @@ import SimNativeSupport
 /// Each frame is placed on a constant `fps` grid by its capture time
 /// (`RecordingFrameScheduler`), repeating the previous frame across static
 /// stretches, so the file is true CFR whose motion timing follows the
-/// simulator rather than the encoder or JS event loop.
+/// simulator rather than the encoder or JS event loop. Static slots are filled
+/// as time passes by a frame-interval timer on `queue` that never waits on the
+/// encoder, so the first frames of new motion don't queue up behind seconds of
+/// repeats (and get shed by the backlog cap).
 ///
 /// All writer state is confined to `queue`. `handleFrame` only enqueues, so a
 /// slow encoder never stalls capture or the live stream consumers; the
@@ -57,6 +60,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
     private var scheduler: RecordingFrameScheduler
     private var dimensions: Dimensions?
     private var lastBuffer: CVPixelBuffer?
+    private var fillTimer: DispatchSourceTimer?
     private var bitrate = 0
     private var finished = false
     private var failure: String?
@@ -84,7 +88,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
 
     /// Pad to "now", close the file, and return a JSON summary.
     func finish() async throws -> String {
-        let stopTime = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        let stopTime = Self.now()
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 self.finish(at: stopTime) { result in continuation.resume(with: result) }
@@ -96,6 +100,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
     func cancel() {
         queue.async {
             self.finished = true
+            self.stopFillTimer()
             if let writer = self.writer, writer.status == .writing { writer.cancelWriting() }
             try? FileManager.default.removeItem(atPath: self.options.path)
         }
@@ -121,6 +126,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
             dropped += 1
             return
         }
+        // Normally empty: the fill timer already covered the static stretch.
         if let lastBuffer {
             for slot in placement.repeats where write(lastBuffer, slot: slot) { repeated += 1 }
         }
@@ -182,22 +188,54 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
         self.adaptor = adaptor
         self.dimensions = size
         self.bitrate = bitrate
+        startFillTimer()
         print("[record] Recording \(size.width)x\(size.height) @ \(options.fps) fps \(options.codec.rawValue) \(bitrate / 1000) kbps -> \(options.path)")
     }
 
+    private static func now() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+    }
+
+    private func startFillTimer() {
+        let interval = DispatchTimeInterval.nanoseconds(Int(1_000_000_000 / options.fps))
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.fillStaticSlots() }
+        timer.resume()
+        fillTimer = timer
+    }
+
+    private func stopFillTimer() {
+        fillTimer?.cancel()
+        fillTimer = nil
+    }
+
+    /// Repeat the last frame into the slots that have gone by with no new
+    /// frame. Usually one slot per tick. Never waits on the encoder: a slot it
+    /// can't write yet stays owed to the next tick (or the next frame's
+    /// placement), so the queue stays free for captured frames.
+    private func fillStaticSlots() {
+        guard !finished, failure == nil, let lastBuffer else { return }
+        for slot in scheduler.repeatsDue(at: Self.now()) {
+            guard write(lastBuffer, slot: slot, waitForEncoder: false) else { break }
+            scheduler.didFill(through: slot)
+            repeated += 1
+        }
+    }
+
     @discardableResult
-    private func write(_ buffer: CVPixelBuffer, slot: Int64) -> Bool {
+    private func write(_ buffer: CVPixelBuffer, slot: Int64, waitForEncoder: Bool = true) -> Bool {
         guard let writer, let input, let adaptor, failure == nil else { return false }
         // We're on the recorder's own queue, so waiting here only delays the
         // recording, never capture or the live stream. Real-time inputs may
         // briefly refuse data while the hardware encoder catches up.
         var waitedMs = 0
-        while !input.isReadyForMoreMediaData, waitedMs < 250, writer.status == .writing {
+        while waitForEncoder, !input.isReadyForMoreMediaData, waitedMs < 250, writer.status == .writing {
             usleep(1000)
             waitedMs += 1
         }
         guard input.isReadyForMoreMediaData else {
-            encoderBusy += 1
+            if waitForEncoder { encoderBusy += 1 }
             return false
         }
         let pts = CMTime(value: slot, timescale: CMTimeScale(options.fps))
@@ -211,6 +249,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
     private func finish(at stopTime: Double, completion: @escaping (Result<String, Error>) -> Void) {
         guard !finished else { return completion(.failure(Errors.writerFailed("already finished"))) }
         finished = true
+        stopFillTimer()
         guard let writer, let input, let lastBuffer, let end = scheduler.finish(at: stopTime) else {
             if let writer, writer.status == .writing { writer.cancelWriting() }
             try? FileManager.default.removeItem(atPath: options.path)

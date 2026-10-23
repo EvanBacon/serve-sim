@@ -5,7 +5,9 @@
  * Wire protocol (device-scoped helper routes, `…/helper/<udid>/recording`):
  *   GET  /recording        → { recording, startedAt?, limitReached? }
  *   POST /recording/start  → ?codec=h264|hevc&fps=1..120&bitrate=<bits/s>
- *   POST /recording/stop   → the finished MP4 (video/mp4, attachment), with the
+ *                            → { recording, startedAt, token }
+ *   POST /recording/stop   → ?token=<start token> (required once limitReached)
+ *                            → the finished MP4 (video/mp4, attachment), with the
  *                            native summary JSON in `X-Serve-Sim-Recording`.
  */
 import type { RecordingCodec, RecordingStartOptions } from "./native";
@@ -16,7 +18,8 @@ export const RECORDING_SUMMARY_HEADER = "X-Serve-Sim-Recording";
 export const DEFAULT_RECORDING_FPS = 60;
 /**
  * Server-side cap on one recording. At the cap the file is finalized and held
- * (status reports `limitReached`) until a `/recording/stop` collects it.
+ * (status reports `limitReached`) until a `/recording/stop` carrying the
+ * start's token collects it.
  */
 export const MAX_RECORDING_MS = 30 * 60_000;
 
@@ -106,4 +109,12 @@ export function parseRecordingDuration(raw: string): number | null {
   const unit = m[2] ?? "s";
   const ms = unit === "ms" ? value : unit === "m" ? value * 60_000 : value * 1000;
   return ms > 0 && Number.isFinite(ms) ? Math.round(ms) : null;
+}
+
+/**
+ * `serve-sim record -t` past the server cap would only wait on a file the
+ * server already finalized (and beyond ~24.8 days overflow `setTimeout`).
+ */
+export function clampRecordingDuration(ms: number): number {
+  return Math.min(ms, MAX_RECORDING_MS);
 }

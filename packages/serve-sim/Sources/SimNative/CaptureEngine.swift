@@ -144,18 +144,20 @@ actor CaptureEngine {
         // (e.g. device not booted), a later retry should still be allowed.
         let (frames, frameContinuation) = AsyncStream.makeStream(
             of: Frame.self,
-            // Fan-out is cheap (each consumer applies its own backpressure),
-            // so keep a few frames rather than dropping on a momentary actor
-            // hop delay: a screen recording needs every captured frame.
-            bufferingPolicy: .bufferingNewest(4)
+            // drop old frames if there's backpressure
+            bufferingPolicy: .bufferingNewest(1)
         )
         do {
-            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { pixelBuffer, timestamp, isCopy in
-                frameContinuation.yield(Frame(
+            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { [recorderTap] pixelBuffer, timestamp, isCopy in
+                let frame = Frame(
                     pixelBuffer: pixelBuffer,
                     isPrivateCopy: isCopy,
                     captureTime: timestamp.seconds
-                ))
+                )
+                // The recorder needs every frame, so it's fed here rather
+                // than through the newest-only stream the live encoders share.
+                recorderTap.recorder?.handleFrame(frame)
+                frameContinuation.yield(frame)
             }
         } catch {
             // Preserve retryability after an ordinary start failure, but never
@@ -280,29 +282,31 @@ actor CaptureEngine {
 
     // MARK: - Recording
 
-    private var recording: (recorder: ScreenRecorder, id: UUID)?
+    /// The active recorder, read by FrameCapture's frame callback.
+    private let recorderTap = RecorderTap()
+    private var recording: ScreenRecorder?
 
     var isRecording: Bool { recording != nil }
 
     /// Start recording the screen to an MP4 at `options.path`. One recording
-    /// per capture session; the recorder is a pixel consumer, so frames are
+    /// per capture session; it counts as a pixel consumer, so frames are
     /// copied (and timestamped) for it even when no viewer is attached.
     func startRecording(_ options: ScreenRecorder.Options) throws {
         guard phase == .running else { throw RecordingErrors.notRunning }
         guard recording == nil else { throw RecordingErrors.alreadyRecording }
         let recorder = ScreenRecorder(options: options)
-        let id = UUID()
-        consumers[id] = recorder
         pixelConsumers.increment()
-        recording = (recorder, id)
+        recording = recorder
+        recorderTap.recorder = recorder
         Task { [frameCapture] in await frameCapture.requestFrame() }
     }
 
     /// Finish the active recording; returns its JSON summary.
     func stopRecording() async throws -> String {
-        guard let (recorder, id) = recording else { throw RecordingErrors.notRecording }
+        guard let recorder = recording else { throw RecordingErrors.notRecording }
         recording = nil
-        if consumers.removeValue(forKey: id) != nil { pixelConsumers.decrement() }
+        recorderTap.recorder = nil
+        pixelConsumers.decrement()
         return try await recorder.finish()
     }
 
@@ -320,7 +324,8 @@ actor CaptureEngine {
     func stop() {
         if phase == .stopped { return }
         phase = .stopped
-        if let (recorder, _) = recording {
+        if let recorder = recording {
+            recorderTap.recorder = nil
             recorder.cancel()
             recording = nil
         }
@@ -382,5 +387,18 @@ actor AVCCEncoder: FrameEncoder {
 
     deinit {
         Task { [h264Encoder] in await h264Encoder.stop() }
+    }
+}
+
+/// Lock-protected handle on the active `ScreenRecorder`, shared between the
+/// engine actor (which sets it) and FrameCapture's frame callback (which
+/// hands it every captured frame without an actor hop).
+private final class RecorderTap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _recorder: ScreenRecorder?
+
+    var recorder: ScreenRecorder? {
+        get { lock.withLock { _recorder } }
+        set { lock.withLock { _recorder = newValue } }
     }
 }

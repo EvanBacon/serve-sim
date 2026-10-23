@@ -155,7 +155,7 @@ async function writeAndDrain(
 type CaptureTransport = Pick<
   NativeCapture,
   "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "subscribeSize" | "snapshotJpeg" | "setPreferredScreenSize"
-> & Partial<Pick<NativeCapture, "diagnostics" | "startRecording" | "stopRecording">>;
+> & Partial<Pick<NativeCapture, "diagnostics" | "startRecording" | "stopRecording" | "supportsRecording">>;
 
 export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
 
@@ -203,6 +203,8 @@ export interface DeviceSessionDependencies {
 type ActiveRecording = {
   path: string;
   startedAt: string;
+  /** Returned by start; only its holder may collect a file held at the cap. */
+  token: string;
   phase: "starting" | "recording" | "stopping";
   /** Native finalize, started by `/recording/stop` or the duration cap. */
   finalizing?: Promise<string>;
@@ -637,7 +639,7 @@ export class DeviceSession {
     }
     try {
       if (action === "start") await this.startRecording(req, res);
-      else await this.stopRecording(res);
+      else await this.stopRecording(req, res);
     } catch (error) {
       if (res.headersSent || res.writableEnded) {
         res.destroy();
@@ -651,7 +653,7 @@ export class DeviceSession {
   }
 
   private async startRecording(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!this.capture.startRecording) {
+    if (!this.capture.startRecording || !this.capture.stopRecording || this.capture.supportsRecording === false) {
       this.sendJson(res, 501, { error: "recording_unsupported", message: "This native build cannot record" });
       return;
     }
@@ -667,7 +669,8 @@ export class DeviceSession {
     const dir = join(tmpdir(), "serve-sim-recordings");
     const path = join(dir, `${this.udid}-${randomUUID()}.mp4`);
     const startedAt = new Date().toISOString();
-    const active: ActiveRecording = { path, startedAt, phase: "starting" };
+    const token = randomUUID();
+    const active: ActiveRecording = { path, startedAt, token, phase: "starting" };
     this.recording = active;
     const closedMeanwhile = () => {
       // close() ran during the start: capture stop cancelled the recorder.
@@ -695,7 +698,7 @@ export class DeviceSession {
       });
     }, maxMs);
     active.limitTimer.unref?.();
-    this.sendJson(res, 200, { recording: true, startedAt });
+    this.sendJson(res, 200, { recording: true, startedAt, token });
   }
 
   /** Finalize natively once, whether triggered by stop or the duration cap. */
@@ -706,17 +709,35 @@ export class DeviceSession {
     return active.finalizing;
   }
 
-  private async stopRecording(res: ServerResponse): Promise<void> {
+  private async stopRecording(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const active = this.recording;
     if (!active || active.phase !== "recording" || !this.capture.stopRecording) {
       this.sendJson(res, 409, { error: "not_recording", ...this.recordingStatus() });
       return;
     }
+    // A running recording can be stopped from anywhere (any tab, the CLI),
+    // but a file held at the duration cap goes only to the client that
+    // started it, so another tab's poll can't take the CLI's file.
+    if (active.finalizing && new URL(req.url ?? "", "http://x").searchParams.get("token") !== active.token) {
+      this.sendJson(res, 409, {
+        error: "not_owner",
+        message: "This recording hit the time limit and is held for the client that started it",
+        ...this.recordingStatus(),
+      });
+      return;
+    }
     active.phase = "stopping";
-    // Finalizing a long recording takes a moment; notice if the client leaves.
-    let clientGone = false;
-    const onClose = () => { clientGone = true; };
-    res.once("close", onClose);
+    // Finalizing a long recording takes a moment; notice if the client
+    // leaves. Runtimes differ in which of these fire for an aborted request.
+    // (Not req "close": Node also emits it once a request completes normally.)
+    let clientGone = req.aborted || res.destroyed;
+    const onGone = () => { clientGone = true; };
+    req.once("aborted", onGone);
+    res.once("close", onGone);
+    const stopWatching = () => {
+      req.off("aborted", onGone);
+      res.off("close", onGone);
+    };
     let summary: string;
     let size: number;
     try {
@@ -726,10 +747,10 @@ export class DeviceSession {
       await rm(active.path, { force: true }).catch(() => {});
       throw error;
     } finally {
-      res.off("close", onClose);
+      stopWatching();
       if (this.recording === active) this.recording = undefined;
     }
-    if (clientGone || res.destroyed) {
+    if (clientGone || req.aborted || res.destroyed || req.socket?.destroyed) {
       await rm(active.path, { force: true }).catch(() => {});
       return;
     }

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_RECORDING_MS,
+  clampRecordingDuration,
   parseRecordingDuration,
   parseRecordingQuery,
   recordingFileName,
@@ -79,5 +81,17 @@ describe("parseRecordingDuration", () => {
 
   test.each(["", "0", "-1", "abc", "10h"])("rejects %p", (raw) => {
     expect(parseRecordingDuration(raw)).toBeNull();
+  });
+});
+
+describe("clampRecordingDuration", () => {
+  test("keeps durations within the server cap", () => {
+    expect(clampRecordingDuration(10_000)).toBe(10_000);
+    expect(clampRecordingDuration(MAX_RECORDING_MS)).toBe(MAX_RECORDING_MS);
+  });
+
+  test("caps longer durations (and ones too large for a timer) at the server limit", () => {
+    expect(clampRecordingDuration(MAX_RECORDING_MS + 1)).toBe(MAX_RECORDING_MS);
+    expect(clampRecordingDuration(parseRecordingDuration("999999999m")!)).toBe(MAX_RECORDING_MS);
   });
 });

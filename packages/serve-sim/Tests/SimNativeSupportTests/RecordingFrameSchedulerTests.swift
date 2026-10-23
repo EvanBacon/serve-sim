@@ -95,4 +95,80 @@ final class RecordingFrameSchedulerTests: XCTestCase {
         var scheduler = RecordingFrameScheduler(fps: 60)
         XCTAssertNil(scheduler.finish(at: 1))
     }
+
+    // MARK: - Incremental static fill
+
+    func testRepeatsDueBeforeTheFirstFrameIsEmpty() {
+        let scheduler = RecordingFrameScheduler(fps: 60)
+        XCTAssertTrue(scheduler.repeatsDue(at: 10).isEmpty)
+    }
+
+    func testRepeatsDueLeavesHeadroomBehindNow() {
+        var scheduler = RecordingFrameScheduler(fps: 60)
+        _ = scheduler.place(captureTime: 0)
+        // 10 intervals in: slots 1...8 are due; 9 and 10 stay open for a
+        // frame captured just before now that hasn't been delivered yet.
+        XCTAssertEqual(scheduler.repeatsDue(at: 10 * frame + 0.001), 1..<9)
+        XCTAssertTrue(scheduler.repeatsDue(at: 2 * frame).isEmpty)
+    }
+
+    func testDidFillAdvancesOnlyThroughWrittenSlots() {
+        var scheduler = RecordingFrameScheduler(fps: 60)
+        _ = scheduler.place(captureTime: 0)
+        // The encoder took slots 1...3 before refusing more: 4... stay owed.
+        scheduler.didFill(through: 3)
+        XCTAssertEqual(scheduler.slotCount, 4)
+        XCTAssertEqual(scheduler.repeatsDue(at: 10 * frame + 0.001), 4..<9)
+        // Committing an older slot never moves the grid backwards.
+        scheduler.didFill(through: 1)
+        XCTAssertEqual(scheduler.slotCount, 4)
+    }
+
+    /// The regression: after a long static stretch, filling incrementally
+    /// leaves the next real frame (and the motion burst behind it) with no
+    /// repeats to write first, so nothing queues up behind fill work.
+    func testIncrementalFillKeepsMotionAfterAStaticStretchOnItsOwnSlots() {
+        var scheduler = RecordingFrameScheduler(fps: 60)
+        _ = scheduler.place(captureTime: 0)
+        var filled: Int64 = 0
+        // 5 s static; the fill timer ticks every frame interval.
+        for tick in 1...300 {
+            let due = scheduler.repeatsDue(at: Double(tick) * frame + 0.0005)
+            filled += Int64(due.count)
+            if let last = due.last { scheduler.didFill(through: last) }
+        }
+        XCTAssertEqual(filled, 298)
+        // Motion resumes at 60 fps; each frame is delivered ~1 ms after capture.
+        var slots: [Int64] = []
+        for i in 0..<30 {
+            let captured = 5.0 + Double(i) * frame
+            let placement = scheduler.place(captureTime: captured)
+            XCTAssertNotNil(placement, "frame \(i) dropped")
+            XCTAssertLessThanOrEqual(placement?.repeats.count ?? 99, 1, "frame \(i) waits on a repeat backlog")
+            slots.append(placement!.slot)
+            let due = scheduler.repeatsDue(at: captured + 0.001)
+            XCTAssertTrue(due.isEmpty, "fill raced ahead of motion at frame \(i)")
+        }
+        XCTAssertEqual(slots, Array(300..<330))
+    }
+
+    func testFrameDeliveredAfterAFillTickStillLandsOnItsSlot() {
+        var scheduler = RecordingFrameScheduler(fps: 60)
+        _ = scheduler.place(captureTime: 0)
+        // A tick at 1.0 s fills through slot 58 while a frame captured at
+        // 0.99 s (slot 59) is still in flight; it must not be dropped.
+        let due = scheduler.repeatsDue(at: 1.0)
+        XCTAssertEqual(due.last, 58)
+        scheduler.didFill(through: due.last!)
+        XCTAssertEqual(scheduler.place(captureTime: 0.99), .init(repeats: 59..<59, slot: 59))
+    }
+
+    func testFinishAfterIncrementalFillPadsOnlyTheTail() {
+        var scheduler = RecordingFrameScheduler(fps: 60)
+        _ = scheduler.place(captureTime: 0)
+        scheduler.didFill(through: scheduler.repeatsDue(at: 1.0).last!)
+        let end = scheduler.finish(at: 1.0)
+        XCTAssertEqual(end?.repeats, 59..<61)
+        XCTAssertEqual(end?.endSlot, 61)
+    }
 }

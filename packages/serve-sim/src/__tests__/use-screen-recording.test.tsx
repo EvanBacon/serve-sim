@@ -155,26 +155,62 @@ describe("useScreenRecording", () => {
     expect(hook.state).toEqual({ status: "idle" });
   });
 
-  test("collects the file when the server reports its duration cap", async () => {
+  test("collects its own recording when the server reports the duration cap", async () => {
     let limitReached = false;
-    let stopped = false;
+    let started = false;
+    let stopPath: string | undefined;
     handler = ({ method, path }) => {
-      if (path.endsWith("/recording/stop")) {
-        stopped = true;
+      if (path.endsWith("/recording/start")) { started = true; return json({ recording: true, startedAt: STARTED, token: "tok-1" }); }
+      if (path.includes("/recording/stop")) {
+        stopPath = path;
         return new Response("mp4", {
           headers: { "content-type": "video/mp4", "content-disposition": 'attachment; filename="x.mp4"' },
         });
       }
       if (method === "GET") {
-        return json(stopped ? { recording: false } : { recording: true, startedAt: STARTED, ...(limitReached ? { limitReached } : {}) });
+        if (!started || stopPath) return json({ recording: false });
+        return json({ recording: true, startedAt: STARTED, ...(limitReached ? { limitReached } : {}) });
       }
       return json({});
     };
     await render("A", 10);
+    await act(async () => { await hook.start(); });
     expect(hook.state.status).toBe("recording");
     limitReached = true;
     await flush(60);
-    expect(stopped).toBe(true);
+    expect(stopPath).toBe("/helper/A/recording/stop?token=tok-1");
+    expect(hook.state).toEqual({ status: "idle" });
+  });
+
+  test("leaves a capped recording it didn't start to its owner", async () => {
+    handler = ({ method }) => method === "GET"
+      ? json({ recording: true, startedAt: STARTED, limitReached: true })
+      : json({});
+    await render("A", 10);
+    await flush(60);
+    expect(calls.some((c) => c.path.includes("/recording/stop"))).toBe(false);
+    expect(hook.state.status).toBe("recording");
+  });
+
+  test("drops a status response that is older than a newer poll", async () => {
+    let releaseSlow!: () => void;
+    let polls = 0;
+    handler = ({ method }) => {
+      if (method !== "GET") return json({});
+      polls++;
+      // Poll 2 hangs and answers "recording" only after poll 3 said idle.
+      if (polls === 2) {
+        return new Promise<Response>((resolve) => {
+          releaseSlow = () => resolve(json({ recording: true, startedAt: STARTED }));
+        });
+      }
+      return json({ recording: false });
+    };
+    await render("A", 10);
+    for (let i = 0; i < 20 && polls < 3; i++) await flush(10);
+    expect(polls).toBeGreaterThanOrEqual(3);
+    releaseSlow();
+    await flush(5);
     expect(hook.state).toEqual({ status: "idle" });
   });
 });

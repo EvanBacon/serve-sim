@@ -2,10 +2,10 @@
 import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
 import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
-import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createHash, randomBytes } from "crypto";
 import { networkInterfaces } from "os";
-import { join, resolve } from "path";
+import { dirname, join, resolve } from "path";
 import {
   STATE_DIR,
   stateFileForDevice,
@@ -45,7 +45,9 @@ import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
 import { MAX_BITRATE_ENV, applyMaxBitrateOption, parseMaxBitrateMbps } from "./max-bitrate";
 import { shareHost } from "./share-host";
 import {
+  MAX_RECORDING_MS,
   RECORDING_SUMMARY_HEADER,
+  clampRecordingDuration,
   parseRecordingDuration,
   recordingFileName,
   recordingUrlForWsUrl,
@@ -1008,12 +1010,27 @@ async function record(
       console.error("record --duration must be a positive duration, e.g. 10, 10s, 1.5m, 500ms");
       process.exit(1);
     }
-    durationMs = parsed;
+    durationMs = clampRecordingDuration(parsed);
+    if (durationMs < parsed) {
+      console.error(`record --duration is capped at the server's ${MAX_RECORDING_MS / 60_000} min recording limit`);
+    }
+  }
+  // Fail before recording rather than after, when the file is in hand.
+  const outputPath = opts.output ? resolve(opts.output) : undefined;
+  if (outputPath) {
+    const dir = dirname(outputPath);
+    let isDir = false;
+    try { isDir = statSync(dir).isDirectory(); } catch {}
+    if (!isDir) {
+      console.error(`record --output: directory ${dir} does not exist`);
+      process.exit(1);
+    }
   }
   const target = await resolveInputTarget(deviceArg);
   const startUrl = recordingUrlForWsUrl(target.wsUrl, "start");
   const stopUrl = recordingUrlForWsUrl(target.wsUrl, "stop");
-  if (!startUrl || !stopUrl) {
+  const statusUrl = recordingUrlForWsUrl(target.wsUrl);
+  if (!startUrl || !stopUrl || !statusUrl) {
     console.error(`Cannot derive the recording endpoint from ${target.wsUrl}`);
     process.exit(1);
   }
@@ -1055,14 +1072,29 @@ async function record(
       process.exit(1);
     });
     if (!startRes.ok) await failed("Starting the recording", startRes);
+    const { token } = await startRes.json().catch(() => ({})) as { token?: string };
 
     if (!stopRequested) {
       await new Promise<void>((resolveStop) => {
         // Signal listeners don't keep the event loop alive; this timer does
         // (and doubles as the --duration stop).
         const timer = setTimeout(() => wake?.(), durationMs ?? 2 ** 31 - 1);
+        // At the server's duration cap the file is finalized and held for
+        // us (the token holder): notice and collect it.
+        const poll = setInterval(() => {
+          void fetch(statusUrl, { headers: target.headers })
+            .then((res) => res.ok ? res.json() as Promise<{ limitReached?: boolean }> : null)
+            .then((status) => {
+              if (!status?.limitReached || !wake) return;
+              console.error(`Reached the server's ${MAX_RECORDING_MS / 60_000} min recording limit; saving.`);
+              wake();
+            })
+            .catch(() => {});
+        }, 1_000);
         wake = () => {
+          wake = undefined;
           clearTimeout(timer);
+          clearInterval(poll);
           resolveStop();
         };
         if (durationMs != null) {
@@ -1074,19 +1106,22 @@ async function record(
     }
 
     saving = true;
-    stopRes = await fetch(stopUrl, { method: "POST", headers: target.headers }).catch((err) => {
+    const stopQuery = new URL(stopUrl);
+    if (token) stopQuery.searchParams.set("token", token);
+    stopRes = await fetch(stopQuery, { method: "POST", headers: target.headers }).catch((err) => {
       console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     });
     if (!stopRes.ok) await failed("Stopping the recording", stopRes);
     const data = Buffer.from(await stopRes.arrayBuffer());
-    if (opts.output) {
-      out = resolve(opts.output);
-      writeFileSync(out, data);
-    } else {
-      // Don't clobber a recording saved earlier in the same second.
-      out = resolve(uniqueRecordingFileName(recordingFileName(), (name) => existsSync(resolve(name))));
-      writeFileSync(out, data, { flag: "wx" });
+    // Don't clobber a recording saved earlier in the same second.
+    out = outputPath ?? resolve(uniqueRecordingFileName(recordingFileName(), (name) => existsSync(resolve(name))));
+    try {
+      writeFileSync(out, data, outputPath ? undefined : { flag: "wx" });
+    } catch (err) {
+      const reason = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+      console.error(`Could not save the recording to ${out} (${reason}); the server has already discarded it.`);
+      process.exit(1);
     }
   } finally {
     process.off("SIGINT", onSignal);
