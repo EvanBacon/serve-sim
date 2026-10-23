@@ -1808,6 +1808,7 @@ async function serve(
   theme: SimulatorTheme | undefined,
   exitOnSimulatorShutdown = false,
   allowExec = false,
+  experimentalHierarchy3d = false,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -1835,6 +1836,7 @@ async function serve(
     proxyHelpers: true,
     allowExec,
     execToken,
+    ...(experimentalHierarchy3d ? { experimentalHierarchy3d: true } : {}),
     // Host RPCs re-run this CLI; never let the middleware guess from argv.
     serveSimBin: selfServeSimBin(),
   });
@@ -1894,6 +1896,9 @@ async function serve(
   const networkIP = getLocalNetworkIP();
   console.log("");
   console.log(`  - Local:   http://localhost:${boundPort}`);
+  if (experimentalHierarchy3d) {
+    console.log(`  - 3D view hierarchy (experimental): http://localhost:${boundPort}/hierarchy-3d`);
+  }
   if (exposedToLan && networkIP) {
     console.log(`  - Network: http://${networkIP}:${boundPort}`);
   } else if (networkIP) {
@@ -2030,6 +2035,11 @@ program
       }
     },
   )
+  .option(
+    "--experimental-hierarchy-3d",
+    "Experimental: serve a 3D view-hierarchy inspector at /hierarchy-3d " +
+      "(inject apps with `serve-sim hierarchy <bundle-id>` for full UIKit trees and snapshots)",
+  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2086,6 +2096,7 @@ Examples:
         opts.theme,
         !!opts.exitOnSimulatorShutdown,
         !!opts.allowExec,
+        !!opts.experimentalHierarchy3d,
       );
     }
   });
@@ -2248,6 +2259,17 @@ program
   .helpOption(false)
   .argument("[args...]")
   .action((args: string[]) => permissions(args));
+
+program
+  .command("hierarchy")
+  .description("Experimental: inject the view-hierarchy agent for the 3D inspector (see `hierarchy --help`)")
+  .allowUnknownOption(true)
+  .helpOption(false)
+  .argument("[args...]")
+  .action(async (args: string[]) => {
+    const { hierarchyCommand } = await import("./hierarchy-3d/cli");
+    await hierarchyCommand(args);
+  });
 
 program
   .command("ui")
