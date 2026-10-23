@@ -115,8 +115,31 @@ const pkgVersion = JSON.parse(
   readFileSync(resolve(root, "package.json"), "utf-8"),
 ).version as string;
 
+// Experimental 3D view-hierarchy page (`--experimental-hierarchy-3d`). A
+// separate bundle so the main preview page doesn't grow; only served when the
+// flag is on.
+const hierarchyJs = await bundleBrowserClient("src/client/hierarchy-3d/main.tsx");
+const hierarchyCss = readFileSync(resolve(root, "src/client/hierarchy-3d/hierarchy-3d.css"), "utf-8");
+const hierarchyHtml = `<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script>${themeBootScript()}</script>
+<title>View Hierarchy (experimental)</title>
+${faviconTag}
+<style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}</style>
+<style>${hierarchyCss}</style>
+</head><body>
+<div id="root"></div>
+<!--__SIM_HIERARCHY_3D_CONFIG__-->
+<script type="module">${hierarchyJs}</script>
+</body></html>`;
+const hierarchyHtmlB64 = Buffer.from(hierarchyHtml).toString("base64");
+console.log(`hierarchy-3d html ${kb(hierarchyHtml.length)}  (base64 ${kb(hierarchyHtmlB64.length)})`);
+
 const PREVIEW_DEFINE = {
   __PREVIEW_HTML_B64__: JSON.stringify(htmlB64),
+  __HIERARCHY_3D_HTML_B64__: JSON.stringify(hierarchyHtmlB64),
   __SERVE_SIM_VERSION__: JSON.stringify(pkgVersion),
 };
 
@@ -185,6 +208,7 @@ const compile = spawnSync(
     resolve(root, "src/index.ts"),
     "--outfile", resolve(distDir, "serve-sim"),
     "--define", `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
+    "--define", `__HIERARCHY_3D_HTML_B64__=${JSON.stringify(hierarchyHtmlB64)}`,
     "--define", `__SERVE_SIM_VERSION__=${JSON.stringify(pkgVersion)}`,
     // `ws` must stay a runtime-resolved specifier so Bun substitutes its
     // native implementation — bundling the Node implementation breaks
@@ -227,6 +251,21 @@ if (helperBuild.status !== 0) {
   process.exit(helperBuild.status ?? 1);
 }
 console.log("dist/simcam/serve-sim-camera-helper");
+
+// Experimental view-hierarchy agent (`serve-sim hierarchy <bundle-id>`).
+const hierBuild = spawnSync(
+  "bash",
+  [
+    resolve(root, "Sources/SimHierarchyInjector/build.sh"),
+    resolve(distDir, "simhier"),
+  ],
+  { stdio: "inherit" },
+);
+if (hierBuild.status !== 0) {
+  console.error("SimHierarchyInjector dylib build failed.");
+  process.exit(hierBuild.status ?? 1);
+}
+console.log("dist/simhier/libSimHierarchyInjector.dylib");
 
 // ─── 7. sim-ax-settings in-sim CLI (simulator-wide UI settings) ──────────
 

@@ -20,6 +20,8 @@
         "src/state.ts",
         "src/client/client.tsx",
         "src/client/global.css",
+        "src/client/hierarchy-3d/main.tsx",
+        "src/client/hierarchy-3d/hierarchy-3d.css",
         "build.ts",
         "dev.ts",
         "scripts/build-trails.ts",
