@@ -125,12 +125,21 @@ async function defaultFetchJson(url: string): Promise<unknown> {
   return res.json();
 }
 
-/** App sockets in a `getpeers` result; tools connect without a `role`. */
+/**
+ * App sockets in a `getpeers` result; tools connect without a `role`. Metro
+ * reports each peer's query either as a raw string or as a parsed object.
+ */
 export function appPeerIds(peers: unknown): string[] {
   if (!peers || typeof peers !== "object") return [];
   return Object.entries(peers as Record<string, unknown>)
-    .filter(([, query]) => typeof query === "string" && new URLSearchParams(query).has("role"))
+    .filter(([, query]) => hasRole(query))
     .map(([id]) => id);
+}
+
+function hasRole(query: unknown): boolean {
+  if (typeof query === "string") return new URLSearchParams(query).has("role");
+  if (query && typeof query === "object") return (query as { role?: unknown }).role != null;
+  return false;
 }
 
 /**

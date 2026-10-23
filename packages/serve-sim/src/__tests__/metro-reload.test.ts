@@ -66,6 +66,12 @@ describe("appPeerIds", () => {
     expect(appPeerIds({ "1": "role=ios", "2": {}, "3": "", "4": "role=android&x=1" })).toEqual(["1", "4"]);
   });
 
+  test("accepts parsed query objects with a role", () => {
+    expect(
+      appPeerIds({ "1": { role: "ios" }, "2": { name: "tool" }, "3": null, "4": { role: "android", x: "1" } }),
+    ).toEqual(["1", "4"]);
+  });
+
   test("handles junk", () => {
     expect(appPeerIds(null)).toEqual([]);
     expect(appPeerIds("nope")).toEqual([]);
