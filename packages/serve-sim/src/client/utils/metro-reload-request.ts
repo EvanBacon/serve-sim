@@ -1,5 +1,10 @@
-/** How long to wait for POST /reload before giving up on it. */
-const METRO_RELOAD_TIMEOUT_MS = 2500;
+/**
+ * How long to wait for POST /reload before giving up on it. The server
+ * bounds its attempt to METRO_RELOAD_SERVER_BUDGET_MS (2.2 s, see
+ * metro-reload.ts) and always answers within it, so this only expires when
+ * the server is wedged or unreachable.
+ */
+export const METRO_RELOAD_TIMEOUT_MS = 3000;
 
 /**
  * - `sent`: the server sent a Metro reload (Metro doesn't confirm it).

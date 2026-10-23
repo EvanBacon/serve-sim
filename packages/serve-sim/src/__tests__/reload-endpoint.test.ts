@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createServer as createHttpServer } from "http";
 import type { AddressInfo } from "net";
+import { METRO_RELOAD_SERVER_BUDGET_MS } from "../metro-reload";
 import { simMiddleware } from "../middleware";
 
 async function postReload(body: string): Promise<{ status: number; json: Record<string, unknown> }> {
@@ -35,6 +36,14 @@ describe("POST /reload", () => {
 
   test("a missing bundle id sends nothing", async () => {
     const { status, json } = await postReload("{}");
+    expect(status).toBe(200);
+    expect(json.sent).toBe(false);
+  });
+
+  test("answers with sent:false within the server budget when no Metro serves the app", async () => {
+    const started = Date.now();
+    const { status, json } = await postReload(JSON.stringify({ bundleId: "com.serve-sim.test.no-such-app" }));
+    expect(Date.now() - started).toBeLessThan(METRO_RELOAD_SERVER_BUDGET_MS + 300);
     expect(status).toBe(200);
     expect(json.sent).toBe(false);
   });

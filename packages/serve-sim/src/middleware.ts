@@ -1219,6 +1219,26 @@ interface SimctlDevice {
   runtime: string;
 }
 
+// Simulator names by udid, for matching Metro's `/json/list` deviceName.
+// `simctl list` is slow on a cold start, so POST /reload answers from this
+// cache and refreshes it in the background (renames are picked up next time).
+const simulatorNames = new Map<string, string>();
+
+async function refreshSimulatorNames(): Promise<void> {
+  const sims = await listAllSimulators();
+  if (sims.length === 0) return;
+  simulatorNames.clear();
+  for (const d of sims) simulatorNames.set(d.udid, d.name);
+}
+
+async function simulatorName(udid: string): Promise<string | undefined> {
+  const refresh = refreshSimulatorNames();
+  const cached = simulatorNames.get(udid);
+  if (cached) return cached;
+  await refresh;
+  return simulatorNames.get(udid);
+}
+
 function listAllSimulators(): Promise<SimctlDevice[]> {
   return new Promise((resolve) => {
     execFile(
@@ -2343,13 +2363,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           if (bundleId && !supportsMetroReload(bundleId)) {
             result = { sent: false, reason: "unsupported-app" };
           } else if (bundleId) {
-            const states = await readServeSimStates();
-            const state = selectServeSimState(states, selectedDevice);
-            if (state) {
-              const sims = await listAllSimulators();
-              const name = sims.find((d) => d.udid === state.device)?.name;
-              result = await reloadViaMetro(bundleId, name);
-            }
+            // The device lookup runs alongside the Metro probes, inside
+            // reloadViaMetro's time budget, so this answers before the
+            // client gives up and taps R itself.
+            const name = readServeSimStates().then((states) => {
+              const state = selectServeSimState(states, selectedDevice);
+              return state ? simulatorName(state.device) : undefined;
+            });
+            result = await reloadViaMetro(bundleId, name);
           }
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ...result, confirmed: false }));

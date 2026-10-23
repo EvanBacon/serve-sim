@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { WebSocketServer, type WebSocket } from "ws";
+import { METRO_RELOAD_TIMEOUT_MS } from "../client/utils/metro-reload-request";
 import {
+  METRO_RELOAD_SERVER_BUDGET_MS,
   appPeerIds,
   metroServesApp,
   metroServesOnlyDevice,
@@ -157,6 +159,45 @@ describe("reloadViaMetro", () => {
       .toMatchObject({ sent: false, reason: "ambiguous" });
   });
 
+  test("resolves a pending device name alongside the Metro probes", async () => {
+    const { sent, sendReload } = recordSends();
+    let probedBeforeName = false;
+    let nameResolved = false;
+    const name = new Promise<string>((resolve) => setTimeout(() => { nameResolved = true; resolve(SIM); }, 30));
+    const result = await reloadViaMetro(DEV_CLIENT, name, [8083], {
+      fetchJson: async (url) => { probedBeforeName = !nameResolved; return fetchJson(url); },
+      sendReload,
+    });
+    expect(result).toEqual({ sent: true, port: 8083, targeted: true });
+    expect(probedBeforeName).toBe(true);
+    expect(sent).toEqual([8083]);
+  });
+
+  test("nothing sent when the device lookup outlasts the budget", async () => {
+    const { sent, sendReload } = recordSends();
+    const slowName = new Promise<string>((resolve) => setTimeout(() => resolve(SIM), 200));
+    const started = Date.now();
+    expect(await reloadViaMetro(DEV_CLIENT, slowName, [8083], { fetchJson, sendReload, lookupBudgetMs: 20 }))
+      .toEqual({ sent: false, reason: "timeout" });
+    expect(Date.now() - started).toBeLessThan(150);
+    // A late name must not trigger a send.
+    await slowName;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toEqual([]);
+  });
+
+  test("nothing sent when the device lookup fails", async () => {
+    const { sent, sendReload } = recordSends();
+    expect(await reloadViaMetro(DEV_CLIENT, Promise.reject(new Error("simctl")), [8083], { fetchJson, sendReload }))
+      .toEqual({ sent: false, reason: "unknown-device" });
+    expect(sent).toEqual([]);
+  });
+
+  test("the server always answers before the browser gives up", () => {
+    // The client only taps R on an explicit `sent: false`; it must get one.
+    expect(METRO_RELOAD_SERVER_BUDGET_MS + 500).toBeLessThanOrEqual(METRO_RELOAD_TIMEOUT_MS);
+  });
+
   test("skips Expo Go, which ignores the reload, without probing", async () => {
     let probed = false;
     const { sent, sendReload } = recordSends();
@@ -179,8 +220,11 @@ describe("sendMetroReload", () => {
     server = null;
   });
 
-  /** A fake Metro `/message` server; `peers` answers getpeers (null = ignore it). */
-  async function fakeMetro(peers: Record<string, unknown> | null) {
+  /**
+   * A fake Metro `/message` server; `peers` answers getpeers (null = ignore
+   * it, "error" = reply with an error like the community CLI does).
+   */
+  async function fakeMetro(peers: Record<string, unknown> | null | "error") {
     server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
     await new Promise<void>((r) => server!.once("listening", () => r()));
     const port = (server.address() as { port: number }).port;
@@ -191,7 +235,9 @@ describe("sendMetroReload", () => {
       socket.on("message", (data) => {
         const msg = JSON.parse(data.toString());
         frames.push(msg);
-        if (msg.method === "getpeers" && peers) {
+        if (msg.method === "getpeers" && peers === "error") {
+          socket.send(JSON.stringify({ id: msg.id, error: "Cannot read properties of undefined (reading 'url')" }));
+        } else if (msg.method === "getpeers" && peers) {
           socket.send(JSON.stringify({ id: msg.id, result: peers }));
         }
       });
@@ -229,6 +275,15 @@ describe("sendMetroReload", () => {
   test("broadcasts when Metro doesn't answer getpeers", async () => {
     const metro = await fakeMetro(null);
     expect(await sendMetroReload(metro.port, { peersTimeoutMs: 20 })).toBe("broadcast");
+    await waitFor(() => metro.frames.length >= 2);
+    expect(metro.frames[1]).toEqual({ version: 2, method: "reload" });
+  });
+
+  test("broadcasts right away when getpeers answers with an error", async () => {
+    const metro = await fakeMetro("error");
+    const started = Date.now();
+    expect(await sendMetroReload(metro.port, { peersTimeoutMs: 1000 })).toBe("broadcast");
+    expect(Date.now() - started).toBeLessThan(500);
     await waitFor(() => metro.frames.length >= 2);
     expect(metro.frames[1]).toEqual({ version: 2, method: "reload" });
   });
