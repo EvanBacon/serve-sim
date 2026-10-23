@@ -3,6 +3,7 @@ import {
   HID_KEY_R,
   createSimKeyState,
   isFormControlTarget,
+  isInteractiveTarget,
   isReloadShortcut,
   keepsNativeButtonKey,
 } from "../client/utils/sim-keyboard";
@@ -194,5 +195,24 @@ describe("isFormControlTarget", () => {
   test("ignores non-element targets", () => {
     expect(isFormControlTarget(null)).toBe(false);
     expect(isFormControlTarget({} as EventTarget)).toBe(false);
+  });
+});
+
+describe("isInteractiveTarget", () => {
+  // Minimal stand-in for Element#closest that matches a single tag name.
+  const el = (tag: string | null) => ({
+    closest: (sel: string) => (tag && sel.split(",").map((s) => s.trim()).includes(tag) ? {} : null),
+  });
+
+  test("matches focusable controls anywhere on the page", () => {
+    for (const tag of ["button", "a[href]", "input", "select", "textarea", "[tabindex]", "[contenteditable]"]) {
+      expect(isInteractiveTarget(el(tag) as unknown as EventTarget)).toBe(true);
+    }
+  });
+
+  test("leaves the body and plain elements to the sim", () => {
+    expect(isInteractiveTarget(el(null) as unknown as EventTarget)).toBe(false);
+    expect(isInteractiveTarget(null)).toBe(false);
+    expect(isInteractiveTarget({} as EventTarget)).toBe(false);
   });
 });

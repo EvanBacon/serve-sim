@@ -9,6 +9,7 @@ import {
   reloadViaMetro,
   sendMetroReload,
   supportsMetroReload,
+  uniqueSimulatorName,
   type MetroSendOutcome,
 } from "../metro-reload";
 
@@ -38,6 +39,25 @@ describe("metroServesApp", () => {
   test("ignores other apps and empty target lists", () => {
     expect(metroServesApp([target("com.example.other", SIM)], DEV_CLIENT, SIM)).toBe(false);
     expect(metroServesApp([], DEV_CLIENT, SIM)).toBe(false);
+  });
+});
+
+describe("uniqueSimulatorName", () => {
+  const sim = (udid: string, name: string, state = "Booted") => ({ udid, name, state });
+
+  test("returns the name when no other booted simulator shares it", () => {
+    expect(uniqueSimulatorName([sim("a", SIM), sim("b", "iPhone 16e")], "a")).toBe(SIM);
+    // A shut-down twin (e.g. another runtime) can't be connected to Metro.
+    expect(uniqueSimulatorName([sim("a", SIM), sim("b", SIM, "Shutdown")], "a")).toBe(SIM);
+  });
+
+  test("declines when another booted simulator has the same name", () => {
+    // Metro only knows the name, so a reload could land on the twin.
+    expect(uniqueSimulatorName([sim("a", SIM), sim("b", SIM)], "a")).toBeUndefined();
+  });
+
+  test("unknown udid", () => {
+    expect(uniqueSimulatorName([sim("b", SIM)], "a")).toBeUndefined();
   });
 });
 

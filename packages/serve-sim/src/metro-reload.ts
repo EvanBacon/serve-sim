@@ -97,6 +97,23 @@ export function metroServesOnlyDevice(
   return devices.size === 1 && [...devices.values()][0] === deviceName;
 }
 
+/**
+ * Name to match against Metro's `deviceName` for simulator `udid`, or
+ * undefined when it can't identify this simulator alone: Metro only knows
+ * device names, so another booted simulator with the same name could be the
+ * one that receives the reload.
+ */
+export function uniqueSimulatorName(
+  sims: Iterable<{ udid: string; name: string; state: string }>,
+  udid: string,
+): string | undefined {
+  const list = [...sims];
+  const name = list.find((d) => d.udid === udid)?.name;
+  if (!name) return undefined;
+  const twin = list.some((d) => d.udid !== udid && d.name === name && d.state === "Booted");
+  return twin ? undefined : name;
+}
+
 export type MetroReloadResult =
   | { sent: true; port: number; targeted: boolean }
   | {

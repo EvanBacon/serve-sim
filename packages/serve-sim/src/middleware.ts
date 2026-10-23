@@ -31,7 +31,7 @@ import {
   subscribeEventLog,
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
-import { reloadViaMetro, supportsMetroReload, type MetroReloadResult } from "./metro-reload";
+import { reloadViaMetro, supportsMetroReload, uniqueSimulatorName, type MetroReloadResult } from "./metro-reload";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import {
   authTokenFingerprint,
@@ -1219,24 +1219,23 @@ interface SimctlDevice {
   runtime: string;
 }
 
-// Simulator names by udid, for matching Metro's `/json/list` deviceName.
+// Simulators by udid, for matching Metro's `/json/list` deviceName.
 // `simctl list` is slow on a cold start, so POST /reload answers from this
 // cache and refreshes it in the background (renames are picked up next time).
-const simulatorNames = new Map<string, string>();
+const simulatorCache = new Map<string, SimctlDevice>();
 
-async function refreshSimulatorNames(): Promise<void> {
+async function refreshSimulatorCache(): Promise<void> {
   const sims = await listAllSimulators();
   if (sims.length === 0) return;
-  simulatorNames.clear();
-  for (const d of sims) simulatorNames.set(d.udid, d.name);
+  simulatorCache.clear();
+  for (const d of sims) simulatorCache.set(d.udid, d);
 }
 
+/** Metro device name for `udid`; undefined if another booted sim shares it. */
 async function simulatorName(udid: string): Promise<string | undefined> {
-  const refresh = refreshSimulatorNames();
-  const cached = simulatorNames.get(udid);
-  if (cached) return cached;
-  await refresh;
-  return simulatorNames.get(udid);
+  const refresh = refreshSimulatorCache();
+  if (!simulatorCache.has(udid)) await refresh;
+  return uniqueSimulatorName(simulatorCache.values(), udid);
 }
 
 function listAllSimulators(): Promise<SimctlDevice[]> {

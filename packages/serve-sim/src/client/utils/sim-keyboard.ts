@@ -42,6 +42,19 @@ export function isFormControlTarget(target: EventTarget | null): boolean {
   return typeof el?.closest === "function" && el.closest("input, select, textarea") != null;
 }
 
+const INTERACTIVE_SELECTOR =
+  "button, a[href], input, select, textarea, summary, [tabindex], [contenteditable]";
+
+/**
+ * Whether DOM focus is on a control that handles Enter/Space/Tab itself
+ * (a toolbar button, a sidebar link, ...). Focus on the body or a plain
+ * element leaves those keys to the sim.
+ */
+export function isInteractiveTarget(target: EventTarget | null): boolean {
+  const el = target as { closest?: (selector: string) => unknown } | null;
+  return typeof el?.closest === "function" && el.closest(INTERACTIVE_SELECTOR) != null;
+}
+
 /**
  * Tracks which keys the simulator currently believes are held so forwarded
  * key events never leave a key stuck down in the guest.

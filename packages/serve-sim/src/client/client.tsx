@@ -75,6 +75,7 @@ import { requestMetroReload } from "./utils/metro-reload-request";
 import {
   createSimKeyState,
   isFormControlTarget,
+  isInteractiveTarget,
   isReloadShortcut,
   keepsNativeButtonKey,
 } from "./utils/sim-keyboard";
@@ -955,8 +956,8 @@ function AppWithConfig({
       if (!simFocusedRef.current) return;
       // A focused form control (e.g. the Duo hinge slider) keeps its keys.
       if (isFormControlTarget(e.target)) return;
-      // A focused toolbar button keeps Enter/Space/Tab for itself.
-      if (keepsNativeButtonKey(e.code) && simActionsRef.current?.contains(e.target as Node)) return;
+      // A focused button or link (toolbar or elsewhere) keeps Enter/Space/Tab.
+      if (keepsNativeButtonKey(e.code) && isInteractiveTarget(e.target)) return;
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) sendWs(0x04, { button: "home" });
