@@ -264,57 +264,16 @@ decide whether the key is present; they do not live on a second line.
 |---|---|---|---|
 | `input.send_ms` | tap / button / gesture | socket write to ack, or to the fire-and-forget close if no ack yet | `hid.state=gone` or `inject.result=threw` (#136), or `ack=timeout` (the 10 s wait is not a send). A landscape miss (#153) and a Device Hub shadow still record it. |
 | `stream.ttff_ms` | first `stream.frame` | session `start()` to first `onSharedMjpegFrame` (JS-only; client-observed Connecting/stall still need the ingest) | never saw a frame (Connecting before any frame, #103 cold). Do not write `0`. |
-| `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | #128 `producer_live=true` (false stall). #103 stuck Connecting after a good frame (`producer_live=true`, never returns). |
-| `camera.frame_interval_ms` | `camera.frame` or `stream.stall` | gap since previous published camera frame | `producer_fps=0` / capture stopped. A long gap is not an interval. #128 may carry the last good interval on the stall entry. |
-| `camera.helper_shutdown_ms` | `camera.helper.exit` | supervising parent saw exit, including signal | never. A 48 ms SIGTERM is still `status=error`. |
-| `helper.uptime_ms` | `helper.lifecycle` | watchdog decision is `recycle-helper` or `recycle-self` after shutdown | `classifyStaleState` returned `keep`, or pid unknown. #102 is the recycle, not a heartbeat. |
+| `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | `stream.false_positive=true` (#128) or producer dead. |
+| `stream.producer_frame_age_ms` | `stream.stall` | last producer frame age at stall | when not a stall. |
+| `camera.helper_shutdown_ms` | `camera.helper.exit` | helper start to exit | never started. |
+| `helper.uptime_ms` | `helper.lifecycle` | session start to recycle decision | `decision=keep`. |
 
-Worked lines (one entry each; no second span line):
+## Privacy / export
 
-```json
-{"kind":"stream.stall","status":"ok","details":{"producer_live":true,"orientation":"landscape_left","producer_fps":58,"last_frame_age_ms":6100,"stream.producer_frame_age_ms":17}}
-{"kind":"stream.state","status":"error","details":{"producer_live":true,"saw_first_frame":true,"phase":"connecting"}}
-{"kind":"stream.state","status":"ok","details":{"phase":"live","saw_first_frame":true,"stream.reconnect_ms":840}}
-{"kind":"stream.frame","status":"ok","details":{"stream.ttff_ms":180,"saw_first_frame":true}}
-{"kind":"camera.helper.exit","status":"error","details":{"signal":"SIGTERM","exit_code":null,"shutdown_phase":"placeholder","camera.helper_shutdown_ms":48,"placeholder_joined":false}}
-{"kind":"camera.helper.exit","status":"ok","details":{"signal":null,"exit_code":0,"shutdown_phase":"surface_released","camera.helper_shutdown_ms":48,"placeholder_joined":true}}
-{"kind":"helper.lifecycle","status":"ok","details":{"decision":"recycle-helper","sim.booted":false,"helper.uptime_ms":86400000}}
-```
-
-#128 stays a stall entry. `stream.producer_frame_age_ms` (time since last `onSharedMjpegFrame`) says the screen producer was fine; do not use `camera.frame_interval_ms` here — the camera helper feeds the guest virtual camera, not the screen stream.
-`stream.reconnect_ms` is absent, so the 6100 ms consumer age is not a reconnect.
-#103 after a good frame is `stream.state` with `status=error` and no `stream.reconnect_ms`
-and no `stream.ttff_ms` (TTFF already happened on the first-frame entry). A later
-recovery is a new `stream.state` with `stream.reconnect_ms` set. #143 records the
-shutdown duration on both the signaled exit and the post-#161 canary; status, not the
-milliseconds, says which one failed. #102 records `helper.uptime_ms` only on the recycle
-entry; a still-booted `keep` is silence, not a zero.
-
-## Privacy and export (Evan's defaults)
-
-- **Local event log is ON by default.** It is the channel bots read. It stores enums,
-  normalized coordinates, screen dimensions, versions, and coarse status -- never pixels,
-  app/accessibility text, clipboard, credentials, or raw command strings with tokens.
-- **Remote export is opt-in and serve-sim-specific.** Enable export only through a
-  serve-sim variable (e.g. `SERVE_SIM_TELEMETRY=remote` with `SERVE_SIM_OTLP_ENDPOINT`).
-  It must **never** inherit a stray generic `OTEL_EXPORTER_OTLP_ENDPOINT` from the
-  environment -- that is how CI and agents would leak without asking. Unset serve-sim
-  variable = no export, in CI and on a laptop.
-- **On export, drop**: pixels/frames, app & accessibility text, clipboard,
-  credentials/tokens/`Authorization`, raw UDIDs and device names (export a hash),
-  home-directory paths (basenames only), raw WebSocket payloads, and the local-only
-  absolute `x`/`y`.
-- **Debug logs are separate and local.** `DEBUG=serve-sim:*` enables the namespaced
-  `debug()` streams (`serve-sim:cli|helper|state|mw` in `src/debug.ts`);
-  `SERVE_SIM_DEBUG_HID=1` enables per-event HID stderr. These go to the terminal of
-  whoever set them and are never attached to an export. (There is no `SERVE_SIM_DEBUG`
-  variable.)
+Local event log is on by default. Remote OTLP (or any export) is opt-in only via a serve-sim-specific variable that never inherits a stray `OTEL_EXPORTER_OTLP_ENDPOINT`. Debug switches: `DEBUG=serve-sim:*`, `SERVE_SIM_DEBUG_HID`. There is no `SERVE_SIM_DEBUG`.
 
 ## Test plan
-
-Docs-only; the field additions above are small and additive, each at a named hook.
-Prove recordability with unit tests (`bun test`) and the maintainer loop in
-`AGENTS.md` (`build.ts` -> run from `dist/` -> reproduce):
 
 - Taps are built in `DeviceSession.recordTouchEvent` (`kind:"tap"`/`"drag"`), not
   `eventLogEventForHidMessage` (whose `0x03` branch yields `kind:"touch"` and is only
@@ -335,3 +294,19 @@ Prove recordability with unit tests (`bun test`) and the maintainer loop in
   `live` does. First frame sets `stream.ttff_ms`; a never-connected preview does not.
 - Read-back: `GET /api/event-log` and `serve-sim event-log --json` return the new
   fields and a `schema_version`.
+
+## Recent issues (#172, #174) and repro fields
+
+#172 (portrait tap silently dropped on iPhone 18 Pro / iOS 27) is a #153 / #136 look-alike that the fields above already distinguish:
+
+- Expected signature for a pure coordinate miss after #167: `hid.state=ok`, `inject.result=sent`, `frame=native_portrait`, `remapped=true`, `screen_changed=false`, `input.send_ms` present, `source=cli`, `orientation=portrait`.
+- Device Hub shadow: same but `input.shadowed=true`.
+- Dead injector (#136): `hid.state=gone` or `inject.result=threw`, `status=error`, `input.send_ms` omitted.
+
+#174 (browser text/paste does not reach guest; CoreDevice clipboard works) is outside HID touch. Extend the event log for text/clipboard paths:
+
+- New `kind:"clipboard"` or `kind:"text"` entries from the `/exec` CoreDevice pasteboard path, carrying `payload_bytes`, `verified_readback` (bool), and `method:"coredevice"|"simctl"`.
+- Timing: `clipboard.send_ms` from command start to verified readback; omit on failure.
+- Do not record the raw string (privacy); record length and a content seed only if needed for repro.
+
+These stay additive to the existing event-log schema. No new spans; durations live on the same entry.
