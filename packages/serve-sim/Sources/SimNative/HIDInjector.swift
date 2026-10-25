@@ -619,6 +619,24 @@ actor HIDInjector {
     }
 
     private func launchSpringBoard(deviceUDID: String) {
+        if let device = simDevice {
+            let sel = NSSelectorFromString("launchApplicationWithID:options:pid:error:")
+            if device.responds(to: sel) {
+                typealias Fn = @convention(c) (
+                    AnyObject, Selector, NSString, NSDictionary,
+                    UnsafeMutablePointer<pid_t>, AutoreleasingUnsafeMutablePointer<NSError?>
+                ) -> ObjCBool
+                let fn = unsafeBitCast(device.method(for: sel), to: Fn.self)
+                var pid: pid_t = 0
+                var error: NSError?
+                let launched = fn(device, sel, "com.apple.springboard", [:], &pid, &error)
+                if launched.boolValue { return }
+                let message = error?.localizedDescription ?? "unknown error"
+                fputs("[hid] Direct SpringBoard launch failed: \(message)\n", stderr)
+            }
+        }
+
+        // Older CoreSimulator versions may not expose the direct launch API.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
         process.arguments = ["simctl", "launch", deviceUDID, "com.apple.springboard"]
