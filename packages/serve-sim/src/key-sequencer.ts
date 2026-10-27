@@ -30,7 +30,9 @@ export class KeySequencer {
   key(type: KeyType, usage: number): Promise<void> {
     if (this.closing) return Promise.resolve();
     const pending = this.queue.then(async () => {
-      if (this.discardQueued) return;
+      // Never post another queued down after the close deadline. Already
+      // accepted ups remain cleanup, including ordinary keys behind a late down.
+      if (this.discardQueued && type === "down") return;
       const modifier = isModifierUsage(usage);
       // Rejection can happen after posting a down. Retain cleanup ownership
       // until a release actually succeeds, including after a rejected call.

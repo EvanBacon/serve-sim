@@ -200,6 +200,28 @@ test("never-settling releases are bounded and do not prevent native close", asyn
   expect(closed).toBe(true);
 });
 
+test("an already accepted ordinary key-up still releases a late key-down", async () => {
+  const gate = deferred();
+  const calls: string[] = [];
+  let held = false;
+  const hid = new KeySequencer({
+    key: async (type, usage) => {
+      calls.push(`${type}:${usage}`);
+      if (type === "down") await gate.promise;
+      held = type === "down";
+    },
+    close: async () => { calls.push("close"); },
+  }, 5);
+  const down = hid.key("down", 4);
+  const up = hid.key("up", 4);
+  await tick();
+  await expect(hid.drainAndRelease()).rejects.toThrow("Keyboard teardown incomplete");
+  gate.finish();
+  await Promise.all([down, up]);
+  expect(calls).toEqual(["down:4", "close", "up:4"]);
+  expect(held).toBe(false);
+});
+
 test("failed cleanup preserves modifier ownership for an explicit close retry", async () => {
   let releases = 0;
   let shiftHeld = false;
