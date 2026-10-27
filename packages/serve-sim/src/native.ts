@@ -172,6 +172,9 @@ function load(): NativeAddon {
  */
 export class NativeHid {
   private readonly handle: SimHIDHandle;
+  private keyQueue: Promise<void> = Promise.resolve();
+  private readonly heldModifiers = new Set<number>();
+  private closing = false;
 
   constructor(udid: string) {
     this.handle = new (load().SimHID)(udid, join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid"));
@@ -210,7 +213,21 @@ export class NativeHid {
   }
 
   key(type: KeyType, usage: number): Promise<void> {
-    return this.guard("key", () => this.handle.key(type, usage), undefined);
+    // Swift async calls may enter the actor out of order. Preserve each device's
+    // down/up sequence so a late Shift-down cannot outlive its release.
+    if (this.closing) return Promise.resolve();
+    this.keyQueue = this.keyQueue.then(async () => {
+      const modifier = Number.isInteger(usage) && usage >= 0xe0 && usage <= 0xe7;
+      // A rejected call may already have posted its down event. Keep cleanup
+      // conservative and forget a modifier only after a successful release.
+      if (modifier && type === "down") this.heldModifiers.add(usage);
+      const delivered = await this.guard("key", async () => {
+        await this.handle.key(type, usage);
+        return true;
+      }, false);
+      if (delivered && modifier && type === "up") this.heldModifiers.delete(usage);
+    });
+    return this.keyQueue;
   }
 
   /** anchorX/anchorY default to screen center when omitted. */
@@ -242,7 +259,13 @@ export class NativeHid {
     return this.guard("isFoldable", () => this.handle.isFoldable(), false);
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
+    this.closing = true;
+    await this.keyQueue;
+    for (const usage of this.heldModifiers) {
+      await this.guard("modifier release", () => this.handle.key("up", usage), undefined);
+    }
+    this.heldModifiers.clear();
     return this.guard("close", () => this.handle.close(), undefined);
   }
 
