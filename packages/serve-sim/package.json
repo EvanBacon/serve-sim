@@ -52,6 +52,8 @@
     "src/helper-lifecycle.ts",
     "src/host-rpc.ts",
     "src/max-bitrate.ts",
+    "src/keyboard-modifiers.ts",
+    "src/key-sequencer.ts",
     "src/metro-reload.ts",
     "src/middleware.ts",
     "src/native.ts",

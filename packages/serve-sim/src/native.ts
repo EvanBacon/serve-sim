@@ -11,7 +11,10 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { KeySequencer, type KeyType } from "./key-sequencer";
 import { maxBitrateFromEnv } from "./max-bitrate";
+
+export type { KeyType } from "./key-sequencer";
 
 const require = createRequire(import.meta.url);
 
@@ -129,7 +132,6 @@ export type RecordingSummary = {
 };
 
 export type TouchType = "begin" | "move" | "end";
-export type KeyType = "down" | "up";
 export type ButtonPhase = "down" | "up" | "press";
 
 /** UIDeviceOrientation values the simulator's GraphicsServices accepts. */
@@ -172,12 +174,11 @@ function load(): NativeAddon {
  */
 export class NativeHid {
   private readonly handle: SimHIDHandle;
-  private keyQueue: Promise<void> = Promise.resolve();
-  private readonly heldModifiers = new Set<number>();
-  private closing = false;
+  private readonly keys: KeySequencer;
 
   constructor(udid: string) {
     this.handle = new (load().SimHID)(udid, join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid"));
+    this.keys = new KeySequencer(this.handle);
   }
 
   // The N-API bindings throw synchronously when a JS value can't be coerced to
@@ -213,21 +214,7 @@ export class NativeHid {
   }
 
   key(type: KeyType, usage: number): Promise<void> {
-    // Swift async calls may enter the actor out of order. Preserve each device's
-    // down/up sequence so a late Shift-down cannot outlive its release.
-    if (this.closing) return Promise.resolve();
-    this.keyQueue = this.keyQueue.then(async () => {
-      const modifier = Number.isInteger(usage) && usage >= 0xe0 && usage <= 0xe7;
-      // A rejected call may already have posted its down event. Keep cleanup
-      // conservative and forget a modifier only after a successful release.
-      if (modifier && type === "down") this.heldModifiers.add(usage);
-      const delivered = await this.guard("key", async () => {
-        await this.handle.key(type, usage);
-        return true;
-      }, false);
-      if (delivered && modifier && type === "up") this.heldModifiers.delete(usage);
-    });
-    return this.keyQueue;
+    return this.guard("key", () => this.keys.key(type, usage), undefined);
   }
 
   /** anchorX/anchorY default to screen center when omitted. */
@@ -259,14 +246,8 @@ export class NativeHid {
     return this.guard("isFoldable", () => this.handle.isFoldable(), false);
   }
 
-  async close(): Promise<void> {
-    this.closing = true;
-    await this.keyQueue;
-    for (const usage of this.heldModifiers) {
-      await this.guard("modifier release", () => this.handle.key("up", usage), undefined);
-    }
-    this.heldModifiers.clear();
-    return this.guard("close", () => this.handle.close(), undefined);
+  close(): Promise<void> {
+    return this.guard("close", () => this.keys.drainAndRelease(), undefined);
   }
 
   pose(name: string, fromDegrees: number): Promise<boolean> {
