@@ -1,14 +1,18 @@
 import type { IncomingMessage } from "http";
 
+type BodyLimit = { max: number; size: (chunk: Buffer) => number };
+
 /**
- * POST bodies the routes cap: `/reload` only carries `{ bundleId }`, and
- * exec's cap is a belt-and-braces guard so a runaway POST can't OOM the dev
- * server. Other routes read the whole body.
+ * POST bodies the routes cap. `/reload` only carries `{ bundleId }` and
+ * counts raw bytes, so multibyte UTF-8 can't slip past; exec's cap is a
+ * belt-and-braces guard so a runaway POST can't OOM the dev server, counted
+ * in characters. Other routes read the whole body.
  */
-const BODY_LIMIT_BYTES: Readonly<Record<string, number>> = {
-  "/reload": 4 * 1024,
-  "/exec": 4 * 1024 * 1024,
-  "/exec/": 4 * 1024 * 1024,
+const EXEC_BODY_LIMIT: BodyLimit = { max: 4 * 1024 * 1024, size: (chunk) => chunk.toString().length };
+const BODY_LIMITS: Readonly<Record<string, BodyLimit>> = {
+  "/reload": { max: 4 * 1024, size: (chunk) => chunk.length },
+  "/exec": EXEC_BODY_LIMIT,
+  "/exec/": EXEC_BODY_LIMIT,
 };
 
 /** A POST body: over its route's cap (no longer read), or read and parsed once. */
@@ -43,9 +47,11 @@ export interface RequestContext {
   body(): Promise<RequestBody>;
 }
 
+/** An upgrade's body is the WebSocket stream, never read here. */
 export function requestContext(
   req: IncomingMessage,
   mount: { base: string; device: string | undefined },
+  kind: "http" | "upgrade",
 ): RequestContext {
   const rawUrl = req.url ?? "";
   const qIndex = rawUrl.indexOf("?");
@@ -66,7 +72,9 @@ export function requestContext(
     helper,
     helperDevice: helper ? helper.device ?? selectedDevice : null,
     devtools: pathname.startsWith(`${mount.base}/devtools`),
-    body: () => (body ??= readBody(req, BODY_LIMIT_BYTES[url.slice(mount.base.length)] ?? Infinity)),
+    body: () => (body ??= kind === "upgrade"
+      ? Promise.resolve(parsedBody(""))
+      : readBody(req, BODY_LIMITS[url.slice(mount.base.length)])),
   };
 }
 
@@ -77,19 +85,18 @@ export function jsonValue(body: RequestBody): unknown {
   return body.json.value;
 }
 
-/**
- * Count raw bytes, not decoded characters, so multibyte UTF-8 can't slip
- * past the cap; past it, resolve at once and drop the rest.
- */
-function readBody(req: IncomingMessage, limitBytes: number): Promise<RequestBody> {
+/** Read the body; past `limit`, resolve at once and drop the rest. */
+function readBody(req: IncomingMessage, limit: BodyLimit | undefined): Promise<RequestBody> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
-    let bytes = 0;
+    let size = 0;
+    let tooLarge = false;
     req.on("data", (chunk: Buffer | string) => {
-      if (bytes > limitBytes) return;
+      if (tooLarge) return;
       const data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-      bytes += data.length;
-      if (bytes > limitBytes) {
+      size += limit?.size(data) ?? 0;
+      if (limit && size > limit.max) {
+        tooLarge = true;
         chunks.length = 0;
         resolve({ kind: "too-large" });
         return;
@@ -97,15 +104,17 @@ function readBody(req: IncomingMessage, limitBytes: number): Promise<RequestBody
       chunks.push(data);
     });
     req.on("end", () => {
-      if (bytes > limitBytes) return;
-      const text = Buffer.concat(chunks).toString("utf8");
-      try {
-        resolve({ kind: "read", text, json: { ok: true, value: JSON.parse(text) } });
-      } catch (error) {
-        resolve({ kind: "read", text, json: { ok: false, error } });
-      }
+      if (!tooLarge) resolve(parsedBody(Buffer.concat(chunks).toString("utf8")));
     });
   });
+}
+
+function parsedBody(text: string): RequestBody {
+  try {
+    return { kind: "read", text, json: { ok: true, value: JSON.parse(text) } };
+  } catch (error) {
+    return { kind: "read", text, json: { ok: false, error } };
+  }
 }
 
 function queryDevice(rawUrl: string): string | null {

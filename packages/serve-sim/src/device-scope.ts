@@ -1,4 +1,11 @@
-import { isBooted, listAllSimulators, readServeSimStates, simulatorName, type SimctlDevice } from "./device-sources";
+import {
+  forgetBootedSimulators,
+  isBooted,
+  listAllSimulators,
+  readServeSimStates,
+  simulatorName,
+  type SimctlDevice,
+} from "./device-sources";
 import { readEventLog, subscribeEventLog } from "./event-log";
 import type { RequestContext } from "./request-context";
 import type { ServeSimDeviceState } from "./state";
@@ -33,6 +40,8 @@ export interface DeviceScope<Simulator> {
   check(request: DeviceRequest): Promise<string | null>;
   states(): Promise<ServeSimDeviceState[]>;
   simulators(): Promise<Simulator[]>;
+  /** Make the next booted-set read ask simctl again, after a shutdown. */
+  forgetBootedSimulators(): void;
   /** Metro's name for a served simulator, if no other simulator shares it. */
   simulatorName(udid: string): Promise<string | undefined>;
   /** Whether host actions may drive `udid`: in scope, and known to the host. */
@@ -66,6 +75,7 @@ export function deviceScope<Simulator extends { udid: string }>(
     },
     states: () => read.states(allows),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
+    forgetBootedSimulators: read.forgetBootedSimulators,
     simulatorName: async (udid) => (allows(udid) ? read.simulatorName(udid) : undefined),
     isKnown: async (udid) => allows(udid) && (await read.isKnown(udid)),
     events: (query) => read.events({ ...query, include: logged }),
@@ -88,9 +98,10 @@ async function requestTargets(request: DeviceRequest): Promise<DeviceTarget[]> {
   if (request.method === "POST") {
     const body = await request.body();
     const value = body.kind === "read" && body.json.ok ? body.json.value : null;
+    // Routes coerce what they read (`[udid]` passes as `udid`), so this does too.
     if (typeof value === "object" && value !== null) {
-      if ("udid" in value && typeof value.udid === "string") targets.push(value.udid);
-      if ("device" in value && typeof value.device === "string") targets.push(value.device);
+      if ("udid" in value && value.udid !== undefined && value.udid !== null) targets.push(String(value.udid));
+      if ("device" in value && value.device !== undefined && value.device !== null) targets.push(String(value.device));
     }
   }
   return targets;
@@ -104,6 +115,7 @@ export function hostDeviceScope(
   return deviceScope(restrictToDevices, {
     states: readServeSimStates,
     simulators: listAllSimulators,
+    forgetBootedSimulators,
     simulatorName: (udid) => simulatorName(udid),
     isKnown,
     events: readEventLog,

@@ -407,6 +407,10 @@ describe("/exec is loopback-only", () => {
 });
 
 describe("grid, DevTools, and helper routes require auth remotely", () => {
+  test("a malformed URL from a remote caller without the token gets 401", async () => {
+    expect((await rawRequest(withToken.port, "//[", PROXY)).status).toBe(401);
+  });
+
   test("grid start/shutdown: remote without token refused, cross-origin refused on loopback", async () => {
     for (const path of ["/grid/api/start", "/grid/api/shutdown"]) {
       const body = JSON.stringify({ udid: "not-a-udid" });
