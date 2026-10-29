@@ -93,7 +93,7 @@ describe("resolveDeviceSet", () => {
   });
 
   test("rejects an empty value and a missing directory, naming where it came from", () => {
-    const missing = join(tmpdir(), "serve-sim-no-such-set");
+    const missing = MISSING_SET;
     for (const [body, env, source] of [
       [`return m.resolveDeviceSet("");`, {}, "--device-set"],
       [`return m.resolveDeviceSet(${JSON.stringify(missing)});`, {}, "--device-set"],
@@ -109,7 +109,7 @@ describe("resolveDeviceSet", () => {
     withSet((dir) => {
       expect(
         inFreshProcess(`return m.resolveDeviceSet(${JSON.stringify(dir)});`, {
-          env: { [DEVICE_SET_ENV]: join(tmpdir(), "serve-sim-no-such-set") },
+          env: { [DEVICE_SET_ENV]: MISSING_SET },
         }),
       ).toEqual({ ok: true, value: dir });
     });
@@ -225,7 +225,7 @@ describe("serve-sim --device-set", () => {
   });
 
   test("rejects a missing directory before starting anything", () => {
-    const result = spawnSync("bun", [cli, "--device-set", join(tmpdir(), "serve-sim-no-such-set"), "--list"], { encoding: "utf8" });
+    const result = spawnSync("bun", [cli, "--device-set", MISSING_SET, "--list"], { encoding: "utf8" });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("--device-set");
   });
@@ -241,7 +241,7 @@ describe("serve-sim --device-set", () => {
   test("rejects a missing SERVE_SIM_DEVICE_SET before starting anything", () => {
     const result = spawnSync("bun", [cli, "--list"], {
       encoding: "utf8",
-      env: { ...process.env, [DEVICE_SET_ENV]: join(tmpdir(), "serve-sim-no-such-set") },
+      env: { ...process.env, [DEVICE_SET_ENV]: MISSING_SET },
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(DEVICE_SET_ENV);
@@ -259,7 +259,8 @@ describe("serve-sim --device-set", () => {
     });
   });
 
-  test("drives only a preview of its own device set", () => {
+  /** A scratch TMPDIR whose state folder holds one live preview of another set; `run` gets its path. */
+  function withOtherSetPreview(run: (scratch: string) => void): void {
     withSet((scratch) => {
       const stateDir = join(scratch, "serve-sim");
       mkdirSync(stateDir);
@@ -272,11 +273,31 @@ describe("serve-sim --device-set", () => {
           url: "http://127.0.0.1:1", streamUrl: "", wsUrl: "ws://127.0.0.1:1/helper/THEIRS/ws",
         }),
       );
+      run(scratch);
+    });
+  }
+
+  test("drives only a preview of its own device set", () => {
+    withOtherSetPreview((scratch) => {
       const result = spawnSync("bun", [cli, "--device-set", scratch, "tap", "0.5", "0.5"], {
         encoding: "utf8",
         env: { ...process.env, TMPDIR: scratch },
       });
       expect(result.stderr).toContain("No serve-sim server running");
+      expect(result.status).toBe(1);
+    });
+  });
+
+  test("a preview that names no simulator ignores another set's previews", () => {
+    // The scratch set has no simulators, so the preview stops before booting anything.
+    withOtherSetPreview((scratch) => {
+      // A regression would start a preview server, so it must not hang the suite.
+      const result = spawnSync("bun", [cli, "--device-set", scratch], {
+        encoding: "utf8",
+        env: { ...process.env, TMPDIR: scratch },
+        timeout: 20_000,
+      });
+      expect(result.stderr).toContain("No device specified and no available iOS simulator found.");
       expect(result.status).toBe(1);
     });
   });
