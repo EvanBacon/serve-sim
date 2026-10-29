@@ -37,6 +37,29 @@ describe("/exec auth", () => {
     }, false);
   });
 
+  test("buffers no more than 4 KB while exec is off", async () => {
+    await withServer(async (origin) => {
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, Origin: origin },
+        body: JSON.stringify({ command: `echo ok # ${"x".repeat(5 * 1024)}` }),
+      });
+      expect(r.status).toBe(413);
+    }, false);
+  });
+
+  test("accepts a command over 4 KB", async () => {
+    await withServer(async (origin) => {
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, Origin: origin },
+        body: JSON.stringify({ command: `echo ok # ${"x".repeat(5 * 1024)}` }),
+      });
+      expect(r.status).toBe(200);
+      expect((await r.json()).stdout).toBe("ok\n");
+    });
+  });
+
   test("rejects unauthenticated POST", async () => {
     await withServer(async (origin) => {
       const r = await fetch(`${origin}/exec`, {
