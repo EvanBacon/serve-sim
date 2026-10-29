@@ -26,7 +26,15 @@ const OTHER = "BBBBBBBB-0000-0000-0000-000000000002";
 let preview: PreviewServer;
 let port: number;
 
+// An xcrun that lists no simulators and changes none, so a request that got
+// past the scope could not reach a real simulator on this Mac.
+const fakeXcrunDir = mkdtempSync(join(tmpdir(), "serve-sim-restrict-xcrun-"));
+const realPath = process.env.PATH;
+
 beforeAll(async () => {
+  writeFileSync(join(fakeXcrunDir, "xcrun"), `#!/bin/sh\necho '{"devices":{}}'\n`);
+  chmodSync(join(fakeXcrunDir, "xcrun"), 0o755);
+  process.env.PATH = `${fakeXcrunDir}:${realPath}`;
   // servePreview's front server, because Bun 1.3's node:http swallows an
   // upgrade rejection's status line (remote-access.test.ts).
   preview = await servePreview({
@@ -53,6 +61,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await preview?.stop(true);
+  process.env.PATH = realPath;
+  rmSync(fakeXcrunDir, { recursive: true, force: true });
 });
 
 function send(path: string, body?: unknown): Promise<{ status: number; body: string }> {

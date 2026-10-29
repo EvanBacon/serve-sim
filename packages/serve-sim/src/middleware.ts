@@ -1456,37 +1456,41 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // Same pathname helperProxyTarget / devtoolsProxyTarget match on, so a
     // `/x/../.sim/...` or `//host/.sim/...` request cannot skip the auth gate.
     const pathname = requestPathname(rawUrl);
-    // Every route below is under `base`.
-    if (!ownsPath(pathname)) return next?.();
-    const method = (req.method ?? "GET").toUpperCase();
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
     const trustedLoopback = isTrustedLoopback(req);
 
-    // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
-    // token on every route, including the preview page itself.
-    if (pathname === exchangePath) {
-      handleAuthExchange(req, res);
-      return;
-    }
-    if (!trustedLoopback) {
-      const access = remoteAccess(req, authToken);
-      if (!access.ok) {
-        if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
-          sendAuthBootstrap(res);
-        } else {
-          sendAccessDenied(res, access);
+    if (ownsPath(pathname)) {
+      // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
+      // token on every route, including the preview page itself.
+      if (pathname === exchangePath) {
+        handleAuthExchange(req, res);
+        return;
+      }
+      if (!trustedLoopback) {
+        const access = remoteAccess(req, authToken);
+        if (!access.ok) {
+          const method = (req.method ?? "GET").toUpperCase();
+          if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
+            sendAuthBootstrap(res);
+          } else {
+            sendAccessDenied(res, access);
+          }
+          return;
         }
+      }
+      // State-changing requests from a browser must come from this origin.
+      const method = (req.method ?? "GET").toUpperCase();
+      if (method !== "GET" && method !== "HEAD" && originCheck(req) === "cross") {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
         return;
       }
     }
-    // State-changing requests from a browser must come from this origin.
-    if (method !== "GET" && method !== "HEAD" && originCheck(req) === "cross") {
-      res.writeHead(403, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
-      return;
-    }
+
     const request = requestContext(req, { base, device: options?.device }, "http");
     const { url, requestedDevice, selectedDevice } = request;
+    // Every route below is under `base`.
+    if (!ownsPath(pathname)) return next?.();
     const refused = await scope.check(request);
     if (refused) {
       res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
