@@ -54,18 +54,18 @@ function existingDirectory(value: string, source: string): string {
 
 /**
  * Whether two device-set paths (undefined: Xcode's default set) name one
- * set, symlinks resolved, so `/tmp/set` and `/private/tmp/set` match.
+ * set, symlinks resolved, so `/tmp/set` and `/private/tmp/set` match, and
+ * so does Xcode's default folder named explicitly.
  */
 export function sameDeviceSet(a: string | undefined, b: string | undefined): boolean {
-  if (a === undefined || b === undefined) return a === b;
   const real = (path: string) => {
     try {
       return realpathSync(path);
     } catch {
-      return path;
+      return resolve(path);
     }
   };
-  return a === b || real(a) === real(b);
+  return real(a ?? DEFAULT_DEVICE_SET) === real(b ?? DEFAULT_DEVICE_SET);
 }
 
 /** `xcrun` arguments that run `simctl <args>` against the device set. */

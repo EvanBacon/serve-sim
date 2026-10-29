@@ -150,6 +150,12 @@ describe("sameDeviceSet", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("takes Xcode's default folder named explicitly for the default set", () => {
+    const xcodeDefault = join(homedir(), "Library/Developer/CoreSimulator/Devices");
+    expect(sameDeviceSet(undefined, xcodeDefault)).toBe(true);
+    expect(sameDeviceSet(`${xcodeDefault}/`, undefined)).toBe(true);
+  });
 });
 
 describe("simulatorDevicesDir", () => {
