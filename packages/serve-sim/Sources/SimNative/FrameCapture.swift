@@ -592,16 +592,17 @@ actor FrameCapture {
         let sharedSel = NSSelectorFromString("sharedServiceContextForDeveloperDir:error:")
         guard let context = contextClass.perform(sharedSel, with: developerDir, with: nil)?
                 .takeUnretainedValue() as? NSObject else { return nil }
-        let path = DeviceSet.path()
-        let deviceSetSel = NSSelectorFromString(path == nil ? "defaultDeviceSetWithError:" : "deviceSetWithPath:error:")
-        guard context.responds(to: deviceSetSel) else { return nil }
-        let deviceSetResult: Unmanaged<AnyObject>?
-        if let path {
-            deviceSetResult = context.perform(deviceSetSel, with: path, with: nil)
-        } else {
-            deviceSetResult = context.perform(deviceSetSel, with: nil)
-        }
-        guard let deviceSet = deviceSetResult?.takeUnretainedValue() as? NSObject else { return nil }
+        guard let deviceSet = DeviceSet.lookUp({ selectorName, path -> NSObject? in
+            let deviceSetSel = NSSelectorFromString(selectorName)
+            guard context.responds(to: deviceSetSel) else { return nil }
+            let deviceSetResult: Unmanaged<AnyObject>?
+            if let path {
+                deviceSetResult = context.perform(deviceSetSel, with: path, with: nil)
+            } else {
+                deviceSetResult = context.perform(deviceSetSel, with: nil)
+            }
+            return deviceSetResult?.takeUnretainedValue() as? NSObject
+        }) else { return nil }
         guard let devices = deviceSet.value(forKey: "devices") as? [NSObject] else { return nil }
         return devices.first(where: {
             ($0.value(forKey: "UDID") as? NSUUID)?.uuidString == udid

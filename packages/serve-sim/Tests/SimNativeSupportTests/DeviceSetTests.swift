@@ -25,4 +25,33 @@ final class DeviceSetTests: XCTestCase {
         DeviceSet.configure(path: nil)
         XCTAssertNil(DeviceSet.path())
     }
+
+    func testLookUpAsksForXcodesDefaultSetWhenUnset() {
+        var asked: (selector: String, path: String?)?
+        let found = DeviceSet.lookUp { selector, path -> String? in
+            asked = (selector, path)
+            return "default set"
+        }
+        XCTAssertEqual(found, "default set")
+        XCTAssertEqual(asked?.selector, "defaultDeviceSetWithError:")
+        XCTAssertNil(asked?.path)
+    }
+
+    func testLookUpAsksForTheConfiguredSetByPath() {
+        DeviceSet.configure(path: "/pool/devices")
+        var asked: (selector: String, path: String?)?
+        let found = DeviceSet.lookUp { selector, path -> String? in
+            asked = (selector, path)
+            return "pool set"
+        }
+        XCTAssertEqual(found, "pool set")
+        XCTAssertEqual(asked?.selector, "deviceSetWithPath:error:")
+        XCTAssertEqual(asked?.path, "/pool/devices")
+    }
+
+    func testLookUpIsNilWhenNoSetIsFound() {
+        XCTAssertNil(DeviceSet.lookUp { _, _ -> String? in nil })
+        DeviceSet.configure(path: "/pool/devices")
+        XCTAssertNil(DeviceSet.lookUp { _, _ -> String? in nil })
+    }
 }
