@@ -34,10 +34,12 @@ static SimCamFakeMovieOutput *SimCamFakeMovieOutputFor(AVCaptureMovieFileOutput 
     }
 }
 
-// The fake that answers the output's recording getters: while the output is
-// on a fake session, and after it leaves once it holds a fake recording,
-// since a removed output's recording finishes, and its delegate reads them,
-// after the output has left.
+// The fake that answers the output's recording getters: the output's own
+// while it is on a fake session, and after it leaves, the one holding its
+// last fake recording, because a removed output's recording finishes, and
+// its delegate reads these getters, after the removal. No input reaches a
+// native session in this process, so the output never records natively and
+// that recording answers for good, as it does while the output is attached.
 static SimCamFakeMovieOutput *SimCamFakeRecordingFor(AVCaptureMovieFileOutput *output) {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(output);
     if (fake) return fake;
@@ -116,8 +118,8 @@ void SimCamFakeMovieOutputSessionStopped(AVCaptureOutput *output) {
            maxDuration:self.maxRecordedDuration
            maxFileSize:self.maxRecordedFileSize];
     fake.recorder = recorder;
-    // AVError.h's AVErrorSessionNotRunning: "The recording couldn't start
-    // because the session isn't running."
+    // AVErrorSessionNotRunning, in Apple's documentation: "The recording
+    // couldn't start because the session isn't running."
     if (!SimCamFakeSessionForOutput(self).isRunning) {
         [recorder stopWithError:[NSError errorWithDomain:AVFoundationErrorDomain
                                                     code:AVErrorSessionNotRunning
