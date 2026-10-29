@@ -239,6 +239,12 @@ describe("restrictToDevices", () => {
     clearEventLogForTests();
   });
 
+  test("refuses the host shell, which reaches every simulator", () => {
+    expect(() => simMiddleware({ restrictToDevices: [SERVED], allowExec: true })).toThrow(
+      "restrictToDevices cannot be combined with allowExec",
+    );
+  });
+
   test("still serves its own simulator", async () => {
     const api = await send(`/api?device=${SERVED}`);
     expect(api.status).toBe(200);
@@ -269,6 +275,12 @@ describe("serve-sim --restrict-devices", () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+
+  test("refuses the host shell, which reaches every simulator", () => {
+    const result = spawnSync("bun", [cli, "--restrict-devices", "--allow-exec"], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--restrict-devices cannot be combined with --allow-exec");
   });
 
   test("refuses modes without the preview server", () => {
