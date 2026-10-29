@@ -39,7 +39,11 @@ beforeAll(async () => {
       // Every well-formed udid counts as booted, so only the restriction refuses.
       isKnownDevice: async () => true,
       diagnostics: {
-        sources: { host: async () => ({}), device: async (udid) => ({ udid }), sessions: async () => [] },
+        sources: {
+          host: async () => ({}),
+          device: async (udid) => ({ udid }),
+          sessions: async () => [{ udid: SERVED }, { udid: OTHER }],
+        },
         cacheTtlMs: 0,
       },
     }),
@@ -214,6 +218,15 @@ describe("restrictToDevices", () => {
     const diagnostics = JSON.parse((await send("/api/diagnostics")).body) as { event_log: Array<{ device?: string }> };
     expect(devicesIn(diagnostics.event_log)).toEqual([SERVED, null]);
     clearEventLogForTests();
+  });
+
+  test("leaves another simulator's session out of diagnostics", async () => {
+    const bundle = JSON.parse((await send("/api/diagnostics")).body) as {
+      sessions: Array<{ udid: string }>;
+      devices: Array<{ udid: string }>;
+    };
+    expect(bundle.sessions.map((session) => session.udid)).toEqual([SERVED]);
+    expect(bundle.devices.map((device) => device.udid)).toEqual([SERVED]);
   });
 
   test("fills an event limit with its own simulator's events", async () => {
