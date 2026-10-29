@@ -21,8 +21,10 @@ static char kSimCamFakeMovieOutputKey;
 // nil for an output AVFoundation records itself.
 static SimCamFakeMovieOutput *SimCamFakeMovieOutputFor(AVCaptureMovieFileOutput *output) {
     if (!SimCamOutputAttachedToFakeSession(output)) return nil;
+    SimCamFakeMovieOutput *fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
+    if (fake) return fake;
     @synchronized (output) {
-        SimCamFakeMovieOutput *fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
+        fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
         if (!fake) {
             fake = [SimCamFakeMovieOutput new];
             fake.videoSettings = @{ AVVideoCodecKey: AVVideoCodecTypeH264 };
@@ -63,7 +65,10 @@ void SimCamMovieOutputLeftFakeSession(AVCaptureOutput *output) {
 - (void)simcam_setOutputSettings:(NSDictionary<NSString *, id> *)settings
                    forConnection:(AVCaptureConnection *)connection {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
-    if (!fake) return [self simcam_setOutputSettings:settings forConnection:connection];
+    if (!fake) {
+        [self simcam_setOutputSettings:settings forConnection:connection];
+        return;
+    }
     // The fake movie has no audio track, so only video settings are kept.
     if (!SimCamConnectionCarries(connection, AVMediaTypeVideo)) return;
     fake.videoSettings = settings ?: @{ AVVideoCodecKey: AVVideoCodecTypeH264 };
@@ -71,33 +76,46 @@ void SimCamMovieOutputLeftFakeSession(AVCaptureOutput *output) {
 - (void)simcam_startRecordingToOutputFileURL:(NSURL *)url
                            recordingDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
-    if (!fake) return [self simcam_startRecordingToOutputFileURL:url recordingDelegate:delegate];
+    if (!fake) {
+        [self simcam_startRecordingToOutputFileURL:url recordingDelegate:delegate];
+        return;
+    }
     // AVFoundation closes the file in progress before it opens the next.
     [fake.recorder stop];
-    fake.recorder = [[SimCamMovieRecorder alloc]
+    SimCamMovieRecorder *recorder = [[SimCamMovieRecorder alloc]
         initWithOutput:self
                    URL:url
               delegate:delegate
            connections:SimCamConnectionsForOutput(self)
          videoSettings:fake.videoSettings
            maxDuration:self.maxRecordedDuration];
+    fake.recorder = recorder;
     SimCamMarkCameraInUse();
     [[SimCamRegistry shared] startPumpingIfNeeded];
-    [fake.recorder start];
+    [recorder start];
 }
 - (void)simcam_stopRecording {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
-    if (!fake) return [self simcam_stopRecording];
+    if (!fake) {
+        [self simcam_stopRecording];
+        return;
+    }
     [fake.recorder stop];
 }
 - (void)simcam_pauseRecording {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
-    if (!fake) return [self simcam_pauseRecording];
+    if (!fake) {
+        [self simcam_pauseRecording];
+        return;
+    }
     [fake.recorder pause];
 }
 - (void)simcam_resumeRecording {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
-    if (!fake) return [self simcam_resumeRecording];
+    if (!fake) {
+        [self simcam_resumeRecording];
+        return;
+    }
     [fake.recorder resume];
 }
 - (BOOL)simcam_isRecording {

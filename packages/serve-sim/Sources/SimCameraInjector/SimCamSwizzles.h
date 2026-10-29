@@ -4,9 +4,10 @@
 
 void SimCamInstallSwizzles(void);
 
-// Shared by the swizzle files, and hidden so the injected dylib exports no
-// more than it did.
+// Shared with the other swizzle files.
+BOOL SimCamOutputAttachedToFakeSession(AVCaptureOutput *output);
+NSArray<AVCaptureConnection *> *SimCamConnectionsForOutput(AVCaptureOutput *output);
+BOOL SimCamConnectionCarries(AVCaptureConnection *connection, AVMediaType mediaType);
+// Hidden from the dylib's exports, as the one helper without the SimCam
+// prefix.
 __attribute__((visibility("hidden"))) BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz);
-__attribute__((visibility("hidden"))) BOOL SimCamOutputAttachedToFakeSession(AVCaptureOutput *output);
-__attribute__((visibility("hidden"))) NSArray<AVCaptureConnection *> *SimCamConnectionsForOutput(AVCaptureOutput *output);
-__attribute__((visibility("hidden"))) BOOL SimCamConnectionCarries(AVCaptureConnection *connection, AVMediaType mediaType);
