@@ -294,6 +294,7 @@ static AVCaptureInput *SimCamFirstFakeInputForSession(AVCaptureSession *s) {
 // look disconnected during client-side session configuration checks.
 static void SimCamUnmarkOutputAttachedToFakeSession(AVCaptureOutput *output) {
     if (!output) return;
+    SimCamMovieOutputLeftFakeSession(output);
     objc_setAssociatedObject(output, &kSimCamOutputAttachedToFakeSessionKey, nil, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(output, &kSimCamOutputSessionKey, nil, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(output, &kSimCamMaxPhotoDimensionsKey, nil, OBJC_ASSOCIATION_RETAIN);

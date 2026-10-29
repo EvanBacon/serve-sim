@@ -230,6 +230,7 @@ static void RunTeardownCheck(id<AVCaptureVideoDataOutputSampleBufferDelegate,
 @interface SimCamRecordingProbe : NSObject <AVCaptureFileOutputRecordingDelegate>
 @property(nonatomic, copy) void (^onStart)(void);
 @property(nonatomic, copy) void (^onFinish)(NSURL *url, NSError *error);
+@property(atomic) BOOL finishedWithOutput;
 @end
 
 @implementation SimCamRecordingProbe
@@ -243,7 +244,8 @@ static void RunTeardownCheck(id<AVCaptureVideoDataOutputSampleBufferDelegate,
     didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL
                         fromConnections:(NSArray<AVCaptureConnection *> *)connections
                                   error:(NSError *)error {
-    (void)output; (void)connections;
+    (void)connections;
+    self.finishedWithOutput = output != nil;
     dispatch_async(dispatch_get_main_queue(), ^{ if (self.onFinish) self.onFinish(outputFileURL, error); });
 }
 @end
@@ -584,6 +586,72 @@ static void RunWriterFailureRecording(void) {
     [movie startRecordingToOutputFileURL:RecordingURL(@"writer-failure.mov") recordingDelegate:gProbe];
 }
 
+// expo-camera removes its movie output when the camera view remounts and
+// lets it go, recording or not. AVFoundation still finishes the file and
+// tells the delegate, as it does for every recording, and the output then
+// goes away.
+static void WaitForRelease(__weak id object, NSDate *deadline, NSString *passMessage) {
+    if (!object) {
+        WriteResult(YES, passMessage);
+        return;
+    }
+    if ([deadline timeIntervalSinceNow] <= 0) {
+        WriteResult(NO, @"The removed movie output was never released");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ WaitForRelease(object, deadline, passMessage); });
+}
+
+static void RunDroppedOutputRecording(void) {
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInputWithNoConnections:camera];
+    [session addOutputWithNoConnections:movie];
+    NSMutableArray<AVCaptureInputPort *> *videoPorts = [NSMutableArray new];
+    for (AVCaptureInputPort *port in camera.ports) {
+        if ([port.mediaType isEqualToString:AVMediaTypeVideo]) [videoPorts addObject:port];
+    }
+    [session addConnection:[[AVCaptureConnection alloc] initWithInputPorts:videoPorts output:movie]];
+    [session startRunning];
+
+    __weak AVCaptureMovieFileOutput *weakMovie = movie;
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [session beginConfiguration];
+            [session removeOutput:weakMovie];
+            [session commitConfiguration];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                WriteResult(NO, @"The delegate never heard that the removed output's recording finished");
+            });
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        if (error) {
+            WriteResult(NO, [NSString stringWithFormat:@"Dropped output: recording failed: %@", error]);
+            return;
+        }
+        if (!gProbe.finishedWithOutput) {
+            WriteResult(NO, @"Dropped output: the delegate was told about a nil output");
+            return;
+        }
+        ReadVideoSeconds(url, ^(double seconds, NSString *problem) {
+            if (problem || seconds < 0.4 || seconds > 0.8) {
+                WriteResult(NO, [NSString stringWithFormat:@"Dropped output: %@",
+                    problem ?: [NSString stringWithFormat:@"movie holds %.2f s, expected 0.40-0.80 s", seconds]]);
+                return;
+            }
+            WaitForRelease(weakMovie, [NSDate dateWithTimeIntervalSinceNow:5.0],
+                [NSString stringWithFormat:@"Dropped output: recorded %.2f s of video, then released the output", seconds]);
+        });
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"dropped-output.mov") recordingDelegate:gProbe];
+}
+
 #pragma mark - App
 
 // iOS 27 stops an app that has not adopted the scene lifecycle, so the
@@ -627,6 +695,7 @@ static void RunWriterFailureRecording(void) {
             else if ([mode isEqualToString:@"max-duration-recording"]) RunMaxDurationRecording();
             else if ([mode isEqualToString:@"existing-file-recording"]) RunExistingFileRecording();
             else if ([mode isEqualToString:@"writer-failure-recording"]) RunWriterFailureRecording();
+            else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
             WriteResult(NO, [NSString stringWithFormat:@"Exception: %@", exception.reason]);

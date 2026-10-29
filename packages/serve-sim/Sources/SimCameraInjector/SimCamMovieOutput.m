@@ -32,6 +32,11 @@ static SimCamFakeMovieOutput *SimCamFakeMovieOutputFor(AVCaptureMovieFileOutput 
     }
 }
 
+void SimCamMovieOutputLeftFakeSession(AVCaptureOutput *output) {
+    SimCamFakeMovieOutput *fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
+    [fake.recorder stop];
+}
+
 // AVFoundation answers these from the native connection graph, which a
 // session with a fake camera never builds, and throws for a connection it
 // does not own. The recording methods are swizzled on

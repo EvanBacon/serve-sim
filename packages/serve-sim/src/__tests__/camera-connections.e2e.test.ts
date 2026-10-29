@@ -40,7 +40,8 @@ async function runTestApp(
     | "manual-recording"
     | "max-duration-recording"
     | "existing-file-recording"
-    | "writer-failure-recording",
+    | "writer-failure-recording"
+    | "dropped-output-recording",
 ) {
   try {
     execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
@@ -170,5 +171,9 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("ends the recording with the writer's error when a write fails", async () => {
     await runTestApp("writer-failure-recording");
+  }, 20_000);
+
+  test("finishes the movie when the app drops its output mid-recording (expo-camera remount)", async () => {
+    await runTestApp("dropped-output-recording");
   }, 20_000);
 });

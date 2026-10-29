@@ -21,7 +21,9 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
 }
 
 @implementation SimCamMovieRecorder {
-    __weak AVCaptureFileOutput *_output;
+    // Held until the delegate hears the recording finished, as AVFoundation
+    // always tells it, even when the app lets the output go first.
+    AVCaptureFileOutput *_output;
     id<AVCaptureFileOutputRecordingDelegate> _delegate;
     NSArray<AVCaptureConnection *> *_connections;
     NSDictionary<NSString *, id> *_videoSettings;
@@ -215,6 +217,7 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
                                fromConnections:self->_connections
                                          error:result];
         self->_delegate = nil;
+        self->_output = nil;
     };
     if (_writer.status != AVAssetWriterStatusWriting) {
         deliver(error ?: SimCamRecordingFailure(_writer.error));
