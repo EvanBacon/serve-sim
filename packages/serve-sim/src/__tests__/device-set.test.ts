@@ -4,8 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { eventLogEventForCommand } from "../event-log";
-import { previewConfigForState, readServeSimStates, rewriteStateForRequestHost, type ServeSimState } from "../middleware";
-import { STATE_DIR, stateFileForDevice } from "../state";
+import { previewConfigForState, rewriteStateForRequestHost, type ServeSimState } from "../middleware";
 import { sameDeviceSet, simctlArguments, simctlBootStatusArguments, simulatorDevicesDir } from "../simctl";
 
 // `--device-set <path>` / SERVE_SIM_DEVICE_SET: simulators a tool keeps in a
@@ -19,14 +18,14 @@ const MISSING_SET = join(tmpdir(), "serve-sim-no-such-set");
 /**
  * Runs `body` in a fresh process, where the device set is not settled yet
  * (this file's process settles it once, to Xcode's default). `body` sees
- * the simctl module as `m` and returns what it observed.
+ * `module` (default: simctl) as `m` and returns what it observed.
  */
 function inFreshProcess(
   body: string,
-  { env = {}, cwd }: { env?: Record<string, string>; cwd?: string } = {},
+  { env = {}, cwd, module = simctlModule }: { env?: Record<string, string>; cwd?: string; module?: string } = {},
 ): { ok: true; value: unknown } | { ok: false; error: string } {
   const script =
-    `const m = await import(${JSON.stringify(simctlModule)});` +
+    `const m = await import(${JSON.stringify(module)});` +
     `try { console.log(JSON.stringify({ ok: true, value: await (async () => { ${body} })() })); }` +
     `catch (error) { console.log(JSON.stringify({ ok: false, error: String(error.message) })); }`;
   const base = { ...process.env };
@@ -171,32 +170,24 @@ describe("simulatorDevicesDir", () => {
 });
 
 describe("readServeSimStates", () => {
-  test("lists only the previews of this process's device set", async () => {
-    // Labels, not UDIDs, so neither state is recycled as shut down.
-    const ours = `SERVE-SIM-TEST-OURS-${process.pid}`;
-    const theirs = `SERVE-SIM-TEST-THEIRS-${process.pid}`;
-    const record = (device: string, extra: Partial<ServeSimState>): ServeSimState => ({
-      pid: process.pid,
-      port: 1,
-      device,
-      url: "http://127.0.0.1:1",
-      streamUrl: `http://127.0.0.1:1/helper/${device}/stream.mjpeg`,
-      wsUrl: `ws://127.0.0.1:1/helper/${device}/ws`,
-      ...extra,
+  test("lists only the previews of this process's device set", () => {
+    // A scratch state folder (STATE_DIR is under TMPDIR), so other previews'
+    // states are neither read nor recycled; labels, not UDIDs, so neither
+    // state here is recycled as shut down.
+    withSet((scratch) => {
+      const stateDir = join(scratch, "serve-sim");
+      mkdirSync(stateDir);
+      const record = (device: string, deviceSet?: string) =>
+        JSON.stringify({ pid: process.pid, port: 1, device, url: "", streamUrl: "", wsUrl: "", ...(deviceSet ? { deviceSet } : {}) });
+      writeFileSync(join(stateDir, "server-OURS.json"), record("OURS"));
+      writeFileSync(join(stateDir, "server-THEIRS.json"), record("THEIRS", scratch));
+      expect(
+        inFreshProcess(`return (await m.readServeSimStates()).map((state) => state.device);`, {
+          env: { TMPDIR: scratch },
+          module: join(import.meta.dir, "..", "middleware.ts"),
+        }),
+      ).toEqual({ ok: true, value: ["OURS"] });
     });
-    mkdirSync(STATE_DIR, { recursive: true });
-    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
-    try {
-      writeFileSync(stateFileForDevice(ours), JSON.stringify(record(ours, {})));
-      writeFileSync(stateFileForDevice(theirs), JSON.stringify(record(theirs, { deviceSet: dir })));
-      const listed = (await readServeSimStates()).map((state) => state.device);
-      expect(listed).toContain(ours);
-      expect(listed).not.toContain(theirs);
-    } finally {
-      rmSync(stateFileForDevice(ours), { force: true });
-      rmSync(stateFileForDevice(theirs), { force: true });
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
 
