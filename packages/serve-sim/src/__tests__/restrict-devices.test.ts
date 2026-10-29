@@ -6,7 +6,7 @@ import { connect } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
-import { EVERY_SIMULATOR, deviceScope } from "../device-scope";
+import { deviceScope } from "../device-scope";
 import { clearEventLogForTests, recordEventLogEvent, type EventLogEntry } from "../event-log";
 import { simMiddleware, type ServeSimState } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
@@ -163,7 +163,7 @@ describe("restrictToDevices", () => {
   });
 
   test("answers 413 to a body over the limit, before reading what it names", async () => {
-    const refused = await send("/grid/api/start", { pad: "x".repeat(8 * 1024) });
+    const refused = await send("/grid/api/start", { udid: OTHER, pad: "x".repeat(8 * 1024) });
     expect({ status: refused.status, body: JSON.parse(refused.body) }).toEqual({
       status: 413,
       body: { ok: false, error: "Body too large" },
@@ -335,7 +335,7 @@ describe("deviceScope", () => {
     expect(await scope.isKnown(SERVED)).toBe(true);
     expect(await scope.isKnown(OTHER)).toBe(false);
     expect([await scope.simulatorName(SERVED), await scope.simulatorName(OTHER)]).toEqual([`name of ${SERVED}`, undefined]);
-    expect([scope.allows(SERVED), scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, false, false]);
+    expect([scope.allows(SERVED), scope.allows(OTHER)]).toEqual([true, false]);
     expect(scope.events().map((event) => event.device)).toEqual([SERVED, undefined]);
     const heard: Array<string | undefined> = [];
     scope.onEvent((event) => heard.push(event.device));
@@ -358,7 +358,7 @@ describe("deviceScope", () => {
     expect(await scope.states()).toHaveLength(2);
     expect(await scope.simulators()).toHaveLength(2);
     expect(scope.events()).toHaveLength(3);
-    expect([scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, true]);
+    expect(scope.allows(OTHER)).toBe(true);
   });
 });
 
