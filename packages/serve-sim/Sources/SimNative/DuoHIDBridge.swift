@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import SimNativeSupport
 
 /// A lazily started guest service. Calls are serialized by HIDInjector's actor;
 /// replies acknowledge dispatch, so a failed command never switches capture.
@@ -34,7 +35,10 @@ final class DuoHIDBridge {
                 let child = Process()
                 let stdin = Pipe(), stdout = Pipe()
                 child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-                child.arguments = ["simctl", "spawn", udid, executable]
+                child.arguments = DeviceSet.simctlArguments(
+                    ["spawn", udid, executable],
+                    environment: ProcessInfo.processInfo.environment
+                )
                 child.standardInput = stdin
                 child.standardOutput = stdout
                 child.standardError = FileHandle.standardError

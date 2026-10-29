@@ -148,6 +148,13 @@ Options:
                       Cap the H.264 stream bitrate (default scales with
                       screen size, 6-30 Mbps). Also read from
                       SERVE_SIM_MAX_BITRATE
+      --device-set <path>
+                      Use this CoreSimulator device set instead of Xcode's
+                      default (simctl --set). Also read from
+                      SERVE_SIM_DEVICE_SET
+      --restrict-devices
+                      Serve only the targeted simulators; refuse to boot,
+                      shut down, stream or drive any other
       --list [device] List running streams
       --kill [device] Kill running stream(s)
 
@@ -175,6 +182,7 @@ serve-sim --panes devices,tools --fit  # start with selected panes open and fit 
 serve-sim --theme dark                 # start the simulator in Dark Mode
 serve-sim --allow-exec                 # enable `serve-sim exec` and .ipa drag-to-install
 serve-sim --max-bitrate 8              # cap H.264 at 8 Mbps (slow links / shared hosts)
+serve-sim --device-set ~/pool <udid> --restrict-devices  # one simulator of another device set, and only it
 
 # Type text into the focused field
 serve-sim type "Hello, world!"
@@ -217,6 +225,12 @@ Browsers never send the fragment to the server, so the token stays out of reques
 The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control channel, and `serve-sim exec` — runs commands on the host, so it is off unless the server is started with `--allow-exec`; otherwise `/exec` answers `403 {"error":"exec disabled; start with --allow-exec"}` and `{command}` frames get `exec disabled`. Installing an app (dropping an `.ipa` on the preview) runs arbitrary code on the host too, so it also requires `--allow-exec` (`installApp requires --allow-exec`). The other preview tools (screenshots, camera, permissions, location, media drops, reveal in Finder) don't need it: they use fixed, validated host actions with no shell, available to loopback same-origin pages. Even when enabled, `/exec` is loopback-only and requires a per-session token that is never sent in any HTTP response: the server writes it to an owner-only file under `$TMPDIR/serve-sim/exec-tokens/` (removed on stop), and `serve-sim exec` reads it from there. A raw TCP forward of the preview port (`ssh -R`, socat) looks like a local client, so only enable `--allow-exec` on a port nobody else can reach. Note that `installApp` needs no exec token: with `--allow-exec` it only requires a same-origin loopback page, so anyone who can reach an `--allow-exec` port through a raw `ssh -R` or socat forward can install (and so run) arbitrary apps on the host.
 
 `--detach` and `--no-preview` reuse a running server only when it was started with the same `--auth-token` (or with none on both sides) and the same `--allow-exec` setting (on or off on both sides); otherwise they exit with an error — stop the old server with `serve-sim -k <udid>` first.
+
+### Device sets and shared Macs (`--device-set`, `--restrict-devices`)
+
+Tools that keep simulators in a CoreSimulator device set of their own (device pools, CI runners) put them where `simctl list` and Simulator.app never look. `--device-set <path>` (or `SERVE_SIM_DEVICE_SET`) points serve-sim at that set: every `simctl` call gets `--set <path>`, the native capture, input and accessibility bridges look the device up in that set, and per-simulator data (permissions) is read from it. Simulator.app is not opened for such a set, since it only shows Xcode's default one. Subcommands such as `serve-sim camera` honour `SERVE_SIM_DEVICE_SET`.
+
+On a Mac whose simulators other people or agents use, `--restrict-devices` keeps a preview to the simulators its command targets: the devices pane lists only them, and every route that names a device (`?device=`, the helper stream and input, grid start and shutdown, host actions, simulator settings) answers `404` for any other. It does not restrict the host shell (`--allow-exec`).
 
 ### Camera
 

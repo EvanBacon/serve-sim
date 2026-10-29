@@ -592,9 +592,13 @@ actor FrameCapture {
         let sharedSel = NSSelectorFromString("sharedServiceContextForDeveloperDir:error:")
         guard let context = contextClass.perform(sharedSel, with: developerDir, with: nil)?
                 .takeUnretainedValue() as? NSObject else { return nil }
-        let deviceSetSel = NSSelectorFromString("defaultDeviceSetWithError:")
-        guard let deviceSet = context.perform(deviceSetSel, with: nil)?
-                .takeUnretainedValue() as? NSObject else { return nil }
+        let deviceSetResult: Unmanaged<AnyObject>?
+        if let path = DeviceSet.path(in: ProcessInfo.processInfo.environment) {
+            deviceSetResult = context.perform(NSSelectorFromString("deviceSetWithPath:error:"), with: path, with: nil)
+        } else {
+            deviceSetResult = context.perform(NSSelectorFromString("defaultDeviceSetWithError:"), with: nil)
+        }
+        guard let deviceSet = deviceSetResult?.takeUnretainedValue() as? NSObject else { return nil }
         guard let devices = deviceSet.value(forKey: "devices") as? [NSObject] else { return nil }
         return devices.first(where: {
             ($0.value(forKey: "UDID") as? NSUUID)?.uuidString == udid

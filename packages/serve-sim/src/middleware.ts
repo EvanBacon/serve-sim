@@ -51,7 +51,7 @@ import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler 
 import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
-import { simctlBootStatusArguments } from "./simctl";
+import { simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
@@ -222,7 +222,7 @@ export function parseForegroundAppLogMessage(message: string): { bundleId: strin
 function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
   if (RN_BUNDLE_IDS.has(bundleId)) return Promise.resolve(true);
   return new Promise((resolve) => {
-    execFile("xcrun", ["simctl", "get_app_container", udid, bundleId, "app"],
+    execFile("xcrun", simctlArguments(["get_app_container", udid, bundleId, "app"]),
       { timeout: 2000 },
       (err, stdout) => {
         if (err) return resolve(false);
@@ -280,7 +280,7 @@ async function getBootedUdids(): Promise<Set<string> | null> {
     const stdout = await new Promise<string>((resolve, reject) => {
       execFile(
         "xcrun",
-        ["simctl", "list", "devices", "booted", "-j"],
+        simctlArguments(["list", "devices", "booted", "-j"]),
         { encoding: "utf-8", timeout: 3_000 },
         (err, stdout) => {
           if (err) {
@@ -887,7 +887,7 @@ export async function startDeviceInProcess(
   record: Pick<ServeSimDeviceState, "authTokenSha256" | "allowExec"> = {},
 ): Promise<string | null> {
   // `simctl boot` errors when already booted — ignore and let bootstatus confirm.
-  await new Promise<void>((resolve) => execFile("xcrun", ["simctl", "boot", udid], () => resolve()));
+  await new Promise<void>((resolve) => execFile("xcrun", simctlArguments(["boot", udid]), () => resolve()));
   const ready = await new Promise<boolean>((resolve) => {
     // Boot was already requested above. Passing `-b` redundantly can remain
     // blocked on Xcode 27 even after `simctl list` reports Booted, so only
@@ -898,7 +898,7 @@ export async function startDeviceInProcess(
     // bootstatus can exit non-zero even when the device is actually ready;
     // confirm against the real state before reporting failure.
     const booted = await new Promise<boolean>((resolve) => {
-      execFile("xcrun", ["simctl", "list", "devices", "-j"], (err, stdout) => {
+      execFile("xcrun", simctlArguments(["list", "devices", "-j"]), (err, stdout) => {
         if (err) return resolve(false);
         try {
           const data = JSON.parse(stdout) as { devices: Record<string, Array<{ udid: string; state: string }>> };
@@ -1244,7 +1244,7 @@ function listAllSimulators(): Promise<SimctlDevice[]> {
   return new Promise((resolve) => {
     execFile(
       "xcrun",
-      ["simctl", "list", "devices", "-j"],
+      simctlArguments(["list", "devices", "-j"]),
       { encoding: "utf-8", timeout: 3_000 },
       (err, stdout) => {
         if (err) return resolve([]);
@@ -1388,6 +1388,15 @@ export interface SimMiddlewareOptions {
   /** Pin this preview server to a specific simulator UDID. */
   device?: string;
   /**
+   * Serve only these simulator UDIDs. The devices pane lists only them, and
+   * every route that names a device (`?device=`, the helper stream and input,
+   * grid start/shutdown, host actions, simulator settings) refuses any other,
+   * so a preview on a shared Mac cannot boot, shut down, stream or drive a
+   * simulator someone else is using. The host shell (`allowExec`) is not
+   * restricted. Default: every simulator in the device set.
+   */
+  restrictToDevices?: readonly string[];
+  /**
    * Allow the host shell: `POST /exec` and `{command}` frames on the
    * `/exec-ws` control channel. Default false — both answer 403 /
    * "exec disabled" until the server opts in (`serve-sim --allow-exec`).
@@ -1451,7 +1460,7 @@ function safeEqualString(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-const STATUS_TEXT: Record<number, string> = { 401: "Unauthorized", 403: "Forbidden" };
+const STATUS_TEXT: Record<number, string> = { 401: "Unauthorized", 403: "Forbidden", 404: "Not Found" };
 
 function sendAccessDenied(res: SimRes, access: Exclude<RemoteAccess, { ok: true }>): void {
   res.writeHead(access.status, {
@@ -1472,6 +1481,11 @@ function rejectUpgrade(socket: Socket, status: number, message: string): void {
   } catch {
     socket.destroy();
   }
+}
+
+function sendDeviceNotServed(res: SimRes, udid: string): void {
+  res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify({ ok: false, error: `${udid} is not served by this preview` }));
 }
 
 function isJsonContentType(value: string | undefined): boolean {
@@ -1502,6 +1516,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const authToken = resolveAuthToken(options?.authToken);
   const serveDiagnostics = createDiagnosticsHandler(options?.diagnostics);
   const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
+  const servedDevices = options?.restrictToDevices
+    ? new Set(options.restrictToDevices.map((udid) => udid.toUpperCase()))
+    : null;
+  const servesDevice = (udid: string) => servedDevices === null || servedDevices.has(udid.toUpperCase());
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
@@ -1597,7 +1615,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const handleRpcRequest = createHostRpcHandler({
     serveSimBin,
     allowExec,
-    isKnownDevice: options?.isKnownDevice ?? (async (udid) => (await getBootedUdids())?.has(udid) ?? false),
+    isKnownDevice: async (udid) =>
+      servesDevice(udid) &&
+      (options?.isKnownDevice ? await options.isKnownDevice(udid) : (await getBootedUdids())?.has(udid) ?? false),
     onCommandResult: (command, result) => recordCommandEvent(command, result),
   });
 
@@ -1609,6 +1629,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (typeof p.device !== "string" || !/^[0-9A-Za-z-]+$/.test(p.device)) {
       throw new Error("missing or invalid device udid");
     }
+    if (!servesDevice(p.device)) throw new Error(`${p.device} is not served by this preview`);
     if (p.option === undefined) {
       return { status: await getUiStatus(p.device) };
     }
@@ -1670,11 +1691,19 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
         return;
       }
+      if (requestedDevice && !servesDevice(requestedDevice)) {
+        sendDeviceNotServed(res, requestedDevice);
+        return;
+      }
     }
 
     const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
     if (helperTarget && ownsPath(pathname)) {
       const device = helperTarget.device ?? selectedDevice;
+      if (device && !servesDevice(device)) {
+        sendDeviceNotServed(res, device);
+        return;
+      }
       // The device's helper endpoints are served from an in-process
       // NativeCapture/NativeHid DeviceSession.
       if (serveHelperInProcess(req, res, device, helperTarget.upstreamPath)) return;
@@ -1801,7 +1830,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (url === base + "/grid/api") {
       const states = await readServeSimStates();
       const helperByUdid = new Map(states.map((s) => [s.device, s] as const));
-      const sims = await listAllSimulators();
+      const sims = (await listAllSimulators()).filter((d) => servesDevice(d.udid));
       // Order mirrors Xcode's Devices window: the devices the user is actually
       // using float to the top — streaming first, then booted, then the
       // simulator they last opened in Simulator.app — and everything else falls
@@ -1897,6 +1926,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
           return;
         }
+        if (!servesDevice(udid)) {
+          sendDeviceNotServed(res, udid);
+          return;
+        }
         // Stop our own in-process capture for this device first (no-op if it
         // isn't streamed here). This frees the native session immediately
         // rather than waiting for the next poll's reaper to notice.
@@ -1904,7 +1937,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // Drop the snapshot so the next /grid/api call re-queries simctl
         // and prunes any helper bound to this now-shutdown device.
         bootedSnapshot = { at: 0, booted: null };
-        execFile("xcrun", ["simctl", "shutdown", udid], { timeout: 30_000 }, (err, _stdout, stderr) => {
+        execFile("xcrun", simctlArguments(["shutdown", udid]), { timeout: 30_000 }, (err, _stdout, stderr) => {
           if (err) {
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
@@ -1933,6 +1966,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
+          return;
+        }
+        if (!servesDevice(udid)) {
+          sendDeviceNotServed(res, udid);
           return;
         }
         const port = req.socket.localPort ?? 0;
@@ -2450,13 +2487,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // AX bridge may be warming up — the log tail fills in once anything moves.
       }
 
-      const child: ChildProcess = spawn("xcrun", [
-        "simctl", "spawn", udid, "log", "stream",
+      const child: ChildProcess = spawn("xcrun", simctlArguments([
+        "spawn", udid, "log", "stream",
         "--style", "ndjson",
         "--level", "info",
         "--predicate",
         'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
-      ], { stdio: ["ignore", "pipe", "ignore"] });
+      ]), { stdio: ["ignore", "pipe", "ignore"] });
 
       let closed = false;
       const emitApp = async (bundleId: string, pid?: number) => {
@@ -2526,6 +2563,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
     const device = helperTarget.device ?? selectedDevice;
+    if (device && !servesDevice(device)) {
+      rejectUpgrade(socket, 404, `${device} is not served by this preview`);
+      return;
+    }
     if (helperTarget.upstreamPath === "/ws") {
       // HID input is delivered to the in-process DeviceSession.
       if (attachHidInProcess(req, socket, head, device)) return;

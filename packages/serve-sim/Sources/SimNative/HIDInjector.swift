@@ -621,7 +621,10 @@ actor HIDInjector {
     private func launchSpringBoard(deviceUDID: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["simctl", "launch", deviceUDID, "com.apple.springboard"]
+        process.arguments = DeviceSet.simctlArguments(
+            ["launch", deviceUDID, "com.apple.springboard"],
+            environment: ProcessInfo.processInfo.environment
+        )
         try? process.run()
     }
 

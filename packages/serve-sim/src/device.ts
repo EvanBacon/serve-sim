@@ -1,4 +1,5 @@
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
+import { simctlArguments } from "./simctl";
 
 /**
  * UDID of a booted simulator, or null if none is booted. Prefers an iOS device
@@ -7,7 +8,7 @@ import { execSync } from "child_process";
  */
 export function findBootedDevice(): string | null {
   try {
-    const output = execSync("xcrun simctl list devices booted -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "booted", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
     };
@@ -34,7 +35,7 @@ export function resolveDevice(nameOrUDID: string): string {
     return nameOrUDID;
   }
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
     };

@@ -76,7 +76,14 @@ import {
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
-import { simctlBootStatusArguments } from "./simctl";
+import {
+  DEVICE_SET_ENV,
+  applyDeviceSetOption,
+  deviceSetFromEnv,
+  parseDeviceSetPath,
+  simctlArguments,
+  simctlBootStatusArguments,
+} from "./simctl";
 import { execCommandLine } from "./shell-quote";
 import { reExecArgs, selfServeSimBin } from "./self-bin";
 import {
@@ -144,7 +151,7 @@ function getBootedUdids(): Set<string> | null {
     return bootedSnapshot.booted;
   }
   try {
-    const output = execSync("xcrun simctl list devices booted -j", {
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "booted", "-j"]), {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 3_000,
@@ -263,7 +270,7 @@ function clearState(udid?: string) {
  */
 function pickDefaultDevice(): { udid: string; name: string } | null {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string; isAvailable?: boolean }>>;
     };
@@ -292,7 +299,7 @@ function getDeviceName(udid: string): string | null {
 function readDeviceNamesByUdid(): Map<string, string> {
   const names = new Map<string, string>();
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
     };
@@ -307,7 +314,7 @@ function readDeviceNamesByUdid(): Map<string, string> {
 
 function isDeviceBooted(udid: string): boolean {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; state: string }>>;
     };
@@ -323,7 +330,7 @@ function isDeviceBooted(udid: string): boolean {
 function bootDevice(udid: string): void {
   if (!isDeviceBooted(udid)) {
     try {
-      execSync(`xcrun simctl boot ${udid}`, { encoding: "utf-8", stdio: "pipe" });
+      execFileSync("xcrun", simctlArguments(["boot", udid]), { encoding: "utf-8", stdio: "pipe" });
     } catch (err: any) {
       const msg = (err.stderr ?? err.message ?? "").toLowerCase();
       if (!msg.includes("booted") && !msg.includes("current state")) {
@@ -337,6 +344,9 @@ function bootDevice(udid: string): void {
   // (e.g. GitHub Actions runners) where `open` can block indefinitely waiting
   // for a window server that never arrives — in that environment the test
   // harness is expected to have already driven the sim via simctl.
+  // Simulator.app shows only Xcode's default device set, so it has nothing to
+  // wire up for a simulator in a `--device-set` of its own.
+  if (deviceSetFromEnv() !== undefined) return;
   try {
     execSync("open -ga Simulator", {
       encoding: "utf-8",
@@ -1725,7 +1735,7 @@ Examples:
     const terminated: string[] = [];
     for (const b of injectedBundles) {
       try {
-        execSync(`xcrun simctl terminate "${udid}" "${b}"`, { stdio: "ignore" });
+        execFileSync("xcrun", simctlArguments(["terminate", udid, b]), { stdio: "ignore" });
         terminated.push(b);
       } catch {}
     }
@@ -1893,12 +1903,12 @@ Examples:
   // we want to bring a new app into the set. Source-only hot-swaps go
   // through `camera switch`, not this path.
   try {
-    execSync(`xcrun simctl privacy "${udid}" grant camera "${bundleId}"`, {
+    execFileSync("xcrun", simctlArguments(["privacy", udid, "grant", "camera", bundleId]), {
       stdio: "ignore",
     });
   } catch {}
   try {
-    execSync(`xcrun simctl terminate "${udid}" "${bundleId}"`, { stdio: "ignore" });
+    execFileSync("xcrun", simctlArguments(["terminate", udid, bundleId]), { stdio: "ignore" });
   } catch {}
 
   const env = {
@@ -1910,7 +1920,7 @@ Examples:
 
   let stdoutBuf = "";
   try {
-    stdoutBuf = execSync(`xcrun simctl launch "${udid}" "${bundleId}"`, {
+    stdoutBuf = execFileSync("xcrun", simctlArguments(["launch", udid, bundleId]), {
       env,
       encoding: "utf-8",
     });
@@ -1975,6 +1985,7 @@ async function serve(
   theme: SimulatorTheme | undefined,
   exitOnSimulatorShutdown = false,
   allowExec = false,
+  restrictDevices = false,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -1997,6 +2008,7 @@ async function serve(
   const middleware = simMiddleware({
     basePath: "/",
     device: targetDevice,
+    ...(restrictDevices ? { restrictToDevices: targetDevices } : {}),
     codec,
     initialState,
     proxyHelpers: true,
@@ -2197,6 +2209,24 @@ program
       }
     },
   )
+  .option(
+    "--device-set <path>",
+    "Use this CoreSimulator device set instead of Xcode's default (simctl --set), " +
+      `for simulators a tool keeps in a set of its own. Also read from ${DEVICE_SET_ENV}.`,
+    (value) => {
+      try {
+        return parseDeviceSetPath(value);
+      } catch (error) {
+        throw new InvalidArgumentError(error instanceof Error ? error.message : String(error));
+      }
+    },
+  )
+  .option(
+    "--restrict-devices",
+    "Serve only the simulators this command targets: the devices pane lists only " +
+      "them, and the preview refuses to boot, shut down, stream or drive any other " +
+      "(for a Mac whose simulators other people or agents use). Preview server only.",
+  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2209,6 +2239,8 @@ Examples:
   serve-sim --max-bitrate 8              Cap the H.264 stream at 8 Mbps
   serve-sim --panes devices,tools --fit  Open panes and fit the simulator to the viewport
   serve-sim --theme dark                 Start the simulator in Dark Mode
+  serve-sim --device-set <path> <udid> --restrict-devices
+                                         Preview one simulator of another device set, and only it
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --allow-exec                 Enable \`serve-sim exec\` and .ipa drag-to-install
@@ -2223,6 +2255,11 @@ Examples:
       process.env[AUTH_TOKEN_ENV] = opts.authToken.trim();
     }
     applyMaxBitrateOption(opts.maxBitrate);
+    applyDeviceSetOption(opts.deviceSet);
+    if (opts.restrictDevices && (opts.detach || opts.preview === false)) {
+      console.error("--restrict-devices applies to the preview server; drop --detach and --no-preview.");
+      process.exit(1);
+    }
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -2253,6 +2290,7 @@ Examples:
         opts.theme,
         !!opts.exitOnSimulatorShutdown,
         !!opts.allowExec,
+        !!opts.restrictDevices,
       );
     }
   });
