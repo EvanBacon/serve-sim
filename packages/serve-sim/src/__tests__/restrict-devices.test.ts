@@ -160,6 +160,7 @@ describe("restrictToDevices", () => {
       { bundleId: "com.example.app", device: OTHER },
       // The grid routes read `[udid]` as `udid`, as main does.
       { bundleId: "com.example.app", udid: [OTHER] },
+      { bundleId: "com.example.app", device: [OTHER] },
     ]) {
       const refused = await send(`/reload?device=${SERVED}`, body);
       expect({ body, status: refused.status }).toEqual({ body, status: 404 });
