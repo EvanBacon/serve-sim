@@ -76,7 +76,7 @@ import {
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
-import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
+import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { execCommandLine } from "./shell-quote";
 import { reExecArgs, selfServeSimBin } from "./self-bin";
 import {
@@ -339,7 +339,7 @@ function bootDevice(udid: string): void {
   // harness is expected to have already driven the sim via simctl.
   // Simulator.app shows only Xcode's default device set, so it has nothing to
   // wire up for a simulator in a `--device-set` of its own.
-  if (resolveDeviceSet() !== undefined) return;
+  if (!sameDeviceSet(resolveDeviceSet(), undefined)) return;
   try {
     execSync("open -ga Simulator", {
       encoding: "utf-8",
