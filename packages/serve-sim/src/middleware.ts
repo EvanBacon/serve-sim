@@ -801,8 +801,11 @@ export type DiagnosticsOptions = {
   now?: () => number;
 };
 
-/** Loopback-only, rate-limited, briefly cached `serve-sim doctor` bundle. */
-function createDiagnosticsHandler(options: DiagnosticsOptions = {}) {
+/**
+ * Loopback-only, rate-limited, briefly cached `serve-sim doctor` bundle,
+ * with the event log as `events` reads it.
+ */
+function createDiagnosticsHandler(events: typeof readEventLog, options: DiagnosticsOptions = {}) {
   const sources = options.sources ?? defaultDiagnosticsSources;
   const limiter = createRateLimiter({ burst: options.burst ?? 5, refillMs: options.refillMs ?? 2000, now: options.now });
   const cache = createTtlCache<DiagnosticsBundle>(options.cacheTtlMs ?? 2000, options.now);
@@ -818,7 +821,7 @@ function createDiagnosticsHandler(options: DiagnosticsOptions = {}) {
       host,
       devices,
       sessions: sessionDiagnostics,
-      event_log: readEventLog({ device, limit: 100 }),
+      event_log: events({ device, limit: 100 }),
     });
   };
 
@@ -1535,7 +1538,6 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
   const allowExec = options?.allowExec === true;
   const authToken = resolveAuthToken(options?.authToken);
-  const serveDiagnostics = createDiagnosticsHandler(options?.diagnostics);
   const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
   // A dev server that embeds this middleware never runs the CLI: settle the
   // device set (and refuse a bad SERVE_SIM_DEVICE_SET) here, not mid-request.
@@ -1548,6 +1550,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     events: readEventLog,
     onEvent: subscribeEventLog,
   });
+  const serveDiagnostics = createDiagnosticsHandler(scope.events, options?.diagnostics);
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>

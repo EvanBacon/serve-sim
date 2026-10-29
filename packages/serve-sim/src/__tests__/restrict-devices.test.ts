@@ -37,6 +37,10 @@ beforeAll(async () => {
       restrictToDevices: [SERVED],
       // Every well-formed udid counts as booted, so only the restriction refuses.
       isKnownDevice: async () => true,
+      diagnostics: {
+        sources: { host: async () => ({}), device: async (udid) => ({ udid }), sessions: async () => [] },
+        cacheTtlMs: 0,
+      },
     }),
   });
   port = preview.port;
@@ -204,6 +208,8 @@ describe("restrictToDevices", () => {
     expect(devicesIn(log.events)).toEqual([SERVED, null]);
     const stream = await firstEvent("/api/event-log/events");
     expect(devicesIn(stream.events)).toEqual([SERVED, null]);
+    const diagnostics = JSON.parse((await send("/api/diagnostics")).body) as { event_log: Array<{ device?: string }> };
+    expect(devicesIn(diagnostics.event_log)).toEqual([SERVED, null]);
     clearEventLogForTests();
   });
 
@@ -281,10 +287,13 @@ describe("deviceScope", () => {
     // simulator in a restricted preview.
     const source = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf-8");
     const body = source.slice(source.indexOf("export function simMiddleware("));
-    for (const reader of [
-      "readServeSimStates(", "listAllSimulators(", "getBootedUdids(", "isBooted(", "readEventLog(", "subscribeEventLog(",
-    ]) {
+    for (const reader of ["readServeSimStates(", "listAllSimulators(", "getBootedUdids(", "isBooted("]) {
       expect({ reader, called: body.includes(reader) }).toEqual({ reader, called: false });
+    }
+    // The diagnostics bundle sits outside simMiddleware, so the event log is
+    // checked across the whole file.
+    for (const reader of ["readEventLog(", "subscribeEventLog("]) {
+      expect({ reader, called: source.includes(reader) }).toEqual({ reader, called: false });
     }
   });
 });
