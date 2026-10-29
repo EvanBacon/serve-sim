@@ -25,6 +25,17 @@ export function findBootedDevice(): string | null {
   return null;
 }
 
+/** Whether the selected device set lists `udid`. */
+export function isInDeviceSet(udid: string): boolean {
+  try {
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
+    const data = JSON.parse(output) as { devices: Record<string, Array<{ udid: string }>> };
+    return Object.values(data.devices).some((devices) => devices.some((device) => device.udid === udid));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve a device name or UDID to a UDID. A UDID is returned as-is; a name is
  * matched case-insensitively against `simctl list devices`. Exits the process

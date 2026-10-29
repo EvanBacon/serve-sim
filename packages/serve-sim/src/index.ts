@@ -20,7 +20,7 @@ import {
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
-import { findBootedDevice, resolveDevice } from "./device";
+import { findBootedDevice, isInDeviceSet, resolveDevice } from "./device";
 import {
   authTokenFingerprint,
   classifyStaleState,
@@ -1851,6 +1851,12 @@ Examples:
   const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
   if (!udid) {
     console.error("No booted simulator. Boot one or pass -d <udid|name>.");
+    process.exit(1);
+  }
+  // The camera helper is keyed by UDID alone, so a UDID from another set
+  // would switch that set's camera before `simctl launch` failed here.
+  if (resolveDeviceSet() && !isInDeviceSet(udid)) {
+    console.error(`${udid} is not in the selected device set.`);
     process.exit(1);
   }
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { eventLogEventForCommand } from "../event-log";
@@ -292,6 +292,32 @@ describe("serve-sim --device-set", () => {
         spawnSync("bun", [cli, "--device-set", set, "--list", udid], { encoding: "utf8", env: { ...process.env, TMPDIR: scratch } });
       expect(JSON.parse(list(scratch).stdout)).toEqual({ running: false, device: udid });
       expect(JSON.parse(list(other).stdout).running).toBe(true);
+    });
+  });
+
+  test("camera refuses a UDID its device set does not list, before any helper", () => {
+    const udid = "CCCCCCCC-0000-0000-0000-000000000003";
+    withSet((scratch) => {
+      // An xcrun whose set lists `listed`; --file names no file, so a camera
+      // that gets past the check stops before any helper.
+      const camera = (listed: string[]) => {
+        const bin = join(scratch, "bin");
+        mkdirSync(bin, { recursive: true });
+        const devices = { devices: { "com.apple.CoreSimulator.SimRuntime.iOS-27-0": listed.map((u) => ({ udid: u, name: "x", state: "Booted" })) } };
+        writeFileSync(join(bin, "xcrun"), `#!/bin/sh\necho '${JSON.stringify(devices)}'\n`);
+        chmodSync(join(bin, "xcrun"), 0o755);
+        return spawnSync(
+          "bun",
+          [cli, "--device-set", scratch, "camera", "com.example.app", "-d", udid, "--file", join(scratch, "missing.png")],
+          { encoding: "utf8", env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}` } },
+        );
+      };
+      const refused = camera([]);
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain(`${udid} is not in the selected device set`);
+      const listed = camera([udid]);
+      expect(listed.status).toBe(1);
+      expect(listed.stderr).not.toContain("is not in the selected device set");
     });
   });
 
