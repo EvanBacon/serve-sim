@@ -177,6 +177,7 @@ describe("restrictToDevices", () => {
       expect({ path, status: refused.status }).toEqual({ path, status: 404 });
       expect(refused.body).toContain("is not served by this preview");
     }
+    expect(JSON.parse((await send("/api?device=")).body).error).toBe("An empty device is not served by this preview");
     const helper = await upgradeAnswer(`/helper/${OTHER}/ws`);
     expect(helper).toStartWith("HTTP/1.1 404 ");
     expect(helper).toContain(`${OTHER} is not served by this preview`);

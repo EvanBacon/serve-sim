@@ -1580,7 +1580,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (refused === undefined) return null;
     return refused === EVERY_SIMULATOR
       ? "DevTools are off in a preview with --restrict-devices"
-      : `${refused} is not served by this preview`;
+      : `${refused === "" ? "An empty device" : refused} is not served by this preview`;
   };
   // A remote browser opens the share link `<preview>/#token=<auth token>`.
   // The fragment never reaches the server; the page's auth bootstrap (served
