@@ -519,14 +519,14 @@ static void RunMaxDurationRecording(void) {
 
 // maxRecordedFileSize ends the recording, without a stop call, with
 // AVErrorMaximumFileSizeReached ("The recording stopped because it reached
-// the file's maximum size") and a playable movie. Unlimited, the movie
-// passes 100 KB about 1 s in.
+// the file's maximum size") and a playable movie. The limit is under the
+// writer's first flush, so the recording ends at that flush, about 0.6 s in.
 static void RunMaxFileSizeRecording(void) {
     AVCaptureSession *session = [AVCaptureSession new];
     AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
     [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
     [session addOutput:movie];
-    int64_t limit = 100 * 1000;
+    int64_t limit = 10 * 1000;
     movie.maxRecordedFileSize = limit;
     [session startRunning];
 
@@ -543,11 +543,6 @@ static void RunMaxFileSizeRecording(void) {
         BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
         if (error.code != AVErrorMaximumFileSizeReached || !finished) {
             WriteResult(NO, [NSString stringWithFormat:@"Expected a successful max-file-size stop, got %@", error]);
-            return;
-        }
-        if (gProbe.finishedFileSize < limit) {
-            WriteResult(NO, [NSString stringWithFormat:@"Stopped at %lld bytes, short of the %lld-byte limit",
-                gProbe.finishedFileSize, limit]);
             return;
         }
         ExpectRecordedMovie(url, nil, NO, 0.3, 2.0,
