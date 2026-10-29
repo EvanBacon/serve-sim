@@ -6,17 +6,17 @@ import type { ServeSimDeviceState } from "./state";
  * What DevTools reach: inspect-webkit lists every booted simulator's web
  * views and cannot tell whose a target is, so it acts on all of them at once.
  */
-export const EVERY_SIMULATOR = Symbol("every simulator");
+const EVERY_SIMULATOR = Symbol("every simulator");
 
 /** A simulator UDID a request names, or every simulator at once. */
-export type DeviceTarget = string | typeof EVERY_SIMULATOR;
+type DeviceTarget = string | typeof EVERY_SIMULATOR;
 
 /**
  * What a request names, parsed once by the middleware: the simulators in its
  * URL (`?device=` and a helper route's own), whether it reaches DevTools,
  * and its JSON body, whose `udid` and `device` fields name simulators too.
  */
-export interface DeviceRequest {
+interface DeviceRequest {
   devices: readonly string[];
   devtools: boolean;
   body: unknown;
@@ -26,11 +26,12 @@ export interface DeviceRequest {
  * The simulators a preview serves (`--restrict-devices`). The middleware
  * reads states, simulators and the event log only through it, and `check`s
  * each request once, before any route runs, against everything it names in
- * its URL or body, so a route added later is restricted without opting in.
- * With no restriction it allows everything.
+ * its URL or body, so a route added later that names simulators the same
+ * ways is restricted without opting in. With no restriction it allows
+ * everything.
  */
 export interface DeviceScope<Simulator> {
-  allows(target: DeviceTarget): boolean;
+  allows(udid: string): boolean;
   /** Why the scope refuses `request`, or null when it serves everything it names. */
   check(request: DeviceRequest): string | null;
   states(): Promise<ServeSimDeviceState[]>;
@@ -57,12 +58,12 @@ export function deviceScope<Simulator extends { udid: string }>(
     return { ...read, allows: () => true, check: () => null, states: () => read.states(() => true) };
   }
   const served = new Set(restrictToDevices.map((udid) => udid.toUpperCase()));
-  const allows = (target: DeviceTarget) => target !== EVERY_SIMULATOR && served.has(target.toUpperCase());
+  const allows = (udid: string) => served.has(udid.toUpperCase());
   const logged = (entry: { device?: string }) => entry.device === undefined || allows(entry.device);
   return {
     allows,
     check: (request) => {
-      const refused = requestTargets(request).find((target) => !allows(target));
+      const refused = requestTargets(request).find((target) => target === EVERY_SIMULATOR || !allows(target));
       if (refused === undefined) return null;
       return refused === EVERY_SIMULATOR
         ? "DevTools are off in a preview with --restrict-devices"
