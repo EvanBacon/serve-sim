@@ -42,7 +42,8 @@ import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
-import { hostDeviceScope, type DeviceScope } from "./device-scope";
+import { hostDeviceScope, notServed, type DeviceScope } from "./device-scope";
+import { jsonValue, requestContext, requestPathname, type RequestContext } from "./request-context";
 import { forgetBootedSimulators } from "./device-sources";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
@@ -125,8 +126,11 @@ type CdpHttpListEntry = {
 
 type CdpHttpVersion = { Browser?: string };
 
-/** An owned POST's body, read once before any route runs. */
-type RequestBody = { kind: "none" } | { kind: "json"; value: unknown } | { kind: "malformed" };
+type ShutdownRequestBody = { udid?: string };
+type StartRequestBody = { udid?: string };
+type ReleaseRequestBody = { targetId?: string };
+type HighlightRequestBody = { targetId?: string; on?: boolean };
+type ExecRequestBody = { command?: string };
 
 /** Re-exported alias for the canonical device-state record in `./state`. */
 export type ServeSimState = ServeSimDeviceState;
@@ -138,13 +142,6 @@ const axStreamerCache = createAxStreamerCache();
 // the partial line is dropped rather than retained indefinitely.
 const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
 
-/**
- * Owned POST bodies carry a UDID, a DevTools target or a bundle id; over the
- * cap answers 413, so a runaway POST can't grow memory. Exec's carries a
- * shell command.
- */
-const BODY_LIMIT_BYTES = 4 * 1024;
-const EXEC_BODY_LIMIT_BYTES = 4 * 1024 * 1024;
 
 let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
@@ -288,11 +285,6 @@ export function selectServeSimState(
   return states[0] ?? null;
 }
 
-function queryDevice(rawUrl: string): string | null {
-  const qIndex = rawUrl.indexOf("?");
-  if (qIndex === -1) return null;
-  return new URLSearchParams(rawUrl.slice(qIndex + 1)).get("device");
-}
 
 /**
  * Parse `/grid/api` pagination params. `limit` absent → return the whole list
@@ -399,9 +391,6 @@ export function rewriteStateForRequestHost(
   };
 }
 
-function helperProxyPrefix(base: string): string {
-  return `${base === "/" ? "" : base}/helper`;
-}
 
 function devtoolsProxyPrefix(base: string): string {
   return `${base === "/" ? "" : base}/devtools`;
@@ -416,44 +405,7 @@ function devtoolsProxyTarget(rawUrl: string, prefix: string): { upstreamPath: st
   return { upstreamPath: `/devtools${suffix}${parsed.search}` };
 }
 
-/** Pathname the routers already match on (dot-segments / `//host` collapsed). */
-function requestPathname(rawUrl: string): string {
-  try {
-    return new URL(rawUrl || "/", "http://serve-sim.local").pathname;
-  } catch {
-    const q = rawUrl.indexOf("?");
-    return q === -1 ? rawUrl || "/" : rawUrl.slice(0, q) || "/";
-  }
-}
 
-function helperProxyTarget(rawUrl: string, prefix: string): { device: string | null; upstreamPath: string } | null {
-  const parsed = new URL(rawUrl, "http://serve-sim.local");
-  if (parsed.pathname !== prefix && !parsed.pathname.startsWith(`${prefix}/`)) {
-    return null;
-  }
-  const rawSuffix = parsed.pathname.slice(prefix.length);
-  const segments = rawSuffix.replace(/^\/+/, "").split("/").filter(Boolean);
-  const directHelperEndpoints = new Set([
-    "ax",
-    "config",
-    "foreground",
-    "health",
-    "recording",
-    "stream.avcc",
-    "stream.mjpeg",
-    "stream.3d.mjpeg",
-    "ws",
-  ]);
-  let device = parsed.searchParams.get("device");
-  let upstreamSegments = segments;
-  if (segments[0] && !directHelperEndpoints.has(segments[0])) {
-    device = decodeURIComponent(segments[0]);
-    upstreamSegments = segments.slice(1);
-  }
-  const suffix = upstreamSegments.length > 0 ? `/${upstreamSegments.join("/")}` : "/";
-  parsed.searchParams.delete("device");
-  return { device, upstreamPath: `${suffix}${parsed.search}` };
-}
 
 const WS_ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -1335,50 +1287,6 @@ function rejectUpgrade(socket: Socket, status: number, message: string): void {
   }
 }
 
-/**
- * Read a POST body as JSON, counting raw bytes so multibyte UTF-8 can't slip
- * past `limitBytes`; past it, stop buffering and answer "too-large".
- */
-function readRequestBody(req: SimReq, limitBytes: number): Promise<RequestBody | { kind: "too-large" }> {
-  return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    req.on("data", (chunk: Buffer | string) => {
-      if (bytes > limitBytes) return;
-      const data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-      bytes += data.length;
-      if (bytes > limitBytes) {
-        resolve({ kind: "too-large" });
-        return;
-      }
-      chunks.push(data);
-    });
-    req.on("end", () => {
-      if (bytes > limitBytes) return;
-      if (bytes === 0) return resolve({ kind: "none" });
-      try {
-        resolve({ kind: "json", value: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
-      } catch {
-        resolve({ kind: "malformed" });
-      }
-    });
-  });
-}
-
-/** A JSON body's fields; none for an absent, malformed or non-object body. */
-function bodyFields(body: RequestBody): Partial<Record<string, unknown>> {
-  if (body.kind !== "json" || typeof body.value !== "object" || body.value === null) return {};
-  return { ...body.value };
-}
-
-/** The simulator a grid request's `{ udid }` names, or null when it names none. */
-function bodyUdid(body: RequestBody): string | null {
-  const { udid } = bodyFields(body);
-  return typeof udid === "string" && /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)
-    ? udid
-    : null;
-}
-
 function isJsonContentType(value: string | undefined): boolean {
   if (!value) return false;
   // `application/json; charset=utf-8` etc. — only the media type matters.
@@ -1396,7 +1304,6 @@ function isJsonContentType(value: string | undefined): boolean {
  */
 export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
-  const helperPrefix = helperProxyPrefix(base);
   const devtoolsPrefix = devtoolsProxyPrefix(base);
   const proxyHelpers = options?.proxyHelpers ?? true;
   const getInspectWebKitBridge = options?.inspectWebKitBridge ?? ensureInspectWebKitBridge;
@@ -1418,16 +1325,6 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
     base === "" || pathname === base || pathname.startsWith(base + "/");
-  // What an owned request's URL names, worked out once for both the scope
-  // check and dispatch: the helper route and the device it acts on (its own,
-  // else `?device=`, else the pinned one), and the simulators the URL names.
-  const routeUrl = (rawUrl: string, pathname: string) => {
-    const requested = queryDevice(rawUrl);
-    const helper = helperProxyTarget(rawUrl, helperPrefix);
-    const helperDevice = helper ? helper.device ?? requested ?? options?.device ?? null : null;
-    const devices = [requested, helperDevice].filter((device) => device !== null);
-    return { helper, helperDevice, devices, devtools: pathname.startsWith(`${base}/devtools`) };
-  };
   // A remote browser opens the share link `<preview>/#token=<auth token>`.
   // The fragment never reaches the server; the page's auth bootstrap (served
   // with the 401 below) POSTs it in a header to `exchangePath`, which answers
@@ -1531,8 +1428,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (typeof p.device !== "string" || !/^[0-9A-Za-z-]+$/.test(p.device)) {
       throw new Error("missing or invalid device udid");
     }
-    const refused = scope.check({ devices: [p.device], devtools: false, body: undefined });
-    if (refused) throw new Error(refused);
+    if (!scope.allows(p.device)) throw new Error(notServed(p.device));
     if (p.option === undefined) {
       return { status: await getUiStatus(p.device) };
     }
@@ -1557,19 +1453,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   };
 
   const middleware = (async (req: SimReq, res: SimRes, next?: SimNext) => {
-    const rawUrl: string = req.url ?? "";
-    const qIndex = rawUrl.indexOf("?");
-    const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
     // Same pathname helperProxyTarget / devtoolsProxyTarget match on, so a
     // `/x/../.sim/...` or `//host/.sim/...` request cannot skip the auth gate.
-    const pathname = requestPathname(rawUrl);
-    const requestedDevice = queryDevice(rawUrl);
-    const selectedDevice = requestedDevice ?? options?.device ?? null;
+    // Every route below is under `base`.
+    if (!ownsPath(requestPathname(req.url ?? ""))) return next?.();
+    const request = requestContext(req, { base, device: options?.device });
+    const { method, rawUrl, url, pathname, requestedDevice, selectedDevice } = request;
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
     const trustedLoopback = isTrustedLoopback(req);
-
-    // Every route below is under `base`.
-    if (!ownsPath(pathname)) return next?.();
 
     // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
     // token on every route, including the preview page itself.
@@ -1580,7 +1471,6 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (!trustedLoopback) {
       const access = remoteAccess(req, authToken);
       if (!access.ok) {
-        const method = (req.method ?? "GET").toUpperCase();
         if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
           sendAuthBootstrap(res);
         } else {
@@ -1590,34 +1480,22 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       }
     }
     // State-changing requests from a browser must come from this origin.
-    const method = (req.method ?? "GET").toUpperCase();
     if (method !== "GET" && method !== "HEAD" && originCheck(req) === "cross") {
       res.writeHead(403, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
       return;
     }
-    // Routes read the body from here, so the scope sees every simulator it
-    // names. Exec's larger cap only applies to callers its first gates admit.
-    const execRoute = url === `${base}/exec` || url === `${base}/exec/`;
-    const bodyLimitBytes = execRoute && allowExec && trustedLoopback ? EXEC_BODY_LIMIT_BYTES : BODY_LIMIT_BYTES;
-    const body = method === "POST" ? await readRequestBody(req, bodyLimitBytes) : { kind: "none" as const };
-    if (body.kind === "too-large") {
-      res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
-      res.end(JSON.stringify({ ok: false, error: "Body too large" }));
-      return;
-    }
-    const routed = routeUrl(rawUrl, pathname);
-    const refused = scope.check({ ...routed, body: body.kind === "json" ? body.value : undefined });
+    const refused = await scope.check(request);
     if (refused) {
       res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ ok: false, error: refused }));
       return;
     }
 
-    if (routed.helper) {
+    if (request.helper) {
       // The device's helper endpoints are served from an in-process
       // NativeCapture/NativeHid DeviceSession.
-      if (serveHelperInProcess(req, res, routed.helperDevice, routed.helper.upstreamPath)) return;
+      if (serveHelperInProcess(req, res, request.helperDevice, request.helper.upstreamPath)) return;
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("No serve-sim device");
       return;
@@ -1653,7 +1531,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       }
       try {
         const upstream = await fetch(
-          `https://chrome-devtools-frontend.appspot.com/serve_rev/@${DEVTOOLS_FRONTEND_REV}/${assetPath}${qIndex === -1 ? "" : rawUrl.slice(qIndex)}`,
+          `https://chrome-devtools-frontend.appspot.com/serve_rev/@${DEVTOOLS_FRONTEND_REV}/${assetPath}${request.search}`,
         );
         const headers: Record<string, string> = {
           "Cache-Control": "public, max-age=604800",
@@ -1822,8 +1700,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // pidfile stays until that process is actually gone so `--kill` can
     // still find it.
     if (url === base + "/grid/api/shutdown" && req.method === "POST") {
-      const udid = bodyUdid(body);
-      if (!udid) {
+      const body = await request.body();
+      let udid = "";
+      try { udid = (jsonValue(body) as ShutdownRequestBody).udid ?? ""; } catch {}
+      if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
         return;
@@ -1853,8 +1733,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // Start streaming a device in-process (auto-boots if needed). The preview
     // server serves its /helper routes directly — no spawned helper.
     if (url === base + "/grid/api/start" && req.method === "POST") {
-      const udid = bodyUdid(body);
-      if (!udid) {
+      const body = await request.body();
+      let udid = "";
+      try { udid = (jsonValue(body) as StartRequestBody).udid ?? ""; } catch {}
+      if (!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
         return;
@@ -1928,11 +1810,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // sit on a WIR slot when the picker is dismissed (or the tab is closed).
     // Optional body { targetId } releases just one; empty body releases all.
     if (url === base + "/devtools/release" && req.method === "POST") {
+      const body = await request.body();
       try {
-        if (body.kind === "malformed") throw new Error("Malformed JSON body");
-        const { targetId } = bodyFields(body);
+        const parsed = (body.kind === "read" && body.text ? jsonValue(body) : {}) as ReleaseRequestBody;
         const bridge = await getInspectWebKitBridge();
-        bridge.releaseHighlight?.(typeof targetId === "string" ? targetId : undefined);
+        bridge.releaseHighlight?.(parsed.targetId);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end("{}");
       } catch (err) {
@@ -1948,10 +1830,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // simulator the way Safari's Develop menu hover does. Body shape:
     // { targetId: string, on: boolean }.
     if (url === base + "/devtools/highlight" && req.method === "POST") {
+      const body = await request.body();
       try {
-        if (body.kind === "malformed") throw new Error("Malformed JSON body");
-        const { targetId, on } = bodyFields(body);
-        if (typeof targetId !== "string" || !targetId) {
+        const { targetId, on } = (body.kind === "read" && body.text ? jsonValue(body) : {}) as HighlightRequestBody;
+        if (!targetId) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Missing targetId" }));
           return;
@@ -2227,8 +2109,18 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ stdout: "", stderr: "Unauthorized", exitCode: 1 }));
         return;
       }
-      const { command } = bodyFields(body);
-      if (typeof command !== "string" || !command) {
+      const body = await request.body();
+      if (body.kind === "too-large") {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ stdout: "", stderr: "Payload Too Large", exitCode: 1 }));
+        req.destroy();
+        return;
+      }
+      let command = "";
+      try {
+        command = (jsonValue(body) as ExecRequestBody).command ?? "";
+      } catch {}
+      if (!command) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ stdout: "", stderr: "Missing command", exitCode: 1 }));
         return;
@@ -2260,10 +2152,16 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ sent: false, error: "Missing device" }));
         return;
       }
+      // Over the cap answers 413 (sent: false → client taps R).
+      const body = await request.body();
+      if (body.kind === "too-large") {
+        res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+        res.end(JSON.stringify({ sent: false, error: "Body too large" }));
+        return;
+      }
       try {
-        if (body.kind === "malformed") throw new Error("Malformed JSON body");
-        const { bundleId: rawBundleId } = bodyFields(body);
-        const bundleId = typeof rawBundleId === "string" ? rawBundleId : "";
+        const parsed = (body.text ? jsonValue(body) : {}) as { bundleId?: unknown };
+        const bundleId = typeof parsed.bundleId === "string" ? parsed.bundleId : "";
         let result: MetroReloadResult = { sent: false, reason: "no-metro" };
         if (bundleId && !supportsMetroReload(bundleId)) {
           result = { sent: false, reason: "unsupported-app" };
@@ -2381,16 +2279,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // Not ours — pass through
     if (next) return next();
   }) as SimMiddleware;
-  middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
-    const rawUrl = req.url ?? "";
-    const pathname = requestPathname(rawUrl);
-    const routed = ownsPath(pathname) ? routeUrl(rawUrl, pathname) : null;
-    const devtoolsTarget = routed ? devtoolsProxyTarget(rawUrl, devtoolsPrefix) : null;
-    const refused = routed ? scope.check({ ...routed, body: undefined }) : null;
-    if (refused) {
-      rejectUpgrade(socket, 404, refused);
-      return;
-    }
+  const upgradeOwned = (request: RequestContext, req: SimReq, socket: Socket, head: Buffer) => {
+    const devtoolsTarget = devtoolsProxyTarget(request.rawUrl, devtoolsPrefix);
     if (devtoolsTarget) {
       (async () => {
         try {
@@ -2403,17 +2293,28 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       })();
       return;
     }
-    if (!routed?.helper) {
+    if (!request.helper) {
       socket.destroy();
       return;
     }
-    if (routed.helper.upstreamPath === "/ws") {
+    if (request.helper.upstreamPath === "/ws") {
       // HID input is delivered to the in-process DeviceSession.
-      if (attachHidInProcess(req, socket, head, routed.helperDevice)) return;
+      if (attachHidInProcess(req, socket, head, request.helperDevice)) return;
       socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
       return;
     }
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+  };
+  middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
+    if (!ownsPath(requestPathname(req.url ?? ""))) {
+      socket.destroy();
+      return;
+    }
+    const request = requestContext(req, { base, device: options?.device });
+    void scope.check(request).then((refused) => {
+      if (refused) rejectUpgrade(socket, 404, refused);
+      else upgradeOwned(request, req, socket, head);
+    });
   };
   // WebSocket control channel, off the browser's per-origin HTTP connection
   // pool so multiple preview tabs (each holding MJPEG + SSE streams) can't
