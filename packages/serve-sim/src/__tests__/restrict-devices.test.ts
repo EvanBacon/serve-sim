@@ -6,7 +6,8 @@ import { connect } from "net";
 import { join } from "path";
 import WebSocket from "ws";
 import { EVERY_SIMULATOR, deviceScope } from "../device-scope";
-import { simMiddleware } from "../middleware";
+import { clearEventLogForTests, recordEventLogEvent, type EventLogEntry } from "../event-log";
+import { simMiddleware, type ServeSimState } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
 
 // `restrictToDevices` (`serve-sim --restrict-devices`): a preview on a shared
@@ -85,6 +86,26 @@ function controlRequest(body: Record<string, unknown>): Promise<Record<string, u
       ws.terminate();
       resolve(message);
     });
+  });
+}
+
+/** The first `data:` frame of the SSE stream at `path`. */
+function firstEvent(path: string): Promise<{ events: Array<{ device?: string }> }> {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, path }, (res) => {
+      let text = "";
+      res.setEncoding("utf-8");
+      res.on("data", (chunk: string) => {
+        text += chunk;
+        const frame = /^data: (.*)$/m.exec(text);
+        if (frame) {
+          req.destroy();
+          resolve(JSON.parse(frame[1]!));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.end();
   });
 }
 
@@ -173,6 +194,19 @@ describe("restrictToDevices", () => {
     expect(String(setting.error)).toContain(`${OTHER} is not served by this preview`);
   });
 
+  test("logs no events for another simulator", async () => {
+    clearEventLogForTests();
+    for (const device of [SERVED, OTHER, undefined]) {
+      recordEventLogEvent({ device, source: "exec", kind: "command", summary: `on ${device ?? "the host"}` });
+    }
+    const devicesIn = (events: Array<{ device?: string }>) => events.map((event) => event.device ?? null);
+    const log = JSON.parse((await send("/api/event-log")).body) as { events: Array<{ device?: string }> };
+    expect(devicesIn(log.events)).toEqual([SERVED, null]);
+    const stream = await firstEvent("/api/event-log/events");
+    expect(devicesIn(stream.events)).toEqual([SERVED, null]);
+    clearEventLogForTests();
+  });
+
   test("still serves its own simulator", async () => {
     const api = await send(`/api?device=${SERVED}`);
     expect(api.status).toBe(200);
@@ -204,34 +238,52 @@ describe("serve-sim --restrict-devices", () => {
 });
 
 describe("deviceScope", () => {
+  const state = (device: string): ServeSimState => ({
+    pid: 1, port: 1, device, url: "", streamUrl: "", wsUrl: "",
+  });
+  const entry = (device: string | undefined): EventLogEntry => ({
+    id: 1, timestamp: "", source: "exec", kind: "command", msg: "", summary: "", device,
+  });
   const read = {
-    states: async () => [{ device: SERVED }, { device: OTHER }],
+    states: async () => [state(SERVED), state(OTHER)],
     simulators: async () => [{ udid: SERVED }, { udid: OTHER }],
     isKnown: async () => true,
+    events: () => [entry(SERVED), entry(OTHER), entry(undefined)],
+    onEvent: (subscriber: (event: EventLogEntry) => void) => {
+      for (const device of [SERVED, OTHER, undefined]) subscriber(entry(device));
+      return () => {};
+    },
   };
 
   test("a route that reads through a restricted scope sees only the served simulators", async () => {
     const scope = deviceScope([SERVED.toLowerCase()], read);
-    expect(await scope.states()).toEqual([{ device: SERVED }]);
+    expect(await scope.states()).toEqual([state(SERVED)]);
     expect(await scope.simulators()).toEqual([{ udid: SERVED }]);
     expect(await scope.isKnown(SERVED)).toBe(true);
     expect(await scope.isKnown(OTHER)).toBe(false);
     expect([scope.allows(SERVED), scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, false, false]);
+    expect(scope.events().map((event) => event.device)).toEqual([SERVED, undefined]);
+    const heard: Array<string | undefined> = [];
+    scope.onEvent((event) => heard.push(event.device));
+    expect(heard).toEqual([SERVED, undefined]);
   });
 
   test("an unrestricted scope allows everything", async () => {
     const scope = deviceScope(undefined, read);
     expect(await scope.states()).toHaveLength(2);
     expect(await scope.simulators()).toHaveLength(2);
+    expect(scope.events()).toHaveLength(3);
     expect([scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, true]);
   });
 
-  test("simMiddleware reads simulators only through its scope", () => {
+  test("simMiddleware reads simulators and events only through its scope", () => {
     // A route that called one of these itself would list or drive every
     // simulator in a restricted preview.
     const source = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf-8");
     const body = source.slice(source.indexOf("export function simMiddleware("));
-    for (const reader of ["readServeSimStates(", "listAllSimulators(", "getBootedUdids(", "isBooted("]) {
+    for (const reader of [
+      "readServeSimStates(", "listAllSimulators(", "getBootedUdids(", "isBooted(", "readEventLog(", "subscribeEventLog(",
+    ]) {
       expect({ reader, called: body.includes(reader) }).toEqual({ reader, called: false });
     }
   });
