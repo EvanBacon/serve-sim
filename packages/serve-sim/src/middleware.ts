@@ -1410,8 +1410,8 @@ export interface SimMiddlewareOptions {
    * settings) refuses any other, so a preview on a shared Mac cannot boot,
    * shut down, stream or drive a simulator someone else is using. DevTools
    * are off, because inspect-webkit cannot tell whose simulator a web view
-   * is on. The host shell (`allowExec`) is not restricted. Default: every
-   * simulator in the device set.
+   * is on. `allowExec` is refused with it, because the host shell reaches
+   * every simulator. Default: every simulator in the device set.
    */
   restrictToDevices?: readonly string[];
   /**
@@ -1541,6 +1541,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // local process that was handed it out of band (the CLI's token file) has it.
   const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
   const allowExec = options?.allowExec === true;
+  if (allowExec && options?.restrictToDevices) {
+    throw new Error("restrictToDevices cannot be combined with allowExec: the host shell reaches every simulator");
+  }
   const authToken = resolveAuthToken(options?.authToken);
   const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
   // A dev server that embeds this middleware never runs the CLI: settle the

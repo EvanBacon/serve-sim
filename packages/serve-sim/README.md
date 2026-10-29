@@ -233,7 +233,7 @@ Tools that keep simulators in a CoreSimulator device set of their own (device po
 
 ### Shared Macs (`--restrict-devices`)
 
-On a Mac whose simulators other people or agents use, `--restrict-devices` keeps a preview to the simulators named on its command line: the devices pane lists only them, every HTTP route and helper WebSocket that names a device (`?device=`, the helper stream and input, grid start and shutdown) answers `404` for any other, host actions and simulator settings refuse it, and the event log leaves it out. DevTools are off in such a preview, because inspect-webkit lists every simulator's web views without saying whose they are. It limits what the preview's page and API reach, not the host shell (`--allow-exec`), the CLI's own `-l`, `-k` and subcommands, or the toolbar library's shell commands.
+On a Mac whose simulators other people or agents use, `--restrict-devices` keeps a preview to the simulators named on its command line: the devices pane lists only them, every HTTP route and helper WebSocket that names a device (`?device=`, the helper stream and input, grid start and shutdown) answers `404` for any other, host actions and simulator settings refuse it, and the event log leaves it out. DevTools are off in such a preview, because inspect-webkit lists every simulator's web views without saying whose they are. `--allow-exec` is refused with it, because the host shell reaches every simulator. It limits what the preview's page and API reach, not the CLI's own `-l`, `-k` and subcommands, or the toolbar library's shell commands.
 
 ### Camera
 

@@ -2274,6 +2274,10 @@ Examples:
       console.error("--restrict-devices applies to the preview server; drop --detach and --no-preview.");
       process.exit(1);
     }
+    if (opts.restrictDevices && opts.allowExec) {
+      console.error("--restrict-devices cannot be combined with --allow-exec: the host shell reaches every simulator.");
+      process.exit(1);
+    }
     if (opts.restrictDevices && devices.length === 0) {
       console.error("--restrict-devices serves the simulators named on the command line; name at least one.");
       process.exit(1);
