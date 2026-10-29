@@ -57,6 +57,7 @@ function existingDirectory(value: string, source: string): string {
  * so does Xcode's default folder named explicitly.
  */
 export function sameDeviceSet(a: string | undefined, b: string | undefined): boolean {
+  if (a === b) return true;
   const real = (path: string) => {
     try {
       return realpathSync(path);
