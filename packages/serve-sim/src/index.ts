@@ -125,12 +125,20 @@ function readState(udid?: string): ServerState | null {
   if (udid) {
     return readStateFile(stateFileForDevice(udid));
   }
-  // No udid: return the first live device state
+  // No udid: the first live preview of this device set.
   for (const file of listStateFiles()) {
     const state = readStateFile(file);
-    if (state) return state;
+    if (state && inThisDeviceSet(state)) return state;
   }
   return null;
+}
+
+/**
+ * Previews in every device set share the state folder; a command that names
+ * no UDID acts only on a preview of its own set.
+ */
+function inThisDeviceSet(state: ServerState): boolean {
+  return sameDeviceSet(state.deviceSet, resolveDeviceSet());
 }
 
 /**
@@ -1956,7 +1964,7 @@ Examples:
 /** Resolve which simulators to stream, without spawning anything. */
 function resolveTargetDevices(devices: string[]): string[] {
   if (devices.length > 0) return devices.map(resolveDevice);
-  const existing = readAllStates();
+  const existing = readAllStates().filter(inThisDeviceSet);
   if (existing.length > 0) return [existing[0]!.device];
   const booted = findBootedDevice();
   if (booted) return [booted];
@@ -1982,7 +1990,7 @@ async function serve(
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
   const targetDevices = resolveTargetDevices(devices);
-  if (devices.length === 0 && readAllStates().length === 0) {
+  if (devices.length === 0 && !readAllStates().some(inThisDeviceSet)) {
     console.log("Starting simulator stream...");
   }
   for (const udid of targetDevices) await ensureBooted(udid);

@@ -248,16 +248,36 @@ describe("serve-sim --device-set", () => {
   });
 
   test("takes a valid --device-set over a missing SERVE_SIM_DEVICE_SET", () => {
-    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
-    try {
+    withSet((dir) => {
+      // TMPDIR holds the state folder, so --list reads none of this Mac's previews.
       const result = spawnSync("bun", [cli, "--device-set", dir, "--list"], {
         encoding: "utf8",
-        env: { ...process.env, [DEVICE_SET_ENV]: join(tmpdir(), "serve-sim-no-such-set") },
+        env: { ...process.env, TMPDIR: dir, [DEVICE_SET_ENV]: MISSING_SET },
       });
       expect(result.stderr).not.toContain(DEVICE_SET_ENV);
       expect(result.status).toBe(0);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
+  });
+
+  test("drives only a preview of its own device set", () => {
+    withSet((scratch) => {
+      const stateDir = join(scratch, "serve-sim");
+      mkdirSync(stateDir);
+      const other = join(scratch, "other-set");
+      mkdirSync(other);
+      writeFileSync(
+        join(stateDir, "server-THEIRS.json"),
+        JSON.stringify({
+          pid: process.pid, port: 1, device: "THEIRS", deviceSet: other,
+          url: "http://127.0.0.1:1", streamUrl: "", wsUrl: "ws://127.0.0.1:1/helper/THEIRS/ws",
+        }),
+      );
+      const result = spawnSync("bun", [cli, "--device-set", scratch, "tap", "0.5", "0.5"], {
+        encoding: "utf8",
+        env: { ...process.env, TMPDIR: scratch },
+      });
+      expect(result.stderr).toContain("No serve-sim server running");
+      expect(result.status).toBe(1);
+    });
   });
 });
