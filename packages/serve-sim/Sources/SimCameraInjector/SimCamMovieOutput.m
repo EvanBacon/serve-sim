@@ -115,6 +115,14 @@ void SimCamFakeMovieOutputSessionStopped(AVCaptureOutput *output) {
          videoSettings:fake.videoSettings
            maxDuration:self.maxRecordedDuration];
     fake.recorder = recorder;
+    // AVError.h's AVErrorSessionNotRunning: "The recording couldn't start
+    // because the session isn't running."
+    if (!SimCamFakeSessionForOutput(self).isRunning) {
+        [recorder stopWithError:[NSError errorWithDomain:AVFoundationErrorDomain
+                                                    code:AVErrorSessionNotRunning
+                                                userInfo:nil]];
+        return;
+    }
     SimCamMarkCameraInUse();
     [[SimCamRegistry shared] startPumpingIfNeeded];
     [recorder start];

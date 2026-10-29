@@ -322,7 +322,7 @@ static void SimCamRefreshAttachedOutputInputsForSession(AVCaptureSession *s) {
         SimCamMarkOutputAttachedToFakeSession(s, output);
     }
 }
-static AVCaptureSession *SimCamFakeSessionForOutput(AVCaptureOutput *output) {
+AVCaptureSession *SimCamFakeSessionForOutput(AVCaptureOutput *output) {
     SimCamWeakRef *ref = objc_getAssociatedObject(output, &kSimCamOutputSessionKey);
     return ref.target;
 }

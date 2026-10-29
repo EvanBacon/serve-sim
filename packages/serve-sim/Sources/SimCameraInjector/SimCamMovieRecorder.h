@@ -14,7 +14,8 @@
 - (void)start;
 - (void)stop;
 // Ends the recording as `stop` does, with `error` for the delegate once the
-// file is finished.
+// file is finished. Before `start`, the recording fails with `error` and
+// writes nothing.
 - (void)stopWithError:(NSError *)error;
 - (void)pause;
 - (void)resume;

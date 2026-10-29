@@ -733,6 +733,40 @@ static void RunStoppedSessionRecording(void) {
     });
 }
 
+// A movie output on a stopped session does not record: the delegate hears
+// AVErrorSessionNotRunning ("The recording couldn't start because the
+// session isn't running") and nothing is written.
+static void RunNotRunningRecording(void) {
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    AVCaptureSession *session = RunningMovieSession(movie);
+    [session stopRunning];
+
+    NSURL *url = RecordingURL(@"not-running.mov");
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        WriteResult(NO, @"The recording started on a stopped session");
+    };
+    gProbe.onFinish = ^(NSURL *finishedURL, NSError *error) {
+        (void)finishedURL;
+        (void)session;
+        BOOL failed = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@NO];
+        if (error.code != AVErrorSessionNotRunning || !failed) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected AVErrorSessionNotRunning, got %@", error]);
+            return;
+        }
+        if ([[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+            WriteResult(NO, @"A file was written for a recording that never started");
+            return;
+        }
+        if (movie.isRecording) {
+            WriteResult(NO, @"isRecording is YES on a stopped session");
+            return;
+        }
+        WriteResult(YES, @"Recording on a stopped session failed with AVErrorSessionNotRunning and wrote nothing");
+    };
+    [movie startRecordingToOutputFileURL:url recordingDelegate:gProbe];
+}
+
 // AVFoundation ignores settings given for another output's connection and
 // throws when asked for them ("Invalid connection passed"), so one movie
 // output never takes the settings meant for another's.
@@ -813,6 +847,7 @@ static void RunForeignConnectionSettings(void) {
             else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();
             else if ([mode isEqualToString:@"stopped-session-recording"]) RunStoppedSessionRecording();
             else if ([mode isEqualToString:@"removed-camera-recording"]) RunRemovedCameraRecording();
+            else if ([mode isEqualToString:@"not-running-recording"]) RunNotRunningRecording();
             else if ([mode isEqualToString:@"foreign-connection-settings"]) RunForeignConnectionSettings();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
