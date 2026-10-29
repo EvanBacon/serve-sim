@@ -153,8 +153,8 @@ Options:
                       default (simctl --set). Also read from
                       SERVE_SIM_DEVICE_SET
       --restrict-devices
-                      Serve only the targeted simulators; refuse to boot,
-                      shut down, stream or drive any other
+                      Serve only the simulators named on the command line;
+                      refuse to boot, shut down, stream or drive any other
       --list [device] List running streams
       --kill [device] Kill running stream(s)
 
@@ -228,9 +228,9 @@ The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control ch
 
 ### Device sets and shared Macs (`--device-set`, `--restrict-devices`)
 
-Tools that keep simulators in a CoreSimulator device set of their own (device pools, CI runners) put them where `simctl list` and Simulator.app never look. `--device-set <path>` (or `SERVE_SIM_DEVICE_SET`) points serve-sim at that set: every `simctl` call gets `--set <path>`, the native capture, input and accessibility bridges look the device up in that set, and per-simulator data (permissions) is read from it. Simulator.app is not opened for such a set, since it only shows Xcode's default one. Subcommands such as `serve-sim camera` honour `SERVE_SIM_DEVICE_SET`.
+Tools that keep simulators in a CoreSimulator device set of their own (device pools, CI runners) put them where `simctl list` and Simulator.app never look. `--device-set <path>` (or `SERVE_SIM_DEVICE_SET`, an existing directory) points serve-sim at that set: every `simctl` call gets `--set <path>`, the native capture, input and accessibility bridges look the device up in that set, and per-simulator data (permissions) is read from it. Simulator.app is not opened for such a set, since it only shows Xcode's default one. Subcommands such as `serve-sim camera` honour `SERVE_SIM_DEVICE_SET`.
 
-On a Mac whose simulators other people or agents use, `--restrict-devices` keeps a preview to the simulators its command targets: the devices pane lists only them, and every route that names a device (`?device=`, the helper stream and input, grid start and shutdown, host actions, simulator settings) answers `404` for any other. It does not restrict the host shell (`--allow-exec`).
+On a Mac whose simulators other people or agents use, `--restrict-devices` keeps a preview to the simulators named on its command line: the devices pane lists only them, and every route that names a device (`?device=`, the helper stream and input, grid start and shutdown, host actions, simulator settings) answers `404` for any other. DevTools are off in such a preview, because inspect-webkit lists every simulator's web views without saying whose they are. It does not restrict the host shell (`--allow-exec`), and the toolbar's library shell commands (`homeButtonCommand`, the screenshot button) still name no device set; the preview page uses host actions instead.
 
 ### Camera
 

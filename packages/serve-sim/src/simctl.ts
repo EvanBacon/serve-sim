@@ -34,6 +34,24 @@ export function parseDeviceSetPath(value: string, cwd: string = process.cwd()): 
   return path;
 }
 
+/**
+ * Give a `SERVE_SIM_DEVICE_SET` from the caller's environment the flag's
+ * checks, resolved in place, so every command and helper reads one absolute
+ * path. Throws when it is not a directory.
+ */
+export function normalizeDeviceSetEnv(env: NodeJS.ProcessEnv = process.env): void {
+  const raw = deviceSetFromEnv(env);
+  if (raw === undefined) {
+    delete env[DEVICE_SET_ENV];
+    return;
+  }
+  try {
+    env[DEVICE_SET_ENV] = parseDeviceSetPath(raw);
+  } catch (error) {
+    throw new Error(`${DEVICE_SET_ENV}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** Hand `--device-set` to everything this process starts; absent leaves the environment alone. */
 export function applyDeviceSetOption(path: string | undefined, env: NodeJS.ProcessEnv = process.env): void {
   if (path !== undefined) env[DEVICE_SET_ENV] = path;

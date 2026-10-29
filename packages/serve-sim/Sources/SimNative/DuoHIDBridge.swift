@@ -35,10 +35,7 @@ final class DuoHIDBridge {
                 let child = Process()
                 let stdin = Pipe(), stdout = Pipe()
                 child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-                child.arguments = DeviceSet.simctlArguments(
-                    ["spawn", udid, executable],
-                    environment: ProcessInfo.processInfo.environment
-                )
+                child.arguments = DeviceSet.simctlArguments(["spawn", udid, executable])
                 child.standardInput = stdin
                 child.standardOutput = stdout
                 child.standardError = FileHandle.standardError

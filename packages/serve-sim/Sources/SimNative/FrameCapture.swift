@@ -593,7 +593,7 @@ actor FrameCapture {
         guard let context = contextClass.perform(sharedSel, with: developerDir, with: nil)?
                 .takeUnretainedValue() as? NSObject else { return nil }
         let deviceSetResult: Unmanaged<AnyObject>?
-        if let path = DeviceSet.path(in: ProcessInfo.processInfo.environment) {
+        if let path = DeviceSet.path() {
             deviceSetResult = context.perform(NSSelectorFromString("deviceSetWithPath:error:"), with: path, with: nil)
         } else {
             deviceSetResult = context.perform(NSSelectorFromString("defaultDeviceSetWithError:"), with: nil)

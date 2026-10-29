@@ -1392,8 +1392,10 @@ export interface SimMiddlewareOptions {
    * every route that names a device (`?device=`, the helper stream and input,
    * grid start/shutdown, host actions, simulator settings) refuses any other,
    * so a preview on a shared Mac cannot boot, shut down, stream or drive a
-   * simulator someone else is using. The host shell (`allowExec`) is not
-   * restricted. Default: every simulator in the device set.
+   * simulator someone else is using. DevTools are off, because inspect-webkit
+   * cannot tell whose simulator a web view is on. The host shell
+   * (`allowExec`) is not restricted. Default: every simulator in the device
+   * set.
    */
   restrictToDevices?: readonly string[];
   /**
@@ -1520,6 +1522,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     ? new Set(options.restrictToDevices.map((udid) => udid.toUpperCase()))
     : null;
   const servesDevice = (udid: string) => servedDevices === null || servedDevices.has(udid.toUpperCase());
+  // Every other preview on this Mac writes its state to the same folder.
+  const readServedStates = async () => (await readServeSimStates()).filter((state) => servesDevice(state.device));
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
@@ -1691,8 +1695,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
         return;
       }
-      if (requestedDevice && !servesDevice(requestedDevice)) {
+      if (requestedDevice !== null && !servesDevice(requestedDevice)) {
         sendDeviceNotServed(res, requestedDevice);
+        return;
+      }
+      // inspect-webkit lists every simulator's web views and cannot tell
+      // whose a target is, so a restricted preview has no DevTools.
+      if (servedDevices !== null && pathname.startsWith(`${base}/devtools`)) {
+        res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: false, error: "DevTools are off in a preview with --restrict-devices" }));
         return;
       }
     }
@@ -1763,7 +1774,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
     // Serve the preview page
     if (url === base || url === base + "/") {
-      const states = await readServeSimStates();
+      const states = await readServedStates();
       const state = selectServeSimState(states, selectedDevice);
       let html = loadHtml();
 
@@ -1828,7 +1839,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
     // Grid JSON: every supported simulator, annotated with running helper info if any.
     if (url === base + "/grid/api") {
-      const states = await readServeSimStates();
+      const states = await readServedStates();
       const helperByUdid = new Map(states.map((s) => [s.device, s] as const));
       const sims = (await listAllSimulators()).filter((d) => servesDevice(d.udid));
       // Order mirrors Xcode's Devices window: the devices the user is actually
@@ -1995,7 +2006,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // /devtools/page/:id on localhost; the preview adds iframe-safe frontend
     // URLs so the browser UI can embed Chrome DevTools.
     if (url === base + "/devtools") {
-      const states = await readServeSimStates();
+      const states = await readServedStates();
       const state = selectServeSimState(states, selectedDevice);
       if (!state) {
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -2096,7 +2107,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
     // JSON API: serve-sim state
     if (url === base + "/api") {
-      const states = await readServeSimStates();
+      const states = await readServedStates();
       const state = selectServeSimState(states, selectedDevice);
       // The web UI polls /api every ~2s, so logging every hit floods the
       // debug stream with identical lines. Only log when the selection
@@ -2194,7 +2205,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // on change instead of re-sending identical JSON on a fixed interval.
     if (url === base + "/api/events") {
       const computeConfig = async (): Promise<string> => {
-        const states = await readServeSimStates();
+        const states = await readServedStates();
         const state = selectServeSimState(states, selectedDevice);
         const remoteState = state ? rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
         return JSON.stringify(
@@ -2284,7 +2295,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
     // SSE: normalized accessibility snapshot stream
     if (url === base + "/ax") {
-      const states = await readServeSimStates();
+      const states = await readServedStates();
       const state = selectServeSimState(states, selectedDevice);
       if (!state) {
         res.writeHead(404);
@@ -2429,7 +2440,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
             // The device lookup runs alongside the Metro probes, inside
             // reloadViaMetro's time budget, so this answers before the
             // client gives up and taps R itself.
-            const name = readServeSimStates().then((states) => {
+            const name = readServedStates().then((states) => {
               const state = selectServeSimState(states, selectedDevice);
               return state ? simulatorName(state.device) : undefined;
             });
@@ -2453,7 +2464,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // log line. Filtering is done here (not in the browser) so the SSE stream
     // stays narrow and the client can listen without rate-limit concerns.
     if (url === base + "/appstate") {
-      const states = await readServeSimStates();
+      const states = await readServedStates();
       const state = selectServeSimState(states, selectedDevice);
       if (!state) {
         res.writeHead(404);
@@ -2546,6 +2557,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const pathname = requestPathname(rawUrl);
     const helperTarget = ownsPath(pathname) ? helperProxyTarget(rawUrl, helperPrefix) : null;
     const devtoolsTarget = ownsPath(pathname) ? devtoolsProxyTarget(rawUrl, devtoolsPrefix) : null;
+    if (devtoolsTarget && servedDevices !== null) {
+      rejectUpgrade(socket, 404, "DevTools are off in a preview with --restrict-devices");
+      return;
+    }
     if (devtoolsTarget) {
       (async () => {
         try {

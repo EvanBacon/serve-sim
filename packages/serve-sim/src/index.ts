@@ -80,6 +80,7 @@ import {
   DEVICE_SET_ENV,
   applyDeviceSetOption,
   deviceSetFromEnv,
+  normalizeDeviceSetEnv,
   parseDeviceSetPath,
   simctlArguments,
   simctlBootStatusArguments,
@@ -2223,9 +2224,10 @@ program
   )
   .option(
     "--restrict-devices",
-    "Serve only the simulators this command targets: the devices pane lists only " +
-      "them, and the preview refuses to boot, shut down, stream or drive any other " +
-      "(for a Mac whose simulators other people or agents use). Preview server only.",
+    "Serve only the simulators named on the command line: the devices pane lists " +
+      "only them, the preview refuses to boot, shut down, stream or drive any other, " +
+      "and DevTools are off (for a Mac whose simulators other people or agents use). " +
+      "Preview server only.",
   )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
@@ -2258,6 +2260,10 @@ Examples:
     applyDeviceSetOption(opts.deviceSet);
     if (opts.restrictDevices && (opts.detach || opts.preview === false)) {
       console.error("--restrict-devices applies to the preview server; drop --detach and --no-preview.");
+      process.exit(1);
+    }
+    if (opts.restrictDevices && devices.length === 0) {
+      console.error("--restrict-devices serves the simulators named on the command line; name at least one.");
       process.exit(1);
     }
     if (opts.list !== undefined) {
@@ -2473,4 +2479,10 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
+try {
+  normalizeDeviceSetEnv();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
 await program.parseAsync(process.argv);

@@ -8,6 +8,7 @@ import {
   DEVICE_SET_ENV,
   applyDeviceSetOption,
   deviceSetFromEnv,
+  normalizeDeviceSetEnv,
   parseDeviceSetPath,
   simctlArguments,
   simctlBootStatusArguments,
@@ -67,6 +68,23 @@ describe("applyDeviceSetOption", () => {
   });
 });
 
+describe("normalizeDeviceSetEnv", () => {
+  test("resolves the environment's set like the flag, and rejects a missing one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
+    try {
+      const env: NodeJS.ProcessEnv = { [DEVICE_SET_ENV]: `${dir}/` };
+      normalizeDeviceSetEnv(env);
+      expect(env[DEVICE_SET_ENV]).toBe(dir);
+      const blank: NodeJS.ProcessEnv = { [DEVICE_SET_ENV]: " " };
+      normalizeDeviceSetEnv(blank);
+      expect(DEVICE_SET_ENV in blank).toBe(false);
+      expect(() => normalizeDeviceSetEnv({ [DEVICE_SET_ENV]: join(dir, "missing") })).toThrow(DEVICE_SET_ENV);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("event log", () => {
   test("reads the verb after a device set", () => {
     const event = eventLogEventForCommand("xcrun simctl --set /pool/devices install UDID /tmp/App.app", { exitCode: 0 });
@@ -90,6 +108,21 @@ describe("serve-sim --device-set", () => {
     const result = spawnSync("bun", [cli, "--device-set", join(tmpdir(), "serve-sim-no-such-set"), "--list"], { encoding: "utf8" });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("--device-set");
+  });
+
+  test("rejects a missing SERVE_SIM_DEVICE_SET before starting anything", () => {
+    const result = spawnSync("bun", [cli, "--list"], {
+      encoding: "utf8",
+      env: { ...process.env, [DEVICE_SET_ENV]: join(tmpdir(), "serve-sim-no-such-set") },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(DEVICE_SET_ENV);
+  });
+
+  test("--restrict-devices needs the simulators it serves named", () => {
+    const result = spawnSync("bun", [cli, "--restrict-devices"], { encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("name at least one");
   });
 
   test("--restrict-devices refuses modes without the preview server", () => {

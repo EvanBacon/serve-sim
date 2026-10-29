@@ -117,20 +117,36 @@ describe("restrictToDevices", () => {
   });
 
   test("matches UDIDs case-insensitively", async () => {
-    const refused = await send("/grid/api/shutdown", { udid: OTHER.toLowerCase() });
-    expect(refused.status).toBe(404);
-    // A served device reaches simctl (which fails for this made-up udid).
-    const reached = await send("/grid/api/shutdown", { udid: SERVED.toLowerCase() });
-    expect(reached.status).not.toBe(404);
+    expect((await send("/grid/api/shutdown", { udid: OTHER.toLowerCase() })).status).toBe(404);
+    expect((await send(`/api?device=${SERVED.toLowerCase()}`)).status).toBe(200);
   });
 
   test("refuses another simulator's stream, input and page routes", async () => {
-    for (const path of [`/helper/${OTHER}/stream.mjpeg`, `/helper/${OTHER}/config`, `/api?device=${OTHER}`, `/?device=${OTHER}`]) {
+    for (const path of [
+      `/helper/${OTHER}/stream.mjpeg`,
+      `/helper/${OTHER}/config`,
+      `/?device=${OTHER}`,
+      `/api?device=${OTHER}`,
+      `/ax?device=${OTHER}`,
+      `/appstate?device=${OTHER}`,
+      `/api/events?device=${OTHER}`,
+      // An empty selection would otherwise fall back to any preview's state.
+      "/api?device=",
+      "/ax?device=",
+    ]) {
       const refused = await send(path);
       expect({ path, status: refused.status }).toEqual({ path, status: 404 });
       expect(refused.body).toContain("is not served by this preview");
     }
     expect(await upgradeStatus(`/helper/${OTHER}/ws`)).toMatch(/^HTTP\/1\.1 404 /);
+  });
+
+  test("has no DevTools, which list every simulator's web views", async () => {
+    for (const path of ["/devtools", "/devtools/release", "/devtools/highlight"]) {
+      const refused = await send(path, path === "/devtools" ? undefined : {});
+      expect({ path, status: refused.status }).toEqual({ path, status: 404 });
+    }
+    expect(await upgradeStatus("/devtools/page/1")).toMatch(/^HTTP\/1\.1 404 /);
   });
 
   test("refuses host actions and simulator settings for another simulator", async () => {
