@@ -140,7 +140,7 @@ type SimctlAllList = {
   devices: Record<string, Array<Omit<SimctlDevice, "runtime">>>;
 };
 
-type GridDeviceRequestBody = { udid?: string };
+type DeviceRequestBody = { udid?: string };
 type ReleaseRequestBody = { targetId?: string };
 type HighlightRequestBody = { targetId?: string; on?: boolean };
 type ExecRequestBody = { command?: string };
@@ -1497,8 +1497,8 @@ function rejectUpgrade(socket: Socket, status: number, message: string): void {
   }
 }
 
-/** The UDID a grid start/shutdown body names, or null when it names none. */
-function readGridDeviceUdid(req: SimReq): Promise<string | null> {
+/** The UDID a JSON request body names (`{ udid }`), or null when it names none. */
+function readBodyDeviceUdid(req: SimReq): Promise<string | null> {
   return new Promise((resolve) => {
     let body = "";
     req.on("data", (chunk: Buffer | string) => {
@@ -1506,7 +1506,7 @@ function readGridDeviceUdid(req: SimReq): Promise<string | null> {
     });
     req.on("end", () => {
       let udid = "";
-      try { udid = (JSON.parse(body) as GridDeviceRequestBody).udid ?? ""; } catch {}
+      try { udid = (JSON.parse(body) as DeviceRequestBody).udid ?? ""; } catch {}
       resolve(/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid) ? udid : null);
     });
   });
@@ -1570,6 +1570,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (helperDevice) targets.push(helperDevice);
     return { helper, helperDevice, targets };
   };
+  // POST routes whose JSON body names the simulator they act on. A new route
+  // that takes a UDID in its body must be listed here, or the scope never
+  // sees that UDID.
+  const bodyDeviceRoutes = new Set([`${base}/grid/api/start`, `${base}/grid/api/shutdown`]);
   // Why the scope refuses a request naming `targets`, or null when it allows it.
   const refusal = (targets: readonly DeviceTarget[]): string | null => {
     const refused = targets.find((target) => !scope.allows(target));
@@ -1718,7 +1722,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
     const trustedLoopback = isTrustedLoopback(req);
     const routed = routeUrl(rawUrl, pathname);
-    let gridDeviceUdid: string | null = null;
+    let bodyDeviceUdid: string | null = null;
 
     if (ownsPath(pathname)) {
       // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
@@ -1746,10 +1750,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
         return;
       }
-      if (req.method === "POST" && (url === base + "/grid/api/start" || url === base + "/grid/api/shutdown")) {
-        gridDeviceUdid = await readGridDeviceUdid(req);
-      }
-      const refused = refusal([...routed.targets, ...(gridDeviceUdid ? [gridDeviceUdid] : [])]);
+      if (req.method === "POST" && bodyDeviceRoutes.has(url)) bodyDeviceUdid = await readBodyDeviceUdid(req);
+      const refused = refusal([...routed.targets, ...(bodyDeviceUdid ? [bodyDeviceUdid] : [])]);
       if (refused) {
         res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ ok: false, error: refused }));
@@ -1968,7 +1970,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // pidfile stays until that process is actually gone so `--kill` can
     // still find it.
     if (url === base + "/grid/api/shutdown" && req.method === "POST") {
-      const udid = gridDeviceUdid;
+      const udid = bodyDeviceUdid;
       if (!udid) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
@@ -1999,7 +2001,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // Start streaming a device in-process (auto-boots if needed). The preview
     // server serves its /helper routes directly — no spawned helper.
     if (url === base + "/grid/api/start" && req.method === "POST") {
-      const udid = gridDeviceUdid;
+      const udid = bodyDeviceUdid;
       if (!udid) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
