@@ -52,7 +52,7 @@ import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
-import { EVERY_SIMULATOR, deviceScope, type DeviceTarget } from "./device-scope";
+import { EVERY_SIMULATOR, deviceScope, type DeviceScope, type DeviceTarget } from "./device-scope";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
@@ -802,16 +802,20 @@ export type DiagnosticsOptions = {
 };
 
 /**
- * Loopback-only, rate-limited, briefly cached `serve-sim doctor` bundle,
- * with the event log as `events` reads it.
+ * Loopback-only, rate-limited, briefly cached `serve-sim doctor` bundle of
+ * the sessions and event log `scope` serves.
  */
-function createDiagnosticsHandler(events: typeof readEventLog, options: DiagnosticsOptions = {}) {
+function createDiagnosticsHandler(
+  scope: Pick<DeviceScope<unknown>, "allows" | "events">,
+  options: DiagnosticsOptions = {},
+) {
   const sources = options.sources ?? defaultDiagnosticsSources;
   const limiter = createRateLimiter({ burst: options.burst ?? 5, refillMs: options.refillMs ?? 2000, now: options.now });
   const cache = createTtlCache<DiagnosticsBundle>(options.cacheTtlMs ?? 2000, options.now);
 
   const collect = async (device: string | null): Promise<DiagnosticsBundle> => {
-    const sessionDiagnostics = await sources.sessions(device);
+    const sessionDiagnostics = (await sources.sessions(device))
+      .filter((session) => scope.allows(String(session.udid)));
     const udids = device ? [device] : sessionDiagnostics.map((session) => String(session.udid));
     const [host, devices] = await Promise.all([
       sources.host(),
@@ -821,7 +825,7 @@ function createDiagnosticsHandler(events: typeof readEventLog, options: Diagnost
       host,
       devices,
       sessions: sessionDiagnostics,
-      event_log: events({ device, limit: 100 }),
+      event_log: scope.events({ device, limit: 100 }),
     });
   };
 
@@ -1550,7 +1554,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     events: readEventLog,
     onEvent: subscribeEventLog,
   });
-  const serveDiagnostics = createDiagnosticsHandler(scope.events, options?.diagnostics);
+  const serveDiagnostics = createDiagnosticsHandler(scope, options?.diagnostics);
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
