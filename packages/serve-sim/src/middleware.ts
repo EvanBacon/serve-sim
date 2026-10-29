@@ -44,8 +44,6 @@ import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { hostDeviceScope, type DeviceScope } from "./device-scope";
 import { forgetBootedSimulators } from "./device-sources";
-
-export { readServeSimStates, simulatorName } from "./device-sources";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
@@ -60,6 +58,8 @@ import {
   tokensEqual,
   type RemoteAccess,
 } from "./request-trust";
+
+export { readServeSimStates, simulatorName } from "./device-sources";
 
 type SimReq = IncomingMessage;
 type SimRes = ServerResponse;
@@ -1596,10 +1596,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
       return;
     }
-    // Routes read the body from here, so the scope sees every simulator it names.
-    const body = method === "POST"
-      ? await readRequestBody(req, url === `${base}/exec` || url === `${base}/exec/` ? EXEC_BODY_LIMIT_BYTES : BODY_LIMIT_BYTES)
-      : { kind: "none" as const };
+    // Routes read the body from here, so the scope sees every simulator it
+    // names. Exec's larger cap only applies to callers its first gates admit.
+    const execRoute = url === `${base}/exec` || url === `${base}/exec/`;
+    const bodyLimitBytes = execRoute && allowExec && trustedLoopback ? EXEC_BODY_LIMIT_BYTES : BODY_LIMIT_BYTES;
+    const body = method === "POST" ? await readRequestBody(req, bodyLimitBytes) : { kind: "none" as const };
     if (body.kind === "too-large") {
       res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
       res.end(JSON.stringify({ ok: false, error: "Body too large" }));
