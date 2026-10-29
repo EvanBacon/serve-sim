@@ -1397,14 +1397,14 @@ export interface SimMiddlewareOptions {
   /** Pin this preview server to a specific simulator UDID. */
   device?: string;
   /**
-   * Serve only these simulator UDIDs. The devices pane lists only them, and
-   * every route that names a device (`?device=`, the helper stream and input,
-   * grid start/shutdown, host actions, simulator settings) refuses any other,
-   * so a preview on a shared Mac cannot boot, shut down, stream or drive a
-   * simulator someone else is using. DevTools are off, because inspect-webkit
-   * cannot tell whose simulator a web view is on. The host shell
-   * (`allowExec`) is not restricted. Default: every simulator in the device
-   * set.
+   * Serve only these simulator UDIDs. The devices pane and the event log
+   * list only them, and every route that names a device (`?device=`, the
+   * helper stream and input, grid start/shutdown, host actions, simulator
+   * settings) refuses any other, so a preview on a shared Mac cannot boot,
+   * shut down, stream or drive a simulator someone else is using. DevTools
+   * are off, because inspect-webkit cannot tell whose simulator a web view
+   * is on. The host shell (`allowExec`) is not restricted. Default: every
+   * simulator in the device set.
    */
   restrictToDevices?: readonly string[];
   /**
