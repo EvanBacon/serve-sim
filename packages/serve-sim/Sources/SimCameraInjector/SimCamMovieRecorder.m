@@ -224,10 +224,12 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
         return;
     }
     [_input markAsFinished];
+    if (!CMTIME_IS_VALID(end) && CMTIME_IS_VALID(_lastFrameTime)) {
+        end = CMTimeAdd(_lastFrameTime, CMTimeMake(1, kSimCamMovieFrameRate));
+    }
     if (CMTIME_IS_VALID(end)) {
         [_writer endSessionAtSourceTime:end];
-    } else if (CMTIME_IS_VALID(_lastFrameTime)) {
-        [_writer endSessionAtSourceTime:CMTimeAdd(_lastFrameTime, CMTimeMake(1, kSimCamMovieFrameRate))];
+        _recordedValue = CMTimeConvertScale(end, kSimCamMovieTimescale, kCMTimeRoundingMethod_Default).value;
     }
     [_writer finishWritingWithCompletionHandler:^{
         dispatch_async(self->_queue, ^{

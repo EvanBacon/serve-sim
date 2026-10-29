@@ -495,6 +495,11 @@ static void RunMaxDurationRecording(void) {
     gProbe = [SimCamRecordingProbe new];
     gProbe.onFinish = ^(NSURL *url, NSError *error) {
         [session stopRunning];
+        double reported = CMTimeGetSeconds(movie.recordedDuration);
+        if (fabs(reported - 0.5) > 0.002) {
+            WriteResult(NO, [NSString stringWithFormat:@"recordedDuration reports %.3f s for a movie cut at 0.5 s", reported]);
+            return;
+        }
         ExpectRecordedMovie(url, error, YES, 0.45, 0.51, @"Max duration");
     };
     [movie startRecordingToOutputFileURL:RecordingURL(@"max-duration.mov") recordingDelegate:gProbe];
