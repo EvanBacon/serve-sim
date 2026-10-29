@@ -29,10 +29,14 @@ static AVCaptureDeviceInput *FakeCameraInput(AVCaptureDevicePosition position) {
 
 // The simulator's microphone is the host's default input, so a Mac without
 // one (a CI runner) has none and the microphone half of a check is skipped.
+// A microphone that is there but gives no input fails the check instead.
 static AVCaptureDeviceInput *MicrophoneInput(void) {
     AVCaptureDevice *microphone = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
     if (!microphone) return nil;
-    return [AVCaptureDeviceInput deviceInputWithDevice:microphone error:nil];
+    NSError *error = nil;
+    AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:microphone error:&error];
+    if (!input) WriteResult(NO, [NSString stringWithFormat:@"The microphone gave no input: %@", error]);
+    return input;
 }
 
 static NSURL *RecordingURL(NSString *name) {
