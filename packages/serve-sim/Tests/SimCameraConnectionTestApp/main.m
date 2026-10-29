@@ -619,18 +619,27 @@ static void WaitForRelease(__weak id object, NSDate *deadline, NSString *passMes
                    dispatch_get_main_queue(), ^{ WaitForRelease(object, deadline, passMessage); });
 }
 
+// An explicit video connection from `camera` to `output`, which, unlike an
+// automatic one, can be freed safely.
+static AVCaptureConnection *AddVideoConnection(AVCaptureSession *session, AVCaptureDeviceInput *camera,
+                                               AVCaptureOutput *output) {
+    NSMutableArray<AVCaptureInputPort *> *videoPorts = [NSMutableArray new];
+    for (AVCaptureInputPort *port in camera.ports) {
+        if ([port.mediaType isEqualToString:AVMediaTypeVideo]) [videoPorts addObject:port];
+    }
+    AVCaptureConnection *connection = [[AVCaptureConnection alloc] initWithInputPorts:videoPorts output:output];
+    [session addConnection:connection];
+    return connection;
+}
+
 // A running session with the fake camera and a movie output on an explicit
-// video connection, which, unlike an automatic one, can be freed safely.
+// video connection.
 static AVCaptureSession *RunningMovieSession(AVCaptureMovieFileOutput *movie) {
     AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
     AVCaptureSession *session = [AVCaptureSession new];
     [session addInputWithNoConnections:camera];
     [session addOutputWithNoConnections:movie];
-    NSMutableArray<AVCaptureInputPort *> *videoPorts = [NSMutableArray new];
-    for (AVCaptureInputPort *port in camera.ports) {
-        if ([port.mediaType isEqualToString:AVMediaTypeVideo]) [videoPorts addObject:port];
-    }
-    [session addConnection:[[AVCaptureConnection alloc] initWithInputPorts:videoPorts output:movie]];
+    AddVideoConnection(session, camera, movie);
     [session startRunning];
     return session;
 }
@@ -724,6 +733,40 @@ static void RunStoppedSessionRecording(void) {
     });
 }
 
+// AVFoundation ignores settings given for another output's connection and
+// throws when asked for them ("Invalid connection passed"), so one movie
+// output never takes the settings meant for another's.
+static void RunForeignConnectionSettings(void) {
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    AVCaptureMovieFileOutput *other = [AVCaptureMovieFileOutput new];
+    [session addInputWithNoConnections:camera];
+    [session addOutputWithNoConnections:movie];
+    [session addOutputWithNoConnections:other];
+    AVCaptureConnection *video = AddVideoConnection(session, camera, movie);
+    AVCaptureConnection *otherVideo = AddVideoConnection(session, camera, other);
+
+    NSDictionary *settings = [movie outputSettingsForConnection:video];
+    [movie setOutputSettings:@{ AVVideoCodecKey: AVVideoCodecTypeHEVC } forConnection:otherVideo];
+    if (![[movie outputSettingsForConnection:video] isEqual:settings]) {
+        WriteResult(NO, [NSString stringWithFormat:@"Another output's connection replaced the settings %@ with %@",
+            settings, [movie outputSettingsForConnection:video]]);
+        return;
+    }
+    @try {
+        NSDictionary *answered = [movie outputSettingsForConnection:otherVideo];
+        WriteResult(NO, [NSString stringWithFormat:@"outputSettingsForConnection: answered %@ for another output's connection", answered]);
+        return;
+    } @catch (NSException *exception) {
+        if (![exception.name isEqualToString:NSInvalidArgumentException]) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected NSInvalidArgumentException, got %@", exception]);
+            return;
+        }
+    }
+    WriteResult(YES, @"Settings for another output's connection were ignored, and asking for them threw");
+}
+
 #pragma mark - App
 
 // iOS 27 stops an app that has not adopted the scene lifecycle, so the
@@ -770,6 +813,7 @@ static void RunStoppedSessionRecording(void) {
             else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();
             else if ([mode isEqualToString:@"stopped-session-recording"]) RunStoppedSessionRecording();
             else if ([mode isEqualToString:@"removed-camera-recording"]) RunRemovedCameraRecording();
+            else if ([mode isEqualToString:@"foreign-connection-settings"]) RunForeignConnectionSettings();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
             WriteResult(NO, [NSString stringWithFormat:@"Exception: %@", exception.reason]);

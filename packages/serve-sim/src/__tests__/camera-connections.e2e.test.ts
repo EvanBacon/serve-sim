@@ -43,7 +43,8 @@ async function runTestApp(
     | "writer-failure-recording"
     | "dropped-output-recording"
     | "stopped-session-recording"
-    | "removed-camera-recording",
+    | "removed-camera-recording"
+    | "foreign-connection-settings",
 ) {
   try {
     execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
@@ -185,5 +186,9 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("finishes the movie when the app removes the camera mid-recording", async () => {
     await runTestApp("removed-camera-recording");
+  }, 20_000);
+
+  test("ignores output settings for another output's connection, as AVFoundation does", async () => {
+    await runTestApp("foreign-connection-settings");
   }, 20_000);
 });
