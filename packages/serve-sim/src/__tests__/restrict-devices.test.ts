@@ -118,6 +118,18 @@ describe("restrictToDevices", () => {
     }
   });
 
+  test("still answers a malformed boot or shutdown request with 400", async () => {
+    for (const path of ["/grid/api/start", "/grid/api/shutdown"]) {
+      const refused = await send(path, { udid: "not-a-udid" });
+      expect({ path, status: refused.status }).toEqual({ path, status: 400 });
+    }
+  });
+
+  test("refuses a request that names another simulator anywhere", async () => {
+    expect((await send(`/helper/${SERVED}/config?device=${OTHER}`)).status).toBe(404);
+    expect((await send("/devtools-frontend/inspector.html")).status).toBe(404);
+  });
+
   test("matches UDIDs case-insensitively", async () => {
     expect((await send("/grid/api/shutdown", { udid: OTHER.toLowerCase() })).status).toBe(404);
     expect((await send(`/api?device=${SERVED.toLowerCase()}`)).status).toBe(200);
