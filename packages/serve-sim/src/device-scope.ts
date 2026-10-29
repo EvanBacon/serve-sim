@@ -41,7 +41,7 @@ export function deviceScope<Simulator extends { udid: string }>(
     states: async () => (await read.states()).filter((state) => allows(state.device)),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
     isKnown: async (udid) => allows(udid) && (await read.isKnown(udid)),
-    events: (query) => read.events(query).filter(logged),
+    events: (query) => read.events({ ...query, include: logged }),
     onEvent: (subscriber) => read.onEvent((entry) => {
       if (logged(entry)) subscriber(entry);
     }),

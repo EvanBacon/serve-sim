@@ -216,6 +216,16 @@ describe("restrictToDevices", () => {
     clearEventLogForTests();
   });
 
+  test("fills an event limit with its own simulator's events", async () => {
+    clearEventLogForTests();
+    for (const device of [SERVED, undefined, OTHER, OTHER]) {
+      recordEventLogEvent({ device, source: "exec", kind: "command", summary: `on ${device ?? "the host"}` });
+    }
+    const log = JSON.parse((await send("/api/event-log?limit=2")).body) as { events: Array<{ device?: string }> };
+    expect(log.events.map((event) => event.device ?? null)).toEqual([SERVED, null]);
+    clearEventLogForTests();
+  });
+
   test("still serves its own simulator", async () => {
     const api = await send(`/api?device=${SERVED}`);
     expect(api.status).toBe(200);
@@ -268,7 +278,8 @@ describe("deviceScope", () => {
     states: async () => [state(SERVED), state(OTHER)],
     simulators: async () => [{ udid: SERVED }, { udid: OTHER }],
     isKnown: async () => true,
-    events: () => [entry(SERVED), entry(OTHER), entry(undefined)],
+    events: (query?: { include?: (event: EventLogEntry) => boolean }) =>
+      [entry(SERVED), entry(OTHER), entry(undefined)].filter(query?.include ?? (() => true)),
     onEvent: (subscriber: (event: EventLogEntry) => void) => {
       for (const device of [SERVED, OTHER, undefined]) subscriber(entry(device));
       return () => {};

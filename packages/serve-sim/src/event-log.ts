@@ -145,12 +145,15 @@ export function readEventLog(options: {
   device?: string | null;
   sinceId?: number;
   limit?: number;
+  /** Narrows the entries before `limit` takes the latest. */
+  include?: (entry: EventLogEntry) => boolean;
 } = {}): EventLogEntry[] {
-  const { device, sinceId } = options;
+  const { device, sinceId, include } = options;
   const limit = clampLimit(options.limit);
   const filtered = entries.filter((entry) => {
     if (device && entry.device !== device) return false;
     if (sinceId != null && entry.id <= sinceId) return false;
+    if (include && !include(entry)) return false;
     return true;
   });
   return filtered.slice(Math.max(0, filtered.length - limit));
