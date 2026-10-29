@@ -484,7 +484,7 @@ static void RunMaxDurationRecording(void) {
     gProbe = [SimCamRecordingProbe new];
     gProbe.onFinish = ^(NSURL *url, NSError *error) {
         [session stopRunning];
-        ExpectRecordedMovie(url, error, YES, 0.4, 0.6, @"Max duration");
+        ExpectRecordedMovie(url, error, YES, 0.45, 0.51, @"Max duration");
     };
     [movie startRecordingToOutputFileURL:RecordingURL(@"max-duration.mov") recordingDelegate:gProbe];
 }

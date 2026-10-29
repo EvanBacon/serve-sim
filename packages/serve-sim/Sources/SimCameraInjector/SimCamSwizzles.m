@@ -214,8 +214,9 @@ static const void *gSimCamAVFoundationBase = NULL;
 
 static void SimCamRecordAVFoundationImage(void) {
     Dl_info info;
-    IMP native = class_getMethodImplementation([AVCaptureSession class], @selector(simcam_connections));
-    if (dladdr((const void *)native, &info)) gSimCamAVFoundationBase = info.dli_fbase;
+    if (dladdr((__bridge const void *)[AVCaptureSession class], &info)) {
+        gSimCamAVFoundationBase = info.dli_fbase;
+    }
 }
 static BOOL SimCamCalledFromAVFoundation(const void *returnAddress) {
     Dl_info info;
@@ -815,9 +816,9 @@ static NSDictionary *SimCamMovieSettings(AVCaptureOutput *output) {
 // AVFoundation answers these from the native connection graph, which a
 // session with a fake camera never builds, and throws for a connection it
 // does not own. The settings are kept per output for the fake recorder,
-// which records in place of the native one. AVCaptureMovieFileOutput
-// overrides AVCaptureFileOutput's recording methods, so they are swizzled
-// on it.
+// which records in place of the native one. The recording methods are
+// swizzled on AVCaptureMovieFileOutput, which overrides some of them, so
+// AVCaptureFileOutput and its other subclasses are untouched.
 @interface AVCaptureMovieFileOutput (SimCam)
 @end
 @implementation AVCaptureMovieFileOutput (SimCam)
@@ -1227,6 +1228,7 @@ static void InstallCoreMotionSwizzles(void) {
 static void SimCamInstallPickerSwizzles(void); // defined below
 
 void SimCamInstallSwizzles(void) {
+    SimCamRecordAVFoundationImage();
     Class dev = [AVCaptureDevice class];
     SwizzleClassMethod(dev,
         @selector(defaultDeviceWithDeviceType:mediaType:position:),
@@ -1285,7 +1287,6 @@ void SimCamInstallSwizzles(void) {
     SwizzleInstanceMethod(sess,
         @selector(canAddConnection:),
         @selector(simcam_canAddConnection:));
-    SimCamRecordAVFoundationImage();
 
     Class nc = [NSNotificationCenter class];
     SwizzleInstanceMethod(nc,

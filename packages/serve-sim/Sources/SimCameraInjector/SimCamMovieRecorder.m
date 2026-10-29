@@ -64,7 +64,7 @@ static const int32_t kSimCamMovieTimescale = 600;
     dispatch_async(_queue, ^{
         NSError *error = nil;
         if (![self openWriter:&error]) {
-            [self finishWithError:error];
+            [self finishWithError:error endingAt:kCMTimeInvalid];
             return;
         }
         self->_startedAt = CACurrentMediaTime();
@@ -82,7 +82,7 @@ static const int32_t kSimCamMovieTimescale = 600;
 }
 
 - (void)stop {
-    dispatch_async(_queue, ^{ [self finishWithError:nil]; });
+    dispatch_async(_queue, ^{ [self finishWithError:nil endingAt:kCMTimeInvalid]; });
 }
 
 - (void)pause {
@@ -150,10 +150,10 @@ static const int32_t kSimCamMovieTimescale = 600;
     CFTimeInterval elapsed = CACurrentMediaTime() - _startedAt - _pausedSeconds;
     CMTime now = CMTimeMakeWithSeconds(elapsed, kSimCamMovieTimescale);
     if (CMTIME_IS_VALID(_maxDuration) && CMTimeCompare(now, _maxDuration) >= 0) {
-        [self appendFrameAt:_maxDuration];
         [self finishWithError:[NSError errorWithDomain:AVFoundationErrorDomain
                                                   code:AVErrorMaximumDurationReached
-                                              userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]];
+                                              userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
+                     endingAt:_maxDuration];
         return;
     }
     [self appendFrameAt:now];
@@ -171,7 +171,8 @@ static const int32_t kSimCamMovieTimescale = 600;
     CVPixelBufferRelease(frame);
 }
 
-- (void)finishWithError:(NSError *)error {
+// `end` is where the movie stops; invalid means one frame past the last.
+- (void)finishWithError:(NSError *)error endingAt:(CMTime)end {
     if (_finishing) return;
     _finishing = YES;
     if (_timer) {
@@ -196,7 +197,9 @@ static const int32_t kSimCamMovieTimescale = 600;
         return;
     }
     [_input markAsFinished];
-    if (CMTIME_IS_VALID(_lastFrameTime)) {
+    if (CMTIME_IS_VALID(end)) {
+        [_writer endSessionAtSourceTime:end];
+    } else if (CMTIME_IS_VALID(_lastFrameTime)) {
         [_writer endSessionAtSourceTime:CMTimeAdd(_lastFrameTime, CMTimeMake(1, kSimCamMovieFrameRate))];
     }
     [_writer finishWritingWithCompletionHandler:^{
