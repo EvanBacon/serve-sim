@@ -1,5 +1,6 @@
 import { isBooted, listAllSimulators, readServeSimStates, simulatorName, type SimctlDevice } from "./device-sources";
 import { readEventLog, subscribeEventLog } from "./event-log";
+import type { RequestContext } from "./request-context";
 import type { ServeSimDeviceState } from "./state";
 
 /**
@@ -11,16 +12,8 @@ const EVERY_SIMULATOR = Symbol("every simulator");
 /** A simulator UDID a request names, or every simulator at once. */
 type DeviceTarget = string | typeof EVERY_SIMULATOR;
 
-/**
- * What a request names, parsed once by the middleware: the simulators in its
- * URL (`?device=` and a helper route's own), whether it reaches DevTools,
- * and its JSON body, whose `udid` and `device` fields name simulators too.
- */
-interface DeviceRequest {
-  devices: readonly string[];
-  devtools: boolean;
-  body: unknown;
-}
+/** What `check` reads of a request. */
+type DeviceRequest = Pick<RequestContext, "method" | "requestedDevice" | "helperDevice" | "devtools" | "body">;
 
 /**
  * The simulators a preview serves (`--restrict-devices`). The middleware
@@ -32,8 +25,12 @@ interface DeviceRequest {
  */
 export interface DeviceScope<Simulator> {
   allows(udid: string): boolean;
-  /** Why the scope refuses `request`, or null when it serves everything it names. */
-  check(request: DeviceRequest): string | null;
+  /**
+   * Why the scope refuses `request`, or null when it serves every simulator
+   * the request names: `?device=`, a helper route's, DevTools (all of them),
+   * and a POST body's `udid` or `device`. Reads the body only when restricted.
+   */
+  check(request: DeviceRequest): Promise<string | null>;
   states(): Promise<ServeSimDeviceState[]>;
   simulators(): Promise<Simulator[]>;
   /** Metro's name for a served simulator, if no other simulator shares it. */
@@ -55,19 +52,17 @@ export function deviceScope<Simulator extends { udid: string }>(
   read: DeviceSources<Simulator>,
 ): DeviceScope<Simulator> {
   if (!restrictToDevices) {
-    return { ...read, allows: () => true, check: () => null, states: () => read.states(() => true) };
+    return { ...read, allows: () => true, check: async () => null, states: () => read.states(() => true) };
   }
   const served = new Set(restrictToDevices.map((udid) => udid.toUpperCase()));
   const allows = (udid: string) => served.has(udid.toUpperCase());
   const logged = (entry: { device?: string }) => entry.device === undefined || allows(entry.device);
   return {
     allows,
-    check: (request) => {
-      const refused = requestTargets(request).find((target) => target === EVERY_SIMULATOR || !allows(target));
+    check: async (request) => {
+      const refused = (await requestTargets(request)).find((target) => target === EVERY_SIMULATOR || !allows(target));
       if (refused === undefined) return null;
-      return refused === EVERY_SIMULATOR
-        ? "DevTools are off in a preview with --restrict-devices"
-        : `${refused === "" ? "An empty device" : refused} is not served by this preview`;
+      return refused === EVERY_SIMULATOR ? "DevTools are off in a preview with --restrict-devices" : notServed(refused);
     },
     states: () => read.states(allows),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
@@ -80,12 +75,23 @@ export function deviceScope<Simulator extends { udid: string }>(
   };
 }
 
-function requestTargets({ devices, devtools, body }: DeviceRequest): DeviceTarget[] {
-  const targets: DeviceTarget[] = [...devices];
-  if (devtools) targets.push(EVERY_SIMULATOR);
-  if (typeof body === "object" && body !== null) {
-    if ("udid" in body && typeof body.udid === "string") targets.push(body.udid);
-    if ("device" in body && typeof body.device === "string") targets.push(body.device);
+/** Why a restricted scope refuses `udid`. */
+export function notServed(udid: string): string {
+  return `${udid === "" ? "An empty device" : udid} is not served by this preview`;
+}
+
+// A body over its route's cap names nothing here: that route answers 413
+// without reading it.
+async function requestTargets(request: DeviceRequest): Promise<DeviceTarget[]> {
+  const targets: DeviceTarget[] = [request.requestedDevice, request.helperDevice].filter((device) => device !== null);
+  if (request.devtools) targets.push(EVERY_SIMULATOR);
+  if (request.method === "POST") {
+    const body = await request.body();
+    const value = body.kind === "read" && body.json.ok ? body.json.value : null;
+    if (typeof value === "object" && value !== null) {
+      if ("udid" in value && typeof value.udid === "string") targets.push(value.udid);
+      if ("device" in value && typeof value.device === "string") targets.push(value.device);
+    }
   }
   return targets;
 }

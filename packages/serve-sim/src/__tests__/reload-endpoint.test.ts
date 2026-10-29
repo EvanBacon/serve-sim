@@ -62,7 +62,7 @@ describe("POST /reload", () => {
     const body = JSON.stringify({ bundleId: "com.example.app", pad: "x".repeat(8 * 1024) });
     expect(await postReload(body)).toEqual({
       status: 413,
-      json: { ok: false, error: "Body too large" },
+      json: { sent: false, error: "Body too large" },
     });
   });
 
@@ -72,7 +72,7 @@ describe("POST /reload", () => {
     expect(Buffer.byteLength(body)).toBeGreaterThan(4 * 1024);
     expect(await postReload(body)).toEqual({
       status: 413,
-      json: { ok: false, error: "Body too large" },
+      json: { sent: false, error: "Body too large" },
     });
   });
 

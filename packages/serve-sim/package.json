@@ -60,6 +60,7 @@
     "src/ports.ts",
     "src/preview-initial-state.ts",
     "src/recording.ts",
+    "src/request-context.ts",
     "src/request-trust.ts",
     "src/runtime.ts",
     "src/shell-quote.ts",
