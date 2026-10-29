@@ -39,6 +39,7 @@
     "src/device-displays.ts",
     "src/device-hub-input.ts",
     "src/device-pose.ts",
+    "src/device-scope.ts",
     "src/device-session.ts",
     "src/devicekit-chrome.ts",
     "src/diagnostics-redact.ts",
