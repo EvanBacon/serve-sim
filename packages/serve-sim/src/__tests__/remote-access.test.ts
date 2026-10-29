@@ -411,6 +411,25 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
     expect((await rawRequest(withToken.port, "//[", PROXY)).status).toBe(401);
   });
 
+  test("an embedded mount fails on a malformed URL outside its base path, as before", async () => {
+    const middleware = simMiddleware({ basePath: "/.sim", execToken: EXEC_TOKEN, device: DEVICE });
+    const server = createServer((req, res) => {
+      middleware(req, res, async () => {
+        res.statusCode = 404;
+        res.end();
+      }).catch(() => {
+        res.statusCode = 500;
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      expect((await rawRequest((server.address() as AddressInfo).port, "//[")).status).toBe(500);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   test("grid start/shutdown: remote without token refused, cross-origin refused on loopback", async () => {
     for (const path of ["/grid/api/start", "/grid/api/shutdown"]) {
       const body = JSON.stringify({ udid: "not-a-udid" });
