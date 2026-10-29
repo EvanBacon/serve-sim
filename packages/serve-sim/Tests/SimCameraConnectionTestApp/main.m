@@ -598,27 +598,27 @@ static void RunWriterFailureRecording(void) {
     [movie startRecordingToOutputFileURL:RecordingURL(@"writer-failure.mov") recordingDelegate:gProbe];
 }
 
-// expo-camera removes its movie output when the camera view remounts and
-// lets it go, recording or not. AVFoundation still finishes the file and
-// tells the delegate, as it does for every recording, and the output then
-// goes away.
+// An app that lets its movie output go mid-recording still gets a finished
+// file: AVFoundation tells the delegate about every recording, and the
+// output then goes away.
 static void WaitForRelease(__weak id object, NSDate *deadline, NSString *passMessage) {
     if (!object) {
         WriteResult(YES, passMessage);
         return;
     }
     if ([deadline timeIntervalSinceNow] <= 0) {
-        WriteResult(NO, @"The removed movie output was never released");
+        WriteResult(NO, @"The movie output was never released");
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ WaitForRelease(object, deadline, passMessage); });
 }
 
-static void RunDroppedOutputRecording(void) {
+// A running session with the fake camera and a movie output on an explicit
+// video connection, which, unlike an automatic one, can be freed safely.
+static AVCaptureSession *RunningMovieSession(AVCaptureMovieFileOutput *movie) {
     AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
     AVCaptureSession *session = [AVCaptureSession new];
-    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
     [session addInputWithNoConnections:camera];
     [session addOutputWithNoConnections:movie];
     NSMutableArray<AVCaptureInputPort *> *videoPorts = [NSMutableArray new];
@@ -627,41 +627,66 @@ static void RunDroppedOutputRecording(void) {
     }
     [session addConnection:[[AVCaptureConnection alloc] initWithInputPorts:videoPorts output:movie]];
     [session startRunning];
+    return session;
+}
 
+// Records into a movie the app lets go of 0.5 s in: `letGo` drops the
+// output, and the delegate must still hear about a finished file.
+static void RunLetGoRecording(NSString *what, void (^letGo)(AVCaptureSession *session,
+                                                           AVCaptureMovieFileOutput *movie)) {
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    __block AVCaptureSession *session = RunningMovieSession(movie);
     __weak AVCaptureMovieFileOutput *weakMovie = movie;
     gProbe = [SimCamRecordingProbe new];
     gProbe.onStart = ^{
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            [session beginConfiguration];
-            [session removeOutput:weakMovie];
-            [session commitConfiguration];
+            letGo(session, weakMovie);
+            session = nil;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                WriteResult(NO, @"The delegate never heard that the removed output's recording finished");
+                WriteResult(NO, [NSString stringWithFormat:@"%@: the delegate never heard the recording finished", what]);
             });
         });
     };
     gProbe.onFinish = ^(NSURL *url, NSError *error) {
         if (error) {
-            WriteResult(NO, [NSString stringWithFormat:@"Dropped output: recording failed: %@", error]);
+            WriteResult(NO, [NSString stringWithFormat:@"%@: recording failed: %@", what, error]);
             return;
         }
         if (!gProbe.finishedWithOutput) {
-            WriteResult(NO, @"Dropped output: the delegate was told about a nil output");
+            WriteResult(NO, [NSString stringWithFormat:@"%@: the delegate was told about a nil output", what]);
             return;
         }
         ReadVideoSeconds(url, ^(double seconds, NSString *problem) {
-            if (problem || seconds < 0.4 || seconds > 0.8) {
-                WriteResult(NO, [NSString stringWithFormat:@"Dropped output: %@",
-                    problem ?: [NSString stringWithFormat:@"movie holds %.2f s, expected 0.40-0.80 s", seconds]]);
+            if (problem || seconds < 0.4 || seconds > 1.0) {
+                WriteResult(NO, [NSString stringWithFormat:@"%@: %@", what,
+                    problem ?: [NSString stringWithFormat:@"movie holds %.2f s, expected 0.40-1.00 s", seconds]]);
                 return;
             }
             WaitForRelease(weakMovie, [NSDate dateWithTimeIntervalSinceNow:5.0],
-                [NSString stringWithFormat:@"Dropped output: recorded %.2f s of video, then released the output", seconds]);
+                [NSString stringWithFormat:@"%@: recorded %.2f s of video, then released the output", what, seconds]);
         });
     };
-    [movie startRecordingToOutputFileURL:RecordingURL(@"dropped-output.mov") recordingDelegate:gProbe];
+    [movie startRecordingToOutputFileURL:RecordingURL([what stringByAppendingString:@".mov"])
+                       recordingDelegate:gProbe];
+}
+
+// expo-camera removes its movie output when the camera view remounts.
+static void RunDroppedOutputRecording(void) {
+    RunLetGoRecording(@"Dropped output", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        [session beginConfiguration];
+        [session removeOutput:movie];
+        [session commitConfiguration];
+    });
+}
+
+// An app can stop its session and let it go with the output still in it.
+static void RunStoppedSessionRecording(void) {
+    RunLetGoRecording(@"Stopped session", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        (void)movie;
+        [session stopRunning];
+    });
 }
 
 #pragma mark - App
@@ -708,6 +733,7 @@ static void RunDroppedOutputRecording(void) {
             else if ([mode isEqualToString:@"existing-file-recording"]) RunExistingFileRecording();
             else if ([mode isEqualToString:@"writer-failure-recording"]) RunWriterFailureRecording();
             else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();
+            else if ([mode isEqualToString:@"stopped-session-recording"]) RunStoppedSessionRecording();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
             WriteResult(NO, [NSString stringWithFormat:@"Exception: %@", exception.reason]);

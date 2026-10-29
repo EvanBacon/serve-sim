@@ -34,7 +34,7 @@ static SimCamFakeMovieOutput *SimCamFakeMovieOutputFor(AVCaptureMovieFileOutput 
     }
 }
 
-void SimCamMovieOutputLeftFakeSession(AVCaptureOutput *output) {
+void SimCamEndFakeMovieRecording(AVCaptureOutput *output) {
     SimCamFakeMovieOutput *fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
     [fake.recorder stop];
 }

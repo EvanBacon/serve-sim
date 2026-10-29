@@ -294,7 +294,6 @@ static AVCaptureInput *SimCamFirstFakeInputForSession(AVCaptureSession *s) {
 // look disconnected during client-side session configuration checks.
 static void SimCamUnmarkOutputAttachedToFakeSession(AVCaptureOutput *output) {
     if (!output) return;
-    SimCamMovieOutputLeftFakeSession(output);
     objc_setAssociatedObject(output, &kSimCamOutputAttachedToFakeSessionKey, nil, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(output, &kSimCamOutputSessionKey, nil, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(output, &kSimCamMaxPhotoDimensionsKey, nil, OBJC_ASSOCIATION_RETAIN);
@@ -476,6 +475,7 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
         (int)SimCamPositionOf(self));
 }
 - (void)simcam_removeOutput:(AVCaptureOutput *)output {
+    SimCamEndFakeMovieRecording(output);
     SimCamRemoveConnectionsForOutput(self, output);
     SimCamUnmarkOutputAttachedToFakeSession(output);
     NSMutableArray *tracked = SimCamSessionTrackedOutputs(self);
@@ -581,6 +581,9 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
 }
 - (void)simcam_stopRunning {
     objc_setAssociatedObject(self, &kSimCamSessionRunningKey, @NO, OBJC_ASSOCIATION_RETAIN);
+    for (AVCaptureOutput *output in SimCamSessionTrackedOutputs(self)) {
+        SimCamEndFakeMovieRecording(output);
+    }
     simcam_log(@"stopRunning intercepted");
     [self willChangeValueForKey:@"running"];
     [self didChangeValueForKey:@"running"];
