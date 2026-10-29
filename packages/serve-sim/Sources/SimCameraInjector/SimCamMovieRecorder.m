@@ -9,6 +9,17 @@
 static const int32_t kSimCamMovieFrameRate = 30;
 static const int32_t kSimCamMovieTimescale = 600;
 
+// AVFoundation reports a failed recording with
+// AVErrorRecordingSuccessfullyFinishedKey set to NO, which apps read to tell
+// a usable file from a broken one.
+static NSError *SimCamRecordingFailure(NSError *cause) {
+    NSMutableDictionary *userInfo = [cause.userInfo mutableCopy] ?: [NSMutableDictionary new];
+    userInfo[AVErrorRecordingSuccessfullyFinishedKey] = @NO;
+    return [NSError errorWithDomain:cause.domain ?: AVFoundationErrorDomain
+                               code:cause ? cause.code : AVErrorUnknown
+                           userInfo:userInfo];
+}
+
 @implementation SimCamMovieRecorder {
     __weak AVCaptureFileOutput *_output;
     id<AVCaptureFileOutputRecordingDelegate> _delegate;
@@ -64,7 +75,7 @@ static const int32_t kSimCamMovieTimescale = 600;
     dispatch_async(_queue, ^{
         NSError *error = nil;
         if (![self openWriter:&error]) {
-            [self finishWithError:error endingAt:kCMTimeInvalid];
+            [self finishWithError:SimCamRecordingFailure(error) endingAt:kCMTimeInvalid];
             return;
         }
         self->_startedAt = CACurrentMediaTime();
@@ -111,7 +122,12 @@ static const int32_t kSimCamMovieTimescale = 600;
     size_t height = frame ? CVPixelBufferGetHeight(frame) : 720;
     if (frame) CVPixelBufferRelease(frame);
 
-    [[NSFileManager defaultManager] removeItemAtURL:_URL error:nil];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:_URL.path]) {
+        if (error) *error = [NSError errorWithDomain:AVFoundationErrorDomain
+                                                code:AVErrorFileAlreadyExists
+                                            userInfo:@{ NSURLErrorKey: _URL }];
+        return NO;
+    }
     // AVCaptureMovieFileOutput writes a QuickTime movie whatever the file's
     // extension says, so the fake does too.
     _writer = [AVAssetWriter assetWriterWithURL:_URL fileType:AVFileTypeQuickTimeMovie error:error];
@@ -146,7 +162,12 @@ static const int32_t kSimCamMovieTimescale = 600;
 }
 
 - (void)tick {
-    if (_finishing || _paused) return;
+    if (_finishing) return;
+    if (_writer.status == AVAssetWriterStatusFailed) {
+        [self finishWithError:SimCamRecordingFailure(_writer.error) endingAt:kCMTimeInvalid];
+        return;
+    }
+    if (_paused) return;
     CFTimeInterval elapsed = CACurrentMediaTime() - _startedAt - _pausedSeconds;
     CMTime now = CMTimeMakeWithSeconds(elapsed, kSimCamMovieTimescale);
     if (CMTIME_IS_VALID(_maxDuration) && CMTimeCompare(now, _maxDuration) >= 0) {
@@ -204,8 +225,8 @@ static const int32_t kSimCamMovieTimescale = 600;
     }
     [_writer finishWritingWithCompletionHandler:^{
         dispatch_async(self->_queue, ^{
-            NSError *writeError = self->_writer.status == AVAssetWriterStatusCompleted ? nil : self->_writer.error;
-            deliver(writeError ?: error);
+            BOOL completed = self->_writer.status == AVAssetWriterStatusCompleted;
+            deliver(completed ? error : SimCamRecordingFailure(self->_writer.error));
         });
     }];
 }

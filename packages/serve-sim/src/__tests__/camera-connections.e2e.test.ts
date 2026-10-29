@@ -38,7 +38,9 @@ async function runTestApp(
     | "teardown"
     | "automatic-recording"
     | "manual-recording"
-    | "max-duration-recording",
+    | "max-duration-recording"
+    | "existing-file-recording"
+    | "writer-failure-recording",
 ) {
   try {
     execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
@@ -160,5 +162,13 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("stops a movie at maxRecordedDuration as a successful recording", async () => {
     await runTestApp("max-duration-recording");
+  }, 20_000);
+
+  test("refuses to record over an existing file, as AVFoundation does", async () => {
+    await runTestApp("existing-file-recording");
+  }, 20_000);
+
+  test("ends the recording with the writer's error when a write fails", async () => {
+    await runTestApp("writer-failure-recording");
   }, 20_000);
 });

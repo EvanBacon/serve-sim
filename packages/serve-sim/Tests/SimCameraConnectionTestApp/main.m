@@ -1,9 +1,14 @@
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
+#include <signal.h>
+#include <sys/resource.h>
 
 static NSString *const kResultFileName = @"simcam-connection-result.json";
 
 static void WriteResult(BOOL passed, NSString *message) {
+    // The writer-failure check caps file writes; the result must still land.
+    struct rlimit unlimited = { RLIM_INFINITY, RLIM_INFINITY };
+    setrlimit(RLIMIT_FSIZE, &unlimited);
     NSURL *documents = [[[NSFileManager defaultManager]
         URLsForDirectory:NSDocumentDirectory
                inDomains:NSUserDomainMask] firstObject];
@@ -392,6 +397,10 @@ static void RunManualConnectionsRecording(void) {
             return;
         }
         [session addConnection:audio];
+        if ([movie connectionWithMediaType:AVMediaTypeAudio] != audio) {
+            WriteResult(NO, @"connectionWithMediaType: did not return the audio connection");
+            return;
+        }
     }
 
     AVCaptureDevice *device = camera.device;
@@ -489,6 +498,81 @@ static void RunMaxDurationRecording(void) {
     [movie startRecordingToOutputFileURL:RecordingURL(@"max-duration.mov") recordingDelegate:gProbe];
 }
 
+// AVFoundation refuses to record over an existing file: the recording never
+// starts, and the delegate hears AVErrorFileAlreadyExists.
+static void RunExistingFileRecording(void) {
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
+    [session addOutput:movie];
+    [session startRunning];
+
+    NSURL *url = RecordingURL(@"existing.mov");
+    NSData *existing = [@"keep me" dataUsingEncoding:NSUTF8StringEncoding];
+    [existing writeToURL:url atomically:YES];
+
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        WriteResult(NO, @"The recording started over an existing file");
+    };
+    gProbe.onFinish = ^(NSURL *finishedURL, NSError *error) {
+        (void)finishedURL;
+        [session stopRunning];
+        BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
+        if (error.code != AVErrorFileAlreadyExists || finished) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected AVErrorFileAlreadyExists, got %@", error]);
+            return;
+        }
+        if (![[NSData dataWithContentsOfURL:url] isEqualToData:existing]) {
+            WriteResult(NO, @"The existing file was replaced");
+            return;
+        }
+        if (movie.isRecording) {
+            WriteResult(NO, @"isRecording is YES after the recording failed");
+            return;
+        }
+        WriteResult(YES, @"Recording over an existing file failed with AVErrorFileAlreadyExists and kept the file");
+    };
+    [movie startRecordingToOutputFileURL:url recordingDelegate:gProbe];
+}
+
+// A write that fails mid-recording (here, a file-size cap) ends the
+// recording with the writer's error, unsuccessfully, without a stop call.
+static void RunWriterFailureRecording(void) {
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
+    [session addOutput:movie];
+    [session startRunning];
+
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        signal(SIGXFSZ, SIG_IGN);
+        struct rlimit capped = { 1, RLIM_INFINITY };
+        setrlimit(RLIMIT_FSIZE, &capped);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            WriteResult(NO, [NSString stringWithFormat:
+                @"Still recording 5 s after writes began failing (isRecording=%d)", movie.isRecording]);
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        (void)url;
+        [session stopRunning];
+        BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
+        if (!error || finished) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected an unsuccessful finish, got %@", error]);
+            return;
+        }
+        if (movie.isRecording) {
+            WriteResult(NO, @"isRecording is YES after the writer failed");
+            return;
+        }
+        WriteResult(YES, [NSString stringWithFormat:@"The writer's failure ended the recording: %@", error.localizedDescription]);
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"writer-failure.mov") recordingDelegate:gProbe];
+}
+
 #pragma mark - App
 
 // iOS 27 stops an app that has not adopted the scene lifecycle, so the
@@ -530,6 +614,8 @@ static void RunMaxDurationRecording(void) {
             else if ([mode isEqualToString:@"automatic-recording"]) RunAutomaticConnectionsRecording();
             else if ([mode isEqualToString:@"manual-recording"]) RunManualConnectionsRecording();
             else if ([mode isEqualToString:@"max-duration-recording"]) RunMaxDurationRecording();
+            else if ([mode isEqualToString:@"existing-file-recording"]) RunExistingFileRecording();
+            else if ([mode isEqualToString:@"writer-failure-recording"]) RunWriterFailureRecording();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
             WriteResult(NO, [NSString stringWithFormat:@"Exception: %@", exception.reason]);

@@ -208,8 +208,9 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
 // AVFoundation reads a session's and an output's own lists when it rebuilds
 // the native graph (a preview layer attached or detached, a configuration
 // committed), and the fake objects have none of the private state it reads
-// there. Calls from inside AVFoundation get the native lists only; the app
-// sees the tracked ones too.
+// there. Calls from the image that defines AVCaptureSession (AVFCapture on
+// iOS 17 and later) get the native lists only; the app sees the tracked ones
+// too.
 static const void *gSimCamAVFoundationBase = NULL;
 
 static void SimCamRecordAVFoundationImage(void) {
