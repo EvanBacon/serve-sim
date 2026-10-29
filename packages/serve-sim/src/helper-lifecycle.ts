@@ -16,7 +16,7 @@ import { readFileSync, unlinkSync } from "fs";
 import { sleepSync } from "./runtime";
 import { getPortHolders } from "./ports";
 import { debugHelper, debugState } from "./debug";
-import { deviceSetFromEnv } from "./simctl";
+import { deviceSetFromEnv, sameDeviceSet } from "./simctl";
 import type { ServeSimDeviceState } from "./state";
 import { writeServeSimState } from "./state";
 
@@ -213,7 +213,7 @@ export function classifyStaleState(
 ): StaleStateAction {
   // `booted` lists only this process's device set; another set's simulator
   // is not in it whether or not it is booted.
-  if (state.deviceSet !== deviceSet) return "keep";
+  if (!sameDeviceSet(state.deviceSet, deviceSet)) return "keep";
   if (booted && isSimulatorUdid(state.device) && !booted.has(state.device)) {
     return state.pid === selfPid ? "recycle-self" : "recycle-helper";
   }

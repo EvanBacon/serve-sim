@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { eventLogEventForCommand } from "../event-log";
@@ -10,6 +10,7 @@ import {
   deviceSetFromEnv,
   normalizeDeviceSetEnv,
   parseDeviceSetPath,
+  sameDeviceSet,
   simctlArguments,
   simctlBootStatusArguments,
   simulatorDevicesDir,
@@ -31,6 +32,31 @@ describe("simctlArguments", () => {
       "simctl", "--set", "/pool/devices", "launch", "UDID", "com.example",
     ]);
     expect(simctlBootStatusArguments("UDID", env)).toEqual(["simctl", "--set", "/pool/devices", "bootstatus", "UDID"]);
+  });
+});
+
+describe("deviceSetFromEnv", () => {
+  test("reads ~ and relative paths as the CLI does, for embedders that never run it", () => {
+    expect(deviceSetFromEnv({ [DEVICE_SET_ENV]: "~/pool" }, "/work")).toBe(join(homedir(), "pool"));
+    expect(deviceSetFromEnv({ [DEVICE_SET_ENV]: "pool/devices/" }, "/work")).toBe("/work/pool/devices");
+    expect(deviceSetFromEnv({ [DEVICE_SET_ENV]: " /pool " }, "/work")).toBe("/pool");
+  });
+});
+
+describe("sameDeviceSet", () => {
+  test("matches one set through a symlink, and only the default with the default", () => {
+    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
+    const link = `${dir}-link`;
+    try {
+      symlinkSync(dir, link);
+      expect(sameDeviceSet(link, realpathSync(dir))).toBe(true);
+      expect(sameDeviceSet(dir, join(dir, "other"))).toBe(false);
+      expect(sameDeviceSet(undefined, undefined)).toBe(true);
+      expect(sameDeviceSet(undefined, dir)).toBe(false);
+    } finally {
+      rmSync(link, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

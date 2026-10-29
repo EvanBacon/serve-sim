@@ -1,4 +1,4 @@
-import { statSync } from "fs";
+import { realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 
@@ -13,17 +13,42 @@ import { join, resolve } from "path";
  */
 export const DEVICE_SET_ENV = "SERVE_SIM_DEVICE_SET";
 
-/** The configured device set's path, or undefined for Xcode's default set. */
-export function deviceSetFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+/**
+ * The configured device set's absolute path (`~` and relative paths
+ * resolved, so a middleware embedder that never runs the CLI reads the same
+ * path as the CLI), or undefined for Xcode's default set.
+ */
+export function deviceSetFromEnv(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string | undefined {
   const raw = env[DEVICE_SET_ENV];
-  return raw === undefined || raw.trim() === "" ? undefined : raw;
+  return raw === undefined || raw.trim() === "" ? undefined : resolveDeviceSetPath(raw, cwd);
+}
+
+function resolveDeviceSetPath(value: string, cwd: string): string {
+  const trimmed = value.trim();
+  const expanded = trimmed === "~" || trimmed.startsWith("~/") ? join(homedir(), trimmed.slice(1)) : trimmed;
+  return resolve(cwd, expanded);
+}
+
+/**
+ * Whether two device-set paths (undefined: Xcode's default set) name one
+ * set, symlinks resolved, so `/tmp/set` and `/private/tmp/set` match.
+ */
+export function sameDeviceSet(a: string | undefined, b: string | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  const real = (path: string) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
+  return a === b || real(a) === real(b);
 }
 
 /** Resolve a `--device-set` value to an absolute directory. Throws when it is not one. */
 export function parseDeviceSetPath(value: string, cwd: string = process.cwd()): string {
   const trimmed = value.trim();
-  const expanded = trimmed === "~" || trimmed.startsWith("~/") ? join(homedir(), trimmed.slice(1)) : trimmed;
-  const path = resolve(cwd, expanded);
+  const path = resolveDeviceSetPath(value, cwd);
   let isDirectory = false;
   try {
     isDirectory = statSync(path).isDirectory();
