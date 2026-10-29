@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
+import { readFileSync } from "fs";
 import { request } from "http";
 import { connect } from "net";
 import { join } from "path";
 import WebSocket from "ws";
+import { EVERY_SIMULATOR, deviceScope } from "../device-scope";
 import { simMiddleware } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
 
@@ -197,6 +199,40 @@ describe("serve-sim --restrict-devices", () => {
       const result = spawnSync("bun", [cli, "--restrict-devices", mode], { encoding: "utf8" });
       expect({ mode, status: result.status }).toEqual({ mode, status: 1 });
       expect(result.stderr).toContain("--restrict-devices applies to the preview server");
+    }
+  });
+});
+
+describe("deviceScope", () => {
+  const read = {
+    states: async () => [{ device: SERVED }, { device: OTHER }],
+    simulators: async () => [{ udid: SERVED }, { udid: OTHER }],
+    isKnown: async () => true,
+  };
+
+  test("a route that reads through a restricted scope sees only the served simulators", async () => {
+    const scope = deviceScope([SERVED.toLowerCase()], read);
+    expect(await scope.states()).toEqual([{ device: SERVED }]);
+    expect(await scope.simulators()).toEqual([{ udid: SERVED }]);
+    expect(await scope.isKnown(SERVED)).toBe(true);
+    expect(await scope.isKnown(OTHER)).toBe(false);
+    expect([scope.allows(SERVED), scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, false, false]);
+  });
+
+  test("an unrestricted scope allows everything", async () => {
+    const scope = deviceScope(undefined, read);
+    expect(await scope.states()).toHaveLength(2);
+    expect(await scope.simulators()).toHaveLength(2);
+    expect([scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, true]);
+  });
+
+  test("simMiddleware reads simulators only through its scope", () => {
+    // A route that called one of these itself would list or drive every
+    // simulator in a restricted preview.
+    const source = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf-8");
+    const body = source.slice(source.indexOf("export function simMiddleware("));
+    for (const reader of ["readServeSimStates(", "listAllSimulators(", "getBootedUdids(", "isBooted("]) {
+      expect({ reader, called: body.includes(reader) }).toEqual({ reader, called: false });
     }
   });
 });
