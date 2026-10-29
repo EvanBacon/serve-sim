@@ -143,4 +143,18 @@ describe("serve-sim --device-set", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(DEVICE_SET_ENV);
   });
+
+  test("takes a valid --device-set over a missing SERVE_SIM_DEVICE_SET", () => {
+    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
+    try {
+      const result = spawnSync("bun", [cli, "--device-set", dir, "--list"], {
+        encoding: "utf8",
+        env: { ...process.env, [DEVICE_SET_ENV]: join(tmpdir(), "serve-sim-no-such-set") },
+      });
+      expect(result.stderr).not.toContain(DEVICE_SET_ENV);
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

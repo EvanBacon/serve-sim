@@ -2460,10 +2460,15 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
-try {
-  normalizeDeviceSetEnv();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-}
+program.hook("preAction", (_program, action) => {
+  // The preview's --device-set replaces SERVE_SIM_DEVICE_SET, so the
+  // environment's set is only checked without one.
+  if (action === program && program.opts().deviceSet !== undefined) return;
+  try {
+    normalizeDeviceSetEnv();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+});
 await program.parseAsync(process.argv);
