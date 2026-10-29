@@ -67,6 +67,12 @@ describe("classifyStaleState", () => {
   test("recycles a foreign helper bound to a shut-down simulator", () => {
     expect(classifyStaleState(state({ pid: 88 }), new Set(), 99)).toBe("recycle-helper");
   });
+
+  test("keeps a helper in another device set, which `booted` does not cover", () => {
+    expect(classifyStaleState(state({ pid: 88, deviceSet: "/pool" }), new Set(), 99, undefined)).toBe("keep");
+    expect(classifyStaleState(state({ pid: 88 }), new Set(), 99, "/pool")).toBe("keep");
+    expect(classifyStaleState(state({ pid: 88, deviceSet: "/pool" }), new Set(), 99, "/pool")).toBe("recycle-helper");
+  });
 });
 
 describe("parseDeviceState / resolveLiveHelperState", () => {

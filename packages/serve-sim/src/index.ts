@@ -2212,8 +2212,8 @@ program
   )
   .option(
     "--device-set <path>",
-    "Use this CoreSimulator device set instead of Xcode's default (simctl --set), " +
-      `for simulators a tool keeps in a set of its own. Also read from ${DEVICE_SET_ENV}.`,
+    "Use this CoreSimulator device set instead of Xcode's default (simctl --set). " +
+      `Also read from ${DEVICE_SET_ENV}, which subcommands use.`,
     (value) => {
       try {
         return parseDeviceSetPath(value);
@@ -2224,10 +2224,8 @@ program
   )
   .option(
     "--restrict-devices",
-    "Serve only the simulators named on the command line: the devices pane lists " +
-      "only them, the preview refuses to boot, shut down, stream or drive any other, " +
-      "and DevTools are off (for a Mac whose simulators other people or agents use). " +
-      "Preview server only.",
+    "Serve only the simulators named on the command line, for a shared Mac; " +
+      "DevTools are off (preview server only)",
   )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
@@ -2241,8 +2239,7 @@ Examples:
   serve-sim --max-bitrate 8              Cap the H.264 stream at 8 Mbps
   serve-sim --panes devices,tools --fit  Open panes and fit the simulator to the viewport
   serve-sim --theme dark                 Start the simulator in Dark Mode
-  serve-sim --device-set <path> <udid> --restrict-devices
-                                         Preview one simulator of another device set, and only it
+  serve-sim --device-set <path> <udid>   Preview a simulator of another device set
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --allow-exec                 Enable \`serve-sim exec\` and .ipa drag-to-install

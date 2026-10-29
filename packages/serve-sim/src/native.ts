@@ -57,8 +57,7 @@ interface NativeAddon {
   SimCapture: new (udid: string, maxBitrate: number | null) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
-  /** Absent in addons built before `--device-set` existed. */
-  setDeviceSet?(path: string | null): void;
+  setDeviceSet(path: string | null): void;
 }
 
 // (data, width, height, flags) — codec 0=MJPEG 1=AVCC 2=size-only; flags bit0=desc bit1=keyframe.
@@ -168,7 +167,7 @@ function load(): NativeAddon {
   if (!addon) {
     addon = require(resolveAddon()) as NativeAddon;
     // Under Bun a `process.env` write never reaches the addon's environment.
-    addon.setDeviceSet?.(deviceSetFromEnv() ?? null);
+    addon.setDeviceSet(deviceSetFromEnv() ?? null);
   }
   return addon;
 }
