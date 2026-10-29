@@ -518,8 +518,8 @@ static void RunExistingFileRecording(void) {
     gProbe.onFinish = ^(NSURL *finishedURL, NSError *error) {
         (void)finishedURL;
         [session stopRunning];
-        BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
-        if (error.code != AVErrorFileAlreadyExists || finished) {
+        BOOL failed = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@NO];
+        if (error.code != AVErrorFileAlreadyExists || !failed) {
             WriteResult(NO, [NSString stringWithFormat:@"Expected AVErrorFileAlreadyExists, got %@", error]);
             return;
         }
@@ -545,11 +545,16 @@ static void RunWriterFailureRecording(void) {
     [session addOutput:movie];
     [session startRunning];
 
+    __block BOOL capped = NO;
     gProbe = [SimCamRecordingProbe new];
     gProbe.onStart = ^{
         signal(SIGXFSZ, SIG_IGN);
-        struct rlimit capped = { 1, RLIM_INFINITY };
-        setrlimit(RLIMIT_FSIZE, &capped);
+        struct rlimit limit = { 1, RLIM_INFINITY };
+        if (setrlimit(RLIMIT_FSIZE, &limit) != 0) {
+            WriteResult(NO, @"Could not cap file writes");
+            return;
+        }
+        capped = YES;
         // AVAssetWriter writes real-time media in chunks well under a
         // second apart, so its first capped write fails long before this.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
@@ -561,8 +566,12 @@ static void RunWriterFailureRecording(void) {
     gProbe.onFinish = ^(NSURL *url, NSError *error) {
         (void)url;
         [session stopRunning];
-        BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
-        if (!error || finished) {
+        if (!capped) {
+            WriteResult(NO, [NSString stringWithFormat:@"The recording ended before writes were capped: %@", error]);
+            return;
+        }
+        BOOL failed = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@NO];
+        if (!error || !failed) {
             WriteResult(NO, [NSString stringWithFormat:@"Expected an unsuccessful finish, got %@", error]);
             return;
         }
