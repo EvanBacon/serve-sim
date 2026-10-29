@@ -27,11 +27,10 @@ export function resolveDeviceSet(flag?: string): string | undefined {
     if (flag !== undefined) throw new Error("--device-set arrived after the device set was settled");
     return resolved.path;
   }
-  const raw = process.env[DEVICE_SET_ENV];
-  const path =
-    flag !== undefined ? existingDirectory(flag, "--device-set")
-    : raw === undefined || raw.trim() === "" ? undefined
-    : existingDirectory(raw, DEVICE_SET_ENV);
+  const fromEnv = process.env[DEVICE_SET_ENV]?.trim();
+  let path: string | undefined;
+  if (flag !== undefined) path = existingDirectory(flag, "--device-set");
+  else if (fromEnv) path = existingDirectory(fromEnv, DEVICE_SET_ENV);
   resolved = { path };
   if (path === undefined) delete process.env[DEVICE_SET_ENV];
   else process.env[DEVICE_SET_ENV] = path;
