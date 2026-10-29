@@ -550,6 +550,8 @@ static void RunWriterFailureRecording(void) {
         signal(SIGXFSZ, SIG_IGN);
         struct rlimit capped = { 1, RLIM_INFINITY };
         setrlimit(RLIMIT_FSIZE, &capped);
+        // AVAssetWriter writes real-time media in chunks well under a
+        // second apart, so its first capped write fails long before this.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             WriteResult(NO, [NSString stringWithFormat:

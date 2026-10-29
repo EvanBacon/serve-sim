@@ -209,20 +209,20 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
 // the native graph (a preview layer attached or detached, a configuration
 // committed), and the fake objects have none of the private state it reads
 // there. Calls from the image that defines AVCaptureSession (AVFCapture on
-// iOS 17 and later) get the native lists only; the app sees the tracked ones
+// current iOS) get the native lists only; the app sees the tracked ones
 // too.
-static const void *gSimCamAVFoundationBase = NULL;
+static const void *gSimCamCaptureImageBase = NULL;
 
-static void SimCamRecordAVFoundationImage(void) {
+static void SimCamRecordCaptureImage(void) {
     Dl_info info;
     if (dladdr((__bridge const void *)[AVCaptureSession class], &info)) {
-        gSimCamAVFoundationBase = info.dli_fbase;
+        gSimCamCaptureImageBase = info.dli_fbase;
     }
 }
-static BOOL SimCamCalledFromAVFoundation(const void *returnAddress) {
+static BOOL SimCamCalledFromCaptureImage(const void *returnAddress) {
     Dl_info info;
-    return gSimCamAVFoundationBase && dladdr(returnAddress, &info) &&
-        info.dli_fbase == gSimCamAVFoundationBase;
+    return gSimCamCaptureImageBase && dladdr(returnAddress, &info) &&
+        info.dli_fbase == gSimCamCaptureImageBase;
 }
 
 static char kSimCamSessionRunningKey;
@@ -499,7 +499,7 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
 }
 - (NSArray<AVCaptureInput *> *)simcam_inputs {
     NSArray *native = [self simcam_inputs];
-    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return native;
+    if (SimCamCalledFromCaptureImage(__builtin_return_address(0))) return native;
     NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionInputsKey);
     if (tracked.count == 0) return native ?: @[];
     if (native.count == 0) return [tracked copy];
@@ -511,7 +511,7 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
 }
 - (NSArray<AVCaptureOutput *> *)simcam_outputs {
     NSArray *native = [self simcam_outputs];
-    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return native;
+    if (SimCamCalledFromCaptureImage(__builtin_return_address(0))) return native;
     NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionOutputsKey);
     if (tracked.count == 0) return native ?: @[];
     if (native.count == 0) return [tracked copy];
@@ -523,7 +523,7 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
 }
 - (NSArray<AVCaptureConnection *> *)simcam_connections {
     NSArray *native = [self simcam_connections];
-    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return native;
+    if (SimCamCalledFromCaptureImage(__builtin_return_address(0))) return native;
     NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionConnectionsKey);
     if (tracked.count == 0) return native ?: @[];
     NSMutableArray *merged = [tracked mutableCopy];
@@ -630,7 +630,7 @@ static void SimCamRegisterPreviewLayer(AVCaptureVideoPreviewLayer *layer, AVCapt
 @implementation AVCaptureOutput (SimCamConn)
 - (AVCaptureConnection *)simcam_connectionWithMediaType:(AVMediaType)mediaType {
     AVCaptureConnection *real = [self simcam_connectionWithMediaType:mediaType];
-    if (real || SimCamCalledFromAVFoundation(__builtin_return_address(0))) return real;
+    if (real || SimCamCalledFromCaptureImage(__builtin_return_address(0))) return real;
     if (!SimCamOutputAttachedToFakeSession(self)) return nil;
     AVCaptureConnection *connection = nil;
     for (AVCaptureConnection *candidate in SimCamConnectionsForOutput(self)) {
@@ -642,7 +642,7 @@ static void SimCamRegisterPreviewLayer(AVCaptureVideoPreviewLayer *layer, AVCapt
 }
 - (NSArray<AVCaptureConnection *> *)simcam_connections {
     NSArray *real = [self simcam_connections];
-    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return real;
+    if (SimCamCalledFromCaptureImage(__builtin_return_address(0))) return real;
     if (!SimCamOutputAttachedToFakeSession(self)) return real ?: @[];
     NSArray *tracked = SimCamConnectionsForOutput(self);
     if (tracked.count == 0) return real ?: @[];
@@ -1229,7 +1229,7 @@ static void InstallCoreMotionSwizzles(void) {
 static void SimCamInstallPickerSwizzles(void); // defined below
 
 void SimCamInstallSwizzles(void) {
-    SimCamRecordAVFoundationImage();
+    SimCamRecordCaptureImage();
     Class dev = [AVCaptureDevice class];
     SwizzleClassMethod(dev,
         @selector(defaultDeviceWithDeviceType:mediaType:position:),

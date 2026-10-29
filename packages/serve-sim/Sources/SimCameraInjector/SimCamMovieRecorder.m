@@ -125,7 +125,10 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
     if ([[NSFileManager defaultManager] fileExistsAtPath:_URL.path]) {
         if (error) *error = [NSError errorWithDomain:AVFoundationErrorDomain
                                                 code:AVErrorFileAlreadyExists
-                                            userInfo:@{ NSURLErrorKey: _URL }];
+                                            userInfo:@{
+                                                NSURLErrorKey: _URL,
+                                                NSLocalizedDescriptionKey: @"A file already exists at the recording URL",
+                                            }];
         return NO;
     }
     // AVCaptureMovieFileOutput writes a QuickTime movie whatever the file's
@@ -214,7 +217,7 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
         self->_delegate = nil;
     };
     if (_writer.status != AVAssetWriterStatusWriting) {
-        deliver(error ?: _writer.error);
+        deliver(error ?: SimCamRecordingFailure(_writer.error));
         return;
     }
     [_input markAsFinished];
