@@ -32,7 +32,14 @@ const describeIfSimulator = udid && existsSync(DYLIB) ? describe : describe.skip
 let buildDir: string | null = null;
 let resultPath: string | null = null;
 
-async function runTestApp(mode: "graph" | "teardown") {
+async function runTestApp(
+  mode:
+    | "graph"
+    | "teardown"
+    | "automatic-recording"
+    | "manual-recording"
+    | "max-duration-recording",
+) {
   try {
     execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
       stdio: "pipe",
@@ -101,12 +108,22 @@ describeIfSimulator("synthetic camera connection graph", () => {
 <key>CFBundleVersion</key><string>1</string>
 <key>LSRequiresIPhoneOS</key><true/>
 <key>MinimumOSVersion</key><string>15.0</string>
+<key>NSMicrophoneUsageDescription</key><string>Records the microphone beside the synthetic camera.</string>
+<key>UIApplicationSceneManifest</key><dict>
+<key>UIApplicationSupportsMultipleScenes</key><false/>
+<key>UISceneConfigurations</key><dict><key>UIWindowSceneSessionRoleApplication</key><array><dict>
+<key>UISceneConfigurationName</key><string>Default</string>
+<key>UISceneDelegateClassName</key><string>SimCameraConnectionSceneDelegate</string>
+</dict></array></dict></dict>
 </dict></plist>\n`);
 
     try {
       execFileSync("xcrun", ["simctl", "uninstall", udid!, BUNDLE_ID]);
     } catch {}
     execFileSync("xcrun", ["simctl", "install", udid!, appDir]);
+    // The recording checks add the microphone, as expo-camera and
+    // VisionCamera do; a host without one skips that half.
+    execFileSync("xcrun", ["simctl", "privacy", udid!, "grant", "microphone", BUNDLE_ID]);
     const dataContainer = execFileSync(
       "xcrun",
       ["simctl", "get_app_container", udid!, BUNDLE_ID, "data"],
@@ -131,5 +148,17 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("deallocates automatic metadata and video outputs without crashing", async () => {
     await runTestApp("teardown");
+  }, 20_000);
+
+  test("records a movie from automatic connections beside a microphone (expo-camera)", async () => {
+    await runTestApp("automatic-recording");
+  }, 20_000);
+
+  test("records a movie from manual connections with a paused stretch (VisionCamera 5)", async () => {
+    await runTestApp("manual-recording");
+  }, 20_000);
+
+  test("stops a movie at maxRecordedDuration as a successful recording", async () => {
+    await runTestApp("max-duration-recording");
   }, 20_000);
 });
