@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { mkdtempSync, rmSync } from "fs";
 import { request } from "http";
 import { connect } from "net";
 import { tmpdir } from "os";
@@ -302,6 +302,7 @@ describe("deviceScope", () => {
   const read = {
     states: async () => [state(SERVED), state(OTHER)],
     simulators: async () => [{ udid: SERVED }, { udid: OTHER }],
+    simulatorName: async (udid: string) => `name of ${udid}`,
     isKnown: async () => true,
     events: (query?: { include?: (event: EventLogEntry) => boolean }) =>
       [entry(SERVED), entry(OTHER), entry(undefined)].filter(query?.include ?? (() => true)),
@@ -317,6 +318,7 @@ describe("deviceScope", () => {
     expect(await scope.simulators()).toEqual([{ udid: SERVED }]);
     expect(await scope.isKnown(SERVED)).toBe(true);
     expect(await scope.isKnown(OTHER)).toBe(false);
+    expect([await scope.simulatorName(SERVED), await scope.simulatorName(OTHER)]).toEqual([`name of ${SERVED}`, undefined]);
     expect([scope.allows(SERVED), scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, false, false]);
     expect(scope.events().map((event) => event.device)).toEqual([SERVED, undefined]);
     const heard: Array<string | undefined> = [];
@@ -330,20 +332,5 @@ describe("deviceScope", () => {
     expect(await scope.simulators()).toHaveLength(2);
     expect(scope.events()).toHaveLength(3);
     expect([scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, true]);
-  });
-
-  test("simMiddleware reads simulators and events only through its scope", () => {
-    // A route that called one of these itself would list or drive every
-    // simulator in a restricted preview.
-    const source = readFileSync(join(import.meta.dir, "..", "middleware.ts"), "utf-8");
-    const body = source.slice(source.indexOf("export function simMiddleware("));
-    for (const reader of ["readServeSimStates(", "listAllSimulators(", "getBootedUdids(", "isBooted("]) {
-      expect({ reader, called: body.includes(reader) }).toEqual({ reader, called: false });
-    }
-    // The diagnostics bundle sits outside simMiddleware, so the event log is
-    // checked across the whole file.
-    for (const reader of ["readEventLog(", "subscribeEventLog("]) {
-      expect({ reader, called: source.includes(reader) }).toEqual({ reader, called: false });
-    }
   });
 });

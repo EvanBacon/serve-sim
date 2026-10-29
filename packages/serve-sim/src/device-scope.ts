@@ -1,4 +1,5 @@
-import type { readEventLog, subscribeEventLog } from "./event-log";
+import { isBooted, listAllSimulators, readServeSimStates, simulatorName, type SimctlDevice } from "./device-sources";
+import { readEventLog, subscribeEventLog } from "./event-log";
 import type { ServeSimDeviceState } from "./state";
 
 /**
@@ -12,7 +13,7 @@ export type DeviceTarget = string | typeof EVERY_SIMULATOR;
 
 /**
  * The simulators a preview serves (`--restrict-devices`). The middleware
- * reads states, the simulator list and the event log only through it, and
+ * reads states, simulators and the event log only through it, and
  * checks every target a request names against `allows` once, before any
  * route runs, so a route added later is restricted without opting in. With
  * no restriction it allows everything.
@@ -21,6 +22,8 @@ export interface DeviceScope<Simulator> {
   allows(target: DeviceTarget): boolean;
   states(): Promise<ServeSimDeviceState[]>;
   simulators(): Promise<Simulator[]>;
+  /** Metro's name for a served simulator, if no other simulator shares it. */
+  simulatorName(udid: string): Promise<string | undefined>;
   /** Whether host actions may drive `udid`: in scope, and known to the host. */
   isKnown(udid: string): Promise<boolean>;
   /** Event-log entries for served simulators, and those that name none. */
@@ -40,10 +43,26 @@ export function deviceScope<Simulator extends { udid: string }>(
     allows,
     states: async () => (await read.states()).filter((state) => allows(state.device)),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
+    simulatorName: async (udid) => (allows(udid) ? read.simulatorName(udid) : undefined),
     isKnown: async (udid) => allows(udid) && (await read.isKnown(udid)),
     events: (query) => read.events({ ...query, include: logged }),
     onEvent: (subscriber) => read.onEvent((entry) => {
       if (logged(entry)) subscriber(entry);
     }),
   };
+}
+
+/** The scope over this host's simulators, previews and event log. */
+export function hostDeviceScope(
+  restrictToDevices: readonly string[] | undefined,
+  isKnown: (udid: string) => Promise<boolean> = isBooted,
+): DeviceScope<SimctlDevice> {
+  return deviceScope(restrictToDevices, {
+    states: readServeSimStates,
+    simulators: listAllSimulators,
+    simulatorName: (udid) => simulatorName(udid),
+    isKnown,
+    events: readEventLog,
+    onEvent: subscribeEventLog,
+  });
 }

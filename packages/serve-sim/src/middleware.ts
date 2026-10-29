@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, existsSync, unlinkSync, watch, type FSWatcher } from "fs";
+import { existsSync, watch, type FSWatcher } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
@@ -24,21 +24,11 @@ import {
   type DiagnosticsBundle,
   type DiagnosticsSources,
 } from "./doctor";
-import {
-  eventLogEventForCommand,
-  readEventLog,
-  recordEventLogEvent,
-  subscribeEventLog,
-} from "./event-log";
+import { eventLogEventForCommand, recordEventLogEvent } from "./event-log";
 import { axFrontmostAsync } from "./native";
-import { reloadViaMetro, supportsMetroReload, uniqueSimulatorName, type MetroReloadResult } from "./metro-reload";
+import { reloadViaMetro, supportsMetroReload, type MetroReloadResult } from "./metro-reload";
 import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
-import {
-  authTokenFingerprint,
-  classifyStaleState,
-  persistRecoveredState,
-  resolveLiveHelperState,
-} from "./helper-lifecycle";
+import { authTokenFingerprint } from "./helper-lifecycle";
 import { debugMw } from "./debug";
 import {
   resolveDevicePlaceholderAsset,
@@ -51,8 +41,11 @@ import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler 
 import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
-import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
-import { EVERY_SIMULATOR, deviceScope, type DeviceScope, type DeviceTarget } from "./device-scope";
+import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
+import { EVERY_SIMULATOR, hostDeviceScope, type DeviceScope, type DeviceTarget } from "./device-scope";
+import { forgetBootedSimulators } from "./device-sources";
+
+export { readServeSimStates, simulatorName } from "./device-sources";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
@@ -131,14 +124,6 @@ type CdpHttpListEntry = {
 };
 
 type CdpHttpVersion = { Browser?: string };
-
-type SimctlBootedList = {
-  devices: Record<string, Array<{ udid: string; state: string }>>;
-};
-
-type SimctlAllList = {
-  devices: Record<string, Array<Omit<SimctlDevice, "runtime">>>;
-};
 
 type DeviceRequestBody = { udid?: string };
 type ReleaseRequestBody = { targetId?: string };
@@ -267,48 +252,6 @@ export function matchInstalledAppByDisplayName(
   return null;
 }
 
-// Cache simctl's booted-device set briefly so per-request cost stays bounded.
-// The middleware runs inside the user's dev server (Metro etc.) and
-// readServeSimStates() is called on every /api and every page load.
-let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
-async function getBootedUdids(): Promise<Set<string> | null> {
-  const now = Date.now();
-  if (bootedSnapshot.booted && now - bootedSnapshot.at < 1500) {
-    return bootedSnapshot.booted;
-  }
-  try {
-    const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
-        "xcrun",
-        simctlArguments(["list", "devices", "booted", "-j"]),
-        { encoding: "utf-8", timeout: 3_000 },
-        (err, stdout) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve(stdout);
-          }
-        },
-      );
-    });
-    const data = JSON.parse(stdout) as SimctlBootedList;
-    const booted = new Set<string>();
-    for (const runtime of Object.values(data.devices)) {
-      for (const device of runtime) {
-        if (device.state === "Booted") booted.add(device.udid);
-      }
-    }
-    bootedSnapshot = { at: now, booted };
-    return booted;
-  } catch {
-    return null;
-  }
-}
-
-async function isBooted(udid: string): Promise<boolean> {
-  return (await getBootedUdids())?.has(udid) ?? false;
-}
-
 // The device the user most recently opened in Simulator.app, regardless of
 // which tool launched it. Simulator.app persists this as CurrentDeviceUDID, so
 // it's the best signal for "the device this user actually cares about" — we
@@ -330,67 +273,6 @@ function getPreferredDeviceUdid(): string | null {
   }
   preferredSnapshot = { at: now, udid };
   return udid;
-}
-
-export async function readServeSimStates(): Promise<ServeSimState[]> {
-  let files: string[];
-  try {
-    files = readdirSync(STATE_DIR).filter(
-      (f) => f.startsWith("server-") && f.endsWith(".json"),
-    );
-  } catch {
-    return [];
-  }
-  const booted = await getBootedUdids();
-  const deviceSet = resolveDeviceSet();
-  const states: ServeSimState[] = [];
-  for (const f of files) {
-    const path = join(STATE_DIR, f);
-    try {
-      const recorded: ServeSimState = JSON.parse(readFileSync(path, "utf-8"));
-      const state = resolveLiveHelperState(recorded);
-      if (!state) {
-        debugMw("helper pid=%d gone, removing %s", recorded.pid, path);
-        try { unlinkSync(path); } catch {}
-        continue;
-      }
-      if (state.pid !== recorded.pid) persistRecoveredState(state);
-      // Previews in every device set share this folder; another set's
-      // simulator is not one this preview can stream.
-      if (!sameDeviceSet(state.deviceSet, deviceSet)) continue;
-      // Helper alive but its simulator was shut down — the MJPEG stream
-      // would accept connections yet never produce frames, leaving the
-      // preview stuck on "Connecting...". Recycle the stale state so the
-      // caller can spawn a fresh helper bound to whatever is booted.
-      const action = classifyStaleState(state, booted, process.pid, deviceSet);
-      if (action !== "keep") {
-        if (action === "recycle-self") {
-          // This device is streamed in-process by *us* (the close button just
-          // shut its sim down). SIGTERMing state.pid would kill the whole
-          // server; instead stop just this device's capture session.
-          debugMw(
-            "closing in-process session for shut-down device %s (own pid %d)",
-            state.device,
-            state.pid,
-          );
-          closeDeviceSession(state.device);
-        } else {
-          debugMw(
-            "asking stale helper pid=%d to exit (device %s no longer booted)",
-            state.pid,
-            state.device,
-          );
-          try { process.kill(state.pid, "SIGTERM"); } catch {}
-        }
-        // Keep the pidfile while the process is alive so `--list` / `--kill`
-        // can still find a detached helper after simctl shutdown. The file
-        // is dropped the next time the pid is observed dead.
-        continue;
-      }
-      states.push(state);
-    } catch {}
-  }
-  return states;
 }
 
 export function selectServeSimState(
@@ -1234,57 +1116,6 @@ function loadHtml(): string {
   return _html;
 }
 
-interface SimctlDevice {
-  udid: string;
-  name: string;
-  state: string;
-  isAvailable?: boolean;
-  deviceTypeIdentifier?: string;
-  runtime: string;
-}
-
-/**
- * Metro device name for `udid`; undefined if another booted sim shares it or
- * the listing fails. Always lists afresh — a cached listing could miss a twin
- * booted since — and POST /reload's lookup budget bounds the wait, falling
- * back to tapping R rather than reloading from stale data.
- */
-export async function simulatorName(
-  udid: string,
-  listSimulators: () => Promise<readonly { udid: string; name: string; state: string }[]> = listAllSimulators,
-): Promise<string | undefined> {
-  return uniqueSimulatorName(await listSimulators(), udid);
-}
-
-function listAllSimulators(): Promise<SimctlDevice[]> {
-  return new Promise((resolve) => {
-    execFile(
-      "xcrun",
-      simctlArguments(["list", "devices", "-j"]),
-      { encoding: "utf-8", timeout: 3_000 },
-      (err, stdout) => {
-        if (err) return resolve([]);
-        try {
-          const data = JSON.parse(stdout) as SimctlAllList;
-          const out: SimctlDevice[] = [];
-          for (const [runtime, devices] of Object.entries(data.devices)) {
-            // Keep this to touch-capable simulator families that serve-sim can
-            // frame and inject into. tvOS is intentionally left out for now.
-            if (!/SimRuntime\.(iOS|watchOS|visionOS|xrOS)-/i.test(runtime)) continue;
-            for (const d of devices) {
-              if (d.isAvailable === false) continue;
-              out.push({ ...d, runtime: runtime.replace(/^.*SimRuntime\./, "") });
-            }
-          }
-          resolve(out);
-        } catch {
-          resolve([]);
-        }
-      },
-    );
-  });
-}
-
 // Default per-simulator footprint when we have no running sim to measure
 // from — a fresh booted iOS sim with one app launched typically sits in
 // the 1.2–1.8 GB range. Used as a fallback only.
@@ -1549,14 +1380,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // A dev server that embeds this middleware never runs the CLI: settle the
   // device set (and refuse a bad SERVE_SIM_DEVICE_SET) here, not mid-request.
   resolveDeviceSet();
-  // Routes read states, simulators and the event log only through the scope.
-  const scope = deviceScope(options?.restrictToDevices, {
-    states: readServeSimStates,
-    simulators: listAllSimulators,
-    isKnown: options?.isKnownDevice ?? isBooted,
-    events: readEventLog,
-    onEvent: subscribeEventLog,
-  });
+  const scope = hostDeviceScope(options?.restrictToDevices, options?.isKnownDevice);
   const serveDiagnostics = createDiagnosticsHandler(scope, options?.diagnostics);
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
@@ -1989,7 +1813,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       closeDeviceSession(udid);
       // Drop the snapshot so the next /grid/api call re-queries simctl
       // and prunes any helper bound to this now-shutdown device.
-      bootedSnapshot = { at: 0, booted: null };
+      forgetBootedSimulators();
       execFile("xcrun", simctlArguments(["shutdown", udid]), { timeout: 30_000 }, (err, _stdout, stderr) => {
         if (err) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -2472,7 +2296,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
             // client gives up and taps R itself.
             const name = scope.states().then((states) => {
               const state = selectServeSimState(states, selectedDevice);
-              return state ? simulatorName(state.device) : undefined;
+              return state ? scope.simulatorName(state.device) : undefined;
             });
             result = await reloadViaMetro(bundleId, name);
           }
