@@ -277,6 +277,24 @@ describe("serve-sim --device-set", () => {
     });
   }
 
+  test("a command that names a simulator finds only a preview of its own set", () => {
+    // A UDID another set's preview recorded; -l must not report it as running here.
+    const udid = "CCCCCCCC-0000-0000-0000-000000000003";
+    withSet((scratch) => {
+      mkdirSync(join(scratch, "serve-sim"));
+      const other = join(scratch, "other-set");
+      mkdirSync(other);
+      writeFileSync(
+        join(scratch, "serve-sim", `server-${udid}.json`),
+        JSON.stringify({ pid: process.pid, port: 1, device: udid, deviceSet: other, url: "", streamUrl: "", wsUrl: "" }),
+      );
+      const list = (set: string) =>
+        spawnSync("bun", [cli, "--device-set", set, "--list", udid], { encoding: "utf8", env: { ...process.env, TMPDIR: scratch } });
+      expect(JSON.parse(list(scratch).stdout)).toEqual({ running: false, device: udid });
+      expect(JSON.parse(list(other).stdout).running).toBe(true);
+    });
+  });
+
   test("drives only a preview of its own device set", () => {
     withOtherSetPreview((scratch) => {
       const result = spawnSync("bun", [cli, "--device-set", scratch, "tap", "0.5", "0.5"], {

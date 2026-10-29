@@ -123,7 +123,8 @@ function ensureStateDir() {
 
 function readState(udid?: string): ServerState | null {
   if (udid) {
-    return readStateFile(stateFileForDevice(udid));
+    const state = readStateFile(stateFileForDevice(udid));
+    return state && inThisDeviceSet(state) ? state : null;
   }
   // No udid: the first live preview of this device set.
   for (const file of listStateFiles()) {
@@ -134,8 +135,8 @@ function readState(udid?: string): ServerState | null {
 }
 
 /**
- * Previews in every device set share the state folder; a command that names
- * no UDID acts only on a preview of its own set.
+ * Previews in every device set share the state folder; a command acts only
+ * on a preview of its own set.
  */
 function inThisDeviceSet(state: ServerState): boolean {
   return sameDeviceSet(state.deviceSet, resolveDeviceSet());
