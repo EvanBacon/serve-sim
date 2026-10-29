@@ -60,8 +60,7 @@ void SimCamFakeMovieOutputSessionStopped(AVCaptureOutput *output) {
 // AVFoundation answers these from the native connection graph, which a
 // session with a fake camera never builds, and throws for a connection it
 // does not own ("Invalid connection passed"). The recording methods are
-// swizzled on
-// AVCaptureMovieFileOutput, which overrides some of them, so
+// swizzled on AVCaptureMovieFileOutput, which overrides some of them, so
 // AVCaptureFileOutput and its other subclasses are untouched.
 @interface AVCaptureMovieFileOutput (SimCam)
 @end
