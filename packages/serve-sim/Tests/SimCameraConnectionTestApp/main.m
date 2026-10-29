@@ -631,9 +631,11 @@ static AVCaptureSession *RunningMovieSession(AVCaptureMovieFileOutput *movie) {
 }
 
 // Records into a movie the app lets go of 0.5 s in: `letGo` drops the
-// output, and the delegate must still hear about a finished file.
-static void RunLetGoRecording(NSString *what, NSString *fileName, void (^letGo)(AVCaptureSession *session,
-                                                                             AVCaptureMovieFileOutput *movie)) {
+// output, and the delegate must still hear about a finished, playable file,
+// with no error when `expectedCode` is 0 and otherwise that AVFoundation
+// error with AVErrorRecordingSuccessfullyFinishedKey set to YES.
+static void RunLetGoRecording(NSString *what, NSString *fileName, NSInteger expectedCode,
+                              void (^letGo)(AVCaptureSession *session, AVCaptureMovieFileOutput *movie)) {
     AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
     __block AVCaptureSession *session = RunningMovieSession(movie);
     __weak AVCaptureMovieFileOutput *weakMovie = movie;
@@ -650,8 +652,15 @@ static void RunLetGoRecording(NSString *what, NSString *fileName, void (^letGo)(
         });
     };
     gProbe.onFinish = ^(NSURL *url, NSError *error) {
-        if (error) {
-            WriteResult(NO, [NSString stringWithFormat:@"%@: recording failed: %@", what, error]);
+        BOOL expected = expectedCode == 0
+            ? error == nil
+            : [error.domain isEqualToString:AVFoundationErrorDomain] && error.code == expectedCode &&
+                [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@YES];
+        if (!expected) {
+            WriteResult(NO, [NSString stringWithFormat:@"%@: expected %@, got %@", what,
+                expectedCode == 0 ? @"no error"
+                                  : [NSString stringWithFormat:@"error %ld, successfully finished", (long)expectedCode],
+                error]);
             return;
         }
         if (!gProbe.finishedWithOutput) {
@@ -672,18 +681,20 @@ static void RunLetGoRecording(NSString *what, NSString *fileName, void (^letGo)(
 }
 
 // expo-camera removes its movie output when the camera view remounts.
+// AVErrorSessionConfigurationChanged: "Recording stopped because the
+// configuration of media sources and destinations changed."
 static void RunDroppedOutputRecording(void) {
-    RunLetGoRecording(@"Dropped output", @"dropped-output.mov", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+    RunLetGoRecording(@"Dropped output", @"dropped-output.mov", AVErrorSessionConfigurationChanged, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         [session beginConfiguration];
         [session removeOutput:movie];
         [session commitConfiguration];
     });
 }
 
-// Removing the camera mid-recording ends the recording, as AVFoundation's
-// movie output is understood to end one across a camera flip.
+// Removing the camera mid-recording, as a camera flip does, changes the
+// session's media sources and ends the recording the same way.
 static void RunRemovedCameraRecording(void) {
-    RunLetGoRecording(@"Removed camera", @"removed-camera.mov", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+    RunLetGoRecording(@"Removed camera", @"removed-camera.mov", AVErrorSessionConfigurationChanged, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         (void)movie;
         [session beginConfiguration];
         for (AVCaptureInput *input in session.inputs) [session removeInput:input];
@@ -692,8 +703,9 @@ static void RunRemovedCameraRecording(void) {
 }
 
 // An app can stop its session and let it go with the output still in it.
+// No AVError code names a stopped session, so the recording ends as a stop.
 static void RunStoppedSessionRecording(void) {
-    RunLetGoRecording(@"Stopped session", @"stopped-session.mov", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+    RunLetGoRecording(@"Stopped session", @"stopped-session.mov", 0, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         (void)movie;
         [session stopRunning];
     });

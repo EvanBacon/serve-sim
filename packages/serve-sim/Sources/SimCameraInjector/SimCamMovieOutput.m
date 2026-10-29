@@ -34,7 +34,14 @@ static SimCamFakeMovieOutput *SimCamFakeMovieOutputFor(AVCaptureMovieFileOutput 
     }
 }
 
-void SimCamEndFakeMovieRecording(AVCaptureOutput *output) {
+void SimCamFakeMovieOutputLeftSession(AVCaptureOutput *output) {
+    SimCamFakeMovieOutput *fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
+    // The file is finished and plays, as AVFoundation's is.
+    [fake.recorder stopWithError:[NSError errorWithDomain:AVFoundationErrorDomain
+                                                     code:AVErrorSessionConfigurationChanged
+                                                 userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]];
+}
+void SimCamFakeMovieOutputSessionStopped(AVCaptureOutput *output) {
     SimCamFakeMovieOutput *fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
     [fake.recorder stop];
 }

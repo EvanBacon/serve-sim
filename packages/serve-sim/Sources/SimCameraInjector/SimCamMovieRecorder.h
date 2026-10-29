@@ -13,6 +13,9 @@
                    maxDuration:(CMTime)maxDuration;
 - (void)start;
 - (void)stop;
+// Ends the recording as `stop` does, with `error` for the delegate once the
+// file is finished.
+- (void)stopWithError:(NSError *)error;
 - (void)pause;
 - (void)resume;
 @property (nonatomic, readonly) NSURL *URL;

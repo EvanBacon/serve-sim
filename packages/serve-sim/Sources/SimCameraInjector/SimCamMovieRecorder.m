@@ -95,7 +95,11 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
 }
 
 - (void)stop {
-    dispatch_async(_queue, ^{ [self finishWithError:nil endingAt:kCMTimeInvalid]; });
+    [self stopWithError:nil];
+}
+
+- (void)stopWithError:(NSError *)error {
+    dispatch_async(_queue, ^{ [self finishWithError:error endingAt:kCMTimeInvalid]; });
 }
 
 - (void)pause {
@@ -220,7 +224,7 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
         self->_output = nil;
     };
     if (_writer.status != AVAssetWriterStatusWriting) {
-        deliver(error ?: SimCamRecordingFailure(_writer.error));
+        deliver(SimCamRecordingFailure(error ?: _writer.error));
         return;
     }
     [_input markAsFinished];
