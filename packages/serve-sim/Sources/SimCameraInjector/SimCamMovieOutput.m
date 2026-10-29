@@ -34,6 +34,17 @@ static SimCamFakeMovieOutput *SimCamFakeMovieOutputFor(AVCaptureMovieFileOutput 
     }
 }
 
+// The fake that answers the output's recording getters: while the output is
+// on a fake session, and after it leaves once it holds a fake recording,
+// since a removed output's recording finishes, and its delegate reads them,
+// after the output has left.
+static SimCamFakeMovieOutput *SimCamFakeRecordingFor(AVCaptureMovieFileOutput *output) {
+    SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(output);
+    if (fake) return fake;
+    fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
+    return fake.recorder ? fake : nil;
+}
+
 void SimCamFakeMovieOutputLeftSession(AVCaptureOutput *output) {
     SimCamFakeMovieOutput *fake = objc_getAssociatedObject(output, &kSimCamFakeMovieOutputKey);
     // The file is finished and plays, as AVFoundation's is.
@@ -126,27 +137,27 @@ void SimCamFakeMovieOutputSessionStopped(AVCaptureOutput *output) {
     [fake.recorder resume];
 }
 - (BOOL)simcam_isRecording {
-    SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
+    SimCamFakeMovieOutput *fake = SimCamFakeRecordingFor(self);
     if (!fake) return [self simcam_isRecording];
     return fake.recorder.isRecording;
 }
 - (BOOL)simcam_isRecordingPaused {
-    SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
+    SimCamFakeMovieOutput *fake = SimCamFakeRecordingFor(self);
     if (!fake) return [self simcam_isRecordingPaused];
     return fake.recorder.isPaused;
 }
 - (NSURL *)simcam_outputFileURL {
-    SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
+    SimCamFakeMovieOutput *fake = SimCamFakeRecordingFor(self);
     if (!fake) return [self simcam_outputFileURL];
     return fake.recorder.isRecording ? fake.recorder.URL : nil;
 }
 - (CMTime)simcam_recordedDuration {
-    SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
+    SimCamFakeMovieOutput *fake = SimCamFakeRecordingFor(self);
     if (!fake) return [self simcam_recordedDuration];
     return fake.recorder ? fake.recorder.recordedDuration : kCMTimeZero;
 }
 - (int64_t)simcam_recordedFileSize {
-    SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
+    SimCamFakeMovieOutput *fake = SimCamFakeRecordingFor(self);
     if (!fake) return [self simcam_recordedFileSize];
     return fake.recorder.recordedFileSize;
 }

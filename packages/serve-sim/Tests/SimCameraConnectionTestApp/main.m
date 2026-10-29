@@ -235,6 +235,9 @@ static void RunTeardownCheck(id<AVCaptureVideoDataOutputSampleBufferDelegate,
 @property(nonatomic, copy) void (^onStart)(void);
 @property(nonatomic, copy) void (^onFinish)(NSURL *url, NSError *error);
 @property(atomic) BOOL finishedWithOutput;
+// What the output reported as its delegate heard the recording finished.
+@property(atomic) double finishedSeconds;
+@property(atomic) int64_t finishedFileSize;
 @end
 
 @implementation SimCamRecordingProbe
@@ -250,6 +253,8 @@ static void RunTeardownCheck(id<AVCaptureVideoDataOutputSampleBufferDelegate,
                                   error:(NSError *)error {
     (void)connections;
     self.finishedWithOutput = output != nil;
+    self.finishedSeconds = CMTimeGetSeconds(output.recordedDuration);
+    self.finishedFileSize = output.recordedFileSize;
     dispatch_async(dispatch_get_main_queue(), ^{ if (self.onFinish) self.onFinish(outputFileURL, error); });
 }
 @end
@@ -633,7 +638,8 @@ static AVCaptureSession *RunningMovieSession(AVCaptureMovieFileOutput *movie) {
 // Records into a movie the app lets go of 0.5 s in: `letGo` drops the
 // output, and the delegate must still hear about a finished, playable file,
 // with no error when `expectedCode` is 0 and otherwise that AVFoundation
-// error with AVErrorRecordingSuccessfullyFinishedKey set to YES.
+// error with AVErrorRecordingSuccessfullyFinishedKey set to YES, from an
+// output that reports the movie's duration and size.
 static void RunLetGoRecording(NSString *what, NSString *fileName, NSInteger expectedCode,
                               void (^letGo)(AVCaptureSession *session, AVCaptureMovieFileOutput *movie)) {
     AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
@@ -671,6 +677,13 @@ static void RunLetGoRecording(NSString *what, NSString *fileName, NSInteger expe
             if (problem || seconds < 0.4 || seconds > 1.0) {
                 WriteResult(NO, [NSString stringWithFormat:@"%@: %@", what,
                     problem ?: [NSString stringWithFormat:@"movie holds %.2f s, expected 0.40-1.00 s", seconds]]);
+                return;
+            }
+            int64_t fileSize = (int64_t)[[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil].fileSize;
+            if (fabs(gProbe.finishedSeconds - seconds) > 0.002 || gProbe.finishedFileSize != fileSize) {
+                WriteResult(NO, [NSString stringWithFormat:
+                    @"%@: the output reported %.3f s and %lld bytes as it finished, for a movie of %.3f s and %lld bytes",
+                    what, gProbe.finishedSeconds, gProbe.finishedFileSize, seconds, fileSize]);
                 return;
             }
             WaitForRelease(weakMovie, [NSDate dateWithTimeIntervalSinceNow:3.0],
