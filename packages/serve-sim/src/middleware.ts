@@ -44,7 +44,6 @@ import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { hostDeviceScope, notServed, type DeviceScope } from "./device-scope";
 import { jsonValue, requestContext, requestPathname, type RequestContext } from "./request-context";
-import { forgetBootedSimulators } from "./device-sources";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
@@ -1453,12 +1452,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   };
 
   const middleware = (async (req: SimReq, res: SimRes, next?: SimNext) => {
+    const rawUrl = req.url ?? "";
     // Same pathname helperProxyTarget / devtoolsProxyTarget match on, so a
     // `/x/../.sim/...` or `//host/.sim/...` request cannot skip the auth gate.
+    const pathname = requestPathname(rawUrl);
     // Every route below is under `base`.
-    if (!ownsPath(requestPathname(req.url ?? ""))) return next?.();
-    const request = requestContext(req, { base, device: options?.device });
-    const { method, rawUrl, url, pathname, requestedDevice, selectedDevice } = request;
+    if (!ownsPath(pathname)) return next?.();
+    const method = (req.method ?? "GET").toUpperCase();
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
     const trustedLoopback = isTrustedLoopback(req);
 
@@ -1485,6 +1485,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
       return;
     }
+    const request = requestContext(req, { base, device: options?.device }, "http");
+    const { url, requestedDevice, selectedDevice } = request;
     const refused = await scope.check(request);
     if (refused) {
       res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -1714,7 +1716,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       closeDeviceSession(udid);
       // Drop the snapshot so the next /grid/api call re-queries simctl
       // and prunes any helper bound to this now-shutdown device.
-      forgetBootedSimulators();
+      scope.forgetBootedSimulators();
       execFile("xcrun", simctlArguments(["shutdown", udid]), { timeout: 30_000 }, (err, _stdout, stderr) => {
         if (err) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -2310,7 +2312,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       socket.destroy();
       return;
     }
-    const request = requestContext(req, { base, device: options?.device });
+    const request = requestContext(req, { base, device: options?.device }, "upgrade");
     void scope.check(request).then((refused) => {
       if (refused) rejectUpgrade(socket, 404, refused);
       else upgradeOwned(request, req, socket, head);

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { request } from "http";
 import { connect } from "net";
 import { tmpdir } from "os";
@@ -119,11 +119,11 @@ function firstEvent(path: string): Promise<{ events: Array<{ device?: string }> 
 }
 
 /** The whole answer a WebSocket upgrade to `path` gets back (Bun's `ws` has no unexpected-response). */
-function upgradeAnswer(path: string): Promise<string> {
+function upgradeAnswer(path: string, method = "GET"): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = connect(port, "127.0.0.1", () => {
       socket.write(
-        `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: http://127.0.0.1:${port}\r\n` +
+        `${method} ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: http://127.0.0.1:${port}\r\n` +
           "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" +
           "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
       );
@@ -155,11 +155,23 @@ describe("restrictToDevices", () => {
   });
 
   test("refuses another simulator named in any JSON body", async () => {
-    for (const body of [{ bundleId: "com.example.app", udid: OTHER }, { bundleId: "com.example.app", device: OTHER }]) {
+    for (const body of [
+      { bundleId: "com.example.app", udid: OTHER },
+      { bundleId: "com.example.app", device: OTHER },
+      // The grid routes read `[udid]` as `udid`, as main does.
+      { bundleId: "com.example.app", udid: [OTHER] },
+    ]) {
       const refused = await send(`/reload?device=${SERVED}`, body);
       expect({ body, status: refused.status }).toEqual({ body, status: 404 });
       expect(JSON.parse(refused.body)).toEqual({ ok: false, error: `${OTHER} is not served by this preview` });
     }
+    expect((await send("/grid/api/shutdown", { udid: [OTHER] })).status).toBe(404);
+  });
+
+  test("answers a POST upgrade without reading a body", async () => {
+    const answer = await upgradeAnswer(`/helper/${OTHER}/ws`, "POST");
+    expect(answer).toStartWith("HTTP/1.1 404 ");
+    expect((await send(`/api?device=${SERVED}`)).status).toBe(200);
   });
 
   test("leaves a body over its route's cap to that route's own 413", async () => {
@@ -319,6 +331,7 @@ describe("deviceScope", () => {
     states: async (allows: (udid: string) => boolean) => [state(SERVED), state(OTHER)].filter((s) => allows(s.device)),
     simulators: async () => [{ udid: SERVED }, { udid: OTHER }],
     simulatorName: async (udid: string) => `name of ${udid}`,
+    forgetBootedSimulators: () => {},
     isKnown: async () => true,
     events: (query?: { include?: (event: EventLogEntry) => boolean }) =>
       [entry(SERVED), entry(OTHER), entry(undefined)].filter(query?.include ?? (() => true)),
@@ -384,12 +397,21 @@ describe("hostDeviceScope", () => {
 
   test("a restricted preview never stops another simulator's stale helper", () => {
     // A scratch state folder (STATE_DIR is under TMPDIR) holding one preview
-    // of OTHER, which no device set lists, so it reads as shut down and its
-    // helper as stale.
+    // of OTHER, and an xcrun that lists no booted simulator, so its helper
+    // reads as stale.
     const scratch = mkdtempSync(join(tmpdir(), "serve-sim-restrict-"));
     const helper = spawn("sleep", ["30"]);
     try {
       mkdirSync(join(scratch, "serve-sim"));
+      mkdirSync(join(scratch, "bin"));
+      writeFileSync(join(scratch, "bin", "xcrun"), `#!/bin/sh\necho '{"devices":{}}'\n`);
+      chmodSync(join(scratch, "bin", "xcrun"), 0o755);
+      const env: Record<string, string | undefined> = {
+        ...process.env,
+        TMPDIR: scratch,
+        PATH: `${join(scratch, "bin")}:${process.env.PATH}`,
+      };
+      delete env.SERVE_SIM_DEVICE_SET;
       writeFileSync(
         join(scratch, "serve-sim", `server-${OTHER}.json`),
         JSON.stringify({ pid: helper.pid, port: 1, device: OTHER, url: "", streamUrl: "", wsUrl: "" }),
@@ -398,7 +420,7 @@ describe("hostDeviceScope", () => {
         const script =
           `const { hostDeviceScope } = await import(${JSON.stringify(join(import.meta.dir, "..", "device-scope.ts"))});` +
           `await hostDeviceScope(${JSON.stringify(restrict)}).states();`;
-        const result = spawnSync("bun", ["-e", script], { encoding: "utf8", env: { ...process.env, TMPDIR: scratch } });
+        const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", env });
         expect(result.stderr).toBe("");
       };
       readStates([SERVED]);

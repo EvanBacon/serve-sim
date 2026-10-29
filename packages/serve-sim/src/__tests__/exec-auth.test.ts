@@ -48,6 +48,18 @@ describe("/exec auth", () => {
     }, false);
   });
 
+  test("counts the 4 MB cap in characters", async () => {
+    await withServer(async (origin) => {
+      // 3 Mi two-byte characters: 6 MiB, but under 4 Mi characters.
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, Origin: origin },
+        body: JSON.stringify({ command: "echo ok", pad: "é".repeat(3 * 1024 * 1024) }),
+      });
+      expect(r.status).toBe(200);
+    });
+  });
+
   test("refuses a body over 4 MB", async () => {
     await withServer(async (origin) => {
       const r = await fetch(`${origin}/exec`, {
