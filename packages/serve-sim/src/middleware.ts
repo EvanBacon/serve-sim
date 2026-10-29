@@ -1540,11 +1540,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // A dev server that embeds this middleware never runs the CLI: settle the
   // device set (and refuse a bad SERVE_SIM_DEVICE_SET) here, not mid-request.
   resolveDeviceSet();
-  // Routes read states and simulators only through the scope.
+  // Routes read states, simulators and the event log only through the scope.
   const scope = deviceScope(options?.restrictToDevices, {
     states: readServeSimStates,
     simulators: listAllSimulators,
     isKnown: options?.isKnownDevice ?? isBooted,
+    events: readEventLog,
+    onEvent: subscribeEventLog,
   });
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
@@ -2172,7 +2174,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         "Cache-Control": "no-store",
       });
       res.end(JSON.stringify({
-        events: readEventLog({
+        events: scope.events({
           device: requestedDevice,
           sinceId: eventLogSinceId(rawUrl),
           limit: eventLogLimit(rawUrl),
@@ -2192,14 +2194,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       });
       res.write(":\n\n");
       res.write("data: " + JSON.stringify({
-        events: readEventLog({
+        events: scope.events({
           device: requestedDevice,
           sinceId: eventLogSinceId(rawUrl),
           limit: eventLogLimit(rawUrl),
         }),
       }) + "\n\n");
 
-      const unsubscribe = subscribeEventLog((event) => {
+      const unsubscribe = scope.onEvent((event) => {
         if (requestedDevice && event.device !== requestedDevice) return;
         if (res.writableEnded) return;
         res.write("data: " + JSON.stringify({ event }) + "\n\n");
