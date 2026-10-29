@@ -1,45 +1,137 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { eventLogEventForCommand } from "../event-log";
-import {
-  DEVICE_SET_ENV,
-  applyDeviceSetOption,
-  deviceSetFromEnv,
-  normalizeDeviceSetEnv,
-  parseDeviceSetPath,
-  sameDeviceSet,
-  simctlArguments,
-  simctlBootStatusArguments,
-  simulatorDevicesDir,
-} from "../simctl";
+import { sameDeviceSet, simctlArguments, simctlBootStatusArguments, simulatorDevicesDir } from "../simctl";
 
 // `--device-set <path>` / SERVE_SIM_DEVICE_SET: simulators a tool keeps in a
 // CoreSimulator set of its own. Every simctl call gets `--set <path>` and the
 // per-simulator data folders live under the set instead of Xcode's default.
 
+const DEVICE_SET_ENV = "SERVE_SIM_DEVICE_SET";
+const simctlModule = join(import.meta.dir, "..", "simctl.ts");
+
+/**
+ * Runs `body` in a fresh process, where the device set is not settled yet
+ * (this file's process settles it once, to Xcode's default). `body` sees
+ * the simctl module as `m` and returns what it observed.
+ */
+function inFreshProcess(
+  body: string,
+  { env = {}, cwd }: { env?: Record<string, string>; cwd?: string } = {},
+): { ok: true; value: unknown } | { ok: false; error: string } {
+  const script =
+    `const m = await import(${JSON.stringify(simctlModule)});` +
+    `try { console.log(JSON.stringify({ ok: true, value: await (async () => { ${body} })() })); }` +
+    `catch (error) { console.log(JSON.stringify({ ok: false, error: String(error.message) })); }`;
+  const base = { ...process.env };
+  delete base[DEVICE_SET_ENV];
+  const result = spawnSync("bun", ["-e", script], { encoding: "utf8", env: { ...base, ...env }, cwd });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+function withSet<T>(run: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
+  try {
+    return run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("simctlArguments", () => {
   test("targets Xcode's default set when none is configured", () => {
-    expect(simctlArguments(["list", "devices", "-j"], {})).toEqual(["simctl", "list", "devices", "-j"]);
-    expect(simctlArguments(["list"], { [DEVICE_SET_ENV]: " " })).toEqual(["simctl", "list"]);
+    expect(simctlArguments(["list", "devices", "-j"])).toEqual(["simctl", "list", "devices", "-j"]);
+    expect(inFreshProcess(`return m.simctlArguments(["list"]);`, { env: { [DEVICE_SET_ENV]: " " } })).toEqual({
+      ok: true,
+      value: ["simctl", "list"],
+    });
   });
 
   test("puts the configured set before the verb", () => {
-    const env = { [DEVICE_SET_ENV]: "/pool/devices" };
-    expect(simctlArguments(["launch", "UDID", "com.example"], env)).toEqual([
-      "simctl", "--set", "/pool/devices", "launch", "UDID", "com.example",
-    ]);
-    expect(simctlBootStatusArguments("UDID", env)).toEqual(["simctl", "--set", "/pool/devices", "bootstatus", "UDID"]);
+    withSet((dir) => {
+      expect(
+        inFreshProcess(`return [m.simctlArguments(["launch", "UDID", "com.example"]), m.simctlBootStatusArguments("UDID")];`, {
+          env: { [DEVICE_SET_ENV]: dir },
+        }),
+      ).toEqual({
+        ok: true,
+        value: [
+          ["simctl", "--set", dir, "launch", "UDID", "com.example"],
+          ["simctl", "--set", dir, "bootstatus", "UDID"],
+        ],
+      });
+    });
+    expect(simctlBootStatusArguments("UDID")).toEqual(["simctl", "bootstatus", "UDID"]);
   });
 });
 
-describe("deviceSetFromEnv", () => {
-  test("reads ~ and relative paths as the CLI does, for embedders that never run it", () => {
-    expect(deviceSetFromEnv({ [DEVICE_SET_ENV]: "~/pool" }, "/work")).toBe(join(homedir(), "pool"));
-    expect(deviceSetFromEnv({ [DEVICE_SET_ENV]: "pool/devices/" }, "/work")).toBe("/work/pool/devices");
-    expect(deviceSetFromEnv({ [DEVICE_SET_ENV]: " /pool " }, "/work")).toBe("/pool");
+describe("resolveDeviceSet", () => {
+  test("reads ~ and relative paths from SERVE_SIM_DEVICE_SET as the CLI does, for embedders that never run it", () => {
+    withSet((dir) => {
+      mkdirSync(join(dir, "pool"));
+      const resolve = `return m.resolveDeviceSet();`;
+      expect(inFreshProcess(resolve, { env: { [DEVICE_SET_ENV]: "pool/" }, cwd: dir })).toEqual({
+        ok: true,
+        value: join(realpathSync(dir), "pool"),
+      });
+      expect(inFreshProcess(resolve, { env: { [DEVICE_SET_ENV]: ` ${dir}/ ` } })).toEqual({ ok: true, value: dir });
+      expect(inFreshProcess(resolve, { env: { [DEVICE_SET_ENV]: "~" } })).toEqual({ ok: true, value: homedir() });
+    });
+  });
+
+  test("resolves --device-set to an absolute directory", () => {
+    withSet((dir) => {
+      expect(inFreshProcess(`return m.resolveDeviceSet(".");`, { cwd: dir })).toEqual({ ok: true, value: realpathSync(dir) });
+      expect(inFreshProcess(`return m.resolveDeviceSet("~");`)).toEqual({ ok: true, value: homedir() });
+    });
+  });
+
+  test("rejects an empty value and a missing directory, naming where it came from", () => {
+    const missing = join(tmpdir(), "serve-sim-no-such-set");
+    for (const [body, env, source] of [
+      [`return m.resolveDeviceSet("");`, {}, "--device-set"],
+      [`return m.resolveDeviceSet(${JSON.stringify(missing)});`, {}, "--device-set"],
+      [`return m.resolveDeviceSet();`, { [DEVICE_SET_ENV]: missing }, DEVICE_SET_ENV],
+    ] as const) {
+      const result = inFreshProcess(body, { env });
+      expect(result.ok).toBe(false);
+      expect(result.ok ? "" : result.error).toStartWith(`${source}: `);
+    }
+  });
+
+  test("takes --device-set over SERVE_SIM_DEVICE_SET, even a missing one", () => {
+    withSet((dir) => {
+      expect(
+        inFreshProcess(`return m.resolveDeviceSet(${JSON.stringify(dir)});`, {
+          env: { [DEVICE_SET_ENV]: join(tmpdir(), "serve-sim-no-such-set") },
+        }),
+      ).toEqual({ ok: true, value: dir });
+    });
+  });
+
+  test("hands the set to the processes serve-sim starts, and leaves no variable for the default set", () => {
+    withSet((dir) => {
+      expect(
+        inFreshProcess(`m.resolveDeviceSet(${JSON.stringify(dir)}); return process.env.${DEVICE_SET_ENV};`),
+      ).toEqual({ ok: true, value: dir });
+      expect(
+        inFreshProcess(`m.resolveDeviceSet(); return "${DEVICE_SET_ENV}" in process.env;`, { env: { [DEVICE_SET_ENV]: " " } }),
+      ).toEqual({ ok: true, value: false });
+    });
+  });
+
+  test("settles once: later calls keep the first answer, and a late --device-set throws", () => {
+    withSet((dir) => {
+      expect(
+        inFreshProcess(`m.simctlArguments(["list"]); process.env.${DEVICE_SET_ENV} = ${JSON.stringify(dir)}; return m.resolveDeviceSet() ?? null;`),
+      ).toEqual({ ok: true, value: null });
+      const late = inFreshProcess(`m.simctlArguments(["list"]); return m.resolveDeviceSet(${JSON.stringify(dir)});`);
+      expect(late.ok ? "" : late.error).toContain("--device-set arrived after the device set was settled");
+    });
   });
 });
 
@@ -62,52 +154,10 @@ describe("sameDeviceSet", () => {
 
 describe("simulatorDevicesDir", () => {
   test("is Xcode's default folder, or the set itself", () => {
-    expect(simulatorDevicesDir({}, "/Users/me")).toBe("/Users/me/Library/Developer/CoreSimulator/Devices");
-    expect(simulatorDevicesDir({ [DEVICE_SET_ENV]: "/pool/devices" }, "/Users/me")).toBe("/pool/devices");
-  });
-});
-
-describe("parseDeviceSetPath", () => {
-  test("resolves an existing directory to an absolute path", () => {
-    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
-    try {
-      expect(parseDeviceSetPath(".", dir)).toBe(dir);
-      expect(parseDeviceSetPath("~", "/")).toBe(homedir());
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects an empty value and a missing directory", () => {
-    expect(() => parseDeviceSetPath("")).toThrow();
-    expect(() => parseDeviceSetPath(join(tmpdir(), "serve-sim-no-such-set"))).toThrow();
-  });
-});
-
-describe("applyDeviceSetOption", () => {
-  test("hands the flag to child processes and leaves the environment alone without it", () => {
-    const env: NodeJS.ProcessEnv = {};
-    applyDeviceSetOption(undefined, env);
-    expect(deviceSetFromEnv(env)).toBeUndefined();
-    applyDeviceSetOption("/pool/devices", env);
-    expect(deviceSetFromEnv(env)).toBe("/pool/devices");
-  });
-});
-
-describe("normalizeDeviceSetEnv", () => {
-  test("resolves the environment's set like the flag, and rejects a missing one", () => {
-    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
-    try {
-      const env: NodeJS.ProcessEnv = { [DEVICE_SET_ENV]: `${dir}/` };
-      normalizeDeviceSetEnv(env);
-      expect(env[DEVICE_SET_ENV]).toBe(dir);
-      const blank: NodeJS.ProcessEnv = { [DEVICE_SET_ENV]: " " };
-      normalizeDeviceSetEnv(blank);
-      expect(DEVICE_SET_ENV in blank).toBe(false);
-      expect(() => normalizeDeviceSetEnv({ [DEVICE_SET_ENV]: join(dir, "missing") })).toThrow(DEVICE_SET_ENV);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect(simulatorDevicesDir()).toBe(join(homedir(), "Library/Developer/CoreSimulator/Devices"));
+    withSet((dir) => {
+      expect(inFreshProcess(`return m.simulatorDevicesDir();`, { env: { [DEVICE_SET_ENV]: dir } })).toEqual({ ok: true, value: dir });
+    });
   });
 });
 

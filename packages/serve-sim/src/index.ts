@@ -76,15 +76,7 @@ import {
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
-import {
-  DEVICE_SET_ENV,
-  applyDeviceSetOption,
-  deviceSetFromEnv,
-  normalizeDeviceSetEnv,
-  parseDeviceSetPath,
-  simctlArguments,
-  simctlBootStatusArguments,
-} from "./simctl";
+import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { execCommandLine } from "./shell-quote";
 import { reExecArgs, selfServeSimBin } from "./self-bin";
 import {
@@ -213,7 +205,7 @@ function readStateFile(file: string): ServerState | null {
 function readReusableState(udid: string, allowExec: boolean): ServerState | null {
   const state = readState(udid);
   if (!state) return null;
-  const action = classifyStaleState(state, getBootedUdids(), process.pid);
+  const action = classifyStaleState(state, getBootedUdids(), process.pid, resolveDeviceSet());
   if (action === "keep") {
     const mismatch =
       reuseAuthMismatch(state, resolveAuthToken(undefined)) ?? reuseExecMismatch(state, allowExec);
@@ -347,7 +339,7 @@ function bootDevice(udid: string): void {
   // harness is expected to have already driven the sim via simctl.
   // Simulator.app shows only Xcode's default device set, so it has nothing to
   // wire up for a simulator in a `--device-set` of its own.
-  if (deviceSetFromEnv() !== undefined) return;
+  if (resolveDeviceSet() !== undefined) return;
   try {
     execSync("open -ga Simulator", {
       encoding: "utf-8",
@@ -2211,14 +2203,7 @@ program
   .option(
     "--device-set <path>",
     "Use this CoreSimulator device set instead of Xcode's default (simctl --set). " +
-      `Also read from ${DEVICE_SET_ENV}, which subcommands use.`,
-    (value) => {
-      try {
-        return parseDeviceSetPath(value);
-      } catch (error) {
-        throw new InvalidArgumentError(error instanceof Error ? error.message : String(error));
-      }
-    },
+      "Also read from SERVE_SIM_DEVICE_SET, which subcommands use.",
   )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
@@ -2247,7 +2232,6 @@ Examples:
       process.env[AUTH_TOKEN_ENV] = opts.authToken.trim();
     }
     applyMaxBitrateOption(opts.maxBitrate);
-    applyDeviceSetOption(opts.deviceSet);
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -2460,12 +2444,11 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
+// Settle the device set before any command runs. Subcommands take it from
+// SERVE_SIM_DEVICE_SET only.
 program.hook("preAction", (_program, action) => {
-  // The preview's --device-set replaces SERVE_SIM_DEVICE_SET, so the
-  // environment's set is only checked without one.
-  if (action === program && program.opts().deviceSet !== undefined) return;
   try {
-    normalizeDeviceSetEnv();
+    resolveDeviceSet(action === program ? program.opts().deviceSet : undefined);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

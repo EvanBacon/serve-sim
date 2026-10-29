@@ -51,7 +51,7 @@ import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler 
 import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
-import { simctlArguments, simctlBootStatusArguments } from "./simctl";
+import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
@@ -354,7 +354,7 @@ export async function readServeSimStates(): Promise<ServeSimState[]> {
       // would accept connections yet never produce frames, leaving the
       // preview stuck on "Connecting...". Recycle the stale state so the
       // caller can spawn a fresh helper bound to whatever is booted.
-      const action = classifyStaleState(state, booted, process.pid);
+      const action = classifyStaleState(state, booted, process.pid, resolveDeviceSet());
       if (action !== "keep") {
         if (action === "recycle-self") {
           // This device is streamed in-process by *us* (the close button just
@@ -1502,6 +1502,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const authToken = resolveAuthToken(options?.authToken);
   const serveDiagnostics = createDiagnosticsHandler(options?.diagnostics);
   const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
+  // A dev server that embeds this middleware never runs the CLI: settle the
+  // device set (and refuse a bad SERVE_SIM_DEVICE_SET) here, not mid-request.
+  resolveDeviceSet();
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>

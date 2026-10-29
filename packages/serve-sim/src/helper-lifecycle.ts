@@ -16,7 +16,7 @@ import { readFileSync, unlinkSync } from "fs";
 import { sleepSync } from "./runtime";
 import { getPortHolders } from "./ports";
 import { debugHelper, debugState } from "./debug";
-import { deviceSetFromEnv, sameDeviceSet } from "./simctl";
+import { sameDeviceSet } from "./simctl";
 import type { ServeSimDeviceState } from "./state";
 import { writeServeSimState } from "./state";
 
@@ -209,7 +209,7 @@ export function classifyStaleState(
   state: { pid: number; device: string; deviceSet?: string },
   booted: Set<string> | null,
   selfPid: number,
-  deviceSet: string | undefined = deviceSetFromEnv(),
+  deviceSet: string | undefined,
 ): StaleStateAction {
   // `booted` lists only this process's device set; another set's simulator
   // is not in it whether or not it is booted.

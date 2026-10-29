@@ -50,23 +50,23 @@ function state(overrides: Partial<ServeSimDeviceState> = {}): ServeSimDeviceStat
 
 describe("classifyStaleState", () => {
   test("keeps a helper when simctl cannot prove the device is gone", () => {
-    expect(classifyStaleState(state(), null, 1)).toBe("keep");
+    expect(classifyStaleState(state(), null, 1, undefined)).toBe("keep");
   });
 
   test("keeps a helper whose simulator is still booted", () => {
-    expect(classifyStaleState(state(), new Set([UDID]), 1)).toBe("keep");
+    expect(classifyStaleState(state(), new Set([UDID]), 1, undefined)).toBe("keep");
   });
 
   test("does not recycle non-UDID device labels", () => {
-    expect(classifyStaleState(state({ device: "iPhone 17" }), new Set(), 1)).toBe("keep");
+    expect(classifyStaleState(state({ device: "iPhone 17" }), new Set(), 1, undefined)).toBe("keep");
   });
 
   test("recycles our own in-process session without treating it as a foreign helper", () => {
-    expect(classifyStaleState(state({ pid: 99 }), new Set(), 99)).toBe("recycle-self");
+    expect(classifyStaleState(state({ pid: 99 }), new Set(), 99, undefined)).toBe("recycle-self");
   });
 
   test("recycles a foreign helper bound to a shut-down simulator", () => {
-    expect(classifyStaleState(state({ pid: 88 }), new Set(), 99)).toBe("recycle-helper");
+    expect(classifyStaleState(state({ pid: 88 }), new Set(), 99, undefined)).toBe("recycle-helper");
   });
 
   test("keeps a helper in another device set, which `booted` does not cover", () => {

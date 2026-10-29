@@ -12,7 +12,7 @@ import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { maxBitrateFromEnv } from "./max-bitrate";
-import { deviceSetFromEnv } from "./simctl";
+import { resolveDeviceSet } from "./simctl";
 
 const require = createRequire(import.meta.url);
 
@@ -166,8 +166,9 @@ let addon: NativeAddon | undefined;
 function load(): NativeAddon {
   if (!addon) {
     addon = require(resolveAddon()) as NativeAddon;
-    // Under Bun a `process.env` write never reaches the addon's environment.
-    addon.setDeviceSet(deviceSetFromEnv() ?? null);
+    // The addon cannot read the set from the environment: under Bun a
+    // `process.env` write never reaches it.
+    addon.setDeviceSet(resolveDeviceSet() ?? null);
   }
   return addon;
 }

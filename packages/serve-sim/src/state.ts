@@ -1,6 +1,6 @@
 import { tmpdir } from "os";
 import { join } from "path";
-import { deviceSetFromEnv } from "./simctl";
+import { resolveDeviceSet } from "./simctl";
 import {
   chmodSync,
   closeSync,
@@ -72,7 +72,7 @@ export function inProcessServeSimState(
   // leading slash (e.g. "foo") still yields well-formed `…:port/foo/helper/…`.
   const trimmed = base.replace(/^\/+/, "").replace(/\/+$/, "");
   const prefix = trimmed === "" ? "" : `/${trimmed}`;
-  const deviceSet = deviceSetFromEnv();
+  const deviceSet = resolveDeviceSet();
   return {
     ...(deviceSet !== undefined ? { deviceSet } : {}),
     pid: process.pid,
