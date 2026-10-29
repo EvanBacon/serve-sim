@@ -681,8 +681,8 @@ static void RunDroppedOutputRecording(void) {
     });
 }
 
-// Removing the camera mid-recording ends the recording, as a camera flip
-// does in AVFoundation.
+// Removing the camera mid-recording ends the recording, as AVFoundation's
+// movie output is understood to end one across a camera flip.
 static void RunRemovedCameraRecording(void) {
     RunLetGoRecording(@"Removed camera", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         (void)movie;
