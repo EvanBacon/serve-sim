@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { readFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { request } from "http";
 import { connect } from "net";
+import { tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
 import { EVERY_SIMULATOR, deviceScope } from "../device-scope";
@@ -233,6 +234,17 @@ describe("serve-sim --restrict-devices", () => {
     const result = spawnSync("bun", [cli, "--restrict-devices"], { encoding: "utf8" });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("name at least one");
+  });
+
+  test("leaves -l alone", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "serve-sim-restrict-"));
+    try {
+      // TMPDIR holds the state folder, so -l reads none of this Mac's previews.
+      const result = spawnSync("bun", [cli, "--restrict-devices", "-l"], { encoding: "utf8", env: { ...process.env, TMPDIR: scratch } });
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 
   test("refuses modes without the preview server", () => {
