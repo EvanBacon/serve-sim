@@ -9,3 +9,4 @@ void SimCamInstallSwizzles(void);
 __attribute__((visibility("hidden"))) BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz);
 __attribute__((visibility("hidden"))) BOOL SimCamOutputAttachedToFakeSession(AVCaptureOutput *output);
 __attribute__((visibility("hidden"))) NSArray<AVCaptureConnection *> *SimCamConnectionsForOutput(AVCaptureOutput *output);
+__attribute__((visibility("hidden"))) BOOL SimCamConnectionCarries(AVCaptureConnection *connection, AVMediaType mediaType);

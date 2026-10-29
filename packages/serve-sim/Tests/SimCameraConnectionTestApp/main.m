@@ -386,12 +386,13 @@ static void RunManualConnectionsRecording(void) {
         return;
     }
     [session addConnection:previewConnection];
+    AVCaptureConnection *audio = nil;
     if (microphone) {
         AVCaptureInputPort *audioPort = nil;
         for (AVCaptureInputPort *port in microphone.ports) {
             if ([port.mediaType isEqualToString:AVMediaTypeAudio]) audioPort = port;
         }
-        AVCaptureConnection *audio = audioPort
+        audio = audioPort
             ? [[AVCaptureConnection alloc] initWithInputPorts:@[audioPort] output:movie]
             : nil;
         if (!audio || ![session canAddConnection:audio]) {
@@ -442,8 +443,10 @@ static void RunManualConnectionsRecording(void) {
         AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @2000000 },
     };
     [movie setOutputSettings:settings forConnection:video];
-    if (![[movie outputSettingsForConnection:video][AVVideoCodecKey] isEqual:AVVideoCodecTypeH264]) {
-        WriteResult(NO, @"The movie output did not keep its H.264 setting");
+    if (audio) [movie setOutputSettings:@{} forConnection:audio];
+    if (![[movie outputSettingsForConnection:video] isEqual:settings]) {
+        WriteResult(NO, [NSString stringWithFormat:@"The movie output did not keep its video settings: %@",
+            [movie outputSettingsForConnection:video]]);
         return;
     }
     [session commitConfiguration];

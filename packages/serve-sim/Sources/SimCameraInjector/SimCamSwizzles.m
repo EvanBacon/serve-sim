@@ -345,7 +345,7 @@ static BOOL SimCamConnectionUsesTrackedInput(
     }
     return NO;
 }
-static BOOL SimCamConnectionCarries(AVCaptureConnection *connection, AVMediaType mediaType) {
+BOOL SimCamConnectionCarries(AVCaptureConnection *connection, AVMediaType mediaType) {
     for (AVCaptureInputPort *port in connection.inputPorts) {
         if ([port.mediaType isEqualToString:mediaType]) return YES;
     }

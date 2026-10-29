@@ -58,12 +58,14 @@ void SimCamMovieOutputLeftFakeSession(AVCaptureOutput *output) {
 - (NSDictionary<NSString *, id> *)simcam_outputSettingsForConnection:(AVCaptureConnection *)connection {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
     if (!fake) return [self simcam_outputSettingsForConnection:connection];
-    return fake.videoSettings;
+    return SimCamConnectionCarries(connection, AVMediaTypeVideo) ? fake.videoSettings : @{};
 }
 - (void)simcam_setOutputSettings:(NSDictionary<NSString *, id> *)settings
                    forConnection:(AVCaptureConnection *)connection {
     SimCamFakeMovieOutput *fake = SimCamFakeMovieOutputFor(self);
     if (!fake) return [self simcam_setOutputSettings:settings forConnection:connection];
+    // The fake movie has no audio track, so only video settings are kept.
+    if (!SimCamConnectionCarries(connection, AVMediaTypeVideo)) return;
     fake.videoSettings = settings ?: @{ AVVideoCodecKey: AVVideoCodecTypeH264 };
 }
 - (void)simcam_startRecordingToOutputFileURL:(NSURL *)url
