@@ -632,8 +632,8 @@ static AVCaptureSession *RunningMovieSession(AVCaptureMovieFileOutput *movie) {
 
 // Records into a movie the app lets go of 0.5 s in: `letGo` drops the
 // output, and the delegate must still hear about a finished file.
-static void RunLetGoRecording(NSString *what, void (^letGo)(AVCaptureSession *session,
-                                                           AVCaptureMovieFileOutput *movie)) {
+static void RunLetGoRecording(NSString *what, NSString *fileName, void (^letGo)(AVCaptureSession *session,
+                                                                             AVCaptureMovieFileOutput *movie)) {
     AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
     __block AVCaptureSession *session = RunningMovieSession(movie);
     __weak AVCaptureMovieFileOutput *weakMovie = movie;
@@ -668,13 +668,12 @@ static void RunLetGoRecording(NSString *what, void (^letGo)(AVCaptureSession *se
                 [NSString stringWithFormat:@"%@: recorded %.2f s of video, then released the output", what, seconds]);
         });
     };
-    [movie startRecordingToOutputFileURL:RecordingURL([what stringByAppendingString:@".mov"])
-                       recordingDelegate:gProbe];
+    [movie startRecordingToOutputFileURL:RecordingURL(fileName) recordingDelegate:gProbe];
 }
 
 // expo-camera removes its movie output when the camera view remounts.
 static void RunDroppedOutputRecording(void) {
-    RunLetGoRecording(@"Dropped output", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+    RunLetGoRecording(@"Dropped output", @"dropped-output.mov", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         [session beginConfiguration];
         [session removeOutput:movie];
         [session commitConfiguration];
@@ -684,7 +683,7 @@ static void RunDroppedOutputRecording(void) {
 // Removing the camera mid-recording ends the recording, as AVFoundation's
 // movie output is understood to end one across a camera flip.
 static void RunRemovedCameraRecording(void) {
-    RunLetGoRecording(@"Removed camera", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+    RunLetGoRecording(@"Removed camera", @"removed-camera.mov", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         (void)movie;
         [session beginConfiguration];
         for (AVCaptureInput *input in session.inputs) [session removeInput:input];
@@ -694,7 +693,7 @@ static void RunRemovedCameraRecording(void) {
 
 // An app can stop its session and let it go with the output still in it.
 static void RunStoppedSessionRecording(void) {
-    RunLetGoRecording(@"Stopped session", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+    RunLetGoRecording(@"Stopped session", @"stopped-session.mov", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         (void)movie;
         [session stopRunning];
     });
