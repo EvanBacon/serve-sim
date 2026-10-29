@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { eventLogEventForCommand } from "../event-log";
+import { readServeSimStates, type ServeSimState } from "../middleware";
+import { STATE_DIR, stateFileForDevice } from "../state";
 import { sameDeviceSet, simctlArguments, simctlBootStatusArguments, simulatorDevicesDir } from "../simctl";
 
 // `--device-set <path>` / SERVE_SIM_DEVICE_SET: simulators a tool keeps in a
@@ -164,6 +166,36 @@ describe("simulatorDevicesDir", () => {
     withSet((dir) => {
       expect(inFreshProcess(`return m.simulatorDevicesDir();`, { env: { [DEVICE_SET_ENV]: dir } })).toEqual({ ok: true, value: dir });
     });
+  });
+});
+
+describe("readServeSimStates", () => {
+  test("lists only the previews of this process's device set", async () => {
+    // Labels, not UDIDs, so neither state is recycled as shut down.
+    const ours = `SERVE-SIM-TEST-OURS-${process.pid}`;
+    const theirs = `SERVE-SIM-TEST-THEIRS-${process.pid}`;
+    const record = (device: string, extra: Partial<ServeSimState>): ServeSimState => ({
+      pid: process.pid,
+      port: 1,
+      device,
+      url: "http://127.0.0.1:1",
+      streamUrl: `http://127.0.0.1:1/helper/${device}/stream.mjpeg`,
+      wsUrl: `ws://127.0.0.1:1/helper/${device}/ws`,
+      ...extra,
+    });
+    mkdirSync(STATE_DIR, { recursive: true });
+    const dir = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
+    try {
+      writeFileSync(stateFileForDevice(ours), JSON.stringify(record(ours, {})));
+      writeFileSync(stateFileForDevice(theirs), JSON.stringify(record(theirs, { deviceSet: dir })));
+      const listed = (await readServeSimStates()).map((state) => state.device);
+      expect(listed).toContain(ours);
+      expect(listed).not.toContain(theirs);
+    } finally {
+      rmSync(stateFileForDevice(ours), { force: true });
+      rmSync(stateFileForDevice(theirs), { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
