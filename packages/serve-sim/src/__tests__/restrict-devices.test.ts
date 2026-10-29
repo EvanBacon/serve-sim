@@ -113,8 +113,8 @@ function firstEvent(path: string): Promise<{ events: Array<{ device?: string }> 
   });
 }
 
-/** The status line a WebSocket upgrade to `path` gets back (Bun's `ws` has no unexpected-response). */
-function upgradeStatus(path: string): Promise<string> {
+/** The whole answer a WebSocket upgrade to `path` gets back (Bun's `ws` has no unexpected-response). */
+function upgradeAnswer(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = connect(port, "127.0.0.1", () => {
       socket.write(
@@ -127,11 +127,8 @@ function upgradeStatus(path: string): Promise<string> {
     socket.setEncoding("utf-8");
     socket.on("data", (chunk: string) => {
       raw += chunk;
-      if (raw.includes("\r\n")) {
-        socket.destroy();
-        resolve(raw.slice(0, raw.indexOf("\r\n")));
-      }
     });
+    socket.on("close", () => resolve(raw));
     socket.on("error", reject);
   });
 }
@@ -179,7 +176,9 @@ describe("restrictToDevices", () => {
       expect({ path, status: refused.status }).toEqual({ path, status: 404 });
       expect(refused.body).toContain("is not served by this preview");
     }
-    expect(await upgradeStatus(`/helper/${OTHER}/ws`)).toMatch(/^HTTP\/1\.1 404 /);
+    const helper = await upgradeAnswer(`/helper/${OTHER}/ws`);
+    expect(helper).toStartWith("HTTP/1.1 404 ");
+    expect(helper).toContain(`${OTHER} is not served by this preview`);
   });
 
   test("has no DevTools, which list every simulator's web views", async () => {
@@ -188,7 +187,9 @@ describe("restrictToDevices", () => {
       expect({ path, status: refused.status }).toEqual({ path, status: 404 });
       expect(refused.body).toContain("DevTools are off");
     }
-    expect(await upgradeStatus("/devtools/page/1")).toMatch(/^HTTP\/1\.1 404 /);
+    const devtools = await upgradeAnswer("/devtools/page/1");
+    expect(devtools).toStartWith("HTTP/1.1 404 ");
+    expect(devtools).toContain("DevTools are off");
   });
 
   test("refuses host actions and simulator settings for another simulator", async () => {
