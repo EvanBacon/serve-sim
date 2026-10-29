@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, execSync } from "child_process";
 import { existsSync } from "fs";
-import { homedir } from "os";
 import { join } from "path";
+import { simulatorDevicesDir } from "../simctl";
 
 // Drives the built CLI against whatever simulator is already booted (the CI
 // `sim-test.yml` job boots one before running this directory). Each assertion
@@ -46,12 +46,7 @@ function cli(...args: string[]): string {
 }
 
 function libDir(): string {
-  return join(
-    homedir(),
-    "Library/Developer/CoreSimulator/Devices",
-    udid!,
-    "data/Library",
-  );
+  return join(simulatorDevicesDir(), udid!, "data/Library");
 }
 
 function tccAuthValue(service: string): string {
