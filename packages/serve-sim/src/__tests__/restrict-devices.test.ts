@@ -145,6 +145,7 @@ describe("restrictToDevices", () => {
     for (const path of ["/devtools", "/devtools/release", "/devtools/highlight"]) {
       const refused = await send(path, path === "/devtools" ? undefined : {});
       expect({ path, status: refused.status }).toEqual({ path, status: 404 });
+      expect(refused.body).toContain("DevTools are off");
     }
     expect(await upgradeStatus("/devtools/page/1")).toMatch(/^HTTP\/1\.1 404 /);
   });
