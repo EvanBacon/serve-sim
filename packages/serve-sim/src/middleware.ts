@@ -1555,18 +1555,20 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
     base === "" || pathname === base || pathname.startsWith(base + "/");
-  // Every simulator a request's URL names: `?device=`, DevTools (all of
-  // them), and the helper path's device or the one it falls back to.
-  const urlTargets = (rawUrl: string, pathname: string): DeviceTarget[] => {
-    if (!ownsPath(pathname)) return [];
-    const targets: DeviceTarget[] = [];
+  // What a request's URL names, worked out once for both the scope check
+  // and dispatch: the helper route and the device it acts on (its own, else
+  // `?device=`, else the pinned one), and every simulator the URL names
+  // (`?device=`, DevTools, which reach all of them, and that helper device).
+  const routeUrl = (rawUrl: string, pathname: string) => {
+    if (!ownsPath(pathname)) return { helper: null, helperDevice: null, targets: [] };
     const requested = queryDevice(rawUrl);
+    const helper = helperProxyTarget(rawUrl, helperPrefix);
+    const helperDevice = helper ? helper.device ?? requested ?? options?.device ?? null : null;
+    const targets: DeviceTarget[] = [];
     if (requested !== null) targets.push(requested);
     if (pathname.startsWith(`${base}/devtools`)) targets.push(EVERY_SIMULATOR);
-    const helper = helperProxyTarget(rawUrl, helperPrefix);
-    const helperDevice = helper && (helper.device ?? requested ?? options?.device);
     if (helperDevice) targets.push(helperDevice);
-    return targets;
+    return { helper, helperDevice, targets };
   };
   // Why the scope refuses a request naming `targets`, or null when it allows it.
   const refusal = (targets: readonly DeviceTarget[]): string | null => {
@@ -1715,6 +1717,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const selectedDevice = requestedDevice ?? options?.device ?? null;
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
     const trustedLoopback = isTrustedLoopback(req);
+    const routed = routeUrl(rawUrl, pathname);
     let gridDeviceUdid: string | null = null;
 
     if (ownsPath(pathname)) {
@@ -1746,7 +1749,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       if (req.method === "POST" && (url === base + "/grid/api/start" || url === base + "/grid/api/shutdown")) {
         gridDeviceUdid = await readGridDeviceUdid(req);
       }
-      const refused = refusal([...urlTargets(rawUrl, pathname), ...(gridDeviceUdid ? [gridDeviceUdid] : [])]);
+      const refused = refusal([...routed.targets, ...(gridDeviceUdid ? [gridDeviceUdid] : [])]);
       if (refused) {
         res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ ok: false, error: refused }));
@@ -1754,12 +1757,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       }
     }
 
-    const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
-    if (helperTarget && ownsPath(pathname)) {
-      const device = helperTarget.device ?? selectedDevice;
+    if (routed.helper) {
       // The device's helper endpoints are served from an in-process
       // NativeCapture/NativeHid DeviceSession.
-      if (serveHelperInProcess(req, res, device, helperTarget.upstreamPath)) return;
+      if (serveHelperInProcess(req, res, routed.helperDevice, routed.helper.upstreamPath)) return;
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("No serve-sim device");
       return;
@@ -2573,11 +2574,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   }) as SimMiddleware;
   middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
     const rawUrl = req.url ?? "";
-    const selectedDevice = queryDevice(rawUrl) ?? options?.device ?? null;
     const pathname = requestPathname(rawUrl);
-    const helperTarget = ownsPath(pathname) ? helperProxyTarget(rawUrl, helperPrefix) : null;
+    const routed = routeUrl(rawUrl, pathname);
     const devtoolsTarget = ownsPath(pathname) ? devtoolsProxyTarget(rawUrl, devtoolsPrefix) : null;
-    const refused = refusal(urlTargets(rawUrl, pathname));
+    const refused = refusal(routed.targets);
     if (refused) {
       rejectUpgrade(socket, 404, refused);
       return;
@@ -2594,14 +2594,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       })();
       return;
     }
-    if (!helperTarget) {
+    if (!routed.helper) {
       socket.destroy();
       return;
     }
-    const device = helperTarget.device ?? selectedDevice;
-    if (helperTarget.upstreamPath === "/ws") {
+    if (routed.helper.upstreamPath === "/ws") {
       // HID input is delivered to the in-process DeviceSession.
-      if (attachHidInProcess(req, socket, head, device)) return;
+      if (attachHidInProcess(req, socket, head, routed.helperDevice)) return;
       socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
       return;
     }
