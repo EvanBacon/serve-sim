@@ -127,7 +127,6 @@ describe("serve-sim --device-set", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("--device-set <path>");
     expect(result.stdout).toContain(DEVICE_SET_ENV);
-    expect(result.stdout).toContain("--restrict-devices");
   });
 
   test("rejects a missing directory before starting anything", () => {
@@ -143,19 +142,5 @@ describe("serve-sim --device-set", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(DEVICE_SET_ENV);
-  });
-
-  test("--restrict-devices needs the simulators it serves named", () => {
-    const result = spawnSync("bun", [cli, "--restrict-devices"], { encoding: "utf8" });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("name at least one");
-  });
-
-  test("--restrict-devices refuses modes without the preview server", () => {
-    for (const mode of ["--detach", "--no-preview"]) {
-      const result = spawnSync("bun", [cli, "--restrict-devices", mode], { encoding: "utf8" });
-      expect({ mode, status: result.status }).toEqual({ mode, status: 1 });
-      expect(result.stderr).toContain("--restrict-devices applies to the preview server");
-    }
   });
 });

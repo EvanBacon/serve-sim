@@ -1986,7 +1986,6 @@ async function serve(
   theme: SimulatorTheme | undefined,
   exitOnSimulatorShutdown = false,
   allowExec = false,
-  restrictDevices = false,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -2009,7 +2008,6 @@ async function serve(
   const middleware = simMiddleware({
     basePath: "/",
     device: targetDevice,
-    ...(restrictDevices ? { restrictToDevices: targetDevices } : {}),
     codec,
     initialState,
     proxyHelpers: true,
@@ -2222,11 +2220,6 @@ program
       }
     },
   )
-  .option(
-    "--restrict-devices",
-    "Serve only the simulators named on the command line, for a shared Mac; " +
-      "DevTools are off (preview server only)",
-  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2255,14 +2248,6 @@ Examples:
     }
     applyMaxBitrateOption(opts.maxBitrate);
     applyDeviceSetOption(opts.deviceSet);
-    if (opts.restrictDevices && (opts.detach || opts.preview === false)) {
-      console.error("--restrict-devices applies to the preview server; drop --detach and --no-preview.");
-      process.exit(1);
-    }
-    if (opts.restrictDevices && devices.length === 0) {
-      console.error("--restrict-devices serves the simulators named on the command line; name at least one.");
-      process.exit(1);
-    }
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -2293,7 +2278,6 @@ Examples:
         opts.theme,
         !!opts.exitOnSimulatorShutdown,
         !!opts.allowExec,
-        !!opts.restrictDevices,
       );
     }
   });
