@@ -664,7 +664,7 @@ static void RunLetGoRecording(NSString *what, void (^letGo)(AVCaptureSession *se
                     problem ?: [NSString stringWithFormat:@"movie holds %.2f s, expected 0.40-1.00 s", seconds]]);
                 return;
             }
-            WaitForRelease(weakMovie, [NSDate dateWithTimeIntervalSinceNow:5.0],
+            WaitForRelease(weakMovie, [NSDate dateWithTimeIntervalSinceNow:3.0],
                 [NSString stringWithFormat:@"%@: recorded %.2f s of video, then released the output", what, seconds]);
         });
     };
@@ -677,6 +677,17 @@ static void RunDroppedOutputRecording(void) {
     RunLetGoRecording(@"Dropped output", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         [session beginConfiguration];
         [session removeOutput:movie];
+        [session commitConfiguration];
+    });
+}
+
+// Removing the camera mid-recording ends the recording, as a camera flip
+// does in AVFoundation.
+static void RunRemovedCameraRecording(void) {
+    RunLetGoRecording(@"Removed camera", ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        (void)movie;
+        [session beginConfiguration];
+        for (AVCaptureInput *input in session.inputs) [session removeInput:input];
         [session commitConfiguration];
     });
 }
@@ -734,6 +745,7 @@ static void RunStoppedSessionRecording(void) {
             else if ([mode isEqualToString:@"writer-failure-recording"]) RunWriterFailureRecording();
             else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();
             else if ([mode isEqualToString:@"stopped-session-recording"]) RunStoppedSessionRecording();
+            else if ([mode isEqualToString:@"removed-camera-recording"]) RunRemovedCameraRecording();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
             WriteResult(NO, [NSString stringWithFormat:@"Exception: %@", exception.reason]);
