@@ -289,8 +289,14 @@ static void ExpectRecordedMovie(NSURL *url, NSError *error, BOOL expectMaxDurati
 }
 
 // expo-camera's graph: automatic connections, a photo and a movie output,
-// and the microphone added with addInput: inside one configuration.
+// the microphone added with addInput: inside one configuration, and a
+// preview layer it detaches when the camera view goes away.
 static void RunAutomaticConnectionsRecording(void) {
+    // expo-camera refuses to record on a simulator without a default camera.
+    if (![AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo]) {
+        WriteResult(NO, @"defaultDeviceWithMediaType: found no camera");
+        return;
+    }
     AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionFront);
     AVCaptureDeviceInput *microphone = MicrophoneInput();
     AVCaptureSession *session = [AVCaptureSession new];
@@ -314,6 +320,7 @@ static void RunAutomaticConnectionsRecording(void) {
         return;
     }
     video.videoOrientation = AVCaptureVideoOrientationPortrait;
+    AVCaptureVideoPreviewLayer *preview = [AVCaptureVideoPreviewLayer layerWithSession:session];
     [session startRunning];
 
     NSString *what = [NSString stringWithFormat:@"Automatic connections %@", MicrophoneNote(microphone)];
@@ -328,6 +335,7 @@ static void RunAutomaticConnectionsRecording(void) {
     };
     gProbe.onFinish = ^(NSURL *url, NSError *error) {
         [session stopRunning];
+        preview.session = nil;
         ExpectRecordedMovie(url, error, NO, 0.8, 1.4, what);
     };
     [movie startRecordingToOutputFileURL:RecordingURL(@"automatic.mov") recordingDelegate:gProbe];

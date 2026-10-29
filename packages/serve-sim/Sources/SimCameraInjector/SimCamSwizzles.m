@@ -121,6 +121,13 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
     }
     return [self simcam_defaultDeviceWithDeviceType:t mediaType:m position:p];
 }
++ (AVCaptureDevice *)simcam_defaultDeviceWithMediaType:(AVMediaType)m {
+    if ([m isEqualToString:AVMediaTypeVideo]) {
+        simcam_log(@"defaultDeviceWithMediaType: video → fake back camera");
+        return SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack);
+    }
+    return [self simcam_defaultDeviceWithMediaType:m];
+}
 + (NSArray<AVCaptureDevice *> *)simcam_devicesWithMediaType:(AVMediaType)m {
     if ([m isEqualToString:AVMediaTypeVideo]) {
         return @[
@@ -197,6 +204,24 @@ static BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
 @end
 
 #pragma mark - AVCaptureSession swizzles
+
+// AVFoundation reads a session's and an output's own lists when it rebuilds
+// the native graph (a preview layer attached or detached, a configuration
+// committed), and the fake objects have none of the private state it reads
+// there. Calls from inside AVFoundation get the native lists only; the app
+// sees the tracked ones too.
+static const void *gSimCamAVFoundationBase = NULL;
+
+static void SimCamRecordAVFoundationImage(void) {
+    Dl_info info;
+    IMP native = class_getMethodImplementation([AVCaptureSession class], @selector(simcam_connections));
+    if (dladdr((const void *)native, &info)) gSimCamAVFoundationBase = info.dli_fbase;
+}
+static BOOL SimCamCalledFromAVFoundation(const void *returnAddress) {
+    Dl_info info;
+    return gSimCamAVFoundationBase && dladdr(returnAddress, &info) &&
+        info.dli_fbase == gSimCamAVFoundationBase;
+}
 
 static char kSimCamSessionRunningKey;
 static char kSimCamSessionInputsKey;
@@ -471,8 +496,9 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
     simcam_log(@"removeConnection: tracked input (session=%p, conn=%p, output=%p)", self, c, c.output);
 }
 - (NSArray<AVCaptureInput *> *)simcam_inputs {
-    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionInputsKey);
     NSArray *native = [self simcam_inputs];
+    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return native;
+    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionInputsKey);
     if (tracked.count == 0) return native ?: @[];
     if (native.count == 0) return [tracked copy];
     NSMutableArray *merged = [tracked mutableCopy];
@@ -482,8 +508,9 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
     return [merged copy];
 }
 - (NSArray<AVCaptureOutput *> *)simcam_outputs {
-    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionOutputsKey);
     NSArray *native = [self simcam_outputs];
+    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return native;
+    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionOutputsKey);
     if (tracked.count == 0) return native ?: @[];
     if (native.count == 0) return [tracked copy];
     NSMutableArray *merged = [tracked mutableCopy];
@@ -493,8 +520,9 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
     return [merged copy];
 }
 - (NSArray<AVCaptureConnection *> *)simcam_connections {
-    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionConnectionsKey);
     NSArray *native = [self simcam_connections];
+    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return native;
+    NSMutableArray *tracked = objc_getAssociatedObject(self, &kSimCamSessionConnectionsKey);
     if (tracked.count == 0) return native ?: @[];
     NSMutableArray *merged = [tracked mutableCopy];
     for (AVCaptureConnection *n in native) {
@@ -600,7 +628,7 @@ static void SimCamRegisterPreviewLayer(AVCaptureVideoPreviewLayer *layer, AVCapt
 @implementation AVCaptureOutput (SimCamConn)
 - (AVCaptureConnection *)simcam_connectionWithMediaType:(AVMediaType)mediaType {
     AVCaptureConnection *real = [self simcam_connectionWithMediaType:mediaType];
-    if (real) return real;
+    if (real || SimCamCalledFromAVFoundation(__builtin_return_address(0))) return real;
     if (!SimCamOutputAttachedToFakeSession(self)) return nil;
     AVCaptureConnection *connection = nil;
     for (AVCaptureConnection *candidate in SimCamConnectionsForOutput(self)) {
@@ -612,6 +640,7 @@ static void SimCamRegisterPreviewLayer(AVCaptureVideoPreviewLayer *layer, AVCapt
 }
 - (NSArray<AVCaptureConnection *> *)simcam_connections {
     NSArray *real = [self simcam_connections];
+    if (SimCamCalledFromAVFoundation(__builtin_return_address(0))) return real;
     if (!SimCamOutputAttachedToFakeSession(self)) return real ?: @[];
     NSArray *tracked = SimCamConnectionsForOutput(self);
     if (tracked.count == 0) return real ?: @[];
@@ -1203,6 +1232,9 @@ void SimCamInstallSwizzles(void) {
         @selector(defaultDeviceWithDeviceType:mediaType:position:),
         @selector(simcam_defaultDeviceWithDeviceType:mediaType:position:));
     SwizzleClassMethod(dev,
+        @selector(defaultDeviceWithMediaType:),
+        @selector(simcam_defaultDeviceWithMediaType:));
+    SwizzleClassMethod(dev,
         @selector(devicesWithMediaType:),
         @selector(simcam_devicesWithMediaType:));
     SwizzleClassMethod(dev, @selector(devices), @selector(simcam_devices));
@@ -1253,6 +1285,7 @@ void SimCamInstallSwizzles(void) {
     SwizzleInstanceMethod(sess,
         @selector(canAddConnection:),
         @selector(simcam_canAddConnection:));
+    SimCamRecordAVFoundationImage();
 
     Class nc = [NSNotificationCenter class];
     SwizzleInstanceMethod(nc,
