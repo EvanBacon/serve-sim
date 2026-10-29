@@ -2203,7 +2203,7 @@ program
   .option(
     "--device-set <path>",
     "Use this CoreSimulator device set instead of Xcode's default (simctl --set). " +
-      "Also read from SERVE_SIM_DEVICE_SET, which subcommands use.",
+      "Applies to subcommands too. Also read from SERVE_SIM_DEVICE_SET.",
   )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
@@ -2444,11 +2444,11 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
-// Settle the device set before any command runs. Subcommands take it from
-// SERVE_SIM_DEVICE_SET only.
-program.hook("preAction", (_program, action) => {
+// Settle the device set before any command runs. Commander matches the root
+// --device-set after a subcommand's name too.
+program.hook("preAction", () => {
   try {
-    resolveDeviceSet(action === program ? program.opts().deviceSet : undefined);
+    resolveDeviceSet(program.opts().deviceSet);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

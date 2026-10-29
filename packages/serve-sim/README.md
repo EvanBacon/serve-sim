@@ -150,8 +150,8 @@ Options:
                       SERVE_SIM_MAX_BITRATE
       --device-set <path>
                       Use this CoreSimulator device set instead of Xcode's
-                      default (simctl --set). Also read from
-                      SERVE_SIM_DEVICE_SET
+                      default (simctl --set). Applies to subcommands too.
+                      Also read from SERVE_SIM_DEVICE_SET
       --list [device] List running streams
       --kill [device] Kill running stream(s)
 
@@ -225,7 +225,7 @@ The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control ch
 
 ### Device sets (`--device-set`)
 
-Tools that keep simulators in a CoreSimulator device set of their own (device pools, CI runners) put them where `simctl list` and Simulator.app never look. `--device-set <path>` (or `SERVE_SIM_DEVICE_SET`, an existing directory) points serve-sim at that set: every `simctl` call gets `--set <path>`, each preview records its set in its state file so previews in different sets never take each other's simulators for shut down, the native capture, input and accessibility bridges look the device up in that set, and per-simulator data (permissions) is read from it. Simulator.app is not opened for such a set, since it only shows Xcode's default one. Subcommands such as `serve-sim camera` take the set from `SERVE_SIM_DEVICE_SET` only; the flag applies to the preview, `--detach` and `--no-preview`. The toolbar's library shell commands (`homeButtonCommand`, the screenshot button) still name no device set; the preview page uses host actions instead.
+Tools that keep simulators in a CoreSimulator device set of their own (device pools, CI runners) put them where `simctl list` and Simulator.app never look. `--device-set <path>` (or `SERVE_SIM_DEVICE_SET`, an existing directory) points serve-sim at that set: every `simctl` call gets `--set <path>`, each preview records its set in its state file so previews in different sets never take each other's simulators for shut down, the native capture, input and accessibility bridges look the device up in that set, and per-simulator data (permissions) is read from it. Simulator.app is not opened for such a set, since it only shows Xcode's default one. The flag applies to subcommands such as `serve-sim camera` too. The toolbar's library shell commands (`homeButtonCommand`, the screenshot button) still name no device set; the preview page uses host actions instead.
 
 ### Camera
 

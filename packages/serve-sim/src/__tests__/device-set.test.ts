@@ -14,6 +14,7 @@ import { sameDeviceSet, simctlArguments, simctlBootStatusArguments, simulatorDev
 
 const DEVICE_SET_ENV = "SERVE_SIM_DEVICE_SET";
 const simctlModule = join(import.meta.dir, "..", "simctl.ts");
+const MISSING_SET = join(tmpdir(), "serve-sim-no-such-set");
 
 /**
  * Runs `body` in a fresh process, where the device set is not settled yet
@@ -221,6 +222,14 @@ describe("serve-sim --device-set", () => {
     const result = spawnSync("bun", [cli, "--device-set", join(tmpdir(), "serve-sim-no-such-set"), "--list"], { encoding: "utf8" });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("--device-set");
+  });
+
+  test("applies to subcommands too", () => {
+    for (const args of [["--device-set", MISSING_SET, "event-log"], ["event-log", "--device-set", MISSING_SET]]) {
+      const result = spawnSync("bun", [cli, ...args], { encoding: "utf8" });
+      expect({ args, status: result.status }).toEqual({ args, status: 1 });
+      expect(result.stderr).toContain("--device-set");
+    }
   });
 
   test("rejects a missing SERVE_SIM_DEVICE_SET before starting anything", () => {
