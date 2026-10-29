@@ -113,7 +113,8 @@ void SimCamFakeMovieOutputSessionStopped(AVCaptureOutput *output) {
               delegate:delegate
            connections:SimCamConnectionsForOutput(self)
          videoSettings:fake.videoSettings
-           maxDuration:self.maxRecordedDuration];
+           maxDuration:self.maxRecordedDuration
+           maxFileSize:self.maxRecordedFileSize];
     fake.recorder = recorder;
     // AVError.h's AVErrorSessionNotRunning: "The recording couldn't start
     // because the session isn't running."

@@ -39,6 +39,7 @@ async function runTestApp(
     | "automatic-recording"
     | "manual-recording"
     | "max-duration-recording"
+    | "max-file-size-recording"
     | "existing-file-recording"
     | "writer-failure-recording"
     | "dropped-output-recording"
@@ -167,6 +168,10 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("stops a movie at maxRecordedDuration as a successful recording", async () => {
     await runTestApp("max-duration-recording");
+  }, 20_000);
+
+  test("stops a movie at maxRecordedFileSize as a successful recording", async () => {
+    await runTestApp("max-file-size-recording");
   }, 20_000);
 
   test("refuses to record over an existing file, as AVFoundation does", async () => {

@@ -28,6 +28,8 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
     NSArray<AVCaptureConnection *> *_connections;
     NSDictionary<NSString *, id> *_videoSettings;
     CMTime _maxDuration;
+    // Bytes; 0 is no limit.
+    int64_t _maxFileSize;
     dispatch_queue_t _queue;
     dispatch_source_t _timer;
     AVAssetWriter *_writer;
@@ -49,7 +51,8 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
                       delegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate
                    connections:(NSArray<AVCaptureConnection *> *)connections
                  videoSettings:(NSDictionary<NSString *, id> *)videoSettings
-                   maxDuration:(CMTime)maxDuration {
+                   maxDuration:(CMTime)maxDuration
+                   maxFileSize:(int64_t)maxFileSize {
     if ((self = [super init])) {
         _output = output;
         _URL = url;
@@ -57,6 +60,7 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
         _connections = [connections copy] ?: @[];
         _videoSettings = [videoSettings copy] ?: @{};
         _maxDuration = maxDuration;
+        _maxFileSize = maxFileSize;
         _queue = dispatch_queue_create("dev.servesim.simcam.movie", DISPATCH_QUEUE_SERIAL);
         _lastFrameTime = kCMTimeInvalid;
     }
@@ -184,6 +188,16 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
                                                   code:AVErrorMaximumDurationReached
                                               userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
                      endingAt:_maxDuration];
+        return;
+    }
+    // The writer flushes in chunks and adds the movie header as it
+    // finishes, so the finished file runs past the limit by what it had
+    // buffered.
+    if (_maxFileSize > 0 && self.recordedFileSize >= _maxFileSize) {
+        [self finishWithError:[NSError errorWithDomain:AVFoundationErrorDomain
+                                                  code:AVErrorMaximumFileSizeReached
+                                              userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
+                     endingAt:kCMTimeInvalid];
         return;
     }
     [self appendFrameAt:now];

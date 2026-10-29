@@ -517,6 +517,45 @@ static void RunMaxDurationRecording(void) {
     [movie startRecordingToOutputFileURL:RecordingURL(@"max-duration.mov") recordingDelegate:gProbe];
 }
 
+// maxRecordedFileSize ends the recording, without a stop call, with
+// AVErrorMaximumFileSizeReached ("The recording stopped because it reached
+// the file's maximum size") and a playable movie. Unlimited, the movie
+// passes 100 KB about 1 s in.
+static void RunMaxFileSizeRecording(void) {
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
+    [session addOutput:movie];
+    int64_t limit = 100 * 1000;
+    movie.maxRecordedFileSize = limit;
+    [session startRunning];
+
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            WriteResult(NO, [NSString stringWithFormat:@"Still recording 5 s in at %lld bytes, past the %lld-byte limit",
+                movie.recordedFileSize, limit]);
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        [session stopRunning];
+        BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
+        if (error.code != AVErrorMaximumFileSizeReached || !finished) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected a successful max-file-size stop, got %@", error]);
+            return;
+        }
+        if (gProbe.finishedFileSize < limit) {
+            WriteResult(NO, [NSString stringWithFormat:@"Stopped at %lld bytes, short of the %lld-byte limit",
+                gProbe.finishedFileSize, limit]);
+            return;
+        }
+        ExpectRecordedMovie(url, nil, NO, 0.3, 2.0,
+            [NSString stringWithFormat:@"Max file size (%lld bytes when finished)", gProbe.finishedFileSize]);
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"max-file-size.mov") recordingDelegate:gProbe];
+}
+
 // AVFoundation refuses to record over an existing file: the recording never
 // starts, and the delegate hears AVErrorFileAlreadyExists.
 static void RunExistingFileRecording(void) {
@@ -842,6 +881,7 @@ static void RunForeignConnectionSettings(void) {
             else if ([mode isEqualToString:@"automatic-recording"]) RunAutomaticConnectionsRecording();
             else if ([mode isEqualToString:@"manual-recording"]) RunManualConnectionsRecording();
             else if ([mode isEqualToString:@"max-duration-recording"]) RunMaxDurationRecording();
+            else if ([mode isEqualToString:@"max-file-size-recording"]) RunMaxFileSizeRecording();
             else if ([mode isEqualToString:@"existing-file-recording"]) RunExistingFileRecording();
             else if ([mode isEqualToString:@"writer-failure-recording"]) RunWriterFailureRecording();
             else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();

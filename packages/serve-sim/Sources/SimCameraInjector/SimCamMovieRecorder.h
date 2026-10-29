@@ -10,7 +10,8 @@
                       delegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate
                    connections:(NSArray<AVCaptureConnection *> *)connections
                  videoSettings:(NSDictionary<NSString *, id> *)videoSettings
-                   maxDuration:(CMTime)maxDuration;
+                   maxDuration:(CMTime)maxDuration
+                   maxFileSize:(int64_t)maxFileSize;
 - (void)start;
 - (void)stop;
 // Ends the recording as `stop` does, with `error` for the delegate once the
