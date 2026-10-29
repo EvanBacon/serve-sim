@@ -2262,14 +2262,6 @@ Examples:
       process.env[AUTH_TOKEN_ENV] = opts.authToken.trim();
     }
     applyMaxBitrateOption(opts.maxBitrate);
-    if (opts.restrictDevices && (opts.detach || opts.preview === false)) {
-      console.error("--restrict-devices applies to the preview server; drop --detach and --no-preview.");
-      process.exit(1);
-    }
-    if (opts.restrictDevices && devices.length === 0) {
-      console.error("--restrict-devices serves the simulators named on the command line; name at least one.");
-      process.exit(1);
-    }
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -2277,6 +2269,14 @@ Examples:
     if (opts.kill !== undefined) {
       killStreams(typeof opts.kill === "string" ? opts.kill : undefined);
       return;
+    }
+    if (opts.restrictDevices && (opts.detach || opts.preview === false)) {
+      console.error("--restrict-devices applies to the preview server; drop --detach and --no-preview.");
+      process.exit(1);
+    }
+    if (opts.restrictDevices && devices.length === 0) {
+      console.error("--restrict-devices serves the simulators named on the command line; name at least one.");
+      process.exit(1);
     }
     const startPort: number | undefined = opts.port;
     if (opts.detach) {
