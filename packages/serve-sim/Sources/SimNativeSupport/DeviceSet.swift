@@ -17,10 +17,10 @@ public enum DeviceSet {
         lock.withLock { configuredPath }
     }
 
-    /// The configured set, found by `lookup`, which sends CoreSimulator's
-    /// `selector` with `path`: `deviceSetWithPath:error:` and the path for a
-    /// configured set, `defaultDeviceSetWithError:` and nil for Xcode's
-    /// default. Nil when `lookup` finds no set.
+    /// The device set serve-sim targets, found by `lookup`, which sends
+    /// CoreSimulator's `selector` with `path`: `deviceSetWithPath:error:` and
+    /// the path for a configured set, `defaultDeviceSetWithError:` and nil for
+    /// Xcode's default. Nil when `lookup` finds no set.
     public static func lookUp<Found>(_ lookup: (_ selector: String, _ path: String?) -> Found?) -> Found? {
         let path = path()
         return lookup(path == nil ? "defaultDeviceSetWithError:" : "deviceSetWithPath:error:", path)
