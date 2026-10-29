@@ -31,17 +31,22 @@ export interface DeviceScope<Simulator> {
   onEvent: typeof subscribeEventLog;
 }
 
+/** What a scope reads from, unfiltered except where it takes `allows`. */
+type DeviceSources<Simulator> = Omit<DeviceScope<Simulator>, "allows" | "states"> & {
+  states(allows: (udid: string) => boolean): Promise<ServeSimDeviceState[]>;
+};
+
 export function deviceScope<Simulator extends { udid: string }>(
   restrictToDevices: readonly string[] | undefined,
-  read: Omit<DeviceScope<Simulator>, "allows">,
+  read: DeviceSources<Simulator>,
 ): DeviceScope<Simulator> {
-  if (!restrictToDevices) return { ...read, allows: () => true };
+  if (!restrictToDevices) return { ...read, allows: () => true, states: () => read.states(() => true) };
   const served = new Set(restrictToDevices.map((udid) => udid.toUpperCase()));
   const allows = (target: DeviceTarget) => target !== EVERY_SIMULATOR && served.has(target.toUpperCase());
   const logged = (entry: { device?: string }) => entry.device === undefined || allows(entry.device);
   return {
     allows,
-    states: async () => (await read.states()).filter((state) => allows(state.device)),
+    states: () => read.states(allows),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
     simulatorName: async (udid) => (allows(udid) ? read.simulatorName(udid) : undefined),
     isKnown: async (udid) => allows(udid) && (await read.isKnown(udid)),

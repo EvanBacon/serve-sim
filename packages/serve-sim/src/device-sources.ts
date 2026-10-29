@@ -66,7 +66,14 @@ export function forgetBootedSimulators(): void {
   bootedSnapshot = { at: 0, booted: null };
 }
 
-export async function readServeSimStates(): Promise<ServeSimDeviceState[]> {
+/**
+ * Live previews of the simulators `allows` passes (default: every one).
+ * Another simulator's state file is skipped before it is read as stale, so
+ * its helper is never stopped.
+ */
+export async function readServeSimStates(
+  allows: (udid: string) => boolean = () => true,
+): Promise<ServeSimDeviceState[]> {
   let files: string[];
   try {
     files = readdirSync(STATE_DIR).filter(
@@ -82,6 +89,7 @@ export async function readServeSimStates(): Promise<ServeSimDeviceState[]> {
     const path = join(STATE_DIR, f);
     try {
       const recorded: ServeSimDeviceState = JSON.parse(readFileSync(path, "utf-8"));
+      if (!allows(recorded.device)) continue;
       const state = resolveLiveHelperState(recorded);
       if (!state) {
         debugMw("helper pid=%d gone, removing %s", recorded.pid, path);

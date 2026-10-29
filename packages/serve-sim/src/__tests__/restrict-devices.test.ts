@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawnSync } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { spawn, spawnSync } from "child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { request } from "http";
 import { connect } from "net";
 import { tmpdir } from "os";
@@ -300,7 +300,7 @@ describe("deviceScope", () => {
     id: 1, timestamp: "", source: "exec", kind: "command", msg: "", summary: "", device,
   });
   const read = {
-    states: async () => [state(SERVED), state(OTHER)],
+    states: async (allows: (udid: string) => boolean) => [state(SERVED), state(OTHER)].filter((s) => allows(s.device)),
     simulators: async () => [{ udid: SERVED }, { udid: OTHER }],
     simulatorName: async (udid: string) => `name of ${udid}`,
     isKnown: async () => true,
@@ -332,5 +332,43 @@ describe("deviceScope", () => {
     expect(await scope.simulators()).toHaveLength(2);
     expect(scope.events()).toHaveLength(3);
     expect([scope.allows(OTHER), scope.allows(EVERY_SIMULATOR)]).toEqual([true, true]);
+  });
+});
+
+describe("hostDeviceScope", () => {
+  /** Whether `pid` still runs (a killed child stays a zombie until reaped). */
+  const running = (pid: number) => {
+    const stat = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+    return stat !== "" && !stat.startsWith("Z");
+  };
+
+  test("a restricted preview never stops another simulator's stale helper", () => {
+    // A scratch state folder (STATE_DIR is under TMPDIR) holding one preview
+    // of OTHER, which no device set lists, so it reads as shut down and its
+    // helper as stale.
+    const scratch = mkdtempSync(join(tmpdir(), "serve-sim-restrict-"));
+    const helper = spawn("sleep", ["30"]);
+    try {
+      mkdirSync(join(scratch, "serve-sim"));
+      writeFileSync(
+        join(scratch, "serve-sim", `server-${OTHER}.json`),
+        JSON.stringify({ pid: helper.pid, port: 1, device: OTHER, url: "", streamUrl: "", wsUrl: "" }),
+      );
+      const readStates = (restrict: string[] | undefined) => {
+        const script =
+          `const { hostDeviceScope } = await import(${JSON.stringify(join(import.meta.dir, "..", "device-scope.ts"))});` +
+          `await hostDeviceScope(${JSON.stringify(restrict)}).states();`;
+        const result = spawnSync("bun", ["-e", script], { encoding: "utf8", env: { ...process.env, TMPDIR: scratch } });
+        expect(result.stderr).toBe("");
+      };
+      readStates([SERVED]);
+      expect(running(helper.pid!)).toBe(true);
+      // An unrestricted preview recycles it, so the state above was stale.
+      readStates(undefined);
+      expect(running(helper.pid!)).toBe(false);
+    } finally {
+      helper.kill();
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
