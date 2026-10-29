@@ -147,11 +147,27 @@ describe("restrictToDevices", () => {
     }
   });
 
-  test("still answers a malformed boot or shutdown request with 400", async () => {
+  test("still answers a boot or shutdown request that names no simulator with 400", async () => {
     for (const path of ["/grid/api/start", "/grid/api/shutdown"]) {
-      const refused = await send(path, { udid: "not-a-udid" });
+      const refused = await send(path, {});
       expect({ path, status: refused.status }).toEqual({ path, status: 400 });
     }
+  });
+
+  test("refuses another simulator named in any JSON body", async () => {
+    for (const body of [{ bundleId: "com.example.app", udid: OTHER }, { bundleId: "com.example.app", device: OTHER }]) {
+      const refused = await send(`/reload?device=${SERVED}`, body);
+      expect({ body, status: refused.status }).toEqual({ body, status: 404 });
+      expect(JSON.parse(refused.body)).toEqual({ ok: false, error: `${OTHER} is not served by this preview` });
+    }
+  });
+
+  test("answers 413 to a body over the limit, before reading what it names", async () => {
+    const refused = await send("/grid/api/start", { pad: "x".repeat(8 * 1024) });
+    expect({ status: refused.status, body: JSON.parse(refused.body) }).toEqual({
+      status: 413,
+      body: { ok: false, error: "Body too large" },
+    });
   });
 
   test("refuses a request that names another simulator anywhere", async () => {
@@ -324,6 +340,17 @@ describe("deviceScope", () => {
     const heard: Array<string | undefined> = [];
     scope.onEvent((event) => heard.push(event.device));
     expect(heard).toEqual([SERVED, undefined]);
+  });
+
+  test("checks every simulator a request names, in its URL or its body", () => {
+    const scope = deviceScope([SERVED], read);
+    const request = { devices: [SERVED], devtools: false, body: { udid: SERVED, device: SERVED } };
+    expect(scope.check(request)).toBeNull();
+    expect(scope.check({ ...request, devices: [SERVED, OTHER] })).toBe(`${OTHER} is not served by this preview`);
+    expect(scope.check({ ...request, body: { udid: OTHER } })).toBe(`${OTHER} is not served by this preview`);
+    expect(scope.check({ ...request, body: { device: OTHER } })).toBe(`${OTHER} is not served by this preview`);
+    expect(scope.check({ ...request, devtools: true })).toBe("DevTools are off in a preview with --restrict-devices");
+    expect(deviceScope(undefined, read).check({ devices: [OTHER], devtools: true, body: { udid: OTHER } })).toBeNull();
   });
 
   test("an unrestricted scope allows everything", async () => {

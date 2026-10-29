@@ -42,7 +42,7 @@ import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
-import { EVERY_SIMULATOR, hostDeviceScope, type DeviceScope, type DeviceTarget } from "./device-scope";
+import { hostDeviceScope, type DeviceScope } from "./device-scope";
 import { forgetBootedSimulators } from "./device-sources";
 
 export { readServeSimStates, simulatorName } from "./device-sources";
@@ -125,10 +125,8 @@ type CdpHttpListEntry = {
 
 type CdpHttpVersion = { Browser?: string };
 
-type DeviceRequestBody = { udid?: string };
-type ReleaseRequestBody = { targetId?: string };
-type HighlightRequestBody = { targetId?: string; on?: boolean };
-type ExecRequestBody = { command?: string };
+/** An owned POST's body, read once before any route runs. */
+type RequestBody = { kind: "none" } | { kind: "json"; value: unknown } | { kind: "malformed" };
 
 /** Re-exported alias for the canonical device-state record in `./state`. */
 export type ServeSimState = ServeSimDeviceState;
@@ -140,8 +138,13 @@ const axStreamerCache = createAxStreamerCache();
 // the partial line is dropped rather than retained indefinitely.
 const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
 
-/** POST /reload only carries `{ bundleId }`. */
-const RELOAD_BODY_LIMIT_BYTES = 4 * 1024;
+/**
+ * Owned POST bodies carry a UDID, a DevTools target or a bundle id; over the
+ * cap answers 413, so a runaway POST can't grow memory. Exec's carries a
+ * shell command.
+ */
+const BODY_LIMIT_BYTES = 4 * 1024;
+const EXEC_BODY_LIMIT_BYTES = 4 * 1024 * 1024;
 
 let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
@@ -1237,7 +1240,7 @@ export interface SimMiddlewareOptions {
   /**
    * Serve only these simulator UDIDs. The devices pane and the event log
    * list only them, and every route that names a device (`?device=`, the
-   * helper stream and input, grid start/shutdown, host actions, simulator
+   * helper path, a JSON body's `udid` or `device`, host actions, simulator
    * settings) refuses any other, so a preview on a shared Mac cannot boot,
    * shut down, stream or drive a simulator someone else is using. DevTools
    * are off, because inspect-webkit cannot tell whose simulator a web view
@@ -1332,19 +1335,48 @@ function rejectUpgrade(socket: Socket, status: number, message: string): void {
   }
 }
 
-/** The UDID a JSON request body names (`{ udid }`), or null when it names none. */
-function readBodyDeviceUdid(req: SimReq): Promise<string | null> {
+/**
+ * Read a POST body as JSON, counting raw bytes so multibyte UTF-8 can't slip
+ * past `limitBytes`; past it, stop buffering and answer "too-large".
+ */
+function readRequestBody(req: SimReq, limitBytes: number): Promise<RequestBody | { kind: "too-large" }> {
   return new Promise((resolve) => {
-    let body = "";
+    const chunks: Buffer[] = [];
+    let bytes = 0;
     req.on("data", (chunk: Buffer | string) => {
-      body += typeof chunk === "string" ? chunk : chunk.toString();
+      if (bytes > limitBytes) return;
+      const data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      bytes += data.length;
+      if (bytes > limitBytes) {
+        resolve({ kind: "too-large" });
+        return;
+      }
+      chunks.push(data);
     });
     req.on("end", () => {
-      let udid = "";
-      try { udid = (JSON.parse(body) as DeviceRequestBody).udid ?? ""; } catch {}
-      resolve(/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid) ? udid : null);
+      if (bytes > limitBytes) return;
+      if (bytes === 0) return resolve({ kind: "none" });
+      try {
+        resolve({ kind: "json", value: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+      } catch {
+        resolve({ kind: "malformed" });
+      }
     });
   });
+}
+
+/** A JSON body's fields; none for an absent, malformed or non-object body. */
+function bodyFields(body: RequestBody): Partial<Record<string, unknown>> {
+  if (body.kind !== "json" || typeof body.value !== "object" || body.value === null) return {};
+  return { ...body.value };
+}
+
+/** The simulator a grid request's `{ udid }` names, or null when it names none. */
+function bodyUdid(body: RequestBody): string | null {
+  const { udid } = bodyFields(body);
+  return typeof udid === "string" && /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i.test(udid)
+    ? udid
+    : null;
 }
 
 function isJsonContentType(value: string | undefined): boolean {
@@ -1386,32 +1418,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
     base === "" || pathname === base || pathname.startsWith(base + "/");
-  // What a request's URL names, worked out once for both the scope check
-  // and dispatch: the helper route and the device it acts on (its own, else
-  // `?device=`, else the pinned one), and every simulator the URL names
-  // (`?device=`, DevTools, which reach all of them, and that helper device).
+  // What an owned request's URL names, worked out once for both the scope
+  // check and dispatch: the helper route and the device it acts on (its own,
+  // else `?device=`, else the pinned one), and the simulators the URL names.
   const routeUrl = (rawUrl: string, pathname: string) => {
-    if (!ownsPath(pathname)) return { helper: null, helperDevice: null, targets: [] };
     const requested = queryDevice(rawUrl);
     const helper = helperProxyTarget(rawUrl, helperPrefix);
     const helperDevice = helper ? helper.device ?? requested ?? options?.device ?? null : null;
-    const targets: DeviceTarget[] = [];
-    if (requested !== null) targets.push(requested);
-    if (pathname.startsWith(`${base}/devtools`)) targets.push(EVERY_SIMULATOR);
-    if (helperDevice) targets.push(helperDevice);
-    return { helper, helperDevice, targets };
-  };
-  // POST routes whose JSON body names the simulator they act on. A new route
-  // that takes a UDID in its body must be listed here, or the scope never
-  // sees that UDID.
-  const bodyDeviceRoutes = new Set([`${base}/grid/api/start`, `${base}/grid/api/shutdown`]);
-  // Why the scope refuses a request naming `targets`, or null when it allows it.
-  const refusal = (targets: readonly DeviceTarget[]): string | null => {
-    const refused = targets.find((target) => !scope.allows(target));
-    if (refused === undefined) return null;
-    return refused === EVERY_SIMULATOR
-      ? "DevTools are off in a preview with --restrict-devices"
-      : `${refused === "" ? "An empty device" : refused} is not served by this preview`;
+    const devices = [requested, helperDevice].filter((device) => device !== null);
+    return { helper, helperDevice, devices, devtools: pathname.startsWith(`${base}/devtools`) };
   };
   // A remote browser opens the share link `<preview>/#token=<auth token>`.
   // The fragment never reaches the server; the page's auth bootstrap (served
@@ -1516,7 +1531,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (typeof p.device !== "string" || !/^[0-9A-Za-z-]+$/.test(p.device)) {
       throw new Error("missing or invalid device udid");
     }
-    const refused = refusal([p.device]);
+    const refused = scope.check({ devices: [p.device], devtools: false, body: undefined });
     if (refused) throw new Error(refused);
     if (p.option === undefined) {
       return { status: await getUiStatus(p.device) };
@@ -1552,42 +1567,50 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const selectedDevice = requestedDevice ?? options?.device ?? null;
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
     const trustedLoopback = isTrustedLoopback(req);
-    const routed = routeUrl(rawUrl, pathname);
-    let bodyDeviceUdid: string | null = null;
 
-    if (ownsPath(pathname)) {
-      // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
-      // token on every route, including the preview page itself.
-      if (pathname === exchangePath) {
-        handleAuthExchange(req, res);
-        return;
-      }
-      if (!trustedLoopback) {
-        const access = remoteAccess(req, authToken);
-        if (!access.ok) {
-          const method = (req.method ?? "GET").toUpperCase();
-          if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
-            sendAuthBootstrap(res);
-          } else {
-            sendAccessDenied(res, access);
-          }
-          return;
+    // Every route below is under `base`.
+    if (!ownsPath(pathname)) return next?.();
+
+    // Remote (non-loopback, proxied, or rebound-Host) callers need the auth
+    // token on every route, including the preview page itself.
+    if (pathname === exchangePath) {
+      handleAuthExchange(req, res);
+      return;
+    }
+    if (!trustedLoopback) {
+      const access = remoteAccess(req, authToken);
+      if (!access.ok) {
+        const method = (req.method ?? "GET").toUpperCase();
+        if (access.status === 401 && (method === "GET" || method === "HEAD") && pagePath(pathname)) {
+          sendAuthBootstrap(res);
+        } else {
+          sendAccessDenied(res, access);
         }
-      }
-      // State-changing requests from a browser must come from this origin.
-      const method = (req.method ?? "GET").toUpperCase();
-      if (method !== "GET" && method !== "HEAD" && originCheck(req) === "cross") {
-        res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
         return;
       }
-      if (req.method === "POST" && bodyDeviceRoutes.has(url)) bodyDeviceUdid = await readBodyDeviceUdid(req);
-      const refused = refusal([...routed.targets, ...(bodyDeviceUdid ? [bodyDeviceUdid] : [])]);
-      if (refused) {
-        res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-        res.end(JSON.stringify({ ok: false, error: refused }));
-        return;
-      }
+    }
+    // State-changing requests from a browser must come from this origin.
+    const method = (req.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD" && originCheck(req) === "cross") {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "cross_origin_request_blocked" }));
+      return;
+    }
+    // Routes read the body from here, so the scope sees every simulator it names.
+    const body = method === "POST"
+      ? await readRequestBody(req, url === `${base}/exec` || url === `${base}/exec/` ? EXEC_BODY_LIMIT_BYTES : BODY_LIMIT_BYTES)
+      : { kind: "none" as const };
+    if (body.kind === "too-large") {
+      res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+      res.end(JSON.stringify({ ok: false, error: "Body too large" }));
+      return;
+    }
+    const routed = routeUrl(rawUrl, pathname);
+    const refused = scope.check({ ...routed, body: body.kind === "json" ? body.value : undefined });
+    if (refused) {
+      res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: false, error: refused }));
+      return;
     }
 
     if (routed.helper) {
@@ -1606,10 +1629,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // Match on the normalized pathname (inside the auth gate), not the raw URL:
     // a raw `%2e%2e` segment would otherwise slip past both the gate and the
     // traversal check and escape `serve_rev/@rev/` upstream.
-    if (
-      ownsPath(pathname) &&
-      (pathname === devtoolsFrontendBase || pathname.startsWith(`${devtoolsFrontendBase}/`))
-    ) {
+    if (pathname === devtoolsFrontendBase || pathname.startsWith(`${devtoolsFrontendBase}/`)) {
       const assetPath = pathname === devtoolsFrontendBase
         ? "inspector.html"
         : pathname.slice(devtoolsFrontendBase.length + 1);
@@ -1801,7 +1821,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // pidfile stays until that process is actually gone so `--kill` can
     // still find it.
     if (url === base + "/grid/api/shutdown" && req.method === "POST") {
-      const udid = bodyDeviceUdid;
+      const udid = bodyUdid(body);
       if (!udid) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
@@ -1832,7 +1852,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // Start streaming a device in-process (auto-boots if needed). The preview
     // server serves its /helper routes directly — no spawned helper.
     if (url === base + "/grid/api/start" && req.method === "POST") {
-      const udid = bodyDeviceUdid;
+      const udid = bodyUdid(body);
       if (!udid) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Invalid or missing udid" }));
@@ -1907,22 +1927,19 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // sit on a WIR slot when the picker is dismissed (or the tab is closed).
     // Optional body { targetId } releases just one; empty body releases all.
     if (url === base + "/devtools/release" && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => (body += chunk));
-      req.on("end", async () => {
-        try {
-          const parsed: ReleaseRequestBody = body ? JSON.parse(body) : {};
-          const bridge = await getInspectWebKitBridge();
-          bridge.releaseHighlight?.(parsed.targetId);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end("{}");
-        } catch (err) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            error: err instanceof Error ? err.message : "Failed to release",
-          }));
-        }
-      });
+      try {
+        if (body.kind === "malformed") throw new Error("Malformed JSON body");
+        const { targetId } = bodyFields(body);
+        const bridge = await getInspectWebKitBridge();
+        bridge.releaseHighlight?.(typeof targetId === "string" ? targetId : undefined);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: err instanceof Error ? err.message : "Failed to release",
+        }));
+      }
       return;
     }
 
@@ -1930,32 +1947,29 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // simulator the way Safari's Develop menu hover does. Body shape:
     // { targetId: string, on: boolean }.
     if (url === base + "/devtools/highlight" && req.method === "POST") {
-      let body = "";
-      req.on("data", (chunk: Buffer) => (body += chunk));
-      req.on("end", async () => {
-        try {
-          const { targetId, on } = JSON.parse(body || "{}") as HighlightRequestBody;
-          if (!targetId) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Missing targetId" }));
-            return;
-          }
-          const bridge = await getInspectWebKitBridge();
-          if (!bridge.highlightTarget) {
-            res.writeHead(501, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "highlightTarget not supported by inspect-webkit" }));
-            return;
-          }
-          await bridge.highlightTarget(targetId, !!on);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end("{}");
-        } catch (err) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            error: err instanceof Error ? err.message : "Failed to highlight target",
-          }));
+      try {
+        if (body.kind === "malformed") throw new Error("Malformed JSON body");
+        const { targetId, on } = bodyFields(body);
+        if (typeof targetId !== "string" || !targetId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing targetId" }));
+          return;
         }
-      });
+        const bridge = await getInspectWebKitBridge();
+        if (!bridge.highlightTarget) {
+          res.writeHead(501, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "highlightTarget not supported by inspect-webkit" }));
+          return;
+        }
+        await bridge.highlightTarget(targetId, !!on);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: err instanceof Error ? err.message : "Failed to highlight target",
+        }));
+      }
       return;
     }
 
@@ -2212,39 +2226,21 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ stdout: "", stderr: "Unauthorized", exitCode: 1 }));
         return;
       }
-      let body = "";
-      let aborted = false;
-      req.on("data", (chunk: Buffer | string) => {
-        body += typeof chunk === "string" ? chunk : chunk.toString();
-        // Cheap belt-and-braces cap so a runaway POST can't OOM the dev server.
-        if (body.length > 4 * 1024 * 1024) {
-          aborted = true;
-          res.writeHead(413, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ stdout: "", stderr: "Payload Too Large", exitCode: 1 }));
-          req.destroy();
-        }
-      });
-      req.on("end", () => {
-        if (aborted) return;
-        let command = "";
-        try {
-          command = (JSON.parse(body) as ExecRequestBody).command ?? "";
-        } catch {}
-        if (!command) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ stdout: "", stderr: "Missing command", exitCode: 1 }));
-          return;
-        }
-        exec(command, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-          const exitCode = err ? (err as ExecException).code ?? 1 : 0;
-          recordCommandEvent(command, { exitCode });
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            stdout: stdout.toString(),
-            stderr: stderr.toString(),
-            exitCode,
-          }));
-        });
+      const { command } = bodyFields(body);
+      if (typeof command !== "string" || !command) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ stdout: "", stderr: "Missing command", exitCode: 1 }));
+        return;
+      }
+      exec(command, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+        const exitCode = err ? (err as ExecException).code ?? 1 : 0;
+        recordCommandEvent(command, { exitCode });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          stdout: stdout.toString(),
+          stderr: stderr.toString(),
+          exitCode,
+        }));
       });
       return;
     }
@@ -2263,53 +2259,32 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.end(JSON.stringify({ sent: false, error: "Missing device" }));
         return;
       }
-      // The body is only `{ bundleId }`; cap it so a runaway POST can't
-      // grow memory. Over the cap answers 413 (sent: false → client taps R).
-      // Count raw bytes, not decoded characters, so multibyte UTF-8 can't
-      // slip past the cap; decode once at the end.
-      let chunks: Buffer[] = [];
-      let bodyBytes = 0;
-      let tooLarge = false;
-      req.on("data", (chunk: Buffer) => {
-        if (tooLarge) return;
-        chunks.push(chunk);
-        bodyBytes += chunk.length;
-        if (bodyBytes > RELOAD_BODY_LIMIT_BYTES) {
-          tooLarge = true;
-          chunks = [];
-          res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
-          res.end(JSON.stringify({ sent: false, error: "Body too large" }));
+      try {
+        if (body.kind === "malformed") throw new Error("Malformed JSON body");
+        const { bundleId: rawBundleId } = bodyFields(body);
+        const bundleId = typeof rawBundleId === "string" ? rawBundleId : "";
+        let result: MetroReloadResult = { sent: false, reason: "no-metro" };
+        if (bundleId && !supportsMetroReload(bundleId)) {
+          result = { sent: false, reason: "unsupported-app" };
+        } else if (bundleId) {
+          // The device lookup runs alongside the Metro probes, inside
+          // reloadViaMetro's time budget, so this answers before the
+          // client gives up and taps R itself.
+          const name = scope.states().then((states) => {
+            const state = selectServeSimState(states, selectedDevice);
+            return state ? scope.simulatorName(state.device) : undefined;
+          });
+          result = await reloadViaMetro(bundleId, name);
         }
-      });
-      req.on("end", async () => {
-        if (tooLarge) return;
-        try {
-          const body = Buffer.concat(chunks).toString("utf8");
-          const parsed = (body ? JSON.parse(body) : {}) as { bundleId?: unknown };
-          const bundleId = typeof parsed.bundleId === "string" ? parsed.bundleId : "";
-          let result: MetroReloadResult = { sent: false, reason: "no-metro" };
-          if (bundleId && !supportsMetroReload(bundleId)) {
-            result = { sent: false, reason: "unsupported-app" };
-          } else if (bundleId) {
-            // The device lookup runs alongside the Metro probes, inside
-            // reloadViaMetro's time budget, so this answers before the
-            // client gives up and taps R itself.
-            const name = scope.states().then((states) => {
-              const state = selectServeSimState(states, selectedDevice);
-              return state ? scope.simulatorName(state.device) : undefined;
-            });
-            result = await reloadViaMetro(bundleId, name);
-          }
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ...result, confirmed: false }));
-        } catch (err) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            sent: false,
-            error: err instanceof Error ? err.message : "Failed to reload",
-          }));
-        }
-      });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ...result, confirmed: false }));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          sent: false,
+          error: err instanceof Error ? err.message : "Failed to reload",
+        }));
+      }
       return;
     }
 
@@ -2408,9 +2383,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
     const rawUrl = req.url ?? "";
     const pathname = requestPathname(rawUrl);
-    const routed = routeUrl(rawUrl, pathname);
-    const devtoolsTarget = ownsPath(pathname) ? devtoolsProxyTarget(rawUrl, devtoolsPrefix) : null;
-    const refused = refusal(routed.targets);
+    const routed = ownsPath(pathname) ? routeUrl(rawUrl, pathname) : null;
+    const devtoolsTarget = routed ? devtoolsProxyTarget(rawUrl, devtoolsPrefix) : null;
+    const refused = routed ? scope.check({ ...routed, body: undefined }) : null;
     if (refused) {
       rejectUpgrade(socket, 404, refused);
       return;
@@ -2427,7 +2402,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       })();
       return;
     }
-    if (!routed.helper) {
+    if (!routed?.helper) {
       socket.destroy();
       return;
     }
