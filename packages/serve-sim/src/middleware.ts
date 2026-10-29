@@ -443,11 +443,12 @@ function endpoint(base: string, path: string, device: string): string {
 /**
  * A state record as it may be served over HTTP: drops the server-private
  * fields (the auth-token fingerprint and the exec opt-in recorded for
- * `--detach` reuse checks), which no client needs.
+ * `--detach` reuse checks, and the host path of the device set), which no
+ * client needs.
  */
 export function publicState(state: ServeSimState): ServeSimState {
-  if (!("authTokenSha256" in state) && !("allowExec" in state)) return state;
-  const { authTokenSha256: _fingerprint, allowExec: _allowExec, ...rest } = state;
+  if (!("authTokenSha256" in state) && !("allowExec" in state) && !("deviceSet" in state)) return state;
+  const { authTokenSha256: _fingerprint, allowExec: _allowExec, deviceSet: _deviceSet, ...rest } = state;
   return rest;
 }
 

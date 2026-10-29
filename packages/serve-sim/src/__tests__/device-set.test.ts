@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { eventLogEventForCommand } from "../event-log";
-import { readServeSimStates, type ServeSimState } from "../middleware";
+import { previewConfigForState, readServeSimStates, rewriteStateForRequestHost, type ServeSimState } from "../middleware";
 import { STATE_DIR, stateFileForDevice } from "../state";
 import { sameDeviceSet, simctlArguments, simctlBootStatusArguments, simulatorDevicesDir } from "../simctl";
 
@@ -196,6 +196,21 @@ describe("readServeSimStates", () => {
       rmSync(stateFileForDevice(ours), { force: true });
       rmSync(stateFileForDevice(theirs), { force: true });
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("served state", () => {
+  test("keeps the host's device-set path out of what the page and /api send", () => {
+    const state: ServeSimState = {
+      pid: 1, port: 3200, device: "UDID", url: "", streamUrl: "", wsUrl: "", deviceSet: "/Users/me/pool",
+    };
+    for (const value of [
+      previewConfigForState(state, "", "serve-sim", true),
+      rewriteStateForRequestHost(state, "127.0.0.1:3200"),
+      rewriteStateForRequestHost(state, "192.168.1.5:3200", "/.sim", "https", true),
+    ]) {
+      expect(JSON.stringify(value)).not.toContain("/Users/me/pool");
     }
   });
 });
