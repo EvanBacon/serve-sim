@@ -4,6 +4,7 @@
 
 void SimCamInstallMovieOutputSwizzles(void);
 
-// Ends the output's fake recording, as AVFoundation ends a recording whose
-// output leaves the session, or loses its camera.
+// Ends the fake recording of an output leaving its fake session (removed,
+// or the session's last fake camera removed), which stopRecording no
+// longer reaches once the output is native again.
 void SimCamMovieOutputLeftFakeSession(AVCaptureOutput *output);
