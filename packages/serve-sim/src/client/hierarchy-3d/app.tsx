@@ -1,8 +1,11 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { ancestorIds, layoutHierarchy, type DepthMode, type Layout } from "../../hierarchy-3d/layout";
 import type { HierarchyCaptureResponse, HierarchyNode, HierarchyPropValue, HierarchyRect } from "../../hierarchy-3d/model";
+import { ChevronIcon, ClearIcon, ClipIcon, KindIcon, LayersIcon, RefreshIcon, ResetViewIcon, SearchIcon } from "./icons";
+import { OverflowMenu, type MenuEntry } from "./overflow-menu";
 import { fitDistance, panTarget, type OrbitCamera } from "./projection";
 import { HierarchyScene } from "./scene";
+import { expandableSubtreeIds, flattenTree, initialCollapsed, nodeKind, nodeSummary, shortClassName, treeKeyAction, type TreeKey, type TreeRow } from "./tree";
 
 export interface Hierarchy3dConfig {
   basePath: string;
@@ -50,6 +53,12 @@ function fmtColor(c: [number, number, number, number] | number[] | null): string
   const [r, g, b, a] = c.map((v) => Math.round(v! * 255)) as [number, number, number, number];
   return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(2)})`;
 }
+/** Compact color label for the inspector: hex, plus alpha when translucent. */
+function fmtColorShort(c: [number, number, number, number] | null): string {
+  if (!c) return "clear";
+  const hex = c.slice(0, 3).map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("").toUpperCase();
+  return c[3] >= 0.995 ? `#${hex}` : `#${hex} · ${Math.round(c[3] * 100)}%`;
+}
 function fmtProp(v: HierarchyPropValue): string {
   if (Array.isArray(v)) return v.length === 4 ? fmtColor(v) : `[${v.map(fmt).join(", ")}]`;
   if (typeof v === "number") return fmt(v);
@@ -74,47 +83,29 @@ function fittedDistance(screen: { width: number; height: number }, canvas: HTMLC
   return fitDistance(apparentWidth, screen.height, aspect) * 1.1;
 }
 
-function nodeSummary(node: HierarchyNode): string {
-  const p = node.props;
-  const text = typeof p.text === "string" ? p.text : typeof p.title === "string" ? p.title : "";
-  return node.accessibilityIdentifier || text || node.accessibilityLabel || "";
+const TREE_WIDTH_KEY = "serve-sim.hierarchy-3d.treeWidth";
+const TREE_WIDTH_DEFAULT = 300;
+const TREE_WIDTH_MIN = 200;
+const TREE_WIDTH_MAX = 640;
+const INDENT = 14; // keep in sync with .h3d-guides in hierarchy-3d.css
+
+function clampTreeWidth(w: number): number {
+  return Math.round(Math.max(TREE_WIDTH_MIN, Math.min(TREE_WIDTH_MAX, Math.min(w, window.innerWidth - 480))));
 }
 
-interface TreeRow {
-  node: HierarchyNode;
-  depth: number;
-  hasChildren: boolean;
-}
-
-function flattenTree(windows: HierarchyNode[], collapsed: Set<string>, filter: string): TreeRow[] {
-  const rows: TreeRow[] = [];
-  const f = filter.trim().toLowerCase();
-  if (f) {
-    // Filtering shows matches flat, with their depth for indentation.
-    const visit = (n: HierarchyNode, depth: number) => {
-      const hay = `${n.class} ${n.accessibilityIdentifier ?? ""} ${n.accessibilityLabel ?? ""} ${nodeSummary(n)} ${n.viewController ?? ""}`.toLowerCase();
-      if (hay.includes(f)) rows.push({ node: n, depth: 0, hasChildren: false });
-      for (const c of n.children) visit(c, depth + 1);
-    };
-    for (const w of windows) visit(w, 0);
-    return rows;
+function readTreeWidth(): number {
+  try {
+    const v = Number(localStorage.getItem(TREE_WIDTH_KEY));
+    return Number.isFinite(v) && v > 0 ? clampTreeWidth(v) : TREE_WIDTH_DEFAULT;
+  } catch {
+    return TREE_WIDTH_DEFAULT;
   }
-  const visit = (n: HierarchyNode, depth: number) => {
-    rows.push({ node: n, depth, hasChildren: n.children.length > 0 });
-    if (collapsed.has(n.id)) return;
-    for (const c of n.children) visit(c, depth + 1);
-  };
-  for (const w of windows) visit(w, 0);
-  return rows;
 }
 
-function Disclosure({ open }: { open: boolean }) {
-  return (
-    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" style={{ transform: open ? "rotate(90deg)" : undefined }}>
-      <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
+/** Deep rows keep room for a readable label; the outline scrolls sideways past that. */
+const rowMinWidth = (depth: number) => depth * INDENT + 190;
+
+const TREE_KEYS = new Set<string>(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
 
 export function App({ config }: { config: Hierarchy3dConfig }) {
   const params = useMemo(readParams, []);
@@ -135,12 +126,13 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   const [showHidden, setShowHidden] = useState(false);
   const [textures, setTextures] = useState(true);
   const [outlines, setOutlines] = useState(true);
-  const [levelRange, setLevelRange] = useState<[number, number] | null>(null);
   const [orbiting, setOrbiting] = useState(params.orbit);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hovered, setHovered] = useState(-1);
   const [filter, setFilter] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [treeWidth, setTreeWidth] = useState(readTreeWidth);
+  const treeRef = useRef<HTMLDivElement | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<HierarchyScene | null>(null);
@@ -186,9 +178,6 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   }, [capture, mode, clip, showHidden, compact]);
   const maxLevel = layout?.maxLevel ?? 0;
   const spacing = spacingOverride ?? autoSpacing(capture?.screen.height ?? 800, maxLevel);
-  const rangeMin = levelRange ? Math.min(levelRange[0], maxLevel) : 0;
-  const rangeMax = levelRange ? Math.min(levelRange[1], maxLevel) : maxLevel;
-  const range: [number, number] = [rangeMin, rangeMax];
   const sceneLayout = useRef<Layout | null>(null);
   sceneLayout.current = layout;
   const selectedIndex = selectedId && layout ? layout.indexById.get(selectedId) ?? -1 : -1;
@@ -250,8 +239,8 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   }, []);
 
   const sceneOptions = useMemo(
-    () => ({ spacing, textures, outlines, minLevel: rangeMin, maxLevel: rangeMax, selected: selectedIndex, hovered, theme }),
-    [spacing, textures, outlines, rangeMin, rangeMax, selectedIndex, hovered, theme],
+    () => ({ spacing, textures, outlines, minLevel: 0, maxLevel, selected: selectedIndex, hovered, theme }),
+    [spacing, textures, outlines, maxLevel, selectedIndex, hovered, theme],
   );
   const optionsRef = useRef(sceneOptions);
   optionsRef.current = sceneOptions;
@@ -388,6 +377,16 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
     };
   }, [resetCamera]);
 
+  // Open a fresh app's outline shallow (refreshes keep the user's expansion).
+  const collapsedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!capture) return;
+    const key = `${capture.source}:${capture.bundleId}`;
+    if (collapsedFor.current === key) return;
+    collapsedFor.current = key;
+    setCollapsed(initialCollapsed(capture.windows));
+  }, [capture]);
+
   // Keep the selection visible in the tree.
   useEffect(() => {
     if (!selectedId || !layout) return;
@@ -399,36 +398,110 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
       return next;
     });
     requestAnimationFrame(() => {
-      document.querySelector(`[data-node-id="${CSS.escape(selectedId)}"]`)?.scrollIntoView({ block: "nearest" });
+      const row = document.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(selectedId)}"]`);
+      const list = treeRef.current;
+      if (!row || !list) return;
+      row.scrollIntoView({ block: "nearest" });
+      // Deep rows: scroll sideways only when the start of the selected
+      // row's label (chevron + glyph + ~60px of name) would be hidden.
+      const indent = (Number(row.getAttribute("aria-level") ?? 1) - 1) * INDENT;
+      const labelEnd = indent + 100;
+      if (indent < list.scrollLeft || labelEnd > list.scrollLeft + list.clientWidth) {
+        list.scrollLeft = Math.max(0, labelEnd - list.clientWidth + 2 * INDENT);
+      }
     });
   }, [selectedId, layout]);
 
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement | null)?.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === "r") void load();
-      else if (e.key === "f") resetCamera();
-      else if (e.key === "Escape") setSelectedId(null);
-      else if (e.key === "ArrowUp" && selectedId && layout) {
-        const idx = layout.indexById.get(selectedId);
-        const parent = idx !== undefined ? layout.items[idx]!.parent : -1;
-        if (parent >= 0) setSelectedId(layout.items[parent]!.node.id);
-      }
-    };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, [load, resetCamera, selectedId, layout]);
+  const rows = useMemo(() => (capture ? flattenTree(capture.windows, collapsed, filter) : []), [capture, collapsed, filter]);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
 
-  const toggleCollapsed = useCallback((id: string) => {
+  const setExpanded = useCallback((ids: string[], expand: boolean) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      for (const id of ids) {
+        if (expand) next.delete(id);
+        else next.add(id);
+      }
       return next;
     });
   }, []);
 
-  const rows = useMemo(() => (capture ? flattenTree(capture.windows, collapsed, filter) : []), [capture, collapsed, filter]);
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
+  const nodeByIdRef = useRef(nodeById);
+  nodeByIdRef.current = nodeById;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+
+  // Option-click toggles the whole subtree, like Finder / Xcode.
+  const toggleCollapsed = useCallback((id: string, deep: boolean) => {
+    const expand = collapsedRef.current.has(id);
+    const node = nodeByIdRef.current.get(id);
+    setExpanded(deep && node ? expandableSubtreeIds(node) : [id], expand);
+  }, [setExpanded]);
+
+  // Outline keyboard navigation. Arrows drive the tree wherever focus is
+  // (except text fields and the menu), so they also work after clicking the
+  // canvas; Left walks up to the superview once a row is collapsed.
+  const navigateTree = useCallback((key: TreeKey) => {
+    const action = treeKeyAction(rowsRef.current, selectedIdRef.current, key);
+    if (!action) return;
+    if ("select" in action) setSelectedId(action.select);
+    else if ("expand" in action) setExpanded([action.expand], true);
+    else setExpanded([action.collapse], false);
+  }, [setExpanded]);
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (target?.closest('input, select, textarea, [role="menu"], [role="separator"]')) return;
+      if (e.key === "r") void load();
+      else if (e.key === "f") resetCamera();
+      else if (e.key === "Escape") setSelectedId(null);
+      else if (TREE_KEYS.has(e.key)) {
+        e.preventDefault();
+        navigateTree(e.key as TreeKey);
+      }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [load, resetCamera, navigateTree]);
+
+  const onFilterKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      treeRef.current?.focus();
+      navigateTree("ArrowDown");
+    } else if (e.key === "Escape" && filter) {
+      e.stopPropagation();
+      setFilter("");
+    }
+  };
+
+  const startResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startW = treeWidth;
+    const move = (ev: PointerEvent) => setTreeWidth(clampTreeWidth(startW + ev.clientX - startX));
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  };
+  useEffect(() => {
+    try {
+      localStorage.setItem(TREE_WIDTH_KEY, String(treeWidth));
+    } catch {}
+    drawRef.current();
+  }, [treeWidth]);
 
   const inject = async () => {
     const bundleId = response?.foreground?.bundleId;
@@ -454,79 +527,118 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   };
 
   const hoveredNode = hovered >= 0 ? layout?.items[hovered]?.node ?? null : null;
+  const hoveredId = hoveredNode?.id ?? null;
   const selectedItem = selectedIndex >= 0 ? layout?.items[selectedIndex] : undefined;
+  const appName = capture?.bundleId ?? response?.foreground?.bundleId ?? null;
+
+  const menuEntries: MenuEntry[] = [
+    { type: "check", label: "Snapshots", checked: textures, onChange: setTextures, hint: "Texture each layer with the view's pixels" },
+    { type: "check", label: "Wireframes", checked: outlines, onChange: setOutlines, hint: "Outline every view" },
+    { type: "check", label: "Collapse transparent containers", checked: compact, onChange: setCompact, hint: "Views that draw nothing don't take a layer" },
+    { type: "check", label: "Show hidden views", checked: showHidden, onChange: setShowHidden },
+    { type: "separator" },
+    { type: "heading", label: "Depth" },
+    { type: "radio", label: "By overlap", checked: mode === "overlap", onSelect: () => setMode("overlap") },
+    { type: "radio", label: "By tree depth", checked: mode === "tree", onSelect: () => setMode("tree") },
+    { type: "separator" },
+    { type: "action", label: "Front view", onSelect: frontView },
+    { type: "check", label: "Auto-orbit", checked: orbiting, onChange: setOrbiting },
+  ];
 
   return (
     <div className="h3d-root">
       <header className="h3d-toolbar">
         <div className="h3d-title">
-          <strong>View Hierarchy</strong>
-          <span className="h3d-badge">experimental</span>
-          {capture && (
-            <span className="h3d-sub">
-              {capture.bundleId ?? "unknown app"} · {capture.nodeCount} views
-              {capture.truncated ? " (truncated)" : ""} · {capture.source === "injected" ? "UIKit (injected)" : "accessibility fallback"}
-              {capture.durationMs != null ? ` · ${Math.round(capture.durationMs)} ms` : ""}
-            </span>
-          )}
+          <h1>View Hierarchy</h1>
+          {appName && <span className="h3d-app" title={appName}>{appName}</span>}
+          <span className="h3d-pill">Experimental</span>
         </div>
         <div className="h3d-controls">
-          <button type="button" onClick={() => void load()} disabled={loading} title="Refresh (R)">
-            {loading ? "Capturing…" : "Refresh"}
+          <button
+            type="button" className="h3d-icon-btn" onClick={() => void load()} disabled={loading}
+            title="Refresh (R)" aria-label="Refresh" aria-busy={loading}
+          >
+            <span className={loading ? "h3d-spin" : undefined}><RefreshIcon /></span>
           </button>
-          <label className="h3d-slider" title="Spacing between layers">
-            Spacing
-            <input type="range" min={0} max={120} value={spacing} onInput={(e) => setSpacing(Number((e.target as HTMLInputElement).value))} />
-          </label>
-          <label className="h3d-slider" title="Lowest layer shown">
-            Layers
+          <label className="h3d-spacing" title="Layer spacing (double-click to reset)">
+            <LayersIcon />
             <input
-              type="range" min={0} max={maxLevel} value={range[0]}
-              onInput={(e) => { const v = Number((e.target as HTMLInputElement).value); setLevelRange([Math.min(v, range[1]), range[1]]); }}
+              type="range" min={0} max={120} value={spacing} aria-label="Layer spacing"
+              onInput={(e) => setSpacing(Number((e.target as HTMLInputElement).value))}
+              onDoubleClick={() => setSpacing(null)}
             />
-            <input
-              type="range" min={0} max={maxLevel} value={range[1]}
-              onInput={(e) => { const v = Number((e.target as HTMLInputElement).value); setLevelRange([range[0], Math.max(v, range[0])]); }}
-            />
-            <span className="h3d-mono">{range[0]}–{range[1]}</span>
           </label>
-          <select value={mode} onChange={(e) => setMode((e.target as HTMLSelectElement).value as DepthMode)} title="How views are spread in depth">
-            <option value="overlap">Depth: overlap</option>
-            <option value="tree">Depth: tree</option>
-          </select>
-          <label><input type="checkbox" checked={textures} onChange={(e) => setTextures((e.target as HTMLInputElement).checked)} /> Snapshots</label>
-          <label><input type="checkbox" checked={outlines} onChange={(e) => setOutlines((e.target as HTMLInputElement).checked)} /> Wireframes</label>
-          <label title="Transparent container views don't take a layer"><input type="checkbox" checked={compact} onChange={(e) => setCompact((e.target as HTMLInputElement).checked)} /> Compact</label>
-          <label><input type="checkbox" checked={clip} onChange={(e) => setClip((e.target as HTMLInputElement).checked)} /> Clip</label>
-          <label><input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden((e.target as HTMLInputElement).checked)} /> Hidden</label>
-          <button type="button" onClick={() => setOrbiting((o) => !o)} aria-pressed={orbiting}>{orbiting ? "Stop orbit" : "Orbit"}</button>
-          <button type="button" onClick={frontView}>Front</button>
-          <button type="button" onClick={resetCamera} title="Reset camera (F / double-click)">Reset</button>
+          <button
+            type="button" className="h3d-icon-btn" aria-pressed={!clip} onClick={() => setClip((c) => !c)}
+            title="Show clipped content" aria-label="Show clipped content"
+          >
+            <ClipIcon />
+          </button>
+          <button type="button" className="h3d-icon-btn" onClick={resetCamera} title="Reset view (F)" aria-label="Reset view">
+            <ResetViewIcon />
+          </button>
+          <span className="h3d-toolbar-sep" />
+          <OverflowMenu entries={menuEntries} footer={<Shortcuts />} />
         </div>
       </header>
 
       {(response?.notice || error) && (
-        <div className={`h3d-banner${error ? " h3d-banner-error" : ""}`}>
+        <div className={`h3d-banner${error ? " h3d-banner-error" : ""}`} role={error ? "alert" : "status"}>
           <span>{error ?? response?.notice}</span>
           {response?.canInject && response.foreground && response.capture?.source !== "injected" && (
-            <button type="button" onClick={() => void inject()} disabled={injecting}>
+            <button type="button" className="h3d-btn" onClick={() => void inject()} disabled={injecting}>
               {injecting ? "Relaunching…" : `Relaunch ${response.foreground.bundleId} with inspector`}
             </button>
           )}
         </div>
       )}
 
-      <div className="h3d-main">
-        <aside className="h3d-tree">
-          <input className="h3d-filter" type="search" placeholder="Filter views" value={filter} onInput={(e) => setFilter((e.target as HTMLInputElement).value)} />
+      <div className="h3d-main" style={{ gridTemplateColumns: `${treeWidth}px minmax(0, 1fr) 300px` }}>
+        <aside className="h3d-tree" aria-label="View hierarchy">
+          <div className="h3d-search">
+            <SearchIcon />
+            <input
+              type="text" placeholder="Filter" aria-label="Filter views" spellCheck={false} value={filter}
+              onInput={(e) => setFilter((e.target as HTMLInputElement).value)}
+              onKeyDown={onFilterKeyDown}
+            />
+            {filter && (
+              <button type="button" className="h3d-search-clear" aria-label="Clear filter" onClick={() => setFilter("")}>
+                <ClearIcon />
+              </button>
+            )}
+          </div>
           <TreeList
+            treeRef={treeRef}
             rows={rows}
             selectedId={selectedId}
-            collapsed={collapsed}
+            hoveredId={hoveredId}
             layout={layout}
             onSelect={setSelectedId}
             onHover={setHovered}
             onToggle={toggleCollapsed}
+          />
+          {filter && rows.length === 0 && capture && <div className="h3d-tree-empty">No matches</div>}
+          {capture && (
+            <footer className="h3d-status">
+              <span>{capture.nodeCount} views{capture.truncated ? " (truncated)" : ""}</span>
+              <span title={capture.source === "injected" ? "Captured by the injected UIKit agent" : "Accessibility tree (inject the agent for classes, colors and per-view snapshots)"}>
+                {capture.source === "injected" ? "UIKit" : "Accessibility"}
+              </span>
+              {capture.durationMs != null && <span>{Math.round(capture.durationMs)} ms</span>}
+            </footer>
+          )}
+          <div
+            className="h3d-splitter" role="separator" aria-orientation="vertical" aria-label="Resize hierarchy panel"
+            aria-valuemin={TREE_WIDTH_MIN} aria-valuemax={TREE_WIDTH_MAX} aria-valuenow={treeWidth} tabIndex={0}
+            onPointerDown={startResize}
+            onDoubleClick={() => setTreeWidth(clampTreeWidth(TREE_WIDTH_DEFAULT))}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                e.preventDefault();
+                setTreeWidth((w) => clampTreeWidth(w + (e.key === "ArrowLeft" ? -16 : 16)));
+              }
+            }}
           />
         </aside>
 
@@ -534,20 +646,26 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
           <canvas ref={canvasRef} className="h3d-canvas" />
           {sceneError && <div className="h3d-overlay">{sceneError}</div>}
           {!capture && !sceneError && <div className="h3d-overlay">{loading ? "Capturing view hierarchy…" : error ?? "No hierarchy yet."}</div>}
-          {hoveredNode && <div className="h3d-hover">{hoveredNode.class}{nodeSummary(hoveredNode) ? ` — ${nodeSummary(hoveredNode)}` : ""}</div>}
-          {textures && textureProgress.total > 0 && textureProgress.loaded < textureProgress.total && (
-            <div className="h3d-progress">Loading snapshots {textureProgress.loaded}/{textureProgress.total}</div>
+          {hoveredNode && (
+            <div className="h3d-chip h3d-hover">
+              <KindIcon kind={nodeKind(hoveredNode)} />
+              <span className="h3d-chip-name">{shortClassName(hoveredNode.class)}</span>
+              {nodeSummary(hoveredNode) && <span className="h3d-chip-detail">{nodeSummary(hoveredNode)}</span>}
+            </div>
           )}
-          <div className="h3d-hint">Drag to orbit · Shift-drag to pan · Scroll to zoom · Click to select</div>
+          {textures && textureProgress.total > 0 && textureProgress.loaded < textureProgress.total && (
+            <div className="h3d-chip h3d-progress">Loading snapshots {textureProgress.loaded}/{textureProgress.total}</div>
+          )}
+          {capture && <div className="h3d-hint">Drag to orbit · Shift-drag to pan · Scroll to zoom</div>}
         </section>
 
-        <aside className="h3d-inspector">
+        <aside className="h3d-inspector" aria-label="Inspector">
           {selectedNode ? (
             <Inspector node={selectedNode} level={selectedItem?.level ?? null} visible={selectedItem?.visibleRect ?? null} onSelectParent={
               selectedItem && selectedItem.parent >= 0 ? () => setSelectedId(layout!.items[selectedItem.parent]!.node.id) : undefined
             } />
           ) : (
-            <div className="h3d-empty">Select a view in the 3D canvas or the tree.</div>
+            <div className="h3d-empty">No Selection</div>
           )}
         </aside>
       </div>
@@ -555,61 +673,136 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   );
 }
 
+const SHORTCUTS: [string, string][] = [
+  ["Drag", "Orbit"],
+  ["⇧ Drag", "Pan"],
+  ["Scroll", "Zoom"],
+  ["Double-click", "Reset view"],
+  ["R", "Refresh"],
+  ["F", "Reset view"],
+  ["↑ ↓", "Move selection"],
+  ["← →", "Collapse · expand"],
+  ["⌥ Click ▸", "Toggle subtree"],
+  ["Esc", "Deselect"],
+];
+
+function Shortcuts() {
+  return (
+    <div className="h3d-shortcuts">
+      <div className="h3d-menu-heading">Shortcuts</div>
+      <dl>
+        {SHORTCUTS.map(([k, v]) => (
+          <div key={k + v}>
+            <dt><kbd className="h3d-kbd">{k}</kbd></dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 /**
- * Memoized so 3D hover / texture progress re-renders skip it; hovering a row
- * still highlights the view in 3D through `onHover`.
+ * Memoized, with memoized rows: 3D hover and texture-progress re-renders skip
+ * it entirely, and a hover / selection change only re-renders the rows whose
+ * state flipped.
  */
-const TreeList = memo(function TreeList({ rows, selectedId, collapsed, layout, onSelect, onHover, onToggle }: {
+const TreeList = memo(function TreeList({ treeRef, rows, selectedId, hoveredId, layout, onSelect, onHover, onToggle }: {
+  treeRef: { current: HTMLDivElement | null };
   rows: TreeRow[];
   selectedId: string | null;
-  collapsed: Set<string>;
+  hoveredId: string | null;
   layout: Layout | null;
   onSelect: (id: string) => void;
   onHover: (index: number) => void;
-  onToggle: (id: string) => void;
+  onToggle: (id: string, deep: boolean) => void;
 }) {
   return (
-    <div className="h3d-rows" role="tree">
-      {rows.map(({ node, depth, hasChildren }) => {
-        const inLayout = layout?.indexById.has(node.id) ?? false;
-        const isSel = node.id === selectedId;
-        const summary = nodeSummary(node);
-        return (
-          <div
-            key={node.id}
-            data-node-id={node.id}
-            role="treeitem"
-            aria-selected={isSel}
-            className={`h3d-row${isSel ? " is-selected" : ""}${inLayout ? "" : " is-hidden"}`}
-            style={{ paddingLeft: 6 + depth * 12 }}
-            onClick={() => onSelect(node.id)}
-            onMouseEnter={() => onHover(layout?.indexById.get(node.id) ?? -1)}
-            onMouseLeave={() => onHover(-1)}
-          >
-            <span
-              className="h3d-disclosure"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (hasChildren) onToggle(node.id);
-              }}
-            >
-              {hasChildren ? <Disclosure open={!collapsed.has(node.id)} /> : null}
-            </span>
-            <span className="h3d-class">{node.class}</span>
-            {summary && <span className="h3d-summary">{summary}</span>}
-          </div>
-        );
-      })}
+    <div
+      ref={treeRef}
+      className="h3d-rows"
+      role="tree"
+      aria-label="Views"
+      tabIndex={0}
+      aria-activedescendant={selectedId ? `h3d-row-${selectedId}` : undefined}
+      onMouseLeave={() => onHover(-1)}
+    >
+      {rows.map((row) => (
+        <TreeRowView
+          key={row.node.id}
+          row={row}
+          selected={row.node.id === selectedId}
+          hovered={row.node.id === hoveredId}
+          layoutIndex={layout?.indexById.get(row.node.id) ?? -1}
+          onSelect={onSelect}
+          onHover={onHover}
+          onToggle={onToggle}
+        />
+      ))}
+    </div>
+  );
+});
+
+const TreeRowView = memo(function TreeRowView({ row, selected, hovered, layoutIndex, onSelect, onHover, onToggle }: {
+  row: TreeRow;
+  selected: boolean;
+  hovered: boolean;
+  layoutIndex: number;
+  onSelect: (id: string) => void;
+  onHover: (index: number) => void;
+  onToggle: (id: string, deep: boolean) => void;
+}) {
+  const { node, depth, hasChildren, expanded, context } = row;
+  const summary = nodeSummary(node);
+  const name = shortClassName(node.class);
+  const notDrawn = layoutIndex < 0;
+  return (
+    <div
+      id={`h3d-row-${node.id}`}
+      data-node-id={node.id}
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-selected={selected}
+      aria-expanded={hasChildren ? expanded : undefined}
+      style={{ minWidth: rowMinWidth(depth) }}
+      className={`h3d-row${selected ? " is-selected" : ""}${hovered ? " is-hovered" : ""}${notDrawn ? " is-dim" : ""}${context ? " is-context" : ""}`}
+      title={`${node.class}${summary ? ` — ${summary}` : ""}${notDrawn ? " (not drawn)" : ""}`}
+      onClick={() => onSelect(node.id)}
+      onMouseEnter={() => onHover(layoutIndex)}
+    >
+      {depth > 0 && <span className="h3d-guides" style={{ width: depth * INDENT }} />}
+      <span
+        className={`h3d-disclosure${expanded ? " is-open" : ""}`}
+        onClick={(e) => {
+          if (!hasChildren) return;
+          e.stopPropagation();
+          onToggle(node.id, e.altKey);
+        }}
+      >
+        {hasChildren ? <ChevronIcon /> : null}
+      </span>
+      <KindIcon kind={nodeKind(node)} />
+      <span className="h3d-class">{name}</span>
+      {summary && <span className="h3d-summary">{summary}</span>}
     </div>
   );
 });
 
 function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
-    <div className="h3d-kv">
-      <span className="h3d-k">{k}</span>
-      <span className={`h3d-v${mono ? " h3d-mono" : ""}`}>{v}</span>
-    </div>
+    <>
+      <dt className="h3d-k">{k}</dt>
+      <dd className={`h3d-v${mono ? " h3d-mono" : ""}`} title={v}>{v}</dd>
+    </>
+  );
+}
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="h3d-section">
+      <h3>{title}</h3>
+      <dl className="h3d-grid">{children}</dl>
+    </section>
   );
 }
 
@@ -620,49 +813,70 @@ function Inspector({ node, level, visible, onSelectParent }: {
   onSelectParent: (() => void) | undefined;
 }) {
   const bg = node.backgroundColor;
+  const name = shortClassName(node.class);
+  const props = Object.entries(node.props);
   return (
     <div className="h3d-inspector-body">
-      <h2 className="h3d-inspector-title">{node.class}</h2>
-      {node.superclasses.length > 0 && <div className="h3d-chain">{node.superclasses.join(" → ")}</div>}
-      {onSelectParent && <button type="button" className="h3d-link" onClick={onSelectParent}>Select superview ↑</button>}
+      <header className="h3d-inspector-head">
+        <div className="h3d-inspector-title">
+          <KindIcon kind={nodeKind(node)} />
+          <h2 title={node.class}>{name}</h2>
+        </div>
+        {name !== node.class && <div className="h3d-fullname h3d-mono">{node.class}</div>}
+        {node.superclasses.length > 0 && (
+          <div className="h3d-chain" title={[node.class, ...node.superclasses].join(" → ")}>
+            {node.superclasses.map((c, i) => (
+              <span key={i}>{i > 0 && <span className="h3d-chain-sep">›</span>}{shortClassName(c)}</span>
+            ))}
+          </div>
+        )}
+        {onSelectParent && <button type="button" className="h3d-btn h3d-btn-small" onClick={onSelectParent}>Select Superview</button>}
+      </header>
 
       {node.snapshot && (
         <div className="h3d-snapshot">
-          <img src={node.snapshot.url} alt={`${node.class} snapshot`} />
+          <img src={node.snapshot.url} alt={`${name} snapshot`} />
         </div>
       )}
 
-      <h3>Layout</h3>
-      <Row k="Frame (screen)" v={fmtRect(node.frame)} mono />
-      {node.localFrame && <Row k="Frame" v={fmtRect(node.localFrame)} mono />}
-      {node.bounds && <Row k="Bounds" v={fmtRect(node.bounds)} mono />}
-      <Row k="Visible rect" v={visible ? fmtRect(visible) : "clipped"} mono />
-      <Row k="Layer" v={level != null ? String(level) : "not drawn"} />
-      <Row k="Subview index" v={String(node.zIndex)} />
+      <Section title="Layout">
+        <Row k="Frame (screen)" v={fmtRect(node.frame)} mono />
+        {node.localFrame && <Row k="Frame" v={fmtRect(node.localFrame)} mono />}
+        {node.bounds && <Row k="Bounds" v={fmtRect(node.bounds)} mono />}
+        <Row k="Visible rect" v={visible ? fmtRect(visible) : "clipped"} mono={!!visible} />
+        <Row k="Layer" v={level != null ? String(level) : "not drawn"} mono={level != null} />
+        <Row k="Subview index" v={String(node.zIndex)} mono />
+      </Section>
 
-      <h3>Appearance</h3>
-      <div className="h3d-kv">
-        <span className="h3d-k">Background</span>
-        <span className="h3d-v">
+      <Section title="Appearance">
+        <dt className="h3d-k">Background</dt>
+        <dd className="h3d-v h3d-mono" title={fmtColor(bg)}>
           <span className="h3d-swatch" style={{ background: bg ? fmtColor(bg) : "transparent" }} />
-          {fmtColor(bg)}
-        </span>
-      </div>
-      <Row k="Alpha" v={fmt(node.alpha)} />
-      <Row k="Hidden" v={node.hidden ? "yes" : "no"} />
-      <Row k="Clips to bounds" v={node.clipsToBounds ? "yes" : "no"} />
-      {node.layerClass && <Row k="Layer class" v={node.layerClass} />}
+          {fmtColorShort(bg)}
+        </dd>
+        <Row k="Alpha" v={fmt(node.alpha)} mono />
+        <Row k="Hidden" v={node.hidden ? "Yes" : "No"} />
+        <Row k="Clips to bounds" v={node.clipsToBounds ? "Yes" : "No"} />
+        {node.layerClass && <Row k="Layer class" v={node.layerClass} />}
+      </Section>
 
-      {(node.viewController || node.accessibilityIdentifier || node.accessibilityLabel) && <h3>Identity</h3>}
-      {node.viewController && <Row k="View controller" v={node.viewController} />}
-      {node.accessibilityIdentifier && <Row k="Accessibility id" v={node.accessibilityIdentifier} />}
-      {node.accessibilityLabel && <Row k="Accessibility label" v={node.accessibilityLabel} />}
+      {(node.viewController || node.accessibilityIdentifier || node.accessibilityLabel) && (
+        <Section title="Identity">
+          {node.viewController && <Row k="View controller" v={node.viewController} />}
+          {node.accessibilityIdentifier && <Row k="Accessibility id" v={node.accessibilityIdentifier} />}
+          {node.accessibilityLabel && <Row k="Accessibility label" v={node.accessibilityLabel} />}
+        </Section>
+      )}
 
-      {Object.keys(node.props).length > 0 && <h3>Properties</h3>}
-      {Object.entries(node.props).map(([k, v]) => <Row key={k} k={k} v={fmtProp(v)} />)}
+      {props.length > 0 && (
+        <Section title="Properties">
+          {props.map(([k, v]) => <Row key={k} k={k} v={fmtProp(v)} mono={typeof v === "number" || Array.isArray(v)} />)}
+        </Section>
+      )}
 
-      <h3>Address</h3>
-      <Row k="id" v={node.id} mono />
+      <Section title="Address">
+        <Row k="id" v={node.id} mono />
+      </Section>
     </div>
   );
 }
