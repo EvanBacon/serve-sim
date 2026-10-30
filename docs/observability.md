@@ -1,9 +1,11 @@
 # Observability: error repro fields and timing (design proposal)
 
 > **Status: proposal, not implemented.** The "What the event log records today"
-> and "How a client reads it back" sections describe `main`. Everything else
-> (new `details` keys, new entry kinds, `schema_version`, acks for all input)
-> is proposed and does not exist yet.
+> and "How a client reads it back" sections describe `main`. Sections and keys
+> marked **Proposed** (new `details` keys, new entry kinds, `schema_version`,
+> acks for all input) do not exist yet.
+>
+> Source paths are relative to `packages/serve-sim/`.
 
 serve-sim already keeps an in-memory **event log** of simulator actions. This
 document proposes small, additive fields that make the silent failures
@@ -44,7 +46,7 @@ type EventLogEntry = {
   touches to `DeviceSession.recordTouchEvent` and other tags to `recordHidEvent`
   -> `eventLogEventForHidMessage(device, tag, payload, screen)`.
   `recordTouchEvent` folds begin/move/end into one `kind:"tap"` or `kind:"drag"`
-  entry whose details (`touchGestureDetails`) carry `type`, `start`, `current`,
+  entry whose details (`touchGestureDetails`) carry `type`, optional `phase`, `start`, `current`,
   `moveCount`, optional `edge`, and `screen = {width,height}` (`eventLogScreen()`).
   An `end` with no preceding `begin`, or an unknown `type`, falls through to a
   per-phase `kind:"touch"` entry.
@@ -88,7 +90,7 @@ is additive; older consumers ignore unknown keys.
 the wrong coordinate frame. `handleHidMessage` -> `this.hid.touch(...)` never
 remaps; `SimHID.touch` expects the native portrait frame, so each client remaps
 before sending. The web client uses `rawPointForDisplayPoint`
-(`client/simulator/orientation.ts`). Since [#167](https://github.com/EvanBacon/serve-sim/pull/167)
+(`src/client/simulator/orientation.ts`). Since [#167](https://github.com/EvanBacon/serve-sim/pull/167)
 the CLI does too: `tap()` / `gesture()` in `index.ts` call `touchInputOrientation`,
 which fetches the helper `/config` (`configUrlForWsUrl` in `src/touch-remap.ts`,
 same headers as the socket, 2 s timeout) and applies `cliInputOrientation` /
@@ -108,7 +110,7 @@ injector.
 | `coord_space` | `normalized_0_1` | constant; the `0x03` payload is always normalized |
 | `orientation` | `portrait` \| `portrait_upside_down` \| `landscape_left` \| `landscape_right` \| `unknown` | `this.orientation`, read at record time |
 | `observed_orientation` | string | polled UI orientation (see below); can lag ~1 s |
-| `remapped` | bool | sender-reported key in the `0x03` JSON: whether `inputOrientation` was defined. Omitted when the sender doesn't send it, and for Duo. |
+| `remapped` | bool | sender-reported key in the `0x03` JSON: whether the sender applied a remap. Omitted when the sender doesn't send it, and for Duo. |
 | `frame` | `display` \| `native_portrait` | `native_portrait` when `remapped=true`, else `display` (identical when no rotation is needed) |
 | `remap_expected` | bool | the viewer's remap rule applied to `observed_orientation` if present, else `orientation`. Omitted for Duo (3D projection, not `rawPointForDisplayPoint`). |
 | `source` | `cli` \| `web` \| `unknown` | sender-reported key in the `0x03` JSON |
@@ -210,8 +212,11 @@ via the native addon.
 ## Stream and camera (#128, #143, #103)
 
 - **#128 is a consumer false stall.** "Stream is not producing frames"
-  (`client/simulator/SimulatorView.tsx`) fires from the client's `fetch()` reader
-  watchdog on the MJPEG stream, not from a dead producer. Proposed:
+  (`src/client/simulator/SimulatorView.tsx`) fires from the client's 6 s startup
+  watchdog (relay `subscribeFrame` or direct `fetch()` reader) when no first frame
+  arrives; it never fires mid-stream. The watchdog targets a dead producer, but in
+  #128 it fired while the producer was live. Separately, relay mode drops `live`
+  (`setConnected(false)`) after 2 s without a frame. Proposed:
   `kind:"stream.stall"` with the reason and `producer_live` (from the server's
   per-endpoint `streamHealth`, which already counts frames and `last_frame_at`).
   Client-observed states need a small ingest route; until then, only
@@ -232,7 +237,7 @@ All keys and entry kinds below are proposed.
 |---|---|---|---|
 | `input.send_ms` | tap / drag / button | socket write to ack (or close, while fire-and-forget) | `hid.state=gone`, `inject.result=swallowed`, or `ack=timeout`. A #153 miss and a shadowed send keep it. |
 | `stream.ttff_ms` | stream start | session `start()` to first `onSharedMjpegFrame` | no frame ever arrived (#103 cold Connecting). Never write `0`. |
-| `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | false stall (#128) or producer dead |
+| `stream.reconnect_ms` | `stream.state` | consumer left `live` (relay 2 s staleness check) and returned | false stall (#128) or producer dead |
 | `stream.producer_frame_age_ms` | `stream.stall` | age of last producer frame at stall | producer dead |
 | `camera.helper_shutdown_ms` | `camera.helper.exit` | helper spawn to exit | still running |
 | `helper.uptime_ms` | `helper.lifecycle` | helper start to recycle decision | `keep` |
