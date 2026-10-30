@@ -43,7 +43,7 @@
   --h3d-separator: #dadadf;
   --h3d-text: #1d1d1f;
   --h3d-secondary: #66666e;
-  --h3d-tertiary: #9a9aa2;
+  --h3d-tertiary: #84848c;
   --h3d-guide: #e1e1e6;
   --h3d-accent: #007aff;
   --h3d-hover: rgb(0 0 0 / 0.045);
@@ -219,9 +219,11 @@ button, input { font: inherit; color: inherit; }
 .h3d-kind-control { color: var(--h3d-kind-control); }
 .h3d-kind-scroll { color: var(--h3d-kind-scroll); }
 .h3d-kind-view { color: var(--h3d-kind-view); }
-.h3d-class { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+/* The class name ellipsizes inside the row instead of being cut off by the
+   panel edge; the summary gives way first. */
+.h3d-class { flex: 0 1 auto; min-width: 48px; overflow: hidden; text-overflow: ellipsis; }
 .h3d-summary {
-  min-width: 0; margin-left: 6px; font-size: 12px; color: var(--h3d-secondary);
+  flex: 0 1000 auto; min-width: 0; margin-left: 6px; font-size: 12px; color: var(--h3d-secondary);
   overflow: hidden; text-overflow: ellipsis;
 }
 /* Not drawn in the current layout (hidden / clipped / empty). */

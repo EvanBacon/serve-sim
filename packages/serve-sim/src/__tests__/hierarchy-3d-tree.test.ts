@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { HierarchyNode } from "../hierarchy-3d/model";
-import { expandableSubtreeIds, flattenTree, initialCollapsed, nodeKind, nodeSummary, shortClassName, treeKeyAction } from "../client/hierarchy-3d/tree";
+import { ancestorChain, expandableSubtreeIds, flattenTree, indexTree, initialCollapsed, nodeKind, nodeSummary, shortClassName, treeKeyAction } from "../client/hierarchy-3d/tree";
 
 function node(id: string, children: HierarchyNode[] = [], extra: Partial<HierarchyNode> = {}): HierarchyNode {
   return {
@@ -46,6 +46,11 @@ describe("shortClassName", () => {
     expect(shortClassName("_TtCC5UIKit12_UITabButtonP33_4EA307C86E0356016F55ED2F1518661D5Label")).toBe("_UITabButton.Label");
     expect(shortClassName("_TtCE5UIKitCSo17_UILiquidLensViewP33_4C400BD973F5E4E0B779D1A21A7AEB2714ClearGlassView")).toBe("_UILiquidLensView.ClearGlassView");
     expect(shortClassName("_TtGC5UIKitP10$186d42c1422FloatingBarHostingViewVS_20FloatingBarContainer_")).toBe("FloatingBarHostingView<FloatingBarContainer>");
+  });
+  test("drops the module of generic arguments", () => {
+    expect(shortClassName("_TtGC7SwiftUI14_UIHostingViewV6Places8RootView_")).toBe("_UIHostingView<RootView>");
+    expect(shortClassName("_TtGC7SwiftUI19UIHostingControllerVS_7AnyView_")).toBe("UIHostingController<AnyView>");
+    expect(shortClassName("_TtGC6Places3BoxCS_4CardVS_4Item_")).toBe("Box<Card, Item>");
   });
   test("leaves malformed mangled names alone", () => {
     expect(shortClassName("_Tt99X")).toBe("_Tt99X");
@@ -141,5 +146,16 @@ describe("initialCollapsed", () => {
     // Deeper multi-child nodes are collapsed too, so revealing one path stays tidy.
     expect([...initialCollapsed(deep, 1)].sort()).toEqual(["chain", "x"]);
     expect([...initialCollapsed(tree(), 1)].sort()).toEqual(["a"]);
+  });
+});
+
+describe("indexTree / ancestorChain", () => {
+  test("walks the full tree, independent of layout", () => {
+    const { byId, parentById } = indexTree(tree());
+    expect(byId.get("a1")?.class).toBe("UILabel");
+    expect(parentById.get("w")).toBeNull();
+    expect(ancestorChain(parentById, "a1")).toEqual(["w", "a"]);
+    expect(ancestorChain(parentById, "w")).toEqual([]);
+    expect(ancestorChain(parentById, "missing")).toEqual([]);
   });
 });

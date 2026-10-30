@@ -1,11 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ancestorIds, layoutHierarchy, type DepthMode, type Layout } from "../../hierarchy-3d/layout";
+import { layoutHierarchy, type DepthMode, type Layout } from "../../hierarchy-3d/layout";
 import type { HierarchyCaptureResponse, HierarchyNode, HierarchyPropValue, HierarchyRect } from "../../hierarchy-3d/model";
 import { ChevronIcon, ClearIcon, ClipIcon, KindIcon, LayersIcon, RefreshIcon, ResetViewIcon, SearchIcon } from "./icons";
 import { OverflowMenu, type MenuEntry } from "./overflow-menu";
 import { fitDistance, panTarget, type OrbitCamera } from "./projection";
 import { HierarchyScene } from "./scene";
-import { expandableSubtreeIds, flattenTree, initialCollapsed, nodeKind, nodeSummary, shortClassName, treeKeyAction, type TreeKey, type TreeRow } from "./tree";
+import { ancestorChain, expandableSubtreeIds, flattenTree, indexTree, initialCollapsed, nodeKind, nodeSummary, shortClassName, treeKeyAction, type TreeKey, type TreeRow } from "./tree";
 
 export interface Hierarchy3dConfig {
   basePath: string;
@@ -103,7 +103,7 @@ function readTreeWidth(): number {
 }
 
 /** Deep rows keep room for a readable label; the outline scrolls sideways past that. */
-const rowMinWidth = (depth: number) => depth * INDENT + 190;
+const rowMinWidth = (depth: number) => depth * INDENT + 150;
 
 const TREE_KEYS = new Set<string>(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
 
@@ -182,15 +182,8 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   sceneLayout.current = layout;
   const selectedIndex = selectedId && layout ? layout.indexById.get(selectedId) ?? -1 : -1;
 
-  const nodeById = useMemo(() => {
-    const map = new Map<string, HierarchyNode>();
-    const visit = (n: HierarchyNode) => {
-      map.set(n.id, n);
-      n.children.forEach(visit);
-    };
-    capture?.windows.forEach(visit);
-    return map;
-  }, [capture]);
+  // The full captured tree: hidden views aren't in the layout but are in the outline.
+  const { byId: nodeById, parentById } = useMemo(() => indexTree(capture?.windows ?? []), [capture]);
   const selectedNode = selectedId ? nodeById.get(selectedId) ?? null : null;
 
   // Initial selection from ?select=<id | accessibilityIdentifier>, applied
@@ -387,10 +380,13 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
     setCollapsed(initialCollapsed(capture.windows));
   }, [capture]);
 
+  // A hover index from the previous layout would point at a different view.
+  useEffect(() => setHovered(-1), [layout]);
+
   // Keep the selection visible in the tree.
   useEffect(() => {
     if (!selectedId || !layout) return;
-    const path = ancestorIds(layout, selectedId).slice(0, -1);
+    const path = ancestorChain(parentById, selectedId);
     setCollapsed((prev) => {
       if (!path.some((id) => prev.has(id))) return prev;
       const next = new Set(prev);
@@ -410,7 +406,7 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
         list.scrollLeft = Math.max(0, labelEnd - list.clientWidth + 2 * INDENT);
       }
     });
-  }, [selectedId, layout]);
+  }, [selectedId, layout, parentById]);
 
   const rows = useMemo(() => (capture ? flattenTree(capture.windows, collapsed, filter) : []), [capture, collapsed, filter]);
   const rowsRef = useRef(rows);
@@ -529,6 +525,7 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
   const hoveredNode = hovered >= 0 ? layout?.items[hovered]?.node ?? null : null;
   const hoveredId = hoveredNode?.id ?? null;
   const selectedItem = selectedIndex >= 0 ? layout?.items[selectedIndex] : undefined;
+  const selectedParentId = selectedId ? parentById.get(selectedId) ?? null : null;
   const appName = capture?.bundleId ?? response?.foreground?.bundleId ?? null;
 
   const menuEntries: MenuEntry[] = [
@@ -662,7 +659,7 @@ export function App({ config }: { config: Hierarchy3dConfig }) {
         <aside className="h3d-inspector" aria-label="Inspector">
           {selectedNode ? (
             <Inspector node={selectedNode} level={selectedItem?.level ?? null} visible={selectedItem?.visibleRect ?? null} onSelectParent={
-              selectedItem && selectedItem.parent >= 0 ? () => setSelectedId(layout!.items[selectedItem.parent]!.node.id) : undefined
+              selectedParentId ? () => setSelectedId(selectedParentId) : undefined
             } />
           ) : (
             <div className="h3d-empty">No Selection</div>
@@ -724,7 +721,7 @@ const TreeList = memo(function TreeList({ treeRef, rows, selectedId, hoveredId, 
       role="tree"
       aria-label="Views"
       tabIndex={0}
-      aria-activedescendant={selectedId ? `h3d-row-${selectedId}` : undefined}
+      aria-activedescendant={selectedId && rows.some((r) => r.node.id === selectedId) ? `h3d-row-${selectedId}` : undefined}
       onMouseLeave={() => onHover(-1)}
     >
       {rows.map((row) => (

@@ -44,7 +44,10 @@ export function OverflowMenu({ entries, footer }: { entries: MenuEntry[]; footer
       e.preventDefault();
       close(true);
     } else if (e.key === "Tab") {
-      close(false);
+      // Return focus to the button rather than letting it fall to <body>
+      // when the focused item unmounts.
+      e.preventDefault();
+      close(true);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       focus(at + 1);

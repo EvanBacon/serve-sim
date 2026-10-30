@@ -13,8 +13,14 @@ function demangleSwiftClass(name: string): string | null {
   if (!name.startsWith("_Tt")) return null;
   const body = name.slice(3);
   const generic = body.startsWith("G");
-  const idents: string[] = [];
+  // Each nominal type is a module identifier (or a substitution such as
+  // `S_` / `So`) followed by its type path. A run of kind letters (C/V/O; E = extension)
+  // right before an identifier starts a new nominal; when that run is pure
+  // kind letters the identifier is the module and is dropped, so generic
+  // arguments (`…V6Places8RootView_`) don't leak their module.
+  const nominals: string[][] = [];
   let i = 0;
+  let run = "";
   while (i < body.length) {
     const ch = body[i]!;
     if (ch >= "0" && ch <= "9") {
@@ -24,17 +30,24 @@ function demangleSwiftClass(name: string): string | null {
       const ident = body.slice(j, j + len);
       if (ident.length !== len || len === 0) return null;
       const privateDiscriminator = body[i - 1] === "P" && (/^_[0-9A-F]{32}$/.test(ident) || ident.startsWith("$"));
-      if (!privateDiscriminator) idents.push(ident);
+      const kinds = run.replace(/^G/, "");
+      if (/[CVO]/.test(kinds)) {
+        nominals.push([]);
+        if (!/^[CVOE]+$/.test(kinds) && !privateDiscriminator) nominals[nominals.length - 1]!.push(ident);
+      } else if (!privateDiscriminator && nominals.length > 0) {
+        nominals[nominals.length - 1]!.push(ident);
+      }
+      run = "";
       i = j + len;
     } else {
+      run += ch;
       i++;
     }
   }
-  // The first identifier is the module.
-  const path = idents.slice(1);
-  if (path.length === 0) return null;
-  if (generic && path.length > 1) return `${path[0]}<${path.slice(1).join(", ")}>`;
-  return path.join(".");
+  const paths = nominals.filter((p) => p.length > 0).map((p) => p.join("."));
+  if (paths.length === 0) return null;
+  if (generic && paths.length > 1) return `${paths[0]}<${paths.slice(1).join(", ")}>`;
+  return paths[0]!;
 }
 
 /**
@@ -186,5 +199,29 @@ export function initialCollapsed(windows: HierarchyNode[], openDepth = 2): Set<s
     for (const c of n.children) visit(c, depth + 1);
   };
   for (const w of windows) visit(w, 0);
+  return out;
+}
+
+/** Id and parent lookups over the full captured tree (including views the layout skips). */
+export function indexTree(windows: HierarchyNode[]): { byId: Map<string, HierarchyNode>; parentById: Map<string, string | null> } {
+  const byId = new Map<string, HierarchyNode>();
+  const parentById = new Map<string, string | null>();
+  const visit = (n: HierarchyNode, parent: string | null) => {
+    byId.set(n.id, n);
+    parentById.set(n.id, parent);
+    for (const c of n.children) visit(c, n.id);
+  };
+  for (const w of windows) visit(w, null);
+  return { byId, parentById };
+}
+
+/** Ancestor ids of `id`, outermost first (excluding `id` itself). */
+export function ancestorChain(parentById: ReadonlyMap<string, string | null>, id: string): string[] {
+  const out: string[] = [];
+  let p = parentById.get(id) ?? null;
+  while (p) {
+    out.unshift(p);
+    p = parentById.get(p) ?? null;
+  }
   return out;
 }
