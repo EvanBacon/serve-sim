@@ -38,6 +38,21 @@ Requires macOS with Xcode command line tools (`xcrun simctl`) and a [maintained 
 
 > **Xcode 27 keyboard input:** Device Hub must be running with the target simulator window visible and frontmost. macOS may also require the app that launched `serve-sim` (for example Terminal) to be enabled in **System Settings → Privacy & Security → Accessibility**. Xcode 26 and older keep using the legacy simulator HID path. Set `SERVE_SIM_DISABLE_DEVICE_HUB_KEYBOARD=1` to opt out of the Xcode 27 bridge.
 
+### Experimental direct input on Xcode 27
+
+For single-panel simulators affected by Device Hub disconnecting legacy input,
+start with `SERVE_SIM_DTUHID=1 serve-sim <udid>`. Touch, drag/scroll, two-finger
+contacts, and keyboard events then use the guest DTUHID digitizer service over a
+persistent XPC connection. Keyboard forwarding does not require Device Hub to
+be frontmost. Hardware buttons retain the existing implementation.
+
+This is opt-in: no automatic `repair-input`, guest restart, or legacy fallback
+is performed. Connection setup requires a successful liveness reply; setup
+failures propagate to input calls. If the guest input daemon restarts during a
+gesture, restart the mirror before continuing. Foldable devices are rejected
+in this mode until panel targeting is covered. Protocol encoding has unit tests;
+live validation currently covers iPhone 17 / iOS 26.5 / Xcode 27.1 only.
+
 ## iPhone Duo
 
 With Xcode 27.1 and the iOS 27.1 runtime, the preview exposes **Closed**,
