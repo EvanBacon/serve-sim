@@ -1,27 +1,29 @@
-# Observability
+# Observability: error repro fields and timing (design proposal)
 
-> Remote readback of `/api/event-log` needs the auth gate from [PR #166](https://github.com/EvanBacon/serve-sim/pull/166). Merge that before relying on off-loopback log access.
+> **Status: proposal, not implemented.** The "What the event log records today"
+> and "How a client reads it back" sections describe `main`. Everything else
+> (new `details` keys, new entry kinds, `schema_version`, acks for all input)
+> is proposed and does not exist yet.
 
 serve-sim already keeps an in-memory **event log** of simulator actions. This
-document describes what that log records today, the small, additive fields that
-make the silent failures ([#153](https://github.com/EvanBacon/serve-sim/issues/153),
+document proposes small, additive fields that make the silent failures
+([#153](https://github.com/EvanBacon/serve-sim/issues/153),
 [#136](https://github.com/EvanBacon/serve-sim/issues/136),
 [#143](https://github.com/EvanBacon/serve-sim/issues/143),
 [#103](https://github.com/EvanBacon/serve-sim/issues/103),
 [#128](https://github.com/EvanBacon/serve-sim/issues/128),
 [#102](https://github.com/EvanBacon/serve-sim/issues/102)) reproducible from the
-log alone, and the exact code hook that produces each field. It is built on the
-log we have -- no span tree, no histograms, no OpenTelemetry SDK is implied.
+log alone, and names the code hook that would produce each one. It builds on the
+log we have: no span tree, no histograms, no OpenTelemetry SDK.
 
-Timing is the same entries. A duration is an additive key (`input.send_ms`,
-`stream.ttff_ms`, `stream.reconnect_ms`, `stream.producer_frame_age_ms`,
-`camera.helper_shutdown_ms`, `helper.uptime_ms`). Omit the key when the number
-would be a lie (false stall, stuck Connecting, dead injector, still-booted
-helper). Do not invent a parent span to carry it.
+Timing lives on the same entries. A duration is an additive key (`input.send_ms`,
+`stream.ttff_ms`, ...). Omit the key when the number would be a lie (false stall,
+stuck Connecting, dead injector, still-booted helper). Do not invent a parent span
+to carry it.
 
-The event log is a diagnostic side-channel. It must never fail the input or
-command path (`recordEventLogEvent` already swallows subscriber errors), and it
-is **on by default**; remote export is strictly opt-in (see Privacy below).
+The event log is a diagnostic side-channel and must never fail the input or
+command path (`notifyEventLogSubscribers` in `src/event-log.ts` already swallows
+subscriber errors, and `/exec` / UI recording is wrapped in `try`).
 
 ## What the event log records today
 
@@ -30,7 +32,7 @@ is **on by default**; remote export is strictly opt-in (see Privacy below).
 ```ts
 type EventLogEntry = {
   id: number; timestamp: string;
-  source: "hid" | "exec" | "ui";
+  source: "hid" | "exec" | "ui" | "capture";
   kind: string; msg: string; summary: string;
   device?: string; action?: string;
   status?: "ok" | "error";
@@ -39,268 +41,209 @@ type EventLogEntry = {
 ```
 
 - **HID input** -> `handleHidMessage` (`src/device-session.ts`) routes tag `0x03`
-  touches to `DeviceSession.recordTouchEvent` and every other tag to `recordHidEvent`
-  -> `eventLogEventForHidMessage(device, tag, payload, screen)`. Tap events come from
-  `recordTouchEvent`: it folds begin/move/end into one `kind:"tap"` or `kind:"drag"`
-  entry (top-level `source:"hid"`) whose details (`touchGestureDetails`) carry `type`,
-  `start`, `current`, `moveCount`, optional `edge`, and `screen = {width,height}` (via
-  `eventLogScreen()`). The only `kind:"touch"` entries are its fallthrough: an `end`
-  with no preceding `begin`, or an unknown `type`, goes to
-  `recordHidEvent(0x03, …)`, whose `0x03` branch builds a per-phase `kind:"touch"`
-  entry.
-- **Shell actions** -> `eventLogEventForCommand(command, {exitCode})`, parsed in
-  `src/middleware.ts` from the `/exec` path. It already drops upload plumbing and
-  never records raw command strings with tokens.
+  touches to `DeviceSession.recordTouchEvent` and other tags to `recordHidEvent`
+  -> `eventLogEventForHidMessage(device, tag, payload, screen)`.
+  `recordTouchEvent` folds begin/move/end into one `kind:"tap"` or `kind:"drag"`
+  entry whose details (`touchGestureDetails`) carry `type`, `start`, `current`,
+  `moveCount`, optional `edge`, and `screen = {width,height}` (`eventLogScreen()`).
+  An `end` with no preceding `begin`, or an unknown `type`, falls through to a
+  per-phase `kind:"touch"` entry.
+- **Shell actions** -> `eventLogEventForCommand(command, {exitCode})`, from the
+  `/exec` path in `src/middleware.ts`. It drops upload plumbing and never records
+  token-bearing command strings.
 - **UI settings** -> `recordEventLogEvent({source:"ui", ...})` in `middleware.ts`.
+- **Capture** -> `kind:"duo.renderer"` entries (`recordRendererEvent` in
+  `device-session.ts`), with `duo.first_frame_ms` on `ready` and repeated
+  identical failures coalesced into one entry via `updateEventLogEvent` (`count`).
+  This is the existing precedent for "duration as a key on the same entry".
 
-It already redacts: printable keystrokes (tag `0x06` records `key:"character"`,
-`redacted:true`, no usage), token-bearing commands (returns `null`), and it only
-ever stores **normalized** coordinates plus screen dimensions -- never pixels.
+Redaction today: printable keystrokes (tag `0x06`) record `key:"character"`,
+`redacted:true`, no usage; token-bearing commands are not recorded; touches store
+only **normalized** coordinates plus screen dimensions, never pixels.
 
-## How a bot reads it back
+## How a client reads it back
 
-- `GET {url}/api/event-log?device=<udid>&since=<id>&limit=<n>` -> `{ events: [...] }`
-  (`readEventLog` in `middleware.ts`).
+- `GET {url}/api/event-log?device=<udid>&since=<id>&limit=<n>` -> `{ events: [...] }`.
 - `GET {url}/api/event-log/events` -> SSE: a snapshot, then one `{ event }` per new
   entry (`subscribeEventLog`; the browser UI reaches it through the exec-ws proxy).
-- CLI: `serve-sim event-log --json [-d <udid>] [--limit <n>]`
-  (`eventLog()` in `src/index.ts`, which fetches `/api/event-log`).
+- `GET {url}/api/diagnostics` (loopback only) includes the last 100 entries as
+  `event_log`; `serve-sim doctor` reads it.
+- CLI: `serve-sim event-log [--json] [-d <udid>] [--limit <n>]` (`eventLog()` in
+  `src/index.ts`, sent with the same auth headers as other input commands).
 
-Add a top-level **`schema_version`** to the `/api/event-log` (and SSE) response
-envelope so a reader can tell which of the fields below are present. Every field
-added here is additive; an older consumer ignores unknown keys.
+**Access.** Loopback callers are trusted. Any other caller (non-loopback,
+proxied, or rebound Host) is gated on every route by `remoteAccess`
+(`src/request-trust.ts`): `403` when the server was started without
+`--auth-token` / `SERVE_SIM_AUTH_TOKEN`, `401` without a valid
+`Authorization: Bearer <token>` or auth cookie. Any new field below inherits this
+gate; none of it may weaken it.
 
-## Making the #153 touch miss reproducible from the log
+**Proposed:** add a top-level `schema_version` to the `/api/event-log` and SSE
+envelopes so a reader can tell which of the fields below are present. Every field
+is additive; older consumers ignore unknown keys.
+
+## #153: making a touch miss reproducible
 
 #153: a tap exits 0 and the screenshot is unchanged because the point was sent in
-the wrong coordinate frame. The server path `handleHidMessage` ->
-`this.hid.touch(type, x, y, W, H, edge)` never remaps: `SimHID.touch` expects the
-native portrait frame, so each client must remap before sending. The web client
-already does (`rawPointForDisplayPoint` in `client/simulator/orientation.ts`, called
-from `SimulatorView.tsx` with `streamDisplayGeometry(...).inputOrientation`). On
-`main` the CLI (`tap()` / `gesture()` in `index.ts`) sends the display-normalized
-point unchanged, which is the #153 miss.
+the wrong coordinate frame. `handleHidMessage` -> `this.hid.touch(...)` never
+remaps; `SimHID.touch` expects the native portrait frame, so each client remaps
+before sending. The web client uses `rawPointForDisplayPoint`
+(`client/simulator/orientation.ts`). Since [#167](https://github.com/EvanBacon/serve-sim/pull/167)
+the CLI does too: `tap()` / `gesture()` in `index.ts` call `touchInputOrientation`,
+which fetches the helper `/config` (`configUrlForWsUrl` in `src/touch-remap.ts`,
+same headers as the socket, 2 s timeout) and applies `cliInputOrientation` /
+`displayTouchToRaw`. It sends the point unmapped when `--raw` is passed, when
+`/config` returns 401/403 (with a stderr warning), on any other failure (silently),
+and for foldables (`hingeDegrees` present).
 
-**Fixed by [#167](https://github.com/EvanBacon/serve-sim/pull/167) (pending).** It
-adds `src/touch-remap.ts`, and `tap()` / `gesture()` call `touchInputOrientation`
-(`index.ts`) before sending:
+So a miss is still possible (`--raw`, a refused or unreachable `/config`, a stale
+`orientation`, an older CLI), and nothing in the log distinguishes it from a dead
+injector.
 
-- **Config lookup with the socket's auth.** `configUrlForWsUrl` derives the `/config`
-  URL from the HID socket URL (`…/helper/<udid>/ws` -> `…/helper/<udid>/config`,
-  `wss:` -> `https:`), so it works for local state files and `--url` remotes. It is
-  fetched with the same headers as the socket, 2 s timeout. Those headers carry
-  `Authorization: Bearer <token>` only when `--auth-token` or `SERVE_SIM_AUTH_TOKEN`
-  is set; otherwise the request is unauthenticated.
-- **Landscape display -> raw.** `cliInputOrientation` applies the viewer's own rule
-  (`streamDisplayGeometry(...).inputOrientation`: remap only when the raw frame is
-  still portrait while the UI is rotated), and `displayTouchToRaw` converts the point
-  with `rawPointForDisplayPoint` and a non-zero `edge` with `rawEdgeForDisplayEdge`.
-- **401/403 warns, then sends unmapped.** A refused `/config` prints a warning to
-  stderr (pass `--auth-token` to remap, or `--raw`) and the touch is sent as-is; the
-  command still exits 0. Any other non-OK status, a network error, or a timeout
-  silently falls back to no remap.
-- **Foldables skipped.** A `/config` carrying `hingeDegrees` returns no remap, since
-  the viewer renders the Duo projection and sends those touches unrotated.
-- **`--raw`** on `tap` / `gesture` skips the lookup and sends the coordinates as given
-  (native portrait frame).
-
-Even with #167 merged, nothing in the log distinguishes a coordinate miss (`--raw`, a
-401/403 on `/config`, a stale `orientation`, an old CLI) from a dead injector.
-
-Add these keys to the `details` of `tap`/`drag` entries (built in
-`DeviceSession.recordTouchEvent` via `touchGestureDetails`):
+**Proposed** keys on `tap`/`drag` `details` (built in `recordTouchEvent` /
+`touchGestureDetails`):
 
 | Field | Values | Source / hook |
 |---|---|---|
-| `coord_space` | `normalized_0_1` | constant; the `0x03` payload is always 0..1 normalized |
-| `orientation` | `portrait` \| `portrait_upside_down` \| `landscape_left` \| `landscape_right` \| `unknown` | `screenConfig().orientation` (i.e. `this.orientation`) read **at record time** |
-| `frame` | `display` \| `native_portrait` | which space the point was in when sent: `native_portrait` when the sender remapped (the web client and #167's CLI whenever `inputOrientation` is set); `display` when it did not (pre-#167 CLI, `--raw`, `/config` refused or unreachable). When no rotation is needed the two are identical. |
-| `remapped` | bool | Sender-reported: an extra `remapped` key in the `0x03` JSON, set by the web client and the #167 CLI to whether `inputOrientation` was defined (`false` for `--raw` / a refused or unreachable `/config`). The server can't infer it from `source` alone, since both clients now remap. Omitted when the sender doesn't send it, and for Duo. |
-| `observed_orientation` | string | Polled UI orientation (`simctl io enumerate`); can lag ~1s. Do **not** write into `this.orientation` / `broadcastConfig()`. |
-| `remap_expected` | bool | Rule applied to `observed_orientation` when present, else `orientation`. Omitted for Duo (`hingeDegrees != null`): Duo web touches use 3D projection, not `rawPointForDisplayPoint`. |
-| `source` | `cli` \| `web` \| `unknown` | who sent the frame (see below) |
-
-A web miss is `remap_expected=true`, `remapped=false`: the browser hadn't been told about the rotation.
-| `screen` | `{width,height}` | already recorded via `eventLogScreen()` |
+| `coord_space` | `normalized_0_1` | constant; the `0x03` payload is always normalized |
+| `orientation` | `portrait` \| `portrait_upside_down` \| `landscape_left` \| `landscape_right` \| `unknown` | `this.orientation`, read at record time |
+| `observed_orientation` | string | polled UI orientation (see below); can lag ~1 s |
+| `remapped` | bool | sender-reported key in the `0x03` JSON: whether `inputOrientation` was defined. Omitted when the sender doesn't send it, and for Duo. |
+| `frame` | `display` \| `native_portrait` | `native_portrait` when `remapped=true`, else `display` (identical when no rotation is needed) |
+| `remap_expected` | bool | the viewer's remap rule applied to `observed_orientation` if present, else `orientation`. Omitted for Duo (3D projection, not `rawPointForDisplayPoint`). |
+| `source` | `cli` \| `web` \| `unknown` | sender-reported key in the `0x03` JSON |
 | `screen_changed` | bool | guest-effect signal (see below) |
-| `input.send_ms` | number, omitted on a dead injector | socket write to ack or fire-and-forget close (see Timing) |
+| `input.send_ms` | number | see Timing |
 
-**`source` (cli vs web), compatibly.** Both CLI and browser touches arrive over the
-separate WebSocket connections to the same handler (`attachHidInProcess` -> `attachHidSocket` -> `handleHidMessage`) and are recorded as
-`source:"hid"`, so the log can't say which client sent them. Add an extra key to the
-`0x03` JSON payload -- `{type,x,y,source:"cli"}` from `tap()`/`gesture()` in `index.ts`,
-`{...,source:"web"}` from `SimulatorView.tsx` -- and read it in `recordTouchEvent`, stored
-as `details.source` (the `source` field in the table above; distinct from the
-entry's top-level `source:"hid"`). It is an
-extra JSON field: the native `touch()` call ignores it and older clients that omit it
-record `source:"unknown"`. (A dedicated tag is unnecessary; the payload is already JSON.)
+A miss is `remap_expected=true`, `remapped=false`.
 
-**Keeping `orientation` current when rotation happens outside `0x07`.** For non-Duo
-devices `this.orientation` is only updated when a `0x07` rotate message is handled
-(`device-session.ts`: `if (this.duo.hinge == null) this.orientation = m.orientation`).
-A rotation triggered from the Simulator menu or forced by the app is **not** reflected.
-Two real hooks fix this: (1) `onSharedMjpegFrame` already observes every capture frame
-and calls `broadcastConfig()` when `width`/`height` swap -- use that dimension swap to
-refresh orientation (portrait<->landscape) rather than caching it per gesture; (2) mirror
-the Duo path, which polls on a 1 s timer (`DuoStateMonitor.refreshOrientation` in
-`duo-state.ts`), with a lightweight orientation poll for non-Duo sessions: poll `xcrun simctl io <udid> enumerate` (as `DuoStateMonitor.refreshOrientation` does, without hinge/panel `log stream` children) and store the result in `observed_orientation` / a separate field. Do **not** write it into `this.orientation` or `broadcastConfig()` — that would change how the web client remaps input (a behavior fix, not a log field). `parseIntegratedScreenOrientations` only keys Device Names `primary`/`primary-1`; confirm what a non-Duo device reports before reusing it. Either way, read the orientation at the moment the entry is recorded.
+**`source` (cli vs web).** Both clients reach the same handler over separate
+WebSockets and are recorded as top-level `source:"hid"`. Add `source:"cli"` to
+the `0x03` JSON from `tap()`/`gesture()` and `source:"web"` from
+`SimulatorView.tsx`; store it as `details.source`. The native `touch()` call
+ignores extra keys, and older clients record `unknown`.
 
-**Did the screen change after the tap, without keeping pixels.** `onSharedMjpegFrame`
-receives every frame's bytes and dimensions. Maintain a monotonic `frameSeq` and a
-cheap content **seed** (e.g. a hash of JPEG length plus a few sampled bytes, or the
-IOSurface seed if the capture exposes it) -- not the image. Store `frameSeq` on the gesture at `begin`. At `end`, if `frameSeq` has already advanced (e.g. a touch-down highlight during the CLI's ~40 ms begin→end gap), record `screen_changed:true` immediately. Otherwise record `false` and, on the first higher `frameSeq` / differing seed within the window, call `updateEventLogEvent(tapId, …)`. `recordTouchEvent` must return the entry id (it returns `void` today), and the window timer must be cleared in `close()`. This is the guest-effect evidence that an ack can't provide.
+**Keeping orientation current.** For non-Duo devices `this.orientation` only
+changes on a `0x07` rotate (`if (this.duo.hinge == null) this.orientation = ...`),
+so a rotation from the Simulator menu or forced by the app is missed. Record a
+separately polled `observed_orientation` (as `DuoStateMonitor.refreshOrientation`
+in `duo-state.ts` does via `xcrun simctl io <udid> enumerate`). Do **not** write it
+into `this.orientation` or `broadcastConfig()`: that would change how clients
+remap input, which is a behavior change, not a log field.
+`parseIntegratedScreenOrientations` only keys `primary`/`primary-1`; confirm what a
+non-Duo device reports before reusing it.
 
-Landscape miss vs portrait hit, same 4 ms send, distinguished only by the repro fields.
-`source` is part of the signature: on `main` the miss is the CLI path, not the web
-client (which already remaps); after #167 it is a CLI run with `--raw`, a 401/403 on
-`/config` (warned on stderr), or an otherwise unreachable `/config`.
+**Did the screen change, without keeping pixels.** `onSharedMjpegFrame` sees
+every frame. Keep a monotonic `frameSeq` (and optionally a cheap content seed, not
+the image). Store `frameSeq` at `begin`; at `end`, record `screen_changed:true` if
+it already advanced, else `false` and patch the entry with `updateEventLogEvent`
+on the first later frame within a short window. This requires `recordTouchEvent`
+to return the entry id (it returns `void` today) and the window timer to be
+cleared in `close()`.
+
+Example (proposed shape): portrait hit vs landscape miss, same send time.
 
 ```json
 {"kind":"tap","status":"ok","details":{"source":"web","orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","screen_changed":true,"input.send_ms":4}}
 {"kind":"tap","status":"ok","details":{"source":"cli","orientation":"landscape_left","frame":"display","remapped":false,"hid.state":"ok","inject.result":"sent","screen_changed":false,"input.send_ms":4}}
 ```
 
-The miss is `hid.state=ok` + `inject.result=sent` + `frame=display` + `remapped=false` +
-`screen_changed=false` + `source=cli`. Status stays `ok`: the injector did what it was asked.
-A #167 CLI tap in landscape is the same entry shape as the web hit: `frame=native_portrait`, `remapped=true`.
+Status stays `ok` for the miss: the injector did what it was asked.
 
-## What an ack proves (Evan's default: inject waits for ack, exits non-zero on failure)
+## What an ack proves
 
-Today only `fold` (tag `0x0e`) waits for a reply: it reads the server's
-`0x0e {ok}` frame, times out at 10 s, and rejects on failure (`index.ts`). `tap`,
-`gesture`, `rotate`, and `button` are **fire-and-forget** -- they write the frame,
-wait a 40-50 ms timer, close the socket, and exit 0 unless the socket itself failed.
+Today only `fold` (tag `0x0e`) waits for a reply: it reads the server's `0x0e {ok}`
+frame, times out at 10 s, and rejects on failure (`index.ts`). `tap`, `gesture`,
+`rotate`, and `button` are fire-and-forget: write the frame, wait a 40-50 ms
+timer, close the socket, exit 0 unless the socket itself failed.
 
-The default we want is the `fold` pattern for all input: send, wait for a server ack
-frame, and exit non-zero when it reports failure. Record the outcome on the entry
-(`details.ack = ok | timeout | rejected`, plus `status`). Be explicit about scope:
+**Proposed:** use the `fold` pattern for all input and record
+`details.ack = ok | timeout | rejected`. Scope:
 
-- An ack **proves** the server received the frame, `handleHidMessage` ran, and the
-  native injector returned. The injector boundary is `NativeHid.touch` ->
-  `SimHIDHandle.touch` (N-API), wrapped by `guard()` in `native.ts`. `guard()`
-  currently swallows **every** error from the native call (sync coercion throws and async rejections alike) and returns a fallback, so a malformed
-  send looks successful -- record whether `guard()` swallowed an error
-  (`inject.result = sent | swallowed | threw`) so #136's dead-injector case is visible.
-- An ack **does not prove** the guest UI reacted. That is exactly the #153 gap, and why
-  `screen_changed` above is the separate, stronger signal.
+- An ack **proves** the server ran `handleHidMessage` and the native call returned.
+  `NativeHid.guard()` (`src/native.ts`) catches every error from the N-API call,
+  logs `[hid] <op> ignored bad input`, and returns a fallback, so a failed send
+  looks successful. Record `inject.result = sent | swallowed` so #136's
+  dead-injector case is visible. (`guard()` must keep swallowing: an uncaught
+  throw would crash the in-process server.)
+- An ack **does not prove** the guest UI reacted. That is the #153 gap, and why
+  `screen_changed` is the separate signal.
 
-## HID health and Device Hub shadowing (#136, and a #153 look-alike)
+## HID health and Device Hub shadowing (#136)
 
-- **`hid.state`** (`ok` | `stale` | `gone`): HID can die while the pidfile and
-  `--list` still say `running: true`. Derive it from the last successful native call
-  (`SimHIDHandle` constructed in `native.ts`; sends go through `this.hid.*` in
-  `handleHidMessage`) and surface it in `--list` so `running:true` + `hid.state:gone`
-  is one object.
-- **Device Hub input shadowing.** `src/device-hub-input.ts` checks
-  `com.apple.coredevice.dtuhidd.active` (`isDeviceHubInputShadowed` /
-  `warnDeviceHubInput`). When Device Hub owns input, legacy HID touches silently no-op --
-  which looks exactly like a #153 coordinate miss. Record the shadow state on the
-  session (and on any inject that produced no `screen_changed`) so the two are
-  distinguishable; `serve-sim repair-input` is the human-only recovery (it restarts
-  SpringBoard and closes apps).
+- **`hid.state`** (`ok` | `stale` | `gone`): HID can die while the state file and
+  `--list` still say running. Derive it from the last native call result and
+  surface it in `--list`.
+- **Device Hub shadowing.** `src/device-hub-input.ts`
+  (`isDeviceHubInputShadowed` / `warnDeviceHubInput`) detects when Device Hub owns
+  input and legacy HID touches no-op, which looks exactly like #153. Record
+  `input.shadowed` on inject entries. `serve-sim repair-input` remains the manual
+  recovery (it restarts SpringBoard).
 
-#136 is the other 4 ms, and it is not a send duration. `hid.state=gone` sets
-`status=error` and **omits** `input.send_ms`, so a dead injector is not bucketed with
-the landscape miss:
+Look-alikes (proposed shapes):
 
 ```json
-{"kind":"tap","status":"error","details":{"source":"cli","hid.state":"gone","inject.result":"threw","ack":"rejected","screen_changed":false}}
-```
-
-Device Hub shadowing is the third look-alike: the send completed, so `input.send_ms`
-stays. `input.shadowed=true` is what separates it from #153 (which has `remapped=false`
-and `input.shadowed` absent or false):
-
-```json
+{"kind":"tap","status":"error","details":{"source":"cli","hid.state":"gone","inject.result":"swallowed","ack":"rejected","screen_changed":false}}
 {"kind":"tap","status":"ok","details":{"source":"cli","orientation":"portrait","frame":"native_portrait","remapped":true,"hid.state":"ok","inject.result":"sent","input.shadowed":true,"screen_changed":false,"input.send_ms":4}}
 ```
 
+A dead injector omits `input.send_ms` so it is not bucketed with a miss; a shadowed
+send completed, so it keeps it. [#172](https://github.com/EvanBacon/serve-sim/issues/172)
+(portrait tap silently dropped on iPhone 18 Pro / iOS 27) is told apart by the same
+fields: `remapped=true` + `screen_changed=false` with `hid.state=ok` and no
+`input.shadowed` points away from both a coordinate miss and #136.
+
 ## Helper lifecycle (#102)
 
-The orphan in #102 was a detached helper still running after the simulator was
-`Shutdown`. There are two hooks. (a) `recycle-self` in `readServeSimStates` (`middleware.ts`, from `classifyStaleState`) closes the device session in-process; an entry recorded there survives via `GET /api/event-log`. (b) The `onExit` closure `index.ts` passes to `startSimulatorShutdownWatch` runs only for detached/`--no-preview` servers and calls `process.exit(0)` immediately (best-effort for SSE). The watchdog itself never calls `classifyStaleState`. The pure-state decision path is still `classifyStaleState(state, bootedUdids, pid)` ->
-`keep | recycle-self | recycle-helper` and the pure-state watchdog
-`startSimulatorShutdownWatch(targets, ...)`, both in
-`src/helper-lifecycle.ts`. The watch decision object (`tick` / `nextDelayMs`) is
-timer-free, but `startSimulatorShutdownWatch` drives it with a `setTimeout` loop
-(re-armed after each `tick` with `nextDelayMs()`). Record one `helper.lifecycle` entry when the watchdog
-decides to recycle/exit after shutdown, carrying `sim.booted` and helper uptime.
-(There is no separate `serve-sim-bin` process today -- HID and capture run in-process
-via the native addon; don't name a binary that doesn't exist.)
+The orphan in #102 was a detached helper still running after its simulator was
+shut down. Decisions live in `src/helper-lifecycle.ts`: `classifyStaleState`
+(`keep | recycle-self | recycle-helper`) and `startSimulatorShutdownWatch`
+(a `setTimeout` loop). `middleware.ts` acts on `recycle-self`, `index.ts` on
+`recycle-helper`, and the watch's `onExit` in `index.ts` calls `process.exit(0)`.
 
-`classifyStaleState` returning `keep` does **not** emit the entry and does not record
-`helper.uptime_ms`. A still-booted sim is not a recycle duration. The orphan is the
-entry with `sim.booted=false` and `decision=recycle-helper`.
+**Proposed:** record one `kind:"helper.lifecycle"` entry when a recycle/exit is
+decided, with `decision`, `sim.booted`, and `helper.uptime_ms`. `keep` emits
+nothing. An entry written right before `process.exit(0)` is only best-effort for
+SSE readers. There is no separate helper binary; HID and capture run in-process
+via the native addon.
 
-- When `recycle-helper` signals a stale helper, keep a module-level `Set<string>` of `device:pid` keys already signalled.
+## Stream and camera (#128, #143, #103)
 
-## Stream and camera (correcting earlier mistakes)
+- **#128 is a consumer false stall.** "Stream is not producing frames"
+  (`client/simulator/SimulatorView.tsx`) fires from the client's `fetch()` reader
+  watchdog on the MJPEG stream, not from a dead producer. Proposed:
+  `kind:"stream.stall"` with the reason and `producer_live` (from the server's
+  per-endpoint `streamHealth`, which already counts frames and `last_frame_at`).
+  Client-observed states need a small ingest route; until then, only
+  server-side facts can be logged.
+- **#143 camera helper exit.** Proposed: `kind:"camera.helper.exit"` with
+  `exit_code`, `signal` (Node reports a `null` code on signal death), and
+  `shutdown_phase`. `SimCameraHelper` already ignores SIGPIPE (`main.m`), so don't
+  attribute exits to it; the real race was the placeholder timer vs. surface
+  release (mitigated by [#161](https://github.com/EvanBacon/serve-sim/pull/161)).
 
-- **#128 is a consumer false-stall, not a dead producer.** The watchdog that fires
-  "Stream is not producing frames" after a rotation is on the **`fetch()` reader**
-  path (the `raw=1` MJPEG consumer read through `body.getReader()`), not the `<img>`
-  element. Record a stall entry with the reason and a `producer_live` boolean (the
-  capture side is still publishing) so a false stall isn't read as a dead stream.
-- **Camera helper exit (#143).** Run the camera helper under a **supervising parent**
-  that captures both exit code and signal -- Node reports a `null` exit code when the
-  child dies on a signal. Record `camera.helper.exit` with `exit_code`, `signal`, and
-  `shutdown_phase`. **SIGPIPE is already ignored**, so a client vanishing mid-write is
-  not the cause; the real race was the placeholder timer vs. surface release (mitigated
-  by [#161](https://github.com/EvanBacon/serve-sim/pull/161)). Don't attribute it to SIGPIPE.
+## Timing
 
-Keep both as ordinary event-log entries -- no span parenting, no `stream.startup` ->
-`camera.frame` tree, no reconnect histograms.
-
-## Timing on those entries
-
-Durations are measured at the hook that already builds the entry, then written with
-`updateEventLogEvent` if the end is later than the start (ack, next frame, helper
-exit). Units are milliseconds. Missing key means "not a duration", not zero.
-
-A reader pairs each duration with the repro fields on the **same** entry. The fields
-decide whether the key is present; they do not live on a second line.
+Measured at the hook that builds the entry, patched with `updateEventLogEvent` when
+the end comes later. Milliseconds. A missing key means "not a duration", not zero.
+All keys and entry kinds below are proposed.
 
 | Key | Entry | Record when | Omit when |
 |---|---|---|---|
-| `input.send_ms` | tap / button / gesture | socket write to ack, or to the fire-and-forget close if no ack yet | `hid.state=gone` or `inject.result=threw` (#136), or `ack=timeout` (the 10 s wait is not a send). A landscape miss (#153) and a Device Hub shadow still record it. |
-| `stream.ttff_ms` | first `stream.frame` | session `start()` to first `onSharedMjpegFrame` (JS-only; client-observed Connecting/stall still need the ingest) | never saw a frame (Connecting before any frame, #103 cold). Do not write `0`. |
-| `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | `stream.false_positive=true` (#128) or producer dead. |
-| `stream.producer_frame_age_ms` | `stream.stall` | last producer frame age at stall | producer dead (`producer_fps=0`). |
-| `camera.helper_shutdown_ms` | `camera.helper.exit` | helper spawn to exit (signaled or clean) | still running. |
-| `helper.uptime_ms` | `helper.lifecycle` | helper start to recycle decision | `classifyStaleState=keep` (still-booted). |
+| `input.send_ms` | tap / drag / button | socket write to ack (or close, while fire-and-forget) | `hid.state=gone`, `inject.result=swallowed`, or `ack=timeout`. A #153 miss and a shadowed send keep it. |
+| `stream.ttff_ms` | stream start | session `start()` to first `onSharedMjpegFrame` | no frame ever arrived (#103 cold Connecting). Never write `0`. |
+| `stream.reconnect_ms` | `stream.state` | consumer left `live` and returned | false stall (#128) or producer dead |
+| `stream.producer_frame_age_ms` | `stream.stall` | age of last producer frame at stall | producer dead |
+| `camera.helper_shutdown_ms` | `camera.helper.exit` | helper spawn to exit | still running |
+| `helper.uptime_ms` | `helper.lifecycle` | helper start to recycle decision | `keep` |
 
-## Recent issues (#172, #174) and repro fields
+## Privacy
 
-#172 (portrait tap silently dropped on iPhone 18 Pro / iOS 27) is a #153 / #136 look-alike that the fields above already distinguish:
-
-- Expected signature for a pure coordinate miss after #167: `hid.state=ok`, `inject.result=sent`, `frame=native_portrait`, `remapped=true`, `screen_changed=false`, `input.send_ms` present, `source=cli`, `orientation=portrait`.
-- Device Hub shadow: same but `input.shadowed=true`.
-- Dead injector (#136): `hid.state=gone` or `inject.result=threw`, `status=error`, `input.send_ms` omitted.
-
-#174 (browser text/paste does not reach guest; CoreDevice clipboard works) is outside HID touch. Extend the event log for text/clipboard paths:
-
-- New `kind:"clipboard"` or `kind:"text"` entries from the `/exec` CoreDevice pasteboard path, carrying `payload_bytes`, `verified_readback` (bool), and `method:"coredevice"|"simctl"`.
-- Timing: `clipboard.send_ms` from command start to verified readback; omit on failure.
-- Do not record the raw string (privacy); record length and a content seed only if needed for repro.
-
-These stay additive to the existing event-log schema. No new spans; durations live on the same entry.
-
-## Maintenance note (2026-10-28)
-
-Error-reproduction fields and performance timing spans remain the priority.
-
-- For #172 (portrait silent drop on iPhone 18 Pro / iOS 27): the signature `hid.state=ok` + `inject.result=sent` + `screen_changed=false` + `orientation=portrait` + `remapped=true` (post-#167) still distinguishes it from #136 (`hid.state=gone`) and from Device Hub shadow (`input.shadowed=true`). Add `observed_orientation` lag check in the worked example if the poll shows portrait while the frame is landscape.
-- For #174 (text/clipboard): the proposed `kind:"clipboard"` entry with `verified_readback` and `clipboard.send_ms` (omitted on failure) gives the same guest-effect signal as `screen_changed` for taps. Prefer CoreDevice method in the `method` field when simctl is a no-op.
-- Timing spans: keep durations on the same entry; omit when the number would be a lie. No new parent spans.
-
-Still design-only. Implementation of the additive fields is a follow-up.
-
-## Maintenance note (2026-10-29)
-
-Continued prioritization of error-reproduction fields and performance timing spans.
-
-- #172 portrait silent drop: the distinguishing fields (`hid.state`, `orientation`/`observed_orientation`, `frame`, `remapped`, `screen_changed`, `input.shadowed`) remain sufficient. Timing key `input.send_ms` is present only when injector is healthy.
-- #174 text/clipboard: `kind:"clipboard"` with `method`, `verified_readback`, and optional `clipboard.send_ms` (omitted on unverified or failed) gives guest-effect evidence without storing raw text.
-- No new parent spans. Durations stay additive on the same event-log entries. schema_version bump on implement.
-
-Still design-only draft. CI green on prior commit. Not merging.
+- Never record raw typed text, clipboard contents, command strings with tokens, or
+  pixels. Lengths and normalized coordinates are fine.
+- Text entry today goes through `serve-sim type` as HID keystrokes (tag `0x06`,
+  already redacted). There is no clipboard path in serve-sim to instrument; if one
+  is added (e.g. for [#174](https://github.com/EvanBacon/serve-sim/issues/174)),
+  log `payload_bytes`, `method`, and `verified_readback`, never the string.
+- Remote readback stays behind the existing auth gate; nothing here adds an
+  export or changes the default.
