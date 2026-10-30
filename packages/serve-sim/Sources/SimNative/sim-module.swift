@@ -33,13 +33,15 @@ private func u32(_ v: Int) -> UInt32 {
     }
 
     @NodeMethod func touch(_ type: String, _ x: Double, _ y: Double,
-                           _ w: Int, _ h: Int, _ edge: Int) async {
+                           _ w: Int, _ h: Int, _ edge: Int) async throws {
+        try await setupTask.value
         await injector.sendTouch(type: type, x: x, y: y,
                            screenWidth: w, screenHeight: h, edge: u32(edge))
     }
 
     @NodeMethod func multiTouch(_ type: String, _ x1: Double, _ y1: Double,
-                                _ x2: Double, _ y2: Double, _ w: Int, _ h: Int) async {
+                                _ x2: Double, _ y2: Double, _ w: Int, _ h: Int) async throws {
+        try await setupTask.value
         await injector.sendMultiTouch(type: type, x1: x1, y1: y1, x2: x2, y2: y2,
                                 screenWidth: w, screenHeight: h)
     }
@@ -52,13 +54,15 @@ private func u32(_ v: Int) -> UInt32 {
         await injector.sendButtonHID(page: u32(page), usage: u32(usage), phase: phase)
     }
 
-    @NodeMethod func key(_ type: String, _ usage: Int) async {
+    @NodeMethod func key(_ type: String, _ usage: Int) async throws {
+        try await setupTask.value
         await injector.sendKey(type: type, usage: u32(usage))
     }
 
     /// NaN anchorX/anchorY mean "center" (the Swift API's nil).
     @NodeMethod func scroll(_ dx: Double, _ dy: Double,
-                            _ anchorX: Double, _ anchorY: Double, _ w: Int, _ h: Int) async {
+                            _ anchorX: Double, _ anchorY: Double, _ w: Int, _ h: Int) async throws {
+        try await setupTask.value
         await injector.sendScroll(dx: dx, dy: dy,
                             anchorX: anchorX.isNaN ? nil : anchorX,
                             anchorY: anchorY.isNaN ? nil : anchorY,
