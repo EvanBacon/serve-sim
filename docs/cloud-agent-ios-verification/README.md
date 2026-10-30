@@ -4,7 +4,7 @@ This is how I let an agent that runs on Linux (a cloud agent, a CI job, a bot in
 
 Read it top to bottom the first time. Fill in the values from [Variables](#variables) and the commands paste as-is.
 
-> **Depends on [PR #166](https://github.com/EvanBacon/serve-sim/pull/166)** (*Require auth for exec and remote access*). That PR adds `--auth-token` / `SERVE_SIM_AUTH_TOKEN`, `--url` / `SERVE_SIM_URL`, the `?token=` cookie bootstrap, and remote gating. It also makes the host shell (`/exec`) opt-in with `--allow-exec` and refuses to reuse a running server started with a different token. **Keep this guide in draft until #166 lands**, then pin a published version that includes those flags. Check with `node packages/serve-sim/dist/serve-sim.js --help | grep -- --auth-token`; if that prints nothing, stop — this build must not be tunneled.
+> **Requires a serve-sim build with [PR #166](https://github.com/EvanBacon/serve-sim/pull/166)** (*Require auth for exec and remote access*), which is on `main`. It adds `--auth-token` / `SERVE_SIM_AUTH_TOKEN`, `--url` / `SERVE_SIM_URL`, and remote gating. It also makes the host shell (`/exec`) opt-in with `--allow-exec` and refuses to reuse a running server started with a different token. Check with `node packages/serve-sim/dist/serve-sim.js --help | grep -- --auth-token`; if that prints nothing, stop — this build must not be tunneled.
 
 ## Who runs what
 
@@ -32,7 +32,7 @@ For serve-sim development I use my Mac mini as the Mac. Our bot has a remote she
 
 - Node 20+.
 - Outbound HTTPS/WSS to the tunnel (ngrok, Tailscale) or SSH to the Mac.
-- The serve-sim CLI from a build that includes #166 (`npx serve-sim@<version-after-#166>`, or a checkout of that branch: `bun install`, then `node packages/serve-sim/dist/serve-sim.js ...`). Until #166 is published, prefer the [direct WebSocket recipe](#direct-websocket-recipe) with the `ws` package.
+- The serve-sim CLI from a build that includes #166 (a published release that has `--url`, or a checkout of `main`: `bun install && bun run packages/serve-sim/build.ts`, then `node packages/serve-sim/dist/serve-sim.js ...`). Without one, use the [direct WebSocket recipe](#direct-websocket-recipe) with the `ws` package.
 
 ## Variables
 
@@ -59,7 +59,7 @@ serve-sim decides "local" from the socket alone (`isTrustedLoopback` in `src/req
 
 A proxy that adds those headers — **nginx with the usual `proxy_set_header X-Forwarded-For` / `X-Real-IP`**, ngrok, Tailscale Serve — is therefore remote, even though it connects from loopback. With `--auth-token` it still gets everything this guide uses:
 
-- the preview page (via the `?token=` cookie bootstrap), `/api`, `/api/event-log` and its SSE stream;
+- the preview page (via the `#token=` share link, see below), `/api`, `/api/event-log` and its SSE stream;
 - `/helper/<udid>/stream.mjpeg`, `stream.avcc`, `config`, `health`, `ax`, `foreground`, and the HID WebSocket `/helper/<udid>/ws`;
 - on `/exec-ws`, SSE subscriptions and simulator settings.
 
@@ -71,7 +71,7 @@ It is refused, with or without the token:
 
 **`ssh -R`, `socat`, and a proxy that strips forwarding headers are *not* refused.** They deliver a remote client from a loopback socket with no forwarding headers, which is indistinguishable from a local one, so serve-sim treats it as trusted loopback: no auth token needed, host actions allowed. (`/exec` would still need `--allow-exec` plus the token file, which the remote side can't read.) Don't use those to expose the port. `ssh -L` from the agent's machine is fine: only people with SSH access to the Mac reach it. **Never start a tunneled serve-sim with `--allow-exec`**; a remote agent never needs it, and every step here works without it.
 
-Do not expose the port without a token, and do not pass the token in a URL query except the one-time browser cookie bootstrap (`<URL>/?token=...`), which the server immediately redirects away.
+Do not expose the port without a token, and never pass the token in a URL query: `?token=` does not authenticate, and URLs end up in server and proxy logs. Scripts send `Authorization: Bearer <token>`. A browser opens the share link `<URL>/#token=<token>`; the fragment never reaches the server, and the page trades it at `POST /auth` for an HttpOnly `serve_sim_auth` cookie.
 
 ## One-time: a dedicated bot simulator
 
@@ -150,7 +150,7 @@ curl -fsS --max-time 10 -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" "$SERVE
 
 ## Linux: drive it with the CLI
 
-**Requires #166.** Until that PR is published, skip this section and use the [direct WebSocket recipe](#direct-websocket-recipe) instead — on mainline builds, `tap`/`button`/`event-log` only read a Mac-local state file and cannot target a remote URL.
+**Requires #166.** On a build without it, skip this section and use the [direct WebSocket recipe](#direct-websocket-recipe) instead — older builds' `tap`/`button`/`event-log` only read a Mac-local state file and cannot target a remote URL. With #166, `--url` / `--auth-token` (or the env vars) work on `gesture`, `tap`, `button`, `type`, `rotate`, `fold`, `ca-debug`, `memory-warning`, `event-log`, and `record`.
 
 With a #166 build and `SERVE_SIM_URL` / `SERVE_SIM_AUTH_TOKEN` set:
 

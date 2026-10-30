@@ -11,8 +11,11 @@ declare global {
       axEndpoint?: string;
       cameraStatusEndpoint?: string;
       appStateEndpoint?: string;
+      reloadEndpoint?: string;
       eventLogEndpoint?: string;
       eventLogEventsEndpoint?: string;
+      /** Loopback-only `serve-sim doctor` JSON (copied by "Copy diagnostics"). */
+      diagnosticsEndpoint?: string;
       devtoolsEndpoint?: string;
       gridApiEndpoint?: string;
       gridStartEndpoint?: string;
@@ -23,8 +26,11 @@ declare global {
       // shells out via `node <bin> camera ...` so it doesn't depend on the
       // `serve-sim` binary being on the user's PATH.
       serveSimBin?: string;
-      /** Bearer token required by the /exec shell-exec route. */
-      execToken?: string;
+      /**
+       * Whether the server allows host shell commands (`--allow-exec`). The
+       * exec token itself is never sent to the page.
+       */
+      allowExec?: boolean;
       /**
        * Server-pinned stream codec. `"mjpeg"` forces the software JPEG path
        * (for hosts whose hardware can't encode H.264); `"auto"`/undefined lets
@@ -50,8 +56,8 @@ declare global {
 
 /**
  * Narrow an injected `__SIM_PREVIEW__` to a usable stream config. The
- * middleware injects a minimal `{basePath, execToken}` when no helper is
- * attached (the empty state still needs the exec token); treating that as a
+ * middleware injects a minimal `{basePath, allowExec}` when no helper is
+ * attached; treating that as a
  * stream config mounts the simulator view with `url: undefined`, which
  * fetches `/undefined/stream.avcc` and trips the no-frames watchdog instead
  * of showing the device picker.

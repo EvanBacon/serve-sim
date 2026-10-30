@@ -21,6 +21,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { spawnSync } from "child_process";
 import tailwindPlugin from "bun-plugin-tailwind";
 import { parseServeSimArch } from "./src/serve-sim-arch";
+import { themeBootScript } from "./src/client/utils/theme";
 
 const root = import.meta.dir;
 const distDir = resolve(root, "dist");
@@ -96,6 +97,7 @@ const html = `<!doctype html>
 <html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<script>${themeBootScript()}</script>
 <title>Simulator Preview</title>
 ${faviconTag}
 <style>*,*::before,*::after{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden}</style>

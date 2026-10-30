@@ -13,11 +13,25 @@ import os
 struct Frame: Identifiable {
     let id = UUID()
     let pixelBuffer: CVPixelBuffer
+    /// False when `pixelBuffer` wraps SimulatorKit's live framebuffer surface
+    /// (no pixel consumer was attached, so the private copy was skipped). Such
+    /// frames are only good for their dimensions.
+    var isPrivateCopy = true
+    /// Monotonic capture time (`DispatchTime` uptime, seconds) taken when
+    /// FrameCapture read the surface; screen recordings are timed from this
+    /// rather than from when the frame reached a consumer.
+    var captureTime: Double = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
 }
 
 protocol FrameEncoder {
     associatedtype Encoded
+    /// Whether this encoder reads pixels (and so needs a private frame copy).
+    static var readsPixels: Bool { get }
     func encode(_ frame: Frame) async throws -> Encoded
+}
+
+extension FrameEncoder {
+    static var readsPixels: Bool { true }
 }
 
 protocol CaptureConsuming: Sendable {
@@ -33,8 +47,10 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
 
     init(
         encoder: E,
+        diagnostics: EncoderDiagnostics? = nil,
         onFrame: @escaping @isolated(any) (E.Encoded) async -> Void
     ) {
+        let codec = String(describing: E.self).replacingOccurrences(of: "Encoder", with: "")
         let (stream, continuation) = AsyncStream.makeStream(
             of: Frame.self,
             // drop old frames if there's backpressure
@@ -46,9 +62,17 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
             for await frame in stream {
                 do {
                     let encoded = try await encoder.encode(frame)
+                    diagnostics?.recordSuccess(codec: codec)
                     await onFrame(encoded)
                 } catch {
-                    print("error encoding \(E.self) frame: \(error)")
+                    // One line per distinct failure plus periodic counts; the
+                    // per-frame print used to flood the log (x20 per second).
+                    let size = frame.pixelBuffer.dimensions
+                    if let diagnostics {
+                        diagnostics.recordFailure(codec: codec, error: error, width: size.width, height: size.height)
+                    } else {
+                        print("error encoding \(E.self) frame: \(error)")
+                    }
                     continue
                 }
             }
@@ -56,6 +80,7 @@ actor CaptureConsumer<E: FrameEncoder>: CaptureConsuming {
     }
 
     nonisolated func handleFrame(_ frame: Frame) {
+        if E.readsPixels, !frame.isPrivateCopy { return }
         continuation.yield(frame)
     }
 
@@ -71,21 +96,45 @@ actor CaptureEngine {
     }
 
     private let deviceUDID: String
+    /// Optional cap (bits/s) on the resolution-scaled H.264 bitrate.
+    private let maxBitrate: Int?
     private let frameCapture = FrameCapture()
     private var phase = Phase.unstarted
 
     // mjpeg is stateless so we can share a single encoder instance
     private let mjpegEncoder = MJPEGEncoder()
+    private let encoderDiagnostics = EncoderDiagnostics()
+    // Separate so viewer seeds don't queue behind (or evict the cache of)
+    // per-frame MJPEG viewer encodes.
+    private let snapshotEncoder = MJPEGEncoder()
 
     private(set) var screenSize = Dimensions(width: 0, height: 0)
     private var consumers = [UUID: CaptureConsuming]()
+    /// Number of attached consumers that read pixels. FrameCapture only pays
+    /// for the private per-frame copy while this is non-zero.
+    private let pixelConsumers = PixelConsumerCount()
 
-    init(deviceUDID: String) {
+    init(deviceUDID: String, maxBitrate: Int? = nil) {
         self.deviceUDID = deviceUDID
+        self.maxBitrate = maxBitrate
     }
 
     func setPreferredScreenSize(width: Int, height: Int) async {
         await frameCapture.setPreferredScreenSize(width: width, height: height)
+    }
+
+    /// JSON snapshot for `serve-sim doctor`: display selection + encoder state.
+    func diagnostics() async -> String {
+        let capture = await frameCapture.diagnosticsJSON()
+        let encoders = jsonString(encoderDiagnostics.snapshot())
+        let phaseName: String
+        switch phase {
+        case .unstarted: phaseName = "unstarted"
+        case .starting: phaseName = "starting"
+        case .running: phaseName = "running"
+        case .stopped: phaseName = "stopped"
+        }
+        return "{\"phase\":\"\(phaseName)\",\"consumers\":\(consumers.count),\"capture\":\(capture),\"encoders\":\(encoders)}"
     }
 
     func start() async throws {
@@ -99,8 +148,16 @@ actor CaptureEngine {
             bufferingPolicy: .bufferingNewest(1)
         )
         do {
-            try await frameCapture.start(deviceUDID: deviceUDID) { pixelBuffer, _ in
-                frameContinuation.yield(Frame(pixelBuffer: pixelBuffer))
+            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { [recorderTap] pixelBuffer, timestamp, isCopy in
+                let frame = Frame(
+                    pixelBuffer: pixelBuffer,
+                    isPrivateCopy: isCopy,
+                    captureTime: timestamp.seconds
+                )
+                // The recorder needs every frame, so it's fed here rather
+                // than through the newest-only stream the live encoders share.
+                recorderTap.recorder?.handleFrame(frame)
+                frameContinuation.yield(frame)
             }
         } catch {
             // Preserve retryability after an ordinary start failure, but never
@@ -130,19 +187,27 @@ actor CaptureEngine {
         encoder: E,
         onFrame: sending @escaping @isolated(any) (E.Encoded) async -> Void
     ) -> (@Sendable () async -> Void) {
-        let consumer = CaptureConsumer(encoder: encoder) { [weak self] encoded in
+        let consumer = CaptureConsumer(encoder: encoder, diagnostics: encoderDiagnostics) { [weak self] encoded in
             guard let self, await self.phase == .running else { return }
             await onFrame(encoded)
         }
         let id = UUID()
         consumers[id] = consumer
-        return { await self.removeConsumer(id) }
+        if E.readsPixels {
+            pixelConsumers.increment()
+            // Emit a copied frame now rather than waiting for the next screen
+            // change or idle tick, so a new viewer's first IDR is immediate.
+            Task { [frameCapture] in await frameCapture.requestFrame() }
+        }
+        return { await self.removeConsumer(id, readsPixels: E.readsPixels) }
     }
 
     private func removeConsumer(
-        _ id: UUID
+        _ id: UUID,
+        readsPixels: Bool
     ) {
-        consumers.removeValue(forKey: id)
+        guard consumers.removeValue(forKey: id) != nil else { return }
+        if readsPixels { pixelConsumers.decrement() }
     }
 
     private func handleFrame(_ frame: Frame) {
@@ -151,6 +216,27 @@ actor CaptureEngine {
         for consumer in consumers.values {
             consumer.handleFrame(frame)
         }
+    }
+
+    /// Reports the screen size with the first frame after subscribing (at most
+    /// one idle tick away) and whenever it changes, without encoding anything.
+    func addSizeConsumer(
+        onSize: sending @escaping (Dimensions) async -> Void
+    ) -> (@Sendable () async -> Void) {
+        var last: Dimensions?
+        return addConsumer(encoder: SizeEncoder()) { size in
+            guard size != last else { return }
+            last = size
+            await onSize(size)
+        }
+    }
+
+    /// JPEG of the current screen, encoded on demand. Used to seed new viewers
+    /// so the session doesn't JPEG-encode every frame just in case.
+    func snapshotJPEG() async throws -> (Dimensions, Data)? {
+        guard phase == .running, let pixelBuffer = await frameCapture.copyCurrentFrame() else { return nil }
+        let frame = Frame(pixelBuffer: pixelBuffer)
+        return (frame.pixelBuffer.dimensions, try await snapshotEncoder.encode(frame))
     }
 
     func addMJPEGConsumer(
@@ -165,7 +251,7 @@ actor CaptureEngine {
     func addAVCCConsumer(
         onFrame: sending @escaping (Dimensions, Data, Int32) async -> Void
     ) -> (@Sendable () async -> Void) {
-        addConsumer(encoder: AVCCEncoder()) { [weak self] encoded in
+        addConsumer(encoder: AVCCEncoder(diagnostics: encoderDiagnostics, maxBitrate: maxBitrate)) { [weak self] encoded in
             let flagDescription: Int32 = 1 << 0
             let flagKeyframe: Int32 = 1 << 1
 
@@ -194,12 +280,75 @@ actor CaptureEngine {
         }
     }
 
+    // MARK: - Recording
+
+    /// The active recorder, read by FrameCapture's frame callback.
+    private let recorderTap = RecorderTap()
+    private var recording: ScreenRecorder?
+
+    var isRecording: Bool { recording != nil }
+
+    /// Start recording the screen to an MP4 at `options.path`. One recording
+    /// per capture session; it counts as a pixel consumer, so frames are
+    /// copied (and timestamped) for it even when no viewer is attached.
+    func startRecording(_ options: ScreenRecorder.Options) throws {
+        guard phase == .running else { throw RecordingErrors.notRunning }
+        guard recording == nil else { throw RecordingErrors.alreadyRecording }
+        let recorder = ScreenRecorder(options: options)
+        pixelConsumers.increment()
+        recording = recorder
+        recorderTap.recorder = recorder
+        Task { [frameCapture] in await frameCapture.requestFrame() }
+    }
+
+    /// Finish the active recording; returns its JSON summary.
+    func stopRecording() async throws -> String {
+        guard let recorder = recording else { throw RecordingErrors.notRecording }
+        recording = nil
+        recorderTap.recorder = nil
+        pixelConsumers.decrement()
+        return try await recorder.finish()
+    }
+
+    enum RecordingErrors: Error, CustomStringConvertible {
+        case notRunning, alreadyRecording, notRecording
+        var description: String {
+            switch self {
+            case .notRunning: return "Capture is not running"
+            case .alreadyRecording: return "A recording is already in progress"
+            case .notRecording: return "No recording in progress"
+            }
+        }
+    }
+
     func stop() {
         if phase == .stopped { return }
         phase = .stopped
+        if let recorder = recording {
+            recorderTap.recorder = nil
+            recorder.cancel()
+            recording = nil
+        }
         Task { [frameCapture] in await frameCapture.stop() }
         consumers.removeAll()
+        pixelConsumers.reset()
     }
+}
+
+struct SizeEncoder: FrameEncoder {
+    static var readsPixels: Bool { false }
+    func encode(_ frame: Frame) async throws -> Dimensions { frame.pixelBuffer.dimensions }
+}
+
+/// Lock-protected count shared by CaptureEngine (writer) and FrameCapture
+/// (reader on its capture queue).
+final class PixelConsumerCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    func decrement() { lock.lock(); count = max(0, count - 1); lock.unlock() }
+    func reset() { lock.lock(); count = 0; lock.unlock() }
+    var isEmpty: Bool { lock.lock(); defer { lock.unlock() }; return count == 0 }
 }
 
 actor MJPEGEncoder: FrameEncoder {
@@ -219,10 +368,12 @@ actor MJPEGEncoder: FrameEncoder {
 actor AVCCEncoder: FrameEncoder {
     private static let timeout: Duration = .milliseconds(500)
 
-    let h264Encoder = H264Encoder(fps: 60)
+    let h264Encoder: H264Encoder
     var forceKeyframe = true
 
-    init() {}
+    init(diagnostics: EncoderDiagnostics? = nil, maxBitrate: Int? = nil) {
+        h264Encoder = H264Encoder(fps: 60, maxBitrate: maxBitrate, diagnostics: diagnostics)
+    }
 
     func encode(_ frame: Frame) async throws -> H264Encoder.Encoded? {
         // TODO: cancel after timeout using TaskGroup
@@ -236,5 +387,18 @@ actor AVCCEncoder: FrameEncoder {
 
     deinit {
         Task { [h264Encoder] in await h264Encoder.stop() }
+    }
+}
+
+/// Lock-protected handle on the active `ScreenRecorder`, shared between the
+/// engine actor (which sets it) and FrameCapture's frame callback (which
+/// hands it every captured frame without an actor hop).
+private final class RecorderTap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _recorder: ScreenRecorder?
+
+    var recorder: ScreenRecorder? {
+        get { lock.withLock { _recorder } }
+        set { lock.withLock { _recorder = newValue } }
     }
 }

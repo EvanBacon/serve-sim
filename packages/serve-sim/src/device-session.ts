@@ -1,6 +1,7 @@
 import { warnDeviceHubInput } from "./device-hub-input";
-import { DuoRenderer } from "./duo-renderer";
-import { DuoPreview } from "./duo-preview";
+import { DuoRenderer, DuoRendererError, logDuoRendererFailure } from "./duo-renderer";
+import { DuoPreview, type DuoRendererEvent } from "./duo-preview";
+import { redactHome } from "./diagnostics-redact";
 /**
  * In-process device session — the replacement for the spawned serve-sim-bin
  * helper. One session per booted simulator owns a NativeCapture + NativeHid and
@@ -29,6 +30,19 @@ import {
   axFrontmostAsync,
   type MjpegFrame,
 } from "./native";
+import { createReadStream } from "fs";
+import { mkdir, rm, stat } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { randomUUID } from "crypto";
+import {
+  MAX_RECORDING_MS,
+  RECORDING_HOLD_MS,
+  RECORDING_SUMMARY_HEADER,
+  parseRecordingQuery,
+  recordingFileName,
+  recordingRotation,
+} from "./recording";
 import { eventLogEventForHidMessage, formatEventLogPoint, recordEventLogEvent, updateEventLogEvent } from "./event-log";
 
 /**
@@ -43,12 +57,6 @@ export interface HidSocket {
   on(event: "close" | "error", cb: () => void): void;
   close(): void;
 }
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
 
 // AVCC seed tag (StreamFormat.AVCCEnvelope.seedTag). description/keyframe/delta
 // envelopes are framed natively; only the on-connect JPEG seed is built here.
@@ -147,8 +155,26 @@ async function writeAndDrain(
 
 type CaptureTransport = Pick<
   NativeCapture,
-  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "setPreferredScreenSize"
->;
+  "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "subscribeSize" | "snapshotJpeg" | "setPreferredScreenSize"
+> & Partial<Pick<NativeCapture, "diagnostics" | "startRecording" | "stopRecording" | "supportsRecording">>;
+
+export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
+
+type StreamHealth = {
+  open: number;
+  frames: number;
+  last_frame_at: string | null;
+  last_error: { at: string; message: string; stage?: string } | null;
+};
+
+function newStreamHealth(): StreamHealth {
+  return { open: 0, frames: 0, last_frame_at: null, last_error: null };
+}
+
+/** 503 body for a Duo 3D stream that cannot produce a first frame. */
+function duoRendererErrorBody(error: DuoRendererError): { error: "duo_renderer_unavailable"; reason: string; stage: string; details: Record<string, unknown> } {
+  return { error: "duo_renderer_unavailable", reason: redactHome(error.reason), stage: error.stage, details: redactHome(error.details) };
+}
 type HidTransport = Pick<
   NativeHid,
   | "touch"
@@ -169,9 +195,32 @@ type HidTransport = Pick<
 export interface DeviceSessionDependencies {
   capture: CaptureTransport;
   hid: HidTransport;
-  createDuoRenderer?: () => Pick<DuoRenderer, "render" | "close">;
+  createDuoRenderer?: (onFailure: (error: DuoRendererError) => void) => Pick<DuoRenderer, "render" | "close">;
   createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  /** Server-side recording cap; defaults to `MAX_RECORDING_MS`. */
+  maxRecordingMs?: number;
+  /** How long a capped file is held for its owner; defaults to `RECORDING_HOLD_MS`. */
+  recordingHoldMs?: number;
 }
+
+type ActiveRecording = {
+  path: string;
+  startedAt: string;
+  /**
+   * Returned by start; only its holder may collect a file held at the cap,
+   * until the hold expires.
+   */
+  token: string;
+  phase: "starting" | "recording" | "stopping";
+  /** Native finalize, started by `/recording/stop` or the duration cap. */
+  finalizing?: Promise<string>;
+  limitTimer?: ReturnType<typeof setTimeout>;
+  /** When the duration cap's finalize settled (epoch ms); starts the hold. */
+  heldAt?: number;
+  /** Set once the hold lapses: any client may collect, a new start discards. */
+  holdExpired?: boolean;
+  holdTimer?: ReturnType<typeof setTimeout>;
+};
 
 type Unsubscribe = () => void | Promise<void>;
 
@@ -179,6 +228,7 @@ export class DeviceSession {
   private readonly capture: CaptureTransport;
   private readonly hid: HidTransport;
   private unsubscribeMjpeg?: Unsubscribe;
+  private unsubscribeSize?: Unsubscribe;
   private phase: "unstarted" | "starting" | "running" | "failed" | "stopped" = "unstarted";
   private startPromise?: Promise<void>;
 
@@ -197,20 +247,42 @@ export class DeviceSession {
   private duoStateQueue: Promise<void> = Promise.resolve();
   private readonly streamResponses = new Set<ServerResponse>();
   private touchGestureLog?: TouchGestureLog;
+  private readonly streamHealth: Record<StreamEndpoint, StreamHealth> = {
+    mjpeg: newStreamHealth(),
+    avcc: newStreamHealth(),
+    "3d": newStreamHealth(),
+  };
+  private deviceHubShadowed?: boolean;
+  /** Active screen recording (one per session), or a start/stop in flight. */
+  private recording?: ActiveRecording;
+  private rendererFailureEvent?: { id: number; key: string; count: number };
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.hid = dependencies?.hid ?? new NativeHid(udid);
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
     this.duo = new DuoPreview({
-      createRenderer: () => dependencies?.createDuoRenderer?.() ?? new DuoRenderer(),
+      createRenderer: (onFailure) => dependencies?.createDuoRenderer
+        ? dependencies.createDuoRenderer(onFailure)
+        : new DuoRenderer(onFailure),
       onProjection: (frame) => {
         for (const ws of this.hidSockets) ws.send(frame);
       },
-      onStreamError: (res, error) => this.handleStreamError(res, error),
+      onStreamError: (res, error) => this.handleStreamError(res, error, "3d"),
+      onRendererEvent: (event) => this.recordRendererEvent(event),
+      onFrameDelivered: () => this.noteStreamFrame("3d"),
     });
   }
 
-  /** Begin capture and retain one shared MJPEG subscription. Idempotent. */
+  /**
+   * Begin capture and track the screen size. Idempotent.
+   *
+   * Only foldables keep a shared per-frame JPEG subscription (the Duo 3D
+   * preview renders from it). Everything else encodes JPEGs only for MJPEG
+   * viewers, and seeds new viewers from an on-demand snapshot: a shared
+   * subscription JPEG-encodes every frame at full resolution on the CPU, which
+   * cost ~6 ms per frame (p95 ~19 ms) and contended with the H.264 path even
+   * when every viewer was on AVCC.
+   */
   start(): Promise<void> {
     if (this.phase === "stopped") {
       return Promise.reject(new Error(`Device session ${this.udid} is closed`));
@@ -222,15 +294,23 @@ export class DeviceSession {
       await this.capture.start();
       if (this.isStopped()) throw new Error(`Device session ${this.udid} closed while starting`);
 
-      const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
+      const unsubscribeSize = await this.capture.subscribeSize((size) => this.onScreenSize(size.width, size.height));
       if (this.isStopped()) {
-        await unsubscribe();
+        await unsubscribeSize();
         throw new Error(`Device session ${this.udid} closed while starting`);
       }
-      this.unsubscribeMjpeg = unsubscribe;
+      this.unsubscribeSize = unsubscribeSize;
       this.phase = "running";
       if (await this.hid.isFoldable?.() && !this.isStopped()) {
-        if (!this.dependencies?.createDuoMonitor) void warnDeviceHubInput(this.udid);
+        const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
+        if (this.isStopped()) {
+          await unsubscribe();
+          return;
+        }
+        this.unsubscribeMjpeg = unsubscribe;
+        if (!this.dependencies?.createDuoMonitor) {
+          void warnDeviceHubInput(this.udid).then((shadowed) => { this.deviceHubShadowed = shadowed; });
+        }
         const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState) => new DuoStateMonitor(udid, onState));
         this.duoMonitor = createMonitor(this.udid, (state) => {
           void this.followDuoState(state).catch((error) => {
@@ -273,7 +353,22 @@ export class DeviceSession {
     if (this.unsubscribeMjpeg) {
       this.runCleanup("shared MJPEG unsubscribe", this.unsubscribeMjpeg);
     }
+    if (this.unsubscribeSize) {
+      this.runCleanup("size unsubscribe", this.unsubscribeSize);
+    }
     this.hidSockets.clear();
+    // Capture stop cancels the native recorder; drop the partial temp file.
+    // A stop in flight owns its file (it's streaming it or cleaning it up).
+    if (this.recording) {
+      const active = this.recording;
+      this.recording = undefined;
+      if (active.limitTimer) clearTimeout(active.limitTimer);
+      if (active.holdTimer) clearTimeout(active.holdTimer);
+      if (active.phase !== "stopping") {
+        const finalized = active.finalizing?.catch(() => {}) ?? Promise.resolve();
+        this.runCleanup("recording cleanup", () => finalized.then(() => rm(active.path, { force: true })));
+      }
+    }
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
   }
@@ -307,14 +402,16 @@ export class DeviceSession {
 
   // ── Frame handling ───────────────────────────────────────────────────────
 
+  private onScreenSize(width: number, height: number): void {
+    if (width === this.width && height === this.height) return;
+    this.width = width;
+    this.height = height;
+    this.broadcastConfig();
+  }
+
   private async onSharedMjpegFrame(frame: MjpegFrame): Promise<void> {
     const { width, height, data: jpeg } = frame;
-
-    if (width !== this.width || height !== this.height) {
-      this.width = width;
-      this.height = height;
-      this.broadcastConfig();
-    }
+    this.onScreenSize(width, height);
 
     if (!this.latestJpegBuffer || this.latestJpegBuffer.length < jpeg.length) {
       const currentCapacity = this.latestJpegBuffer?.length ?? 0;
@@ -329,6 +426,26 @@ export class DeviceSession {
   private latestJpeg(): Buffer | null {
     if (!this.latestJpegBuffer) return null;
     return this.latestJpegBuffer.subarray(0, this.latestJpegLength);
+  }
+
+  /** A private copy of the shared JPEG cache, kept current only on foldables. */
+  private sharedJpegCopy(): Buffer | null {
+    const cached = this.unsubscribeMjpeg ? this.latestJpeg() : null;
+    return cached ? Buffer.from(cached) : null;
+  }
+
+  /**
+   * A private JPEG of the current screen for a new AVCC viewer: the shared
+   * cache on foldables, else a one-shot native snapshot (copy + CPU encode).
+   */
+  private async seedJpeg(): Promise<Uint8Array | null> {
+    const cached = this.sharedJpegCopy();
+    if (cached) return cached;
+    try {
+      return await this.capture.snapshotJpeg();
+    } catch {
+      return null;
+    }
   }
 
   /** Write a multipart JPEG part (header + shared frame + boundary) without copying the JPEG. */
@@ -347,16 +464,22 @@ export class DeviceSession {
       if (res.destroyed || res.writableEnded) return;
       if (!await this.hid.isFoldable?.()) { this.sendJson(res, 400, { error: "This device has no Duo model" }); return; }
       const raw = new URL(req.url ?? "", "http://x").searchParams.get("raw") === "1";
-      res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store", ...CORS });
-      this.trackStreamResponse(res);
+      if (!this.trackStreamResponse(res, "3d")) return;
       this.duo.setPanel(this.activePanel());
-      this.duo.attach(res);
       res.once("close", () => this.duo.detach(res));
-    })().catch((error) => this.handleStreamError(res, error));
+      // Headers wait for the first PNG. Model lookup, worker spawn, and the
+      // first render can all fail; with headers unsent each failure becomes a
+      // 503 with a reason instead of an empty socket (ERR_EMPTY_RESPONSE).
+      this.duo.attach(res, {
+        onFirstFrame: () => {
+          res.writeHead(200, { "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame", "Cache-Control": "no-store" });
+        },
+      });
+    })().catch((error) => this.handleStreamError(res, error, "3d"));
   }
 
   handleMjpeg(req: IncomingMessage, res: ServerResponse): void {
-    void this.serveMjpeg(req, res).catch((error) => this.handleStreamError(res, error));
+    void this.serveMjpeg(req, res).catch((error) => this.handleStreamError(res, error, "mjpeg"));
   }
 
   private async serveMjpeg(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -368,9 +491,8 @@ export class DeviceSession {
       "Content-Type": raw ? "application/octet-stream" : "multipart/x-mixed-replace; boundary=frame",
       "Cache-Control": "no-cache, no-store",
       Connection: "keep-alive",
-      ...CORS,
     });
-    if (!this.trackStreamResponse(res)) return;
+    if (!this.trackStreamResponse(res, "mjpeg")) return;
 
     // The native subscriber reuses its frame buffer after this callback
     // resolves. Keep the callback pending through HTTP backpressure so the
@@ -379,6 +501,14 @@ export class DeviceSession {
     // slow client drains, so this neither interleaves parts nor grows a queue.
     let writeInFlight = false;
     let lastSentAt = 0;
+    // This viewer's last frame, replayed while the screen is static.
+    let replay: Buffer | null = null;
+    let replayLength = 0;
+    const remember = (jpeg: Uint8Array) => {
+      if (!replay || replay.length < jpeg.length) replay = Buffer.allocUnsafe(Math.max(jpeg.length, (replay?.length ?? 0) * 2));
+      replay.set(jpeg, 0);
+      replayLength = jpeg.length;
+    };
     const writeFrame = async (jpeg: Uint8Array): Promise<void> => {
       // This can only overlap when the idle replay timer wins the event-loop
       // turn immediately before a native frame. Prefer the in-flight write and
@@ -388,6 +518,7 @@ export class DeviceSession {
       try {
         if (await writeAndDrain(res, () => this.writeMjpegFrame(res, jpeg))) {
           lastSentAt = Date.now();
+          this.noteStreamFrame("mjpeg");
         }
       } catch (error) {
         if (!res.destroyed) {
@@ -398,20 +529,24 @@ export class DeviceSession {
       }
     };
 
-    const latestJpeg = this.latestJpeg();
-    // The shared cache is reused in place. Copy this one on-connect seed before
-    // awaiting backpressure; native subscriber frames below remain zero-copy.
-    if (latestJpeg) await writeFrame(Buffer.from(latestJpeg));
+    // Subscribing forces an immediate native frame, so only foldables (whose
+    // shared cache is already encoded) send a seed. The copy is private, safe
+    // to hold across backpressure; subscriber frames below remain zero-copy.
+    const seed = this.sharedJpegCopy();
+    if (seed) {
+      remember(seed);
+      await writeFrame(seed);
+    }
     const unsubscribe = await this.capture.subscribeMjpeg(async (frame) => {
+      remember(frame.data);
       await writeFrame(frame.data);
     });
     const idleReplay = setInterval(() => {
       if (res.writableEnded || res.destroyed) return;
       if (Date.now() - lastSentAt < MJPEG_IDLE_REPLAY_MS) return;
-      const cached = this.latestJpeg();
-      // The shared cache is reused in place as fresh frames arrive. Copy only
+      // The replay buffer is reused in place as fresh frames arrive. Copy only
       // this low-frequency replay so it stays immutable across backpressure.
-      if (cached) void writeFrame(Buffer.from(cached));
+      if (replay) void writeFrame(Buffer.from(replay.subarray(0, replayLength)));
     }, MJPEG_IDLE_REPLAY_MS);
     this.bindSubscription(res, async () => {
       clearInterval(idleReplay);
@@ -420,7 +555,7 @@ export class DeviceSession {
   }
 
   handleAvcc(_req: IncomingMessage, res: ServerResponse): void {
-    void this.serveAvcc(res).catch((error) => this.handleStreamError(res, error));
+    void this.serveAvcc(res).catch((error) => this.handleStreamError(res, error, "avcc"));
   }
 
   private async serveAvcc(res: ServerResponse): Promise<void> {
@@ -431,17 +566,22 @@ export class DeviceSession {
       "Content-Type": "application/octet-stream",
       "Cache-Control": "no-cache, no-store",
       Connection: "keep-alive",
-      ...CORS,
     });
-    if (!this.trackStreamResponse(res)) return;
+    if (!this.trackStreamResponse(res, "avcc")) return;
 
-    // Seed with the current screen; the per-client native AVCC subscription
-    // starts with its own decoder config and keyframe.
-    const latestJpeg = this.latestJpeg();
-    if (latestJpeg) res.write(avccSeed(latestJpeg));
+    // Seed with the current screen while the per-client native AVCC
+    // subscription (which forces an immediate frame) starts its own decoder
+    // config and keyframe. The seed is fetched concurrently and dropped if
+    // H.264 got there first — painting it then would rewind the picture.
+    let streaming = false;
+    void this.seedJpeg().then((seed) => {
+      if (seed && !streaming && !res.writableEnded && !res.destroyed) res.write(avccSeed(seed));
+    });
 
     const unsubscribe = await this.capture.subscribeAvcc(async (frame) => {
+      streaming = true;
       await writeAndDrain(res, () => res.write(frame.data));
+      this.noteStreamFrame("avcc");
     });
     this.bindSubscription(res, unsubscribe);
   }
@@ -475,6 +615,220 @@ export class DeviceSession {
         message: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // ── Screen recording ─────────────────────────────────────────────────────
+
+  /**
+   * `limitReached`: the duration cap finalized the file; it stays reported as
+   * recording until a `/recording/stop` collects it. `holdExpiresAt`: when
+   * the start's token stops being required to collect it.
+   */
+  recordingStatus(): { recording: boolean; startedAt?: string; limitReached?: boolean; holdExpiresAt?: string } {
+    const active = this.recording;
+    if (!active) return { recording: false };
+    const held = active.finalizing && active.phase === "recording";
+    return {
+      recording: true,
+      startedAt: active.startedAt,
+      ...(held ? { limitReached: true } : {}),
+      ...(held && active.heldAt != null
+        ? { holdExpiresAt: new Date(active.heldAt + this.recordingHoldMs()).toISOString() }
+        : {}),
+    };
+  }
+
+  private recordingHoldMs(): number {
+    return this.dependencies?.recordingHoldMs ?? RECORDING_HOLD_MS;
+  }
+
+  /** Drop a capped file whose hold expired, freeing the device to record. */
+  private async discardExpiredHold(): Promise<void> {
+    const active = this.recording;
+    if (!active || !active.holdExpired || active.phase !== "recording") return;
+    this.recording = undefined;
+    console.error(`[record] ${this.udid}: discarding the uncollected recording held at the duration limit`);
+    await active.finalizing?.catch(() => {});
+    await rm(active.path, { force: true }).catch(() => {});
+  }
+
+  /**
+   * `GET /recording` (status), `POST /recording/start`, `POST /recording/stop`.
+   * Stop streams the finished MP4 back as an attachment and deletes the temp
+   * file, so the browser (or `serve-sim record`) decides where it's saved.
+   */
+  async handleRecording(req: IncomingMessage, res: ServerResponse, action: "status" | "start" | "stop"): Promise<void> {
+    const method = (req.method ?? "GET").toUpperCase();
+    if (action === "status") {
+      this.sendJson(res, 200, this.recordingStatus());
+      return;
+    }
+    if (method !== "POST") {
+      res.setHeader("Allow", "POST");
+      this.sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+    try {
+      if (action === "start") await this.startRecording(req, res);
+      else await this.stopRecording(req, res);
+    } catch (error) {
+      if (res.headersSent || res.writableEnded) {
+        res.destroy();
+        return;
+      }
+      this.sendJson(res, 500, {
+        error: "recording_failed",
+        message: redactHome(error instanceof Error ? error.message : String(error)),
+      });
+    }
+  }
+
+  private async startRecording(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.capture.startRecording || !this.capture.stopRecording || this.capture.supportsRecording === false) {
+      this.sendJson(res, 501, { error: "recording_unsupported", message: "This native build cannot record" });
+      return;
+    }
+    const parsed = parseRecordingQuery(new URL(req.url ?? "", "http://x").searchParams);
+    if ("error" in parsed) {
+      this.sendJson(res, 400, { error: "invalid_recording_options", message: parsed.error });
+      return;
+    }
+    await this.discardExpiredHold();
+    if (this.recording) {
+      this.sendJson(res, 409, { error: "already_recording", ...this.recordingStatus() });
+      return;
+    }
+    const dir = join(tmpdir(), "serve-sim-recordings");
+    const path = join(dir, `${this.udid}-${randomUUID()}.mp4`);
+    const startedAt = new Date().toISOString();
+    const token = randomUUID();
+    const active: ActiveRecording = { path, startedAt, token, phase: "starting" };
+    this.recording = active;
+    const closedMeanwhile = () => {
+      // close() ran during the start: capture stop cancelled the recorder.
+      this.runCleanup("recording cleanup", () => rm(path, { force: true }));
+      this.sendJson(res, 409, { error: "session_closed", message: "The device session closed while the recording was starting" });
+    };
+    try {
+      await this.start();
+      await mkdir(dir, { recursive: true });
+      await this.capture.startRecording(path, { ...parsed, rotation: recordingRotation(this.screenConfig()) });
+    } catch (error) {
+      if (this.recording !== active) return closedMeanwhile();
+      this.recording = undefined;
+      await rm(path, { force: true }).catch(() => {});
+      throw error;
+    }
+    if (this.recording !== active) return closedMeanwhile();
+    active.phase = "recording";
+    const maxMs = this.dependencies?.maxRecordingMs ?? MAX_RECORDING_MS;
+    active.limitTimer = setTimeout(() => {
+      if (this.recording !== active || active.phase !== "recording") return;
+      console.error(`[record] ${this.udid}: reached the ${Math.round(maxMs / 60_000)} min limit; finalizing`);
+      this.finalizeRecording(active).catch((error) => {
+        console.error(`[record] ${this.udid}: finalize at the duration limit failed:`, error instanceof Error ? error.message : error);
+      }).finally(() => this.holdForOwner(active));
+    }, maxMs);
+    active.limitTimer.unref?.();
+    this.sendJson(res, 200, { recording: true, startedAt, token });
+  }
+
+  /**
+   * The cap finalized `active`: keep it for the start's token holder for a
+   * bounded time. The token lives only in that client's memory (a tab,
+   * `serve-sim record`), so if it went away the hold lapses rather than
+   * stranding the device: then any client may collect the file, and a new
+   * start discards it.
+   */
+  private holdForOwner(active: ActiveRecording): void {
+    if (this.recording !== active || active.phase !== "recording") return;
+    active.heldAt = Date.now();
+    active.holdTimer = setTimeout(() => {
+      active.holdTimer = undefined;
+      if (this.recording !== active || active.phase !== "recording") return;
+      active.holdExpired = true;
+      console.error(`[record] ${this.udid}: the recording held at the duration limit is now available to any client`);
+    }, this.recordingHoldMs());
+    active.holdTimer.unref?.();
+  }
+
+  /** Finalize natively once, whether triggered by stop or the duration cap. */
+  private finalizeRecording(active: ActiveRecording): Promise<string> {
+    if (active.limitTimer) clearTimeout(active.limitTimer);
+    active.limitTimer = undefined;
+    active.finalizing ??= this.capture.stopRecording!();
+    return active.finalizing;
+  }
+
+  private async stopRecording(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const active = this.recording;
+    if (!active || active.phase !== "recording" || !this.capture.stopRecording) {
+      this.sendJson(res, 409, { error: "not_recording", ...this.recordingStatus() });
+      return;
+    }
+    // A running recording can be stopped from anywhere (any tab, the CLI),
+    // but a file held at the duration cap goes only to the client that
+    // started it, so another tab's poll can't take the CLI's file. The hold
+    // is bounded (`holdForOwner`) so a vanished owner can't strand it.
+    if (
+      active.finalizing && !active.holdExpired &&
+      new URL(req.url ?? "", "http://x").searchParams.get("token") !== active.token
+    ) {
+      this.sendJson(res, 409, {
+        error: "not_owner",
+        message: "This recording hit the time limit and is held for the client that started it"
+          + (active.heldAt != null ? ` until ${new Date(active.heldAt + this.recordingHoldMs()).toLocaleTimeString()}` : ""),
+        ...this.recordingStatus(),
+      });
+      return;
+    }
+    if (active.holdTimer) clearTimeout(active.holdTimer);
+    active.holdTimer = undefined;
+    active.phase = "stopping";
+    // Finalizing a long recording takes a moment; notice if the client
+    // leaves. Runtimes differ in which of these fire for an aborted request.
+    // (Not req "close": Node also emits it once a request completes normally.)
+    let clientGone = req.aborted || res.destroyed;
+    const onGone = () => { clientGone = true; };
+    req.once("aborted", onGone);
+    res.once("close", onGone);
+    const stopWatching = () => {
+      req.off("aborted", onGone);
+      res.off("close", onGone);
+    };
+    let summary: string;
+    let size: number;
+    try {
+      summary = await this.finalizeRecording(active);
+      ({ size } = await stat(active.path));
+    } catch (error) {
+      await rm(active.path, { force: true }).catch(() => {});
+      throw error;
+    } finally {
+      stopWatching();
+      if (this.recording === active) this.recording = undefined;
+    }
+    if (clientGone || req.aborted || res.destroyed || req.socket?.destroyed) {
+      await rm(active.path, { force: true }).catch(() => {});
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "video/mp4",
+      "Content-Length": String(size),
+      "Content-Disposition": `attachment; filename="${recordingFileName()}"`,
+      "Cache-Control": "no-store",
+      [RECORDING_SUMMARY_HEADER]: publicRecordingSummary(summary),
+    });
+    await new Promise<void>((resolve) => {
+      const file = createReadStream(active.path);
+      const done = () => {
+        file.destroy();
+        void rm(active.path, { force: true }).finally(resolve);
+      };
+      file.once("error", () => { res.destroy(); done(); });
+      res.once("close", done);
+      file.pipe(res);
+    });
   }
 
   // ── HID WebSocket ────────────────────────────────────────────────────────
@@ -810,17 +1164,18 @@ export class DeviceSession {
     res.once("error", cleanup);
   }
 
-  private trackStreamResponse(res: ServerResponse): boolean {
+  private trackStreamResponse(res: ServerResponse, endpoint: StreamEndpoint): boolean {
     if (this.isStopped() || res.writableEnded || res.destroyed) {
       if (!res.writableEnded && !res.destroyed) res.destroy();
       return false;
     }
 
     this.streamResponses.add(res);
+    this.streamHealth[endpoint].open++;
     const release = () => {
       res.off("close", release);
       res.off("error", release);
-      this.streamResponses.delete(res);
+      if (this.streamResponses.delete(res)) this.streamHealth[endpoint].open--;
     };
     res.once("close", release);
     res.once("error", release);
@@ -842,15 +1197,101 @@ export class DeviceSession {
     );
   }
 
-  private handleStreamError(res: ServerResponse, error: unknown): void {
+  private noteStreamFrame(endpoint: StreamEndpoint): void {
+    const health = this.streamHealth[endpoint];
+    health.frames++;
+    health.last_frame_at = new Date().toISOString();
+  }
+
+  /** Coalesce repeated identical renderer failures (client retries) into one counted entry. */
+  private recordRendererEvent(event: DuoRendererEvent): void {
+    if (event.phase === "ready") {
+      this.rendererFailureEvent = undefined;
+      recordEventLogEvent({
+        device: this.udid,
+        source: "capture",
+        kind: "duo.renderer",
+        action: "ready",
+        status: "ok",
+        summary: `Duo renderer ready (${event.firstFrameMs} ms to first frame)`,
+        details: { phase: "ready", "duo.first_frame_ms": event.firstFrameMs },
+      });
+      return;
+    }
+    const { error } = event;
+    logDuoRendererFailure(error);
+    const key = `${error.stage}\u0000${error.reason}`;
+    const reason = redactHome(error.reason);
+    const details = { phase: "failed", stage: error.stage, reason, ...redactHome(error.details) };
+    const previous = this.rendererFailureEvent;
+    if (previous?.key === key && updateEventLogEvent(previous.id, { details: { ...details, count: previous.count + 1 } })) {
+      previous.count++;
+      return;
+    }
+    const entry = recordEventLogEvent({
+      device: this.udid,
+      source: "capture",
+      kind: "duo.renderer",
+      action: "failed",
+      status: "error",
+      summary: `Duo renderer ${error.stage} failed: ${reason}`,
+      details: { ...details, count: 1 },
+    });
+    this.rendererFailureEvent = { id: entry.id, key, count: 1 };
+  }
+
+  /** JSON-safe live state for `/api/diagnostics` / `serve-sim doctor`. */
+  async diagnostics(): Promise<Record<string, unknown>> {
+    let native: unknown = null;
+    if (this.capture.diagnostics) {
+      try {
+        native = JSON.parse(await this.capture.diagnostics());
+      } catch (error) {
+        native = { error: error instanceof Error ? error.message : String(error) };
+      }
+    } else {
+      native = { error: "native capture diagnostics unavailable in this build" };
+    }
+    return {
+      udid: this.udid,
+      phase: this.phase,
+      screen: this.screenConfig(),
+      streams: structuredClone(this.streamHealth),
+      native,
+      duo: {
+        ...this.duo.diagnostics(),
+        primary_panel: this.primaryDuoPanel ?? null,
+        active_panel: this.activePanel(),
+        followed_cover: this.followedCover ?? null,
+      },
+      hid: {
+        device_hub_input_shadowed: this.deviceHubShadowed ?? null,
+        sockets: this.hidSockets.size,
+      },
+    };
+  }
+
+  private handleStreamError(res: ServerResponse, error: unknown, endpoint?: StreamEndpoint): void {
+    const message = redactHome(error instanceof Error ? error.message : String(error));
+    if (endpoint) {
+      this.streamHealth[endpoint].last_error = {
+        at: new Date().toISOString(),
+        message,
+        ...(error instanceof DuoRendererError ? { stage: error.stage } : {}),
+      };
+    }
     if (res.writableEnded || res.destroyed) return;
+    if (error instanceof DuoRendererError && !res.headersSent) {
+      this.sendJson(res, 503, duoRendererErrorBody(error));
+      return;
+    }
     if (res.headersSent) {
       res.destroy(error instanceof Error ? error : new Error(String(error)));
       return;
     }
     this.sendJson(res, 503, {
       error: "capture_unavailable",
-      message: error instanceof Error ? error.message : String(error),
+      message,
     });
   }
 
@@ -864,7 +1305,6 @@ export class DeviceSession {
       "Content-Type": "application/json",
       "Cache-Control": "no-cache, no-store",
       "Content-Length": String(buf.length),
-      ...CORS,
     });
     res.end(buf);
   }
@@ -879,6 +1319,15 @@ const sessions = new Map<string, DeviceSession>();
  * failures are surfaced by stream endpoints and evict the session so the next
  * request can retry. The session otherwise lives until `closeDeviceSession`.
  */
+/** Live sessions only; never creates or starts one (diagnostics must not open capture). */
+export function liveDeviceSessions(udid?: string | null): DeviceSession[] {
+  if (udid) {
+    const session = sessions.get(udid);
+    return session ? [session] : [];
+  }
+  return [...sessions.values()];
+}
+
 export function getDeviceSession(udid: string): DeviceSession {
   let session = sessions.get(udid);
   if (!session) {
@@ -904,4 +1353,17 @@ export function closeDeviceSession(udid: string): void {
     session.close();
     sessions.delete(udid);
   }
+}
+
+/** Native summary JSON for the response header, minus the server temp path. */
+function publicRecordingSummary(summary: string): string {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(summary) as Record<string, unknown>;
+  } catch {
+    return "{}";
+  }
+  delete parsed.path;
+  // Header-safe: JSON.stringify escapes control chars; drop anything non-ASCII.
+  return JSON.stringify(parsed).replace(/[^\x20-\x7e]/g, "");
 }

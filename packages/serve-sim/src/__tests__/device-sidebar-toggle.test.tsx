@@ -14,7 +14,7 @@ describe("DeviceSidebarToggle", () => {
     expect(html).toContain("z-30");
     expect(html).toContain("flex items-center");
     expect(html).toContain("serve-sim");
-    expect(html).toContain("text-white/65");
+    expect(html).toContain("text-ink-65");
     expect(html).toContain(`href="${SERVE_SIM_REPO_URL}"`);
     expect(html).not.toContain("max-[900px]:hidden");
   });

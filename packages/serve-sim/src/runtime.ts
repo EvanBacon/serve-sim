@@ -4,6 +4,7 @@ import { dirname } from "path";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "http";
 import type { Socket } from "net";
 import { createConnection, createServer as createNetServer, type Server as NetServer } from "net";
+import { registerProxiedPeer } from "./request-trust";
 
 export function dirnameOf(metaUrl: string): string {
   return dirname(fileURLToPath(metaUrl));
@@ -25,7 +26,10 @@ export async function isPortFree(port: number): Promise<boolean> {
 }
 
 export interface PreviewServer {
-  stop(force?: boolean): void;
+  /** The bound preview port (resolved when `port: 0` was requested). */
+  port: number;
+  /** Stop listening; resolves once every listener has closed. */
+  stop(force?: boolean): Promise<void>;
 }
 
 /** Connect-style middleware signature, matching what `simMiddleware` returns. */
@@ -37,6 +41,7 @@ type ConnectMiddleware = (
 
 type PreviewMiddleware = ConnectMiddleware & {
   handleUpgrade?: (req: IncomingMessage, socket: Socket, head: Buffer) => void;
+  setServerPort?: (port: number) => void;
 };
 
 function parseHttpRequestHead(buffer: Buffer): {
@@ -83,8 +88,14 @@ function isWebSocketUpgrade(headers: Record<string, string | string[]>): boolean
   return /websocket/i.test(upgradeValue) && /upgrade/i.test(connectionValue);
 }
 
-function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number): void {
-  const upstream = createConnection(port, "127.0.0.1");
+/** @internal Exported for tests; `connectUpstream` is a test hook. */
+export function proxyTcpToHttpServer(
+  socket: Socket,
+  firstChunk: Buffer,
+  port: number,
+  connectUpstream: (port: number) => Socket = (p) => createConnection(p, "127.0.0.1"),
+): void {
+  const upstream = connectUpstream(port);
   const destroyBoth = () => {
     socket.destroy();
     upstream.destroy();
@@ -92,6 +103,17 @@ function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number):
   socket.on("error", destroyBoth);
   upstream.on("error", destroyBoth);
   upstream.on("connect", () => {
+    // The internal server sees this pipe as a loopback client. Record the real
+    // peer so the middleware's trust checks don't treat a LAN or tunnel client
+    // as loopback (see request-trust.ts).
+    // Without a local port the peer can't be recorded, and the request would
+    // read as loopback: fail closed instead of forwarding it.
+    if (typeof upstream.localPort !== "number") {
+      destroyBoth();
+      return;
+    }
+    const unregister = registerProxiedPeer(upstream.localPort, socket.remoteAddress ?? "unknown");
+    upstream.once("close", unregister);
     upstream.write(firstChunk);
     socket.pipe(upstream);
     upstream.pipe(socket);
@@ -101,8 +123,11 @@ function proxyTcpToHttpServer(socket: Socket, firstChunk: Buffer, port: number):
 function createPreviewFrontServer(
   middleware: PreviewMiddleware,
   internalPort: number,
+  sockets: Set<Socket>,
 ): NetServer {
   return createNetServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
     let buffered = Buffer.alloc(0);
     const onData = (chunk: Buffer) => {
       buffered = Buffer.concat([buffered, chunk]);
@@ -175,6 +200,12 @@ export async function servePreview(opts: {
   internalServer.headersTimeout = 0;
   internalServer.requestTimeout = 0;
   internalServer.timeout = 0;
+  // Every open socket (including upgraded ones), so `stop(true)` can drop them.
+  const openSockets = new Set<Socket>();
+  internalServer.on("connection", (socket: Socket) => {
+    openSockets.add(socket);
+    socket.once("close", () => openSockets.delete(socket));
+  });
   internalServer.on("upgrade", (req, socket, head) => {
     if (opts.middleware.handleUpgrade) {
       opts.middleware.handleUpgrade(req, socket as Socket, head);
@@ -206,12 +237,14 @@ export async function servePreview(opts: {
     internalServer.close();
     throw new Error("Failed to bind preview HTTP server");
   }
+  // The server that runs the middleware (the internal one under Bun).
+  opts.middleware.setServerPort?.(internalAddress.port);
 
   let maybeFrontServer: NetServer | undefined;
   if (isBun) {
     // works around a bug where Bun fails to proxy websockets
     // https://github.com/oven-sh/bun/issues/14522
-    const frontServer = createPreviewFrontServer(opts.middleware, internalAddress.port);
+    const frontServer = createPreviewFrontServer(opts.middleware, internalAddress.port, openSockets);
     maybeFrontServer = frontServer;
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error & { code?: string }) => {
@@ -231,10 +264,17 @@ export async function servePreview(opts: {
     });
   }
 
+  const frontAddress = maybeFrontServer?.address();
+  const port = frontAddress && typeof frontAddress === "object" ? frontAddress.port : internalAddress.port;
+  const close = (server: { close(cb: () => void): unknown }) =>
+    new Promise<void>((resolve) => server.close(() => resolve()));
+
   return {
-    stop: () => {
-      internalServer.close()
-      maybeFrontServer?.close()
+    port,
+    stop: async (force) => {
+      const closing = Promise.all([close(internalServer), ...(maybeFrontServer ? [close(maybeFrontServer)] : [])]);
+      if (force) for (const socket of openSockets) socket.destroy();
+      await closing;
     },
   };
 }

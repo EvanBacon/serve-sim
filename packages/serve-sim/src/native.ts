@@ -11,6 +11,7 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { maxBitrateFromEnv } from "./max-bitrate";
 
 const require = createRequire(import.meta.url);
 
@@ -41,16 +42,23 @@ interface SimCaptureHandle {
   stop(): Promise<void>;
   setPreferredScreenSize(width: number, height: number): Promise<void>;
   subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void | Promise<void>>;
+  /** Absent in addons built before diagnostics existed. */
+  diagnostics?(): Promise<string>;
+  snapshotJpeg(): Promise<Uint8Array | null>;
+  /** Absent in addons built before screen recording existed. */
+  startRecording?(path: string, codec: string, fps: number, rotation: number, bitrate: number): Promise<void>;
+  stopRecording?(): Promise<string>;
 }
 
 interface NativeAddon {
   SimHID: new (udid: string, duoHelper: string) => SimHIDHandle;
-  SimCapture: new (udid: string) => SimCaptureHandle;
+  /** maxBitrate: H.264 cap in bits/s, or null for the resolution-scaled default. */
+  SimCapture: new (udid: string, maxBitrate: number | null) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
 }
 
-// (codec, data, width, height, flags) — codec 0=MJPEG 1=AVCC; flags bit0=desc bit1=keyframe.
+// (data, width, height, flags) — codec 0=MJPEG 1=AVCC 2=size-only; flags bit0=desc bit1=keyframe.
 type RawFrameCallback = (
   data: Uint8Array,
   width: number,
@@ -60,11 +68,17 @@ type RawFrameCallback = (
 
 const CODEC_MJPEG = 0;
 const CODEC_AVCC = 1;
+const CODEC_SIZE = 2;
 const FLAG_DESCRIPTION = 1 << 0;
 const FLAG_KEYFRAME = 1 << 1;
 
 export type MjpegFrame = {
   data: Uint8Array;
+  width: number;
+  height: number;
+};
+
+export type ScreenSize = {
   width: number;
   height: number;
 };
@@ -75,6 +89,43 @@ export type AvccFrame = {
   height: number;
   isDescription: boolean;
   isKeyframe: boolean;
+};
+
+export type RecordingCodec = "h264" | "hevc";
+
+export type RecordingStartOptions = {
+  codec: RecordingCodec;
+  /** Constant output frame rate; static stretches repeat the last frame. */
+  fps: number;
+  /** Clockwise display rotation stored as the MP4 track transform. */
+  rotation: number;
+  /** Average bits/s; omitted picks the resolution-scaled default. */
+  bitrate?: number;
+};
+
+/** JSON summary the native recorder returns when a recording is finalized. */
+export type RecordingSummary = {
+  path: string;
+  width: number;
+  height: number;
+  fps: number;
+  codec?: RecordingCodec;
+  bitrate?: number;
+  rotation?: number;
+  /** Frames in the file (CFR: duration × fps). */
+  frames: number;
+  duration: number;
+  /** Frames delivered by capture while recording. */
+  captured?: number;
+  /** Captured frames written at their own slot. */
+  encoded?: number;
+  /** Slots filled by repeating the previous frame (static screen). */
+  repeated?: number;
+  /** Captured frames skipped (faster than fps, or a mid-recording size change). */
+  dropped?: number;
+  /** Of `dropped`, frames shed because the encoder backlog was full. */
+  backlogDropped?: number;
+  startedAt?: string;
 };
 
 export type TouchType = "begin" | "move" | "end";
@@ -213,8 +264,8 @@ export class NativeHid {
 export class NativeCapture {
   private readonly handle: SimCaptureHandle;
 
-  constructor(udid: string) {
-    this.handle = new (load().SimCapture)(udid);
+  constructor(udid: string, maxBitrate: number | undefined = maxBitrateFromEnv()) {
+    this.handle = new (load().SimCapture)(udid, maxBitrate ?? null);
   }
 
   /** Begin capturing. Rejects if the device isn't booted. */
@@ -243,6 +294,49 @@ export class NativeCapture {
         isKeyframe: (flags & FLAG_KEYFRAME) !== 0,
       });
     });
+  }
+
+  /** JSON: display candidates + selection reason, surface-size history, encoder sessions and error counts. */
+  diagnostics(): Promise<string> {
+    if (!this.handle.diagnostics) return Promise.reject(new Error("native capture diagnostics unavailable in this build"));
+    return this.handle.diagnostics();
+  }
+
+  /**
+   * Screen size with the first frame after subscribing and on every change. Encodes
+   * nothing, so a session can track dimensions without paying for JPEG or
+   * H.264 work while nobody is watching.
+   */
+  subscribeSize(onSize: (size: ScreenSize) => void | Promise<void>): Promise<() => void | Promise<void>> {
+    return this.handle.subscribe(CODEC_SIZE, async (_data, width, height) => {
+      await onSize({ width, height });
+    });
+  }
+
+  /** JPEG of the latest frame, encoded on demand; null before the first frame. */
+  snapshotJpeg(): Promise<Uint8Array | null> {
+    return this.handle.snapshotJpeg();
+  }
+
+  /** False for addons built before screen recording existed. */
+  get supportsRecording(): boolean {
+    return typeof this.handle.startRecording === "function" && typeof this.handle.stopRecording === "function";
+  }
+
+  /**
+   * Start recording the screen to an MP4 at `path`: native resolution,
+   * hardware H.264/HEVC straight from the captured frames (no stream
+   * re-encode), placed on a constant `fps` grid by capture time.
+   */
+  startRecording(path: string, options: RecordingStartOptions): Promise<void> {
+    if (!this.handle.startRecording) return Promise.reject(new Error("screen recording unavailable in this native build"));
+    return this.handle.startRecording(path, options.codec, options.fps, options.rotation, options.bitrate ?? 0);
+  }
+
+  /** Finalize the active recording; resolves with its JSON summary string. */
+  stopRecording(): Promise<string> {
+    if (!this.handle.stopRecording) return Promise.reject(new Error("screen recording unavailable in this native build"));
+    return this.handle.stopRecording();
   }
 
   /** Halt frame production. Full teardown happens when this object is GC'd. */

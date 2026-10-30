@@ -4,6 +4,8 @@
 // Mirrors the AXe `type` command's character coverage: A-Z, a-z, 0-9, space,
 // newline, tab, and the standard ASCII punctuation reachable on a US layout.
 
+import WebSocket from "ws";
+
 const LEFT_SHIFT = 0xe1;
 
 // Char → { usage, shift } for US keyboard physical keys.
@@ -71,9 +73,10 @@ export async function sendKeyEventsToWs(
   // iOS coalesces events that arrive in the same tick, so a small gap keeps
   // long strings reliable without making the command noticeably slow.
   perEventDelayMs = 4,
+  headers: Record<string, string> = {},
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl, { headers });
     ws.binaryType = "arraybuffer";
 
     ws.onopen = async () => {

@@ -53,9 +53,12 @@ import {
 import { WebKitDevtoolsPanel } from "./components/webkit-devtools-panel";
 import { useMediaDrop } from "./hooks/use-media-drop";
 import { useMjpegStream } from "./hooks/use-mjpeg-stream";
+import type { StreamError } from "./utils/stream-retry";
 import { useAvccStream } from "./hooks/use-avcc-stream";
 import { useResizableWidth } from "./hooks/use-resizable-width";
 import { useScreenshotToast } from "./hooks/use-screenshot-toast";
+import { useScreenRecording } from "./hooks/use-screen-recording";
+import { RecordToolbarButton } from "./components/record-toolbar-button";
 import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
@@ -68,8 +71,17 @@ import {
   AVCC_FRAME_TIMEOUT_MS,
 } from "./avcc-fallback";
 import { fileExtension } from "./utils/drop";
-import { execOnHost, openHostEventStream } from "./utils/exec";
+import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
+import { requestMetroReload } from "./utils/metro-reload-request";
+import {
+  createSimKeyState,
+  isFormControlTarget,
+  isInteractiveTarget,
+  isReloadShortcut,
+  keepsNativeButtonKey,
+  releaseFocusToSim,
+} from "./utils/sim-keyboard";
 import {
   DEVICE_SIDEBAR_WIDTH,
   DEVTOOLS_PANEL_WIDTH,
@@ -277,9 +289,9 @@ function App() {
         window.__SIM_PREVIEW__ = next;
       } else if (window.__SIM_PREVIEW__) {
         // Keep the minimal injection: the empty state still routes through
-        // simEndpoint (basePath) and authenticates /exec (execToken).
-        const { basePath, execToken } = window.__SIM_PREVIEW__;
-        window.__SIM_PREVIEW__ = { basePath, execToken } as Window["__SIM_PREVIEW__"];
+        // simEndpoint (basePath) and gates host-shell features (allowExec).
+        const { basePath, allowExec } = window.__SIM_PREVIEW__;
+        window.__SIM_PREVIEW__ = { basePath, allowExec } as Window["__SIM_PREVIEW__"];
       }
       return next;
     });
@@ -384,10 +396,10 @@ function App() {
           />
         ) : (
           <div className="flex flex-col items-center gap-3 text-center">
-            <h1 className="text-[18px] m-0 text-white/90">No simulators available</h1>
-            <p className="text-white/55 text-[14px] max-w-120">
+            <h1 className="text-[18px] m-0 text-ink-90">No simulators available</h1>
+            <p className="text-ink-55 text-[14px] max-w-120">
               Create a simulator in Xcode, or start one with{" "}
-              <code className="bg-[#222] px-1.5 py-0.5 rounded text-[13px]">bunx serve-sim --detach</code>.
+              <code className="bg-ink/10 px-1.5 py-0.5 rounded text-[13px]">bunx serve-sim --detach</code>.
             </p>
           </div>
         )}
@@ -545,10 +557,14 @@ function AppWithConfig({
   const useAvccVideo =
     !serverForcesMjpeg && avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
   const mjpeg = useMjpegStream(foldable || useAvccVideo ? null : config.streamUrl);
+  const [duoStreamError, setDuoStreamError] = useState<StreamError | null>(null);
+  const streamError = foldable ? duoStreamError : useAvccVideo ? null : mjpeg.error;
 
-  // Re-arm AVCC whenever the target stream changes (device switch / reconnect).
+  // Re-arm AVCC and drop any stale Duo stream error whenever the target stream
+  // changes (device switch / reconnect).
   useEffect(() => {
     setStreaming(false);
+    setDuoStreamError(null);
     dispatchAvccFallback("reset");
   }, [config.streamUrl, setStreaming]);
   // `streaming` flips true on the first painted AVCC frame (JPEG seed decodes
@@ -861,18 +877,39 @@ function AppWithConfig({
     return () => { if (timer) clearTimeout(timer); es.close(); };
   }, [config.appStateEndpoint]);
 
-  // R to reload the RN/Expo bundle.
+  // Keys the sim currently holds; see createSimKeyState.
+  const [simKeys] = useState(createSimKeyState);
+  const currentAppRef = useRef(currentApp);
+  useEffect(() => {
+    currentAppRef.current = currentApp;
+  }, [currentApp]);
+
+  // Reload the RN/Expo bundle. Prefer asking the app's Metro server (works
+  // with a text field focused, where an R tap would just type "r"). Tap R
+  // only when the server reports it sent nothing (Expo Go, no Metro, Metro
+  // shared with other devices; see metro-reload.ts): Metro doesn't confirm
+  // reloads, so tapping after a sent or timed-out request could reload twice.
+  // RN handles the R tap when nothing is first responder.
   // expo-go https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/apps/expo-go/ios/Exponent/Kernel/DevSupport/EXKernelDevKeyCommands.m#L236
   // dev-client https://github.com/expo/expo/blob/f043020ffffd39fabb7684d52937d349f1ddc148/packages/expo-dev-menu/ios/Interceptors/DevMenuKeyCommandsInterceptor.swift#L46
   // react-native https://github.com/react/react-native/blob/c1652651c09506b8dda0b9515b5f0e5829220f0d/packages/react-native/React/Base/RCTKeyCommands.m#L69-L74
+  const reloadEndpoint =
+    config.reloadEndpoint ?? `${simEndpoint("reload")}?device=${encodeURIComponent(config.device)}`;
   const sendReactNativeReload = useCallback(async () => {
-    const R = 0x15;
-    sendKey("down", R);
+    const bundleId = currentAppRef.current?.bundleId;
+    if (bundleId && (await requestMetroReload(reloadEndpoint, bundleId)) !== "not-sent") return;
+    const { release, tap } = simKeys.reloadEvents();
+    for (const ev of release) sendKey(ev.type, ev.usage);
+    sendKey("down", tap);
     await new Promise((r) => setTimeout(r, 30));
-    sendKey("up", R);
-  }, [sendKey]);
+    sendKey("up", tap);
+    for (const ev of simKeys.restoreEvents()) sendKey(ev.type, ev.usage);
+  }, [sendKey, simKeys, reloadEndpoint]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
+  // The action toolbar under the device (reload, home, ...) is sim chrome:
+  // clicking it must not move keyboard focus away from the simulator.
+  const simActionsRef = useRef<HTMLDivElement | null>(null);
   const [deviceRenderedWidth, setDeviceRenderedWidth] = useState(0);
   const [deviceRenderedHeight, setDeviceRenderedHeight] = useState(0);
   useEffect(() => {
@@ -889,11 +926,15 @@ function AppWithConfig({
   const [simFocused, setSimFocused] = useState(true);
   const simFocusedRef = useRef(true);
   simFocusedRef.current = simFocused;
-  const pressedKeysRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     const onPointerDown = (e: PointerEvent) => {
-      const inside = !!simContainerRef.current?.contains(e.target as Node);
+      const target = e.target as Node;
+      const inSim = !!simContainerRef.current?.contains(target);
+      if (inSim) releaseFocusToSim(document);
+      const inside =
+        inSim ||
+        (!!simActionsRef.current?.contains(target) && !isFormControlTarget(target));
       setSimFocused(inside);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
@@ -902,15 +943,26 @@ function AppWithConfig({
 
   useEffect(() => {
     if (simFocused) return;
-    const held = pressedKeysRef.current;
-    if (held.size === 0) return;
-    for (const usage of held) sendWs(0x06, { type: "up", usage });
-    held.clear();
-  }, [simFocused, sendWs]);
+    for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
+  }, [simFocused, sendWs, simKeys]);
+
+  // Keyups that happen while the window is in the background never reach
+  // us (e.g. Cmd+Tab away), so lift everything the sim holds on blur.
+  useEffect(() => {
+    const onBlur = () => {
+      for (const ev of simKeys.releaseAll()) sendWs(0x06, ev);
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [sendWs, simKeys]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
+      // A focused form control (e.g. the Duo hinge slider) keeps its keys.
+      if (isFormControlTarget(e.target)) return;
+      // A focused button or link (toolbar or elsewhere) keeps Enter/Space/Tab.
+      if (keepsNativeButtonKey(e.code) && isInteractiveTarget(e.target)) return;
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) sendWs(0x04, { button: "home" });
@@ -926,10 +978,7 @@ function AppWithConfig({
       if (e.code === "KeyA" && e.metaKey && e.shiftKey) {
         e.preventDefault();
         if (type === "down" && !e.repeat) {
-          execOnHost(`xcrun simctl ui ${config.device} appearance`).then((r) => {
-            const next = r.stdout.trim() === "dark" ? "light" : "dark";
-            return execOnHost(`xcrun simctl ui ${config.device} appearance ${next}`);
-          }).catch(() => {});
+          hostAction("toggleAppearance", { udid: config.device }).catch(() => {});
         }
         return;
       }
@@ -938,12 +987,15 @@ function AppWithConfig({
         if (type === "down" && !e.repeat) sendWs(0x0c, {});
         return;
       }
+      if (isReloadShortcut(e) && currentAppRef.current?.isReactNative) {
+        e.preventDefault();
+        if (type === "down" && !e.repeat) void sendReactNativeReload();
+        return;
+      }
       const usage = hidUsageForCode(e.code);
       if (usage == null) return;
       e.preventDefault();
-      if (type === "down") pressedKeysRef.current.add(usage);
-      else pressedKeysRef.current.delete(usage);
-      sendWs(0x06, { type, usage });
+      for (const ev of simKeys.forward(type, usage)) sendWs(0x06, ev);
     };
     const down = (e: KeyboardEvent) => onKey(e, "down");
     const up = (e: KeyboardEvent) => onKey(e, "up");
@@ -953,12 +1005,13 @@ function AppWithConfig({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device, rotateBy]);
+  }, [sendWs, config.device, rotateBy, sendReactNativeReload, simKeys]);
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
+  const screenRecording = useScreenRecording(config.device);
   const mediaDrop = useMediaDrop({
-    exec: execOnHost,
+    host: hostAction,
     udid: config.device,
     enabled: streaming,
     onUploadStart: uploads.add,
@@ -1040,7 +1093,7 @@ function AppWithConfig({
         }}
       >
         <SimulatorToolbar
-          exec={execOnHost}
+          exec={noHostShell}
           onRotate={rotateDevice}
           orientation={currentOrientation}
           deviceUdid={config.device}
@@ -1071,7 +1124,7 @@ function AppWithConfig({
               maxWidth: "min(230px, calc(100vw - 170px))",
             }}
           />
-          <StreamStatusPill streaming={streaming} />
+          <StreamStatusPill streaming={streaming} error={streamError} />
         </SimulatorToolbar>
         <div
           ref={simContainerRef}
@@ -1088,7 +1141,7 @@ function AppWithConfig({
         >
           {(() => {
             if (foldable) return <DuoThreeDView url={config.streamUrl.replace("stream.mjpeg", "stream.3d.mjpeg")}
-              projection={duoProjection} screenConfig={activeStreamConfig} onStreamingChange={setStreaming} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
+              projection={duoProjection} screenConfig={activeStreamConfig} onStreamingChange={setStreaming} onStreamError={setDuoStreamError} onHardwarePress={onDuoHardwarePress} onTouch={onStreamTouch} onMultiTouch={onStreamMultiTouch}
               onError={() => toast.error("Device rendering is unavailable. Check the selected Xcode and server log.")}>
               {axOverlayEnabled && duoProjection && <AxDomOverlay projection={duoProjection} screenConfig={activeStreamConfig} />}
             </DuoThreeDView>;
@@ -1169,7 +1222,7 @@ function AppWithConfig({
               // No backdrop-blur here: the canvas underneath repaints every
               // stream frame, and backdrop-filter forces a full re-blur per
               // frame for the whole drag — the tint alone stays cheap.
-              className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-accent bg-[rgba(99,102,241,0.18)] text-accent pointer-events-none z-20"
+              className="absolute inset-0 flex flex-col items-center justify-center gap-2 border-2 border-dashed border-[#a5b4fc] bg-[rgba(99,102,241,0.18)] text-[#a5b4fc] pointer-events-none z-20"
               style={{ borderRadius: useChrome ? undefined : imgBorderRadius }}
             >
               <Upload size={32} strokeWidth={1.5} />
@@ -1199,9 +1252,9 @@ function AppWithConfig({
             </>
           )}
         </div>
-        <div className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
+        <div ref={simActionsRef} className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
           <SimulatorToolbar
-            exec={execOnHost}
+            exec={noHostShell}
             onRotate={rotateDevice}
             orientation={currentOrientation}
             deviceUdid={config.device}
@@ -1224,17 +1277,24 @@ function AppWithConfig({
               {currentApp?.isReactNative && (
                 <SimulatorToolbar.Button
                   aria-label="Reload React Native bundle"
-                  title="Reload (R)"
+                  title="Reload (R, ⌘R)"
                   onClick={() => void sendReactNativeReload()}
                 >
                   <ReloadIcon />
                 </SimulatorToolbar.Button>
               )}
-              <SimulatorToolbar.HomeButton title="Home" />
+              <SimulatorToolbar.HomeButton
+                title="Home"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void hostAction("home", { udid: config.device, watch: deviceType === "watch" });
+                }}
+              />
               <SimulatorToolbar.ScreenshotButton
                 title="Screenshot"
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
+              <RecordToolbarButton state={screenRecording.state} onToggle={screenRecording.toggle} />
               <SimulatorToolbar.RotateButton title="Rotate device" />
               {!foldable && !!activeChrome && (
                 <ChromeToolbarButton
@@ -1249,7 +1309,7 @@ function AppWithConfig({
                     streaming={streaming}
                     onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
                   />
-                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-white/15" />
+                  <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-ink/15" />
                   <DeviceHingeControls
                     orientation={currentOrientation}
                     angle={hingeAngle}
@@ -1262,7 +1322,7 @@ function AppWithConfig({
           </SimulatorToolbar>
           {!foldable && (
             <SimulatorToolbar
-              exec={execOnHost}
+              exec={noHostShell}
               onRotate={rotateDevice}
               orientation={currentOrientation}
               deviceUdid={config.device}
@@ -1293,14 +1353,14 @@ function AppWithConfig({
 
       {/* Right-edge rail: tools + WebKit DevTools. */}
       <div
-        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-white/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || devtoolsOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
+        className={`fixed top-3 right-3 flex flex-col gap-1 p-1 bg-panel-bg border border-ink/8 rounded-[10px] backdrop-blur-[12px] [-webkit-backdrop-filter:blur(12px)] [transition:opacity_0.18s_ease] z-40 ${(panelOpen || devtoolsOpen) ? "opacity-0 pointer-events-none" : "opacity-100 pointer-events-auto"}`}
       >
         <button
           onClick={() => {
             setDevtoolsOpen(false);
             setPanelOpen((o) => !o);
           }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-icon cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink"
           aria-label="Open tools panel"
           aria-pressed={panelOpen}
           title="Tools"
@@ -1312,7 +1372,7 @@ function AppWithConfig({
             setPanelOpen(false);
             setDevtoolsOpen((o) => !o);
           }}
-          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+          className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-icon cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink"
           aria-label="Open WebKit DevTools"
           aria-pressed={devtoolsOpen}
           title="WebKit DevTools"

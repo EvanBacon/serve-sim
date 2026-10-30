@@ -44,12 +44,14 @@ describe("selectServeSimState", () => {
 describe("previewConfigForState", () => {
   test("returns the full client config shape with device-scoped endpoints", () => {
     const state = states[1]!;
-    expect(previewConfigForState(state, "/preview", "/bin/serve-sim", "token-xyz")).toEqual({
+    expect(previewConfigForState(state, "/preview", "/bin/serve-sim", true)).toEqual({
       ...state,
       basePath: "/preview",
       appStateEndpoint: "/preview/appstate?device=DEVICE-B",
+      reloadEndpoint: "/preview/reload?device=DEVICE-B",
       eventLogEndpoint: "/preview/api/event-log?device=DEVICE-B",
       eventLogEventsEndpoint: "/preview/api/event-log/events?device=DEVICE-B",
+      diagnosticsEndpoint: "/preview/api/diagnostics?device=DEVICE-B",
       axEndpoint: "/preview/ax?device=DEVICE-B",
       cameraStatusEndpoint: "/preview/helper/DEVICE-B/camera/status",
       devtoolsEndpoint: "/preview/devtools?device=DEVICE-B",
@@ -59,19 +61,25 @@ describe("previewConfigForState", () => {
       gridShutdownEndpoint: "/preview/grid/api/shutdown",
       gridMemoryEndpoint: "/preview/grid/api/memory",
       previewEndpoint: "/preview",
-      execToken: "token-xyz",
+      allowExec: true,
     });
+  });
+
+  test("never carries an exec token; omits allowExec unless enabled", () => {
+    const config = previewConfigForState(states[0]!, "/preview", "", undefined);
+    expect("execToken" in config).toBe(false);
+    expect("allowExec" in config).toBe(false);
   });
 
   test("omits codec when none is pinned", () => {
     expect(
-      "codec" in previewConfigForState(states[0]!, "/preview", "/bin/serve-sim", "token-xyz"),
+      "codec" in previewConfigForState(states[0]!, "/preview", "/bin/serve-sim", true),
     ).toBe(false);
   });
 
   test("pins the stream codec in the client config", () => {
     expect(
-      previewConfigForState(states[0]!, "/preview", "/bin/serve-sim", "token-xyz", "mjpeg").codec,
+      previewConfigForState(states[0]!, "/preview", "/bin/serve-sim", true, "mjpeg").codec,
     ).toBe("mjpeg");
   });
 
@@ -81,7 +89,7 @@ describe("previewConfigForState", () => {
         states[0]!,
         "/preview",
         "/bin/serve-sim",
-        "token-xyz",
+        true,
         undefined,
         false,
         { panes: ["devices", "tools"], fit: true },
@@ -91,7 +99,7 @@ describe("previewConfigForState", () => {
 
   test("builds the camera status endpoint correctly at the root mount", () => {
     expect(
-      previewConfigForState(states[0]!, "", "/bin/serve-sim", "token-xyz").cameraStatusEndpoint,
+      previewConfigForState(states[0]!, "", "/bin/serve-sim", true).cameraStatusEndpoint,
     ).toBe("/helper/DEVICE-A/camera/status");
   });
 });

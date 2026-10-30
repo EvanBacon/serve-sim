@@ -1,6 +1,6 @@
 import { LocationEmulationTool } from "../location-emulation-tool";
 import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "../Panel";
-import { execOnHost } from "../utils/exec";
+import { hostAction } from "../utils/exec";
 import { AppDetectionTool } from "./app-detection-tool";
 import { AppPermissionsTool } from "./app-permissions-tool";
 import { AxTreeTool } from "./ax-tree-tool";
@@ -62,7 +62,7 @@ export function ToolsPanel({
             onToggleOverlay={onToggleAxOverlay}
           />
           <CameraTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
-          <LocationEmulationTool udid={udid} exec={execOnHost} />
+          <LocationEmulationTool udid={udid} host={hostAction} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <StreamSettingsTool
             preference={codecPreference}

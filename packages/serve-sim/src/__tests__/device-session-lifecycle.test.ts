@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "events";
 import { createServer, type Server } from "http";
+import { homedir } from "os";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import {
@@ -33,6 +34,30 @@ describe("DeviceSession capture lifecycle", () => {
     expect((await fetch(`${baseUrl}/health`)).status).toBe(200);
   });
 
+  for (const [kind, thrown] of [
+    ["Error", () => new Error(`dlopen ${homedir()}/Library/x.dylib: not found`)],
+    ["non-Error", () => `dlopen ${homedir()}/Library/x.dylib: not found`],
+  ] as const) {
+    test(`redacts the home from a ${kind} stream error in last_error and the 503 body`, async () => {
+      const session = new DeviceSession("TEST-UDID", dependencies({
+        start: async () => { throw thrown(); },
+      }));
+      const baseUrl = await serve(session);
+
+      const response = await fetch(`${baseUrl}/stream.mjpeg`);
+      expect(response.status).toBe(503);
+      const body = await response.text();
+      expect(body).not.toContain(homedir());
+      expect(JSON.parse(body)).toEqual({
+        error: "capture_unavailable",
+        message: "dlopen ~/Library/x.dylib: not found",
+      });
+      const streams = (await session.diagnostics()).streams as Record<string, { last_error?: { message: string } }>;
+      expect(streams.mjpeg!.last_error!.message).toBe("dlopen ~/Library/x.dylib: not found");
+      expect(JSON.stringify(streams)).not.toContain(homedir());
+    });
+  }
+
   test("closing while capture starts cannot resurrect or crash the session", async () => {
     let rejectStart!: (error: Error) => void;
     let notifyStartCalled!: () => void;
@@ -58,16 +83,18 @@ describe("DeviceSession capture lifecycle", () => {
     expect((await fetch(`${baseUrl}/health`)).status).toBe(200);
   });
 
-  test("a static simulator replays its cached JPEG to keep MJPEG clients live", async () => {
-    const callbacks: Array<(frame: { data: Uint8Array; width: number; height: number }) => Promise<void>> = [];
+  test("a static simulator replays its last JPEG to keep MJPEG clients live", async () => {
+    let snapshots = 0;
     const session = new DeviceSession("TEST-UDID", dependencies({
+      // Subscribing forces one native frame; after that a static screen
+      // produces none, so the client must be kept live by replaying it.
       subscribeMjpeg: async (callback) => {
-        callbacks.push(callback);
+        void callback({ data: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), width: 10, height: 20 });
         return () => {};
       },
+      snapshotJpeg: async () => { snapshots++; return null; },
     }));
     await session.start();
-    await callbacks[0]!({ data: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), width: 10, height: 20 });
 
     const baseUrl = await serve(session);
     const controller = new AbortController();
@@ -90,6 +117,9 @@ describe("DeviceSession capture lifecycle", () => {
     session.close();
 
     expect(wire.match(/Content-Length:/g)?.length).toBeGreaterThanOrEqual(2);
+    // A non-foldable MJPEG viewer starts from the forced native frame; it
+    // never waits on a separate snapshot encode.
+    expect(snapshots).toBe(0);
   });
 
   test("holds a native JPEG buffer until HTTP backpressure drains", async () => {
@@ -107,7 +137,7 @@ describe("DeviceSession capture lifecycle", () => {
       { url: "/stream.mjpeg" } as IncomingMessage,
       response as unknown as ServerResponse,
     );
-    await waitFor(() => callbacks.length === 2);
+    await waitFor(() => callbacks.length === 1);
 
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
     response.onWrite = (chunk) => {
@@ -116,7 +146,7 @@ describe("DeviceSession capture lifecycle", () => {
       return false;
     };
     let callbackSettled = false;
-    const delivery = callbacks[1]!({
+    const delivery = callbacks[0]!({
       data: jpeg,
       width: 10,
       height: 20,
@@ -186,13 +216,14 @@ describe("DeviceSession capture lifecycle", () => {
 
   test("closing a session terminates active streams and unsubscribes them", async () => {
     const callbacks: Array<(frame: { data: Uint8Array; width: number; height: number }) => Promise<void>> = [];
-    const unsubscribed: number[] = [];
+    const unsubscribed: string[] = [];
     const session = new DeviceSession("TEST-UDID", dependencies({
       subscribeMjpeg: async (callback) => {
         callbacks.push(callback);
-        const subscription = callbacks.length;
+        const subscription = `mjpeg${callbacks.length}`;
         return () => { unsubscribed.push(subscription); };
       },
+      subscribeSize: async () => () => { unsubscribed.push("size"); },
     }));
     await session.start();
 
@@ -201,11 +232,82 @@ describe("DeviceSession capture lifecycle", () => {
       { url: "/stream.mjpeg" } as IncomingMessage,
       response as unknown as ServerResponse,
     );
-    await waitFor(() => callbacks.length === 2);
+    await waitFor(() => callbacks.length === 1);
 
     session.close();
     await waitFor(() => response.destroyed && unsubscribed.length === 2);
-    expect(unsubscribed.sort()).toEqual([1, 2]);
+    expect(unsubscribed.sort()).toEqual(["mjpeg1", "size"]);
+  });
+
+  test("a non-foldable session encodes no JPEGs until an MJPEG client connects", async () => {
+    let mjpegSubscriptions = 0;
+    let sizeSubscriptions = 0;
+    const session = new DeviceSession("TEST-UDID", dependencies({
+      subscribeMjpeg: async () => { mjpegSubscriptions++; return () => {}; },
+      subscribeSize: async () => { sizeSubscriptions++; return () => {}; },
+    }));
+    await session.start();
+    expect(sizeSubscriptions).toBe(1);
+    expect(mjpegSubscriptions).toBe(0);
+    session.close();
+  });
+
+  test("size updates drive the screen config pushed to HID sockets", async () => {
+    let onSize!: (size: { width: number; height: number }) => void;
+    const sent: Buffer[] = [];
+    const session = new DeviceSession("TEST-UDID", dependencies({
+      subscribeSize: async (callback) => { onSize = callback; return () => {}; },
+    }));
+    await session.start();
+    session.attachHidSocket({ send(data) { sent.push(data); }, close() {}, on() {} });
+    onSize({ width: 1206, height: 2622 });
+    expect(session.screenConfig()).toMatchObject({ width: 1206, height: 2622 });
+    expect(sent.some((frame) => frame[0] === 0x82 && frame.subarray(1).toString().includes("1206"))).toBe(true);
+    session.close();
+  });
+
+  test("AVCC clients are seeded with a one-shot JPEG snapshot", async () => {
+    const seed = new Uint8Array([0xff, 0xd8, 0x01, 0xff, 0xd9]);
+    let avccSubscribed = false;
+    const session = new DeviceSession("TEST-UDID", dependencies({
+      snapshotJpeg: async () => seed,
+      subscribeAvcc: async () => { avccSubscribed = true; return () => {}; },
+    }));
+    await session.start();
+    const response = new FakeServerResponse();
+    session.handleAvcc({} as IncomingMessage, response as unknown as ServerResponse);
+    await waitFor(() => avccSubscribed && response.chunks.length > 0);
+    const wire = Buffer.concat(response.chunks);
+    expect(wire.readUInt32BE(0)).toBe(seed.length + 1);
+    expect(wire[4]).toBe(0x04);
+    expect(wire.subarray(5, 5 + seed.length).equals(Buffer.from(seed))).toBe(true);
+    response.emit("close");
+    session.close();
+  });
+
+  test("an AVCC seed that resolves after the first H.264 chunk is dropped", async () => {
+    let resolveSnapshot!: (jpeg: Uint8Array) => void;
+    let snapshotRequested = false;
+    const chunk = new Uint8Array([0, 0, 0, 2, 0x01, 0x42]);
+    const session = new DeviceSession("TEST-UDID", dependencies({
+      snapshotJpeg: () => {
+        snapshotRequested = true;
+        return new Promise((resolve) => { resolveSnapshot = resolve; });
+      },
+      subscribeAvcc: async (callback) => {
+        await callback({ data: chunk, width: 10, height: 20, isDescription: true, isKeyframe: false });
+        return () => {};
+      },
+    }));
+    await session.start();
+    const response = new FakeServerResponse();
+    session.handleAvcc({} as IncomingMessage, response as unknown as ServerResponse);
+    await waitFor(() => snapshotRequested && response.chunks.length > 0);
+    resolveSnapshot(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(Buffer.concat(response.chunks).equals(Buffer.from(chunk))).toBe(true);
+    response.emit("close");
+    session.close();
   });
 });
 
@@ -445,11 +547,13 @@ test("3D attach and hinge updates render cached frames; stale worker failures ca
   const first = new FakeServerResponse();
   session.handleDuoMjpeg({ url: "/stream.3d.mjpeg?raw=1" } as IncomingMessage, first as unknown as ServerResponse);
   await waitFor(() => workers[0]?.angles.length === 1);
-  expect(first.headers["Content-Type"]).toBe("application/octet-stream");
+  // Headers wait for the first PNG so setup failures can still become a 503.
+  expect(first.headersSent).toBe(false);
   first.destroy();
   const second = new FakeServerResponse();
   session.handleDuoMjpeg({} as IncomingMessage, second as unknown as ServerResponse);
   await waitFor(() => second.chunks.length > 0);
+  expect(second.headers["Content-Type"]).toBe("multipart/x-mixed-replace; boundary=frame");
   workers[0]!.reject!(new Error("old worker exited"));
   update({ hingeDegrees: 140, orientations: {} });
   await waitFor(() => workers[1]!.angles.includes(140));
@@ -566,6 +670,8 @@ function dependencies(
       stop: async () => {},
       subscribeMjpeg: async () => () => {},
       subscribeAvcc: async () => () => {},
+      subscribeSize: async () => () => {},
+      snapshotJpeg: async () => null,
       setPreferredScreenSize: async () => {},
       ...captureOverrides,
     },

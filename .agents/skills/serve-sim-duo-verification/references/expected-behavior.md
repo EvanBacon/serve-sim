@@ -34,6 +34,9 @@ Use [verification.md](verification.md) for historical validation; its earlier
 
 - [ ] Folded (0°), semi-folded (130°), and fully open (180°) presets work. Holding
   Alt exposes the continuous hinge slider.
+- [ ] The fold-pose toolbar group has exactly three buttons, Closed · Book ·
+  Open, each with its own icon. `DUO_POSES` in `device-pose.ts` is the only
+  pose list; no tent/tabletop or other hinge presets appear as buttons.
 - [ ] Pinch must not change the hinge angle. Folding is controlled by pose
   buttons or the Alt slider; two-finger screen input remains available to apps.
 - [ ] Named fold transitions render continuously between hinge-monitor samples.
@@ -140,7 +143,7 @@ Relevant automated suites in `packages/serve-sim/src/__tests__`:
 
 | Area | Suites |
 | --- | --- |
-| One-mode preview and pose toolbar | `duo-preview.test.ts`, `device-hinge-controls.test.tsx` |
+| One-mode preview and pose toolbar | `duo-preview.test.ts`, `device-hinge-controls.test.tsx`, `duo-pose-buttons.test.tsx` |
 | Physical anchors, rotation, pose identity | `duo-controls-position.test.ts` |
 | Bent-screen touch mapping | `duo-projection.test.ts`, `duo-ax-frame.test.ts`, `duo-home-gesture.test.ts` |
 | Static-frame redraw, rotation, one-shot ≤1500 settle sharpen, lifecycle | `device-session-lifecycle.test.ts`, `duo-preview-stream.test.ts` |

@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createServer, type Server } from "http";
+import type { AddressInfo, Socket } from "net";
 import { clearEventLogForTests, recordEventLogEvent } from "../event-log";
 import { simMiddleware } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
@@ -12,17 +14,25 @@ import { servePreview, type PreviewServer } from "../runtime";
 // is built on `ws` (Bun substitutes its native implementation).
 
 const PORT = 3461;
-const TOKEN = "exec-ws-test-token";
+const PORT_NO_EXEC = 3462;
+const EXEC_TOKEN = "exec-ws-test-token";
 
 let server: PreviewServer;
+let noExecServer: PreviewServer;
 
 beforeAll(async () => {
-  const middleware = simMiddleware({ basePath: "/", execToken: TOKEN, device: "DEVICE-A" });
+  const middleware = simMiddleware({ basePath: "/", allowExec: true, execToken: EXEC_TOKEN, device: "DEVICE-A" });
   server = await servePreview({ port: PORT, middleware, host: "127.0.0.1" });
+  noExecServer = await servePreview({
+    port: PORT_NO_EXEC,
+    middleware: simMiddleware({ basePath: "/", execToken: EXEC_TOKEN, device: "DEVICE-A" }),
+    host: "127.0.0.1",
+  });
 });
 
 afterAll(() => {
   server?.stop(true);
+  noExecServer?.stop(true);
 });
 
 interface Reply {
@@ -36,14 +46,18 @@ interface Reply {
   data?: string;
 }
 
-function connect(token: string): Promise<{
+function connect(port = PORT, first: Record<string, unknown> = {}, host = `127.0.0.1:${port}`): Promise<{
   next: () => Promise<Reply>;
   send: (body: Record<string, unknown>) => void;
   close: () => void;
   closed: Promise<void>;
 }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/exec-ws`);
+    // Browsers always send Origin on WebSocket upgrades, and the control
+    // channel requires it (loopback same-origin for shell access).
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/exec-ws`, {
+      headers: { Host: host, Origin: `http://${host}` },
+    } as never);
     const queue: Reply[] = [];
     const waiters: Array<(r: Reply) => void> = [];
     let closeResolve: () => void;
@@ -53,7 +67,9 @@ function connect(token: string): Promise<{
     const timer = setTimeout(() => reject(new Error("connect timeout")), 5000);
     ws.onopen = () => {
       clearTimeout(timer);
-      ws.send(JSON.stringify({ token }));
+      // The page holds no exec token, so its first frame is `{}`; only a
+      // local process that read the token file sends `{token}`.
+      ws.send(JSON.stringify(first));
       resolve({
         next: () =>
           new Promise<Reply>((r, rej) => {
@@ -85,8 +101,8 @@ function connect(token: string): Promise<{
 }
 
 describe("exec-ws control channel", () => {
-  test("authenticates and runs a shell exec", async () => {
-    const channel = await connect(TOKEN);
+  test("runs a shell exec for a loopback socket holding the exec token (allowExec)", async () => {
+    const channel = await connect(PORT, { token: EXEC_TOKEN });
     expect((await channel.next()).ready).toBe(true);
     channel.send({ id: 1, command: "echo channel-works" });
     const reply = await channel.next();
@@ -96,13 +112,44 @@ describe("exec-ws control channel", () => {
     channel.close();
   });
 
-  test("rejects a bad token by closing the socket", async () => {
-    const channel = await connect("wrong-token");
-    await channel.closed;
+  test("refuses shell execs from the token-less page, even with allowExec", async () => {
+    for (const first of [{}, { token: "wrong" }]) {
+      const channel = await connect(PORT, first);
+      expect((await channel.next()).ready).toBe(true);
+      channel.send({ id: 1, command: "echo should-not-run" });
+      const reply = await channel.next();
+      expect(reply.id).toBe(1);
+      expect(reply.exitCode).toBe(126);
+      expect(reply.error).toBe("exec requires the exec token");
+      expect(reply.stdout).not.toContain("should-not-run");
+      channel.close();
+    }
+  });
+
+  test("refuses shell execs unless the server opted in with allowExec", async () => {
+    const channel = await connect(PORT_NO_EXEC, { token: EXEC_TOKEN });
+    expect((await channel.next()).ready).toBe(true);
+    channel.send({ id: 1, command: "echo should-not-run" });
+    const reply = await channel.next();
+    expect(reply.id).toBe(1);
+    expect(reply.exitCode).toBe(126);
+    expect(reply.error).toBe("exec disabled; start with --allow-exec");
+    expect(reply.stdout).not.toContain("should-not-run");
+    channel.close();
+  });
+
+  test("host actions reject unknown methods and invalid params", async () => {
+    const channel = await connect(PORT_NO_EXEC);
+    await channel.next(); // ready
+    channel.send({ id: 3, rpc: { method: "exec", params: { command: "echo nope" } } });
+    expect((await channel.next()).error).toMatch(/unknown method/);
+    channel.send({ id: 4, rpc: { method: "home", params: { udid: "booted; echo nope" } } });
+    expect((await channel.next()).error).toBe("invalid udid");
+    channel.close();
   });
 
   test("ui requests validate their payload", async () => {
-    const channel = await connect(TOKEN);
+    const channel = await connect();
     await channel.next(); // ready
     channel.send({ id: 2, ui: { device: "not a udid!!", option: "appearance" } });
     const reply = await channel.next();
@@ -112,7 +159,7 @@ describe("exec-ws control channel", () => {
   });
 
   test("sse subscriptions reject paths outside the allowlist", async () => {
-    const channel = await connect(TOKEN);
+    const channel = await connect();
     await channel.next(); // ready
     channel.send({ sub: 7, path: "/exec" });
     const reply = await channel.next();
@@ -122,8 +169,39 @@ describe("exec-ws control channel", () => {
     channel.close();
   });
 
+  test("sse subscriptions reject control characters and non-latin1 paths", async () => {
+    const channel = await connect();
+    await channel.next(); // ready
+    const guarded = [
+      "/api/events?device=a\r\nX-Injected: 1",
+      "/api/events?device=\u0000",
+      "/api/events?device=\u007f",
+      "/api/events?device=a b",
+      "/api/events\r\nX-Injected: 1",
+      "api/events",
+    ];
+    let sub = 20;
+    for (const path of guarded) {
+      channel.send({ sub, path });
+      const reply = await channel.next();
+      expect({ path, sub: reply.sub, end: reply.end, error: reply.error }).toEqual({
+        path,
+        sub,
+        end: true,
+        error: "path not allowed",
+      });
+      sub++;
+    }
+    channel.send({ sub, path: "/api/events?device=\u0100" });
+    const reply = await channel.next();
+    expect(reply.sub).toBe(sub);
+    expect(reply.end).toBe(true);
+    expect(reply.error).toBe("bad path");
+    channel.close();
+  });
+
   test("sse subscription streams a real middleware route", async () => {
-    const channel = await connect(TOKEN);
+    const channel = await connect();
     await channel.next(); // ready
     channel.send({ sub: 8, path: "/api/events" });
     // /api/events sends an initial SSE payload immediately on connect.
@@ -189,7 +267,7 @@ describe("exec-ws control channel", () => {
       summary: "Button home",
     });
 
-    const channel = await connect(TOKEN);
+    const channel = await connect();
     await channel.next(); // ready
     channel.send({ sub: 9, path: "/api/event-log/events?device=DEVICE-A" });
     let reply = await channel.next();
@@ -204,5 +282,53 @@ describe("exec-ws control channel", () => {
     expect(payload.events?.map((event) => event.summary)).toEqual(["Button home"]);
     channel.send({ unsub: 9 });
     channel.close();
+  });
+
+  test("sse loopback uses the server's bound port, never the Host header", async () => {
+    // A decoy listener on the port a hostile Host header names.
+    let decoyHits = 0;
+    const decoy = createServer((_req, res) => {
+      decoyHits++;
+      res.end();
+    });
+    await new Promise<void>((r) => decoy.listen(0, "127.0.0.1", r));
+    const decoyPort = (decoy.address() as AddressInfo).port;
+    const listen = (middleware: ReturnType<typeof simMiddleware>) =>
+      new Promise<Server>((resolve) => {
+        const server = createServer((req, res) => void middleware(req, res));
+        // Simulate a runtime whose upgrade socket has no local port.
+        server.on("upgrade", (req, socket, head) => {
+          Object.defineProperty(socket, "localPort", { get: () => undefined });
+          middleware.handleUpgrade(req, socket as Socket, head);
+        });
+        server.listen(0, "127.0.0.1", () => resolve(server));
+      });
+    const portOf = (server: Server) => (server.address() as AddressInfo).port;
+    const withPort = simMiddleware({ basePath: "/", device: "DEVICE-A" });
+    const withoutPort = simMiddleware({ basePath: "/", device: "DEVICE-A" });
+    const known = await listen(withPort);
+    const unknown = await listen(withoutPort);
+    withPort.setServerPort(portOf(known));
+    try {
+      const channel = await connect(portOf(known), {}, `127.0.0.1:${decoyPort}`);
+      await channel.next(); // ready
+      channel.send({ sub: 10, path: "/api/events" });
+      const reply = await channel.next();
+      expect(reply.sub).toBe(10);
+      expect(typeof reply.data).toBe("string");
+      channel.close();
+
+      const blind = await connect(portOf(unknown), {}, `127.0.0.1:${decoyPort}`);
+      await blind.next(); // ready
+      blind.send({ sub: 11, path: "/api/events" });
+      expect(await blind.next()).toEqual({ sub: 11, end: true, error: "no local port" });
+      blind.close();
+      expect(decoyHits).toBe(0);
+    } finally {
+      for (const server of [decoy, known, unknown]) {
+        server.closeAllConnections();
+        server.close();
+      }
+    }
   });
 });

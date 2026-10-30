@@ -14,7 +14,7 @@ const config = {
   port: 3200,
   device: "DEVICE-A",
   basePath: "",
-  execToken: "token",
+  allowExec: true,
 };
 
 describe("selected stream config recovery", () => {
