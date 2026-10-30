@@ -172,12 +172,20 @@ const touch = (type, x, y) => frame(0x03, { type, x, y });
 // `serve-sim --list -q` -> .wsUrl. Add { headers: { Authorization: `Bearer ${token}` } } for a remote server.
 const ws = new WebSocket("ws://127.0.0.1:<port>/helper/<udid>/ws");
 // Wait for the first 0x82 config frame: the screen is ready for input.
-await new Promise((resolve) => {
-  ws.on("message", function onMsg(data) {
+// It only arrives once the screen size is known, so don't hang forever.
+await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => {
+    ws.off("message", onMsg);
+    ws.close();
+    reject(new Error("no config frame in 10s"));
+  }, 10_000);
+  function onMsg(data) {
     if (Buffer.from(data)[0] !== 0x82) return;
+    clearTimeout(timer);
     ws.off("message", onMsg);
     resolve();
-  });
+  }
+  ws.on("message", onMsg);
 });
 
 // Long vertical drag on one socket.

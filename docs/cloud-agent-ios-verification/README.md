@@ -152,7 +152,7 @@ curl -fsS --max-time 10 -H "Authorization: Bearer $SERVE_SIM_AUTH_TOKEN" "$SERVE
 
 **Requires #166.** On a build without it, skip this section and use the [direct WebSocket recipe](#direct-websocket-recipe) instead — older builds' `tap`/`button`/`event-log` only read a Mac-local state file and cannot target a remote URL. With #166, `--url` / `--auth-token` (or the env vars) work on `gesture`, `tap`, `button`, `type`, `rotate`, `fold`, `ca-debug`, `memory-warning`, `event-log`, and `record`.
 
-With a #166 build and `SERVE_SIM_URL` / `SERVE_SIM_AUTH_TOKEN` set:
+With a #166 build and `SERVE_SIM_URL` / `SERVE_SIM_AUTH_TOKEN` set. The commands below assume a `serve-sim` executable on `PATH` (e.g. a published release installed globally); from a checkout, run them as `node packages/serve-sim/dist/serve-sim.js ...` instead:
 
 ```bash
 serve-sim tap 0.5 0.9 -d "$UDID"       # fire-and-forget; confirm with event-log or a JPEG delta
