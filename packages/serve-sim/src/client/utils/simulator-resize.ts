@@ -46,11 +46,14 @@ export const RESIZE_SCALE: Record<ResizeVisualPhase, number> = {
   drag: 1.12,
 };
 
+// Theme-aware (see --serve-sim-resize-* in global.css): a light core on a dark
+// outline in dark mode, inverted in light mode, so the arc reads on either page.
 export const RESIZE_MAIN_STROKE: Record<ResizeVisualPhase, string> = {
-  idle: "#686e78",
-  hover: "#b7bbc2",
-  drag: "#f4f6fa",
+  idle: "var(--serve-sim-resize-idle, #686e78)",
+  hover: "var(--serve-sim-resize-hover, #b7bbc2)",
+  drag: "var(--serve-sim-resize-drag, #f4f6fa)",
 };
+export const RESIZE_OUTLINE_STROKE = "var(--serve-sim-resize-outline, #34363b)";
 
 export const RESIZE_MAIN_STROKE_W: Record<ResizeVisualPhase, number> = {
   idle: 2.65,

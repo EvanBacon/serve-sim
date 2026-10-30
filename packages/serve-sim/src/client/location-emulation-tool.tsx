@@ -40,11 +40,12 @@ import {
 } from "./icons";
 import { CollapsibleSection } from "./components/collapsible-section";
 import { Select } from "./components/select";
+import type { HostActionFn } from "./utils/exec";
+import { useTheme } from "./hooks/use-theme";
+import { inkFill, type ResolvedTheme } from "./utils/theme";
 
 const TRAIL_MORPH_MS = 650;
 
-interface ExecResult { stdout: string; stderr: string; exitCode: number }
-type ExecFn = (cmd: string) => Promise<ExecResult>;
 
 const SPEED_MULTIPLIERS = [1, 2, 5, 20] as const;
 type SpeedMultiplier = (typeof SPEED_MULTIPLIERS)[number];
@@ -66,10 +67,11 @@ const INITIAL_PLAYBACK: PlaybackState = { status: "idle", arc: 0, elapsedMs: 0 }
 
 export function LocationEmulationTool({
   udid,
-  exec,
+  host,
 }: {
   udid: string;
-  exec: ExecFn;
+  /** Host action runner (`location` sets or clears the simulated fix). */
+  host: HostActionFn;
 }) {
   const [open, setOpen] = useState(false);
   const [trailId, setTrailId] = useState<string>(DEFAULT_TRAILS[0]!.id);
@@ -123,6 +125,9 @@ export function LocationEmulationTool({
   const cameraAngleRef = useRef(0);
   const lastFrameRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const { resolved: theme } = useTheme();
+  const sceneColorsRef = useRef(SCENE_COLORS[theme]);
+  sceneColorsRef.current = SCENE_COLORS[theme];
 
   useEffect(() => {
     let raf = 0;
@@ -175,6 +180,7 @@ export function LocationEmulationTool({
           ts,
           statusRef.current === "playing",
           markerOverride,
+          sceneColorsRef.current,
         );
       }
       raf = requestAnimationFrame(tick);
@@ -214,8 +220,7 @@ export function LocationEmulationTool({
       if (now - lastPushed < LOCATION_PUSH_INTERVAL_MS) return;
       lastPushed = now;
       const pt = pointAtDistance(trailRef.current, arcRef.current);
-      const cmd = `xcrun simctl location ${udid} set ${pt.lat.toFixed(7)},${pt.lng.toFixed(7)}`;
-      inflight = exec(cmd).then((res) => {
+      inflight = host("location", { udid, lat: pt.lat, lng: pt.lng }).then((res) => {
         if (cancelled) return;
         if (res.exitCode !== 0) {
           setError(parseSimctlError(res.stderr) || "simctl location set failed");
@@ -233,7 +238,7 @@ export function LocationEmulationTool({
       cancelled = true;
       clearInterval(id);
     };
-  }, [playback.status, udid, exec]);
+  }, [playback.status, udid, host]);
 
   // ── Controls ─────────────────────────────────────────────────────────────
   const onPlayPause = useCallback(() => {
@@ -267,14 +272,12 @@ export function LocationEmulationTool({
     setPlayback(INITIAL_PLAYBACK);
     const origin = sessionOriginRef.current;
     sessionOriginRef.current = null;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
-    void exec(cmd).then((res) => {
+    const params = origin ? { udid, lat: origin.lat, lng: origin.lng } : { udid };
+    void host("location", params).then((res) => {
       if (res.exitCode !== 0) setError(parseSimctlError(res.stderr) || null);
       else setError(null);
     });
-  }, [exec, udid]);
+  }, [host, udid]);
 
   const onTrailChange = useCallback((id: string) => {
     setTrailId(id);
@@ -288,11 +291,9 @@ export function LocationEmulationTool({
   useEffect(() => () => {
     if (statusRef.current === "idle") return;
     const origin = sessionOriginRef.current;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
-    void exec(cmd).catch(() => {});
-  }, [exec, udid]);
+    const params = origin ? { udid, lat: origin.lat, lng: origin.lng } : { udid };
+    void host("location", params).catch(() => {});
+  }, [host, udid]);
 
   // ── Render ───────────────────────────────────────────────────────────────
   const playing = playback.status === "playing";
@@ -307,17 +308,17 @@ export function LocationEmulationTool({
       summaryClassName="grid [grid-template-columns:auto_minmax(0,1fr)_auto] [container-type:inline-size] items-center gap-2 text-left"
       summary={
         <>
-          <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
+          <span className="text-[11px] font-semibold text-ink-50 uppercase tracking-[0.08em] leading-none inline-flex items-center">Location</span>
           {open ? (
             <span
               data-location-status
-              className="min-w-0 text-[11px] text-white/55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none whitespace-nowrap overflow-hidden text-ellipsis max-w-full"
+              className="min-w-0 text-[11px] text-ink-55 font-mono inline-flex items-center gap-1.5 justify-self-end leading-none whitespace-nowrap overflow-hidden text-ellipsis max-w-full"
             >
               <span
                 className="size-1.5 rounded-full shrink-0 [transition:background_0.2s,box-shadow_0.2s]"
                 style={{
-                  background: playing ? "#4ade80" : prepared.totalDistance > 0 ? "rgba(255,255,255,0.3)" : "transparent",
-                  boxShadow: playing ? "0 0 6px rgba(74,222,128,0.7)" : "none",
+                  background: playing ? "var(--serve-sim-success)" : prepared.totalDistance > 0 ? inkFill(0.3) : "transparent",
+                  boxShadow: playing ? "0 0 6px color-mix(in srgb, var(--serve-sim-success) 70%, transparent)" : "none",
                 }}
               />
               <span className="min-w-0 overflow-hidden text-ellipsis">{headerMetric}</span>
@@ -336,16 +337,16 @@ export function LocationEmulationTool({
                 value={trailId}
                 onChange={onTrailChange}
                 options={DEFAULT_TRAILS.map((t) => ({ value: t.id, label: t.name }))}
-                className="bg-white/[0.04] border border-white/8 rounded-md text-white/90 text-[12px] py-1.5 pr-[26px] pl-2 w-full [transition:background_0.12s,border-color_0.12s] hover:bg-white/[0.07] hover:border-[rgba(255,255,255,0.16)] focus:outline-none focus:bg-white/[0.08] focus:border-[rgba(255,255,255,0.24)]"
+                className="bg-ink/[0.04] border border-ink/8 rounded-md text-ink-90 text-[12px] py-1.5 pr-[26px] pl-2 w-full [transition:background_0.12s,border-color_0.12s] hover:bg-ink/[0.07] hover:border-ink/16 focus:outline-none focus:bg-ink/[0.08] focus:border-ink/24"
               />
               <span className="absolute right-[9px] top-1/2 -translate-y-1/2 pointer-events-none flex items-center" aria-hidden="true">
                 <Chevron open={false} />
               </span>
             </div>
-            <div className="text-[10px] text-white/45">{trail.description}</div>
+            <div className="text-[10px] text-ink-45">{trail.description}</div>
           </div>
 
-          <div className="relative w-full rounded-[10px] overflow-hidden bg-[#0a0a0c] border border-white/[0.06] [aspect-ratio:16/11]">
+          <div className="relative w-full rounded-[10px] overflow-hidden border border-ink/[0.06] [aspect-ratio:16/11]" style={{ background: SCENE_COLORS[theme].backgroundOuter }}>
             <canvas ref={canvasRef} className="w-full h-full block" />
             <ElevationBadges prepared={prepared} />
           </div>
@@ -360,7 +361,7 @@ export function LocationEmulationTool({
             <button
               type="button"
               onClick={onPlayPause}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer font-[inherit] ${playing ? "bg-white/[0.16] text-white enabled:hover:bg-white/[0.22]" : "bg-success-emerald text-[#062018] enabled:hover:brightness-[1.08]"}`}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2.5 border-none rounded-[7px] text-[12px] font-semibold cursor-pointer font-[inherit] ${playing ? "bg-ink/[0.16] text-ink enabled:hover:bg-ink/[0.22]" : "bg-success-emerald text-on-success enabled:hover:brightness-[1.08]"}`}
               aria-pressed={playing}
               title={playing ? "Pause" : "Play"}
             >
@@ -370,7 +371,7 @@ export function LocationEmulationTool({
             <button
               type="button"
               onClick={onStop}
-              className="flex items-center justify-center gap-1.5 py-2 px-3 border border-white/12 rounded-[7px] text-[12px] font-medium bg-transparent text-white/85 cursor-pointer font-[inherit] enabled:hover:bg-white/[0.06] enabled:hover:border-white/20 enabled:hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center justify-center gap-1.5 py-2 px-3 border border-ink/12 rounded-[7px] text-[12px] font-medium bg-transparent text-ink-85 cursor-pointer font-[inherit] enabled:hover:bg-ink/[0.06] enabled:hover:border-ink/20 enabled:hover:text-ink disabled:opacity-40 disabled:cursor-not-allowed"
               disabled={playback.status === "idle" && playback.arc === 0}
               title="Stop and clear simulated location"
             >
@@ -400,7 +401,7 @@ export function LocationEmulationTool({
                 const next = SPEED_MULTIPLIERS[(idx + 1) % SPEED_MULTIPLIERS.length]!;
                 setMultiplier(next);
               }}
-              className={`flex items-center justify-center gap-1 px-2.5 border rounded-[7px] cursor-pointer font-[inherit] text-[11px] font-semibold min-w-[56px] active:scale-[0.97] ${multiplier > 1 ? "bg-white border-white text-[#0a0a0c] hover:bg-white/[0.88] hover:border-white/[0.88] hover:text-[#0a0a0c]" : "bg-white/[0.04] border-white/8 text-white/85 hover:bg-white/[0.09] hover:border-[rgba(255,255,255,0.18)] hover:text-white"}`}
+              className={`flex items-center justify-center gap-1 px-2.5 border rounded-[7px] cursor-pointer font-[inherit] text-[11px] font-semibold min-w-[56px] active:scale-[0.97] ${multiplier > 1 ? "bg-ink border-ink text-ink-inverse hover:bg-ink/[0.88] hover:border-ink/[0.88] hover:text-ink-inverse" : "bg-ink/[0.04] border-ink/8 text-ink-85 hover:bg-ink/[0.09] hover:border-ink/18 hover:text-ink"}`}
               aria-label={`Speed ${multiplier}× — tap to cycle`}
               title={`Speed ${multiplier}× — tap to cycle`}
             >
@@ -422,9 +423,9 @@ export function LocationEmulationTool({
 
 const Stat = memo(function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex flex-col gap-0.5 bg-white/[0.03] border border-white/[0.06] rounded-md py-[5px] px-[7px] min-w-0">
-      <div className="text-[9px] uppercase tracking-[0.06em] text-white/45">{label}</div>
-      <div className="text-[12px] font-mono text-white overflow-hidden text-ellipsis whitespace-nowrap">{value}</div>
+    <div className="flex flex-col gap-0.5 bg-ink/[0.03] border border-ink/[0.06] rounded-md py-[5px] px-[7px] min-w-0">
+      <div className="text-[9px] uppercase tracking-[0.06em] text-ink-45">{label}</div>
+      <div className="text-[12px] font-mono text-ink overflow-hidden text-ellipsis whitespace-nowrap">{value}</div>
     </div>
   );
 });
@@ -444,7 +445,7 @@ function Segmented<T extends string>({
     <div
       role="group"
       aria-label={ariaLabel}
-      className="flex bg-white/[0.04] border border-white/8 rounded-[7px] p-0.5 gap-0.5"
+      className="flex bg-ink/[0.04] border border-ink/8 rounded-[7px] p-0.5 gap-0.5"
     >
       {options.map((o) => {
         const active = o.value === value;
@@ -453,7 +454,7 @@ function Segmented<T extends string>({
             key={o.value}
             type="button"
             onClick={() => onChange(o.value)}
-            className={`flex-1 flex items-center justify-center border-none rounded-[5px] py-[5px] px-2 text-[11px] font-medium cursor-pointer font-[inherit] [transition:background_0.12s,color_0.12s] min-h-[22px] ${active ? "bg-white/[0.12] text-white" : "bg-transparent text-white/60 hover:bg-white/[0.05] hover:text-white/90"}`}
+            className={`flex-1 flex items-center justify-center border-none rounded-[5px] py-[5px] px-2 text-[11px] font-medium cursor-pointer font-[inherit] [transition:background_0.12s,color_0.12s] min-h-[22px] ${active ? "bg-ink/[0.12] text-ink" : "bg-transparent text-ink-60 hover:bg-ink/[0.05] hover:text-ink-90"}`}
             aria-pressed={active}
             aria-label={o.icon ? o.label : undefined}
             title={o.icon ? o.label : undefined}
@@ -470,10 +471,10 @@ function ElevationBadges({ prepared }: { prepared: PreparedTrail }) {
   if (prepared.rawMaxAlt - prepared.rawMinAlt < 5) return null;
   return (
     <>
-      <div className="absolute top-2 left-2.5 bg-panel-overlay text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
+      <div className="absolute top-2 left-2.5 bg-panel-overlay text-ink-85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-ink/[0.06]">
         <ArrowGlyph dir="up" /> {formatElevation(prepared.rawMaxAlt)}
       </div>
-      <div className="absolute top-2 right-2.5 bg-panel-overlay text-white/85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-white/[0.06]">
+      <div className="absolute top-2 right-2.5 bg-panel-overlay text-ink-85 text-[10px] font-mono px-1.5 py-0.5 rounded-[5px] flex items-center tracking-[0.02em] border border-ink/[0.06]">
         <ArrowGlyph dir="down" /> {formatElevation(prepared.rawMinAlt)}
       </div>
     </>
@@ -639,6 +640,42 @@ function easeInOut(t: number): number {
 
 // ─── 3D renderer ───────────────────────────────────────────────────────────
 
+interface SceneColors {
+  backgroundInner: string;
+  backgroundOuter: string;
+  dotGrid: string;
+  /** Ribbon gradient stops, lit ridge → ground. */
+  ribbon: [string, string, string, string];
+  line: string;
+  travelled: string;
+  marker: string;
+  /** "r,g,b" for the pulse ring (alpha is animated). */
+  pulseRgb: string;
+}
+
+const SCENE_COLORS: Record<ResolvedTheme, SceneColors> = {
+  dark: {
+    backgroundInner: "#1a1a1d",
+    backgroundOuter: "#0a0a0c",
+    dotGrid: "rgba(255,255,255,0.06)",
+    ribbon: ["rgba(255,255,255,0.55)", "rgba(180,180,185,0.28)", "rgba(40,40,45,0.18)", "rgba(0,0,0,0)"],
+    line: "#ffffff",
+    travelled: "#f9d2a4",
+    marker: "#fff",
+    pulseRgb: "255,255,255",
+  },
+  light: {
+    backgroundInner: "#ffffff",
+    backgroundOuter: "#e9e9ee",
+    dotGrid: "rgba(0,0,0,0.07)",
+    ribbon: ["rgba(60,60,67,0.4)", "rgba(120,120,128,0.2)", "rgba(200,200,205,0.12)", "rgba(255,255,255,0)"],
+    line: "#1c1c1e",
+    travelled: "#d9731a",
+    marker: "#1c1c1e",
+    pulseRgb: "0,0,0",
+  },
+};
+
 function renderScene(
   canvas: HTMLCanvasElement,
   prepared: PreparedTrail,
@@ -647,6 +684,7 @@ function renderScene(
   timeMs: number,
   moving: boolean,
   markerOverride: Vec3 | null,
+  colors: SceneColors,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -671,13 +709,13 @@ function renderScene(
     cssW * 0.5, cssH * 0.55, Math.min(cssW, cssH) * 0.2,
     cssW * 0.5, cssH * 0.55, Math.max(cssW, cssH) * 0.85,
   );
-  bg.addColorStop(0, "#1a1a1d");
-  bg.addColorStop(1, "#0a0a0c");
+  bg.addColorStop(0, colors.backgroundInner);
+  bg.addColorStop(1, colors.backgroundOuter);
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, cssW, cssH);
 
   // Soft dot grid — subtle texture behind the 3D scene for depth cue.
-  drawDotGrid(ctx, cssW, cssH);
+  drawDotGrid(ctx, cssW, cssH, colors.dotGrid);
 
   const { points, bounds } = prepared;
   if (points.length < 2) return;
@@ -762,10 +800,10 @@ function renderScene(
     // Stronger elevation gradient — bright lit ridge fading through a mid
     // grey body into a dark ground shadow, so the ribbon reads as a solid
     // wall of terrain rather than a flat band.
-    grad.addColorStop(0, "rgba(255,255,255,0.55)");
-    grad.addColorStop(0.45, "rgba(180,180,185,0.28)");
-    grad.addColorStop(0.85, "rgba(40,40,45,0.18)");
-    grad.addColorStop(1, "rgba(0,0,0,0)");
+    grad.addColorStop(0, colors.ribbon[0]);
+    grad.addColorStop(0.45, colors.ribbon[1]);
+    grad.addColorStop(0.85, colors.ribbon[2]);
+    grad.addColorStop(1, colors.ribbon[3]);
     ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.moveTo(a.top.sx, a.top.sy);
@@ -777,7 +815,7 @@ function renderScene(
   }
 
   // Top edge — bright crisp line that reads as the elevation profile.
-  ctx.strokeStyle = "#ffffff";
+  ctx.strokeStyle = colors.line;
   ctx.lineWidth = 1.6;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
@@ -791,7 +829,7 @@ function renderScene(
 
   // Travelled portion — thicker, slightly warmer overlay up to currentArc.
   const cutoff = currentArc;
-  ctx.strokeStyle = "#f9d2a4";
+  ctx.strokeStyle = colors.travelled;
   ctx.lineWidth = 2.2;
   ctx.beginPath();
   let started = false;
@@ -815,25 +853,25 @@ function renderScene(
     const r = 4 + (PULSE_MAX - 4) * phase;
     const alpha = 0.22 * (1 - phase);
     const pulse = ctx.createRadialGradient(m.sx, m.sy, r * 0.5, m.sx, m.sy, r);
-    pulse.addColorStop(0, `rgba(255,255,255,0)`);
-    pulse.addColorStop(0.7, `rgba(255,255,255,${alpha.toFixed(3)})`);
-    pulse.addColorStop(1, `rgba(255,255,255,0)`);
+    pulse.addColorStop(0, `rgba(${colors.pulseRgb},0)`);
+    pulse.addColorStop(0.7, `rgba(${colors.pulseRgb},${alpha.toFixed(3)})`);
+    pulse.addColorStop(1, `rgba(${colors.pulseRgb},0)`);
     ctx.fillStyle = pulse;
     ctx.beginPath();
     ctx.arc(m.sx, m.sy, r, 0, Math.PI * 2);
     ctx.fill();
   }
   // Body
-  ctx.fillStyle = "#fff";
+  ctx.fillStyle = colors.marker;
   ctx.beginPath();
   ctx.arc(m.sx, m.sy, 3.8, 0, Math.PI * 2);
   ctx.fill();
 }
 
-function drawDotGrid(ctx: CanvasRenderingContext2D, w: number, h: number) {
+function drawDotGrid(ctx: CanvasRenderingContext2D, w: number, h: number, color: string) {
   const spacing = 14;
   const radius = 0.7;
-  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  ctx.fillStyle = color;
   for (let y = spacing / 2; y < h; y += spacing) {
     for (let x = spacing / 2; x < w; x += spacing) {
       ctx.beginPath();

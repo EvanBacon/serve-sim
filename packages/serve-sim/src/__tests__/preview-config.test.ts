@@ -9,7 +9,7 @@ const baseConfig = {
   streamUrl: "http://127.0.0.1:3100/stream.mjpeg",
   wsUrl: "ws://127.0.0.1:3100/ws",
   basePath: "",
-  execToken: "token",
+  allowExec: true,
   // The server only re-anchors helper URLs to the browser origin when it opted
   // into same-origin proxying.
   proxyHelpers: true as const,

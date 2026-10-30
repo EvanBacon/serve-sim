@@ -117,13 +117,15 @@ private func u32(_ v: Int) -> UInt32 {
     private let engine: CaptureEngine
     private let queue: NodeAsyncQueue
 
-    @NodeConstructor init(_ udid: String) throws {
+    /// `maxBitrate`: optional cap (bits/s) on the resolution-scaled H.264
+    /// bitrate; null/undefined keeps the default.
+    @NodeConstructor init(_ udid: String, _ maxBitrate: Int?) throws {
         // unref'd by NodeAsyncQueue's init, so the frame pipeline alone won't
         // keep the event loop alive. Bounded queue + blocking AVCC preserves
         // inter-frame ordering; MJPEG is nonblocking and drops under backpressure.
         let queue = try NodeAsyncQueue(label: "simCapture", maxQueueSize: 16)
         self.queue = queue
-        self.engine = CaptureEngine(deviceUDID: udid)
+        self.engine = CaptureEngine(deviceUDID: udid, maxBitrate: maxBitrate)
     }
 
     // returns a function that can be called to unsubscribe
@@ -133,8 +135,10 @@ private func u32(_ v: Int) -> UInt32 {
     ) async throws -> NodeFunction {
         let codecMJPEG: Int = 0
         let codecAVCC: Int = 1
+        let codecSize: Int = 2
 
-        var buffer = try CaptureBuffer(initialCapacity: 1024 * 1024)
+        // Size-only subscriptions deliver an empty array; don't reserve 1 MB.
+        var buffer = try CaptureBuffer(initialCapacity: codec == codecSize ? 1 : 1024 * 1024)
         let unsubscribe: @Sendable () async -> Void
         switch codec {
         case codecMJPEG:
@@ -159,10 +163,30 @@ private func u32(_ v: Int) -> UInt32 {
                     ]).as(NodePromise.self)?.value
                 }
             }
+        case codecSize:
+            unsubscribe = await engine.addSizeConsumer { [self] dimensions in
+                try? await queue.run {
+                    let array = try buffer.setData(Data())
+                    _ = try? await onFrame.call([
+                        array,
+                        Int(dimensions.width), Int(dimensions.height),
+                        0,
+                    ]).as(NodePromise.self)?.value
+                }
+            }
         default:
             throw Errors.invalidCodec
         }
         return try NodeFunction { await unsubscribe() }
+    }
+
+    /// JPEG of the latest frame (or null before the first frame), encoded on
+    /// demand for viewer seeds.
+    @NodeMethod func snapshotJpeg() async throws -> NodeValueConvertible {
+        guard let (_, jpeg) = try await engine.snapshotJPEG() else { return try NodeNull() }
+        let buffer = try NodeArrayBuffer(capacity: jpeg.count)
+        _ = try buffer.withUnsafeMutableBytes { jpeg.copyBytes(to: $0) }
+        return try NodeTypedArray<UInt8>(for: buffer, count: jpeg.count)
     }
 
     @NodeMethod func setPreferredScreenSize(_ width: Int, _ height: Int) async {
@@ -171,6 +195,31 @@ private func u32(_ v: Int) -> UInt32 {
 
     @NodeMethod func start() async throws {
         try await engine.start()
+    }
+
+    /// JSON string: display selection, surface-size history, encoder sessions
+    /// and error counts. Read by `/api/diagnostics` (`serve-sim doctor`).
+    @NodeMethod func diagnostics() async -> String {
+        await engine.diagnostics()
+    }
+
+    /// Start an MP4 screen recording at `path`. `codec` is "h264" or "hevc";
+    /// `rotation` is the clockwise display rotation stored as the track
+    /// transform; `bitrate` <= 0 picks the resolution-scaled default.
+    @NodeMethod func startRecording(
+        _ path: String, _ codec: String, _ fps: Int, _ rotation: Int, _ bitrate: Int
+    ) async throws {
+        var options = ScreenRecorder.Options(path: path)
+        options.codec = codec == "hevc" ? .hevc : .h264
+        options.fps = min(max(fps, 1), 120)
+        options.rotationDegrees = rotation
+        options.bitrate = bitrate > 0 ? bitrate : nil
+        try await engine.startRecording(options)
+    }
+
+    /// Finish the active recording; resolves with a JSON summary string.
+    @NodeMethod func stopRecording() async throws -> String {
+        try await engine.stopRecording()
     }
 
     @NodeMethod func stop() async {

@@ -6,8 +6,8 @@ const FLOATING_CHROME = [
   "top-3",
   "bottom-3",
   "rounded-[14px]",
-  "border border-white/10",
-  "shadow-[0_12px_40px_rgba(0,0,0,0.55)]",
+  "border border-ink/10",
+  "shadow-panel",
 ];
 
 describe("Panel", () => {

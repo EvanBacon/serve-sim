@@ -1,4 +1,5 @@
 import type { ComponentProps, CSSProperties } from "react";
+import { inkFill } from "../utils/theme";
 
 type SliderProps = Omit<ComponentProps<"input">, "type" | "min" | "max" | "value"> & {
   min: number;
@@ -9,12 +10,12 @@ type SliderProps = Omit<ComponentProps<"input">, "type" | "min" | "max" | "value
 export function Slider({ min, max, value, disabled, className = "", style, ...props }: SliderProps) {
   const fraction = max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
   const fill = `${fraction * 100}%`;
-  const fillColor = disabled ? "rgba(255,255,255,0.3)" : "#0a84ff";
+  const fillColor = disabled ? inkFill(0.3) : "var(--serve-sim-tint)";
 
   const trackClasses =
     "[&::-webkit-slider-runnable-track]:h-[4px] [&::-webkit-slider-runnable-track]:rounded-full " +
-    "[&::-webkit-slider-runnable-track]:[background:linear-gradient(to_right,var(--slider-fill-color)_var(--slider-fill),rgba(255,255,255,0.22)_var(--slider-fill))] " +
-    "[&::-moz-range-track]:h-[4px] [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-white/20 " +
+    "[&::-webkit-slider-runnable-track]:[background:linear-gradient(to_right,var(--slider-fill-color)_var(--slider-fill),color-mix(in_srgb,var(--serve-sim-ink)_22%,transparent)_var(--slider-fill))] " +
+    "[&::-moz-range-track]:h-[4px] [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-ink/22 " +
     "[&::-moz-range-progress]:h-[4px] [&::-moz-range-progress]:rounded-full [&::-moz-range-progress]:bg-[var(--slider-fill-color)]";
   const thumbClasses =
     "[&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:size-[13px] [&::-webkit-slider-thumb]:rounded-full " +
@@ -32,6 +33,6 @@ export function Slider({ min, max, value, disabled, className = "", style, ...pr
     value={value}
     disabled={disabled}
     style={{ "--slider-fill": fill, "--slider-fill-color": fillColor, ...style } as CSSProperties}
-    className={`h-[13px] w-full appearance-none rounded-full bg-transparent outline-none focus-visible:[outline:1.5px_solid_rgba(10,132,255,0.55)] focus-visible:outline-offset-4 ${disabled ? "cursor-default" : "cursor-pointer"} ${trackClasses} ${thumbClasses} ${className}`}
+    className={`h-[13px] w-full appearance-none rounded-full bg-transparent outline-none focus-visible:[outline:1.5px_solid_color-mix(in_srgb,var(--serve-sim-tint)_55%,transparent)] focus-visible:outline-offset-4 ${disabled ? "cursor-default" : "cursor-pointer"} ${trackClasses} ${thumbClasses} ${className}`}
   />;
 }

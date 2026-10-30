@@ -8,7 +8,7 @@ export function DeviceSidebarToggle({ open, onClick }: { open: boolean; onClick:
     >
       <button
         onClick={onClick}
-        className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-white"
+        className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-icon cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink"
         aria-label="Open devices sidebar"
         aria-pressed={open}
         title="Devices"

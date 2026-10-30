@@ -34,7 +34,7 @@ export function CollapsibleSection({
       {...dataProps}
     >
       <summary
-        className={`lem-toggle cursor-pointer select-none text-white/90 min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)] ${summaryClassName}`}
+        className={`lem-toggle cursor-pointer select-none text-ink-90 min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)] ${summaryClassName}`}
       >
         {summary}
         <Chevron open={open} />

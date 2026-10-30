@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AppWindow, ArrowUpRight } from "lucide-react";
 import { type AppDetails, fetchAppDetails } from "../utils/app-icon";
-import { execOnHost, shellEscape } from "../utils/exec";
+import { hostAction } from "../utils/exec";
 import { CollapsibleSection } from "./collapsible-section";
 
 export function isSystemBundleId(bundleId: string): boolean {
@@ -21,8 +21,8 @@ export function AppIconFallback({ bundleId }: { bundleId: string }) {
       data-testid={system ? "system-app-icon" : "app-icon-fallback"}
       className={`w-10 h-10 rounded-[8px] shrink-0 border grid place-items-center ${
         system
-          ? "border-[#3b5f99] bg-[linear-gradient(145deg,#253a5f,#162132)] text-[#c8d7ff]"
-          : "border-white/10 bg-white/[0.06] text-white/80"
+          ? "border-system-icon-border bg-[linear-gradient(145deg,var(--serve-sim-system-icon-from),var(--serve-sim-system-icon-to))] text-system-icon-fg"
+          : "border-ink/10 bg-ink/[0.06] text-ink-80"
       }`}
       aria-label={system ? "System app" : "App icon unavailable"}
       title={system ? "System app" : "App icon unavailable"}
@@ -56,7 +56,7 @@ export function AppIcon({
     return (
       <img
         src={iconDataUrl}
-        className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-white/8"
+        className="w-10 h-10 rounded-[8px] shrink-0 object-cover border border-ink/8"
         alt=""
       />
     );
@@ -83,7 +83,7 @@ export function AppDetectionTool({
       pid: currentApp.pid,
       loading: true,
     });
-    fetchAppDetails(execOnHost, udid, currentApp.bundleId).then((extra) => {
+    fetchAppDetails(hostAction, udid, currentApp.bundleId).then((extra) => {
       if (cancelled) return;
       setDetails({
         bundleId: currentApp.bundleId,
@@ -135,7 +135,7 @@ export function AppDetectionTool({
                 details.appPath
                   ? {
                       title: "Reveal in Finder",
-                      onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
+                      onClick: () => { void hostAction("revealApp", { udid, bundleId: details.bundleId }); },
                       icon: (
                         <ArrowUpRight size={11} strokeWidth={2.2} />
                       ),
@@ -156,12 +156,12 @@ export function AppDetectionSkeleton() {
       aria-label="Waiting for foreground app"
     >
       <div className="flex items-center gap-3 text-left min-h-[36px] leading-none py-2.5 px-1 -my-2 -mx-1 w-[calc(100%+8px)]">
-        <span className="w-10 h-10 rounded-[8px] shrink-0 bg-white/[0.08]" />
+        <span className="w-10 h-10 rounded-[8px] shrink-0 bg-ink/[0.08]" />
         <span className="min-w-0 flex-1 flex flex-col gap-2">
-          <span className="h-3.5 w-[46%] rounded-full bg-white/[0.12]" />
-          <span className="h-2.5 w-[68%] rounded-full bg-white/[0.08]" />
+          <span className="h-3.5 w-[46%] rounded-full bg-ink/[0.12]" />
+          <span className="h-2.5 w-[68%] rounded-full bg-ink/[0.08]" />
         </span>
-        <span className="w-2.5 h-2.5 rounded-full bg-white/[0.08]" />
+        <span className="w-2.5 h-2.5 rounded-full bg-ink/[0.08]" />
       </div>
     </div>
   );
@@ -176,10 +176,10 @@ export function AppSummaryLabel({
 }) {
   return (
     <div className="min-w-0 flex-1 leading-tight text-left">
-      <div className="text-[13px] font-semibold text-white/90 truncate">
+      <div className="text-[13px] font-semibold text-ink-90 truncate">
         {displayName ?? fallbackAppDisplayName(bundleId)}
       </div>
-      <div className="text-[11px] text-white/55 font-mono truncate" title={bundleId}>
+      <div className="text-[11px] text-ink-55 font-mono truncate" title={bundleId}>
         {bundleId}
       </div>
     </div>
@@ -199,22 +199,22 @@ function Row({
 }) {
   return (
     <div className="group flex items-baseline gap-2 min-w-0">
-      <dt className="m-0 text-[11px] text-white/50 w-21 shrink-0">{label}</dt>
+      <dt className="m-0 text-[11px] text-ink-50 w-21 shrink-0">{label}</dt>
       <dd
-        className={`m-0 text-white/90 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap relative ${mono ? "font-mono text-[11px]" : "text-[12px]"}`}
+        className={`m-0 text-ink-90 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap relative ${mono ? "font-mono text-[11px]" : "text-[12px]"}`}
         title={value}
       >
         {value}
         {action && (
           <div
-            className="absolute top-0 right-0 bottom-0 pl-7 flex items-center justify-end bg-[linear-gradient(to_right,rgba(28,28,30,0)_0%,#1c1c1e_55%)] [transition:opacity_0.15s_ease,transform_0.15s_ease] opacity-0 translate-x-1 pointer-events-none group-hover:opacity-100 group-hover:translate-x-0 group-hover:pointer-events-auto"
+            className="absolute top-0 right-0 bottom-0 pl-7 flex items-center justify-end bg-[linear-gradient(to_right,var(--serve-sim-panel-transparent)_0%,var(--serve-sim-panel)_55%)] [transition:opacity_0.15s_ease,transform_0.15s_ease] opacity-0 translate-x-1 pointer-events-none group-hover:opacity-100 group-hover:translate-x-0 group-hover:pointer-events-auto"
           >
             <button
               type="button"
               onClick={action.onClick}
               title={action.title}
               aria-label={action.title}
-              className="w-5 h-5 flex items-center justify-center bg-transparent border-none rounded text-white cursor-pointer p-0"
+              className="w-5 h-5 flex items-center justify-center bg-transparent border-none rounded text-ink cursor-pointer p-0"
             >
               {action.icon}
             </button>

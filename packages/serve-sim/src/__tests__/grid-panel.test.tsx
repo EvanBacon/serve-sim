@@ -88,7 +88,7 @@ describe("GridPanel", () => {
     );
 
     expect(html).toContain("serve-sim");
-    expect(html).toContain("text-white/65");
+    expect(html).toContain("text-ink-65");
     expect(html).toContain(`href="${SERVE_SIM_REPO_URL}"`);
     expect(html).toContain('target="_blank"');
     expect(html).toContain('title="Open serve-sim"');

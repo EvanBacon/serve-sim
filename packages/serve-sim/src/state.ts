@@ -1,6 +1,18 @@
 import { tmpdir } from "os";
 import { join } from "path";
-import { readdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
+import {
+  chmodSync,
+  closeSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "fs";
 
 /** Directory where serve-sim stores runtime state. */
 export const STATE_DIR = join(tmpdir(), "serve-sim");
@@ -22,6 +34,18 @@ export interface ServeSimDeviceState {
   url: string;
   streamUrl: string;
   wsUrl: string;
+  /**
+   * sha256 (hex) of the `--auth-token` the server was started with, so a
+   * later `--detach` / follow never silently reuses a server guarded by a
+   * different token (or by none). Absent when the server has no auth token.
+   */
+  authTokenSha256?: string;
+  /**
+   * Whether the server was started with `--allow-exec`, so a later
+   * `--detach` / follow never silently reuses a server whose host-shell
+   * opt-in differs from the one requested. Absent means off.
+   */
+  allowExec?: boolean;
 }
 
 /**
@@ -71,4 +95,54 @@ export function listStateFiles(): string[] {
   } catch {
     return [];
   }
+}
+
+/** Owner-only (0700) directory holding exec tokens for `serve-sim exec`. */
+export const EXEC_TOKEN_DIR = join(STATE_DIR, "exec-tokens");
+
+/** Exec token file for the preview server listening on `port`. */
+export function execTokenFileForPort(port: number): string {
+  return join(EXEC_TOKEN_DIR, `${port}.token`);
+}
+
+function ensurePrivateDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(dir);
+  if (!stat.isDirectory() || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+    throw new Error(`Refusing to use ${dir}: not a directory owned by the current user`);
+  }
+  chmodSync(dir, 0o700);
+}
+
+/**
+ * Hand the `/exec` token to the local CLI. The token is never served over
+ * HTTP — a client that only reaches the preview port (including through a raw
+ * TCP forward) cannot read it; only a process running as this user can.
+ */
+export function writeExecTokenFile(port: number, token: string): string {
+  ensurePrivateDir(EXEC_TOKEN_DIR);
+  const file = execTokenFileForPort(port);
+  const tmp = `${file}.${process.pid}.tmp`;
+  try { unlinkSync(tmp); } catch {}
+  const fd = openSync(tmp, "wx", 0o600);
+  try {
+    writeSync(fd, token);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, file);
+  return file;
+}
+
+export function readExecTokenFile(port: number): string | null {
+  try {
+    const token = readFileSync(execTokenFileForPort(port), "utf-8").trim();
+    return token === "" ? null : token;
+  } catch {
+    return null;
+  }
+}
+
+export function removeExecTokenFile(port: number): void {
+  try { unlinkSync(execTokenFileForPort(port)); } catch {}
 }

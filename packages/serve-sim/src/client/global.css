@@ -3,40 +3,175 @@
 @source "./";
 
 @theme {
-  /* Panel / surface palette */
-  --color-panel: #1c1c1e;
+  /* Panel / surface palette. Every color resolves through a --serve-sim-*
+     variable so the light/dark palettes below can swap it at runtime. */
+  --color-panel: var(--serve-sim-panel);
   --color-panel-bg: var(--serve-sim-panel-bg);
   --color-panel-bg-translucent: var(--serve-sim-panel-bg-translucent);
-  --color-panel-overlay: rgba(24, 24, 24, 0.65);
-  --color-panel-deep: #111113;
-  --color-page: #0a0a0a;
+  --color-panel-overlay: var(--serve-sim-panel-overlay);
+  --color-panel-deep: var(--serve-sim-panel-deep);
+  --color-panel-hover: var(--serve-sim-panel-hover);
+  --color-page: var(--serve-sim-page);
+
+  /* Foreground "ink": white in dark mode, black in light mode. Use it with an
+     opacity modifier for fills/separators (`bg-ink/8`, `border-ink/12`) and
+     through the `text-ink-*` utility below for text. `ink-inverse` is the
+     text color on a solid `bg-ink` surface. */
+  --color-ink: var(--serve-sim-ink);
+  --color-ink-inverse: var(--serve-sim-ink-inverse);
+  /* Secondary glyph color for toolbar/icon buttons (systemGray-like). */
+  --color-icon: var(--serve-sim-icon);
+  /* System blue: switches, sliders, selection, primary actions. */
+  --color-tint: var(--serve-sim-tint);
 
   /* Accent palette */
-  --color-accent: #a5b4fc;
-  --color-success: #4ade80;
-  --color-success-emerald: #34d399;
-  --color-danger: #f87171;
-  --color-danger-soft: #fca5a5;
-  --color-warning: #fbbf24;
-  --color-warning-soft: #fcd34d;
+  --color-accent: var(--serve-sim-accent);
+  --color-success: var(--serve-sim-success);
+  --color-success-emerald: var(--serve-sim-success-emerald);
+  --color-danger: var(--serve-sim-danger);
+  --color-danger-soft: var(--serve-sim-danger-soft);
+  --color-warning: var(--serve-sim-warning);
+  --color-warning-soft: var(--serve-sim-warning-soft);
+  /* Selected segment in a segmented control. */
+  --color-control-selected: var(--serve-sim-control-selected);
+  /* Booted-but-idle status (amber, distinct from the warning text color). */
+  --color-caution: var(--serve-sim-caution);
+  /* Panel resize grabber pill (idle / dragging). */
+  --color-grabber: var(--serve-sim-grabber);
+  --color-grabber-active: var(--serve-sim-grabber-active);
+  /* Label color on a solid success (emerald) button. */
+  --color-on-success: var(--serve-sim-on-success);
+
+  /* Placeholder tile for system (com.apple.*) apps without an icon. */
+  --color-system-icon-border: var(--serve-sim-system-icon-border);
+  --color-system-icon-fg: var(--serve-sim-system-icon-fg);
+
+  /* Sidebar glyph tile for a device that is actively streaming. */
+  --color-live-icon: var(--serve-sim-live-icon);
+  --color-live-icon-active: var(--serve-sim-live-icon-active);
+  --color-live-icon-fg: var(--serve-sim-live-icon-fg);
+
+  --shadow-panel: var(--serve-sim-shadow-panel);
+  --shadow-popover: var(--serve-sim-shadow-popover);
 
   /* Font families */
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-system: -apple-system, system-ui, sans-serif;
 }
 
-/* The UI is dark-only, but UA-rendered chrome (select popups, scrollbars,
-   date inputs) defaults to the light scheme. Desktop Chrome masks this by
-   drawing select popups natively per the OS appearance; embedded webviews
-   render them in-page and follow the declared scheme, so without this they
-   show a white option list on the dark panel. */
+/* `text-ink-55` = ink at 55% opacity. Light mode compresses the opacity range
+   toward opaque (--serve-sim-text-k < 1) so secondary/tertiary labels keep
+   WCAG-legible contrast on light surfaces, while dark mode renders exactly
+   the authored alpha. */
+@utility text-ink-* {
+  color: color-mix(
+    in srgb,
+    var(--color-ink) calc(100% - (100% - --value(integer) * 1%) * var(--serve-sim-text-k)),
+    transparent
+  );
+}
+
+/* Dark palette (default). An inline <head> script sets data-theme="dark" |
+   "light" on <html> before first paint (see utils/theme.ts), resolving the
+   stored preference against prefers-color-scheme. `color-scheme` keeps UA-rendered
+   chrome (select popups, scrollbars, date inputs) in step — embedded
+   webviews draw select popups in-page and follow the declared scheme. */
 :root {
   color-scheme: dark;
+  --serve-sim-ink: #fff;
+  --serve-sim-ink-inverse: #0a0a0c;
+  --serve-sim-text-k: 1;
+  --serve-sim-page: #0a0a0a;
+  --serve-sim-panel: #1c1c1e;
+  --serve-sim-panel-hover: #2a2a2c;
+  /* --serve-sim-panel at 0 alpha, for scroll-edge fades. */
+  --serve-sim-panel-transparent: rgba(28, 28, 30, 0);
   --serve-sim-panel-bg: #181818;
   /* Frosted-glass overlays (e.g. the resize badge) want the same backing color
      but translucent so `backdrop-blur` still shows the stream through them. */
   --serve-sim-panel-bg-translucent: rgba(24, 24, 24, 0.78);
   --serve-sim-panel-bg-transparent: rgba(24, 24, 24, 0);
+  --serve-sim-panel-overlay: rgba(24, 24, 24, 0.65);
+  --serve-sim-panel-deep: #111113;
+  --serve-sim-icon: #8e8e93;
+  --serve-sim-tint: #0a84ff;
+  --serve-sim-accent: #a5b4fc;
+  --serve-sim-success: #4ade80;
+  --serve-sim-success-emerald: #34d399;
+  --serve-sim-danger: #f87171;
+  --serve-sim-danger-soft: #fca5a5;
+  --serve-sim-warning: #fbbf24;
+  --serve-sim-warning-soft: #fcd34d;
+  --serve-sim-caution: #e9a13b;
+  --serve-sim-on-success: #062018;
+  --serve-sim-control-selected: rgba(255, 255, 255, 0.16);
+  --serve-sim-resize-outline: #34363b;
+  --serve-sim-system-icon-border: #3b5f99;
+  --serve-sim-system-icon-from: #253a5f;
+  --serve-sim-system-icon-to: #162132;
+  --serve-sim-system-icon-fg: #c8d7ff;
+  --serve-sim-resize-idle: #686e78;
+  --serve-sim-grabber: #6e6e72;
+  --serve-sim-grabber-active: #9a9a9e;
+  --serve-sim-resize-hover: #b7bbc2;
+  --serve-sim-resize-drag: #f4f6fa;
+  --serve-sim-live-icon: #202b3a;
+  --serve-sim-live-icon-active: #26364c;
+  --serve-sim-live-icon-fg: #d2e7ff;
+  --serve-sim-shadow-panel: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --serve-sim-shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* Light palette: Apple-style grouped surfaces — a cool gray page, near-white
+   translucent sidebars, white cards/menus — with black-alpha separators and
+   darker accent shades that clear 4.5:1 on white. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --serve-sim-ink: #000;
+  --serve-sim-ink-inverse: #fff;
+  --serve-sim-text-k: 0.72;
+  --serve-sim-page: #ececf0;
+  --serve-sim-panel: #fff;
+  --serve-sim-panel-hover: #f2f2f5;
+  --serve-sim-panel-transparent: rgba(255, 255, 255, 0);
+  --serve-sim-panel-bg: rgba(246, 246, 248, 0.92);
+  --serve-sim-panel-bg-translucent: rgba(246, 246, 248, 0.8);
+  --serve-sim-panel-bg-transparent: rgba(246, 246, 248, 0);
+  --serve-sim-panel-overlay: rgba(255, 255, 255, 0.78);
+  --serve-sim-panel-deep: #f2f2f5;
+  --serve-sim-icon: #6e6e73;
+  --serve-sim-tint: #007aff;
+  --serve-sim-accent: #4f46e5;
+  --serve-sim-success: #15803d;
+  --serve-sim-success-emerald: #065f46;
+  --serve-sim-danger: #c81e1e;
+  --serve-sim-danger-soft: #b91c1c;
+  --serve-sim-warning: #b45309;
+  --serve-sim-warning-soft: #92400e;
+  --serve-sim-caution: #c2410c;
+  --serve-sim-on-success: #fff;
+  --serve-sim-control-selected: #fff;
+  --serve-sim-resize-outline: #fff;
+  --serve-sim-system-icon-border: #b9cff0;
+  --serve-sim-system-icon-from: #eaf2ff;
+  --serve-sim-system-icon-to: #d6e5fb;
+  --serve-sim-system-icon-fg: #1d4f99;
+  --serve-sim-resize-idle: #76767e;
+  --serve-sim-grabber: #a1a1a6;
+  --serve-sim-grabber-active: #6e6e73;
+  --serve-sim-resize-hover: #5f6068;
+  --serve-sim-resize-drag: #2c2c30;
+  --serve-sim-live-icon: #e3eefc;
+  --serve-sim-live-icon-active: #d2e4fb;
+  --serve-sim-live-icon-fg: #0b4f9e;
+  --serve-sim-shadow-panel: 0 0 0 0.5px rgba(0, 0, 0, 0.04), 0 12px 40px rgba(0, 0, 0, 0.12);
+  --serve-sim-shadow-popover: 0 0 0 0.5px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+
+/* Paint the page color on the canvas itself so nothing UA-white shows before
+   the app mounts. */
+html {
+  background: var(--serve-sim-page);
 }
 
 /* Collapsible tool sections (<details>) animate open/close height with a
@@ -69,10 +204,10 @@ details.lem-section > summary::-webkit-details-marker {
   display: none;
 }
 details.lem-section > summary:hover {
-  color: #fff;
+  color: var(--serve-sim-ink);
 }
 details.lem-section > summary:hover .lem-chevron {
-  color: rgba(255,255,255,0.85) !important;
+  color: color-mix(in srgb, var(--serve-sim-ink) 85%, transparent) !important;
 }
 
 .lem-chevron {
@@ -115,7 +250,7 @@ details.lem-section > summary:hover .lem-chevron {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.4;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--serve-sim-shadow-popover);
   gap: 8px;
 }
 
@@ -142,11 +277,11 @@ details.lem-section > summary:hover .lem-chevron {
 }
 .grid-tile:hover .grid-shutdown-btn { opacity: 1; }
 .grid-shutdown-btn:hover:not(:disabled) {
-  background: #5a1d1d;
-  color: #fff;
-  border-color: #a33;
+  background: color-mix(in srgb, var(--serve-sim-danger) 22%, transparent);
+  color: var(--serve-sim-ink);
+  border-color: var(--serve-sim-danger);
 }
-.grid-tile:hover { border-color: #555 !important; }
+.grid-tile:hover { border-color: color-mix(in srgb, var(--serve-sim-ink) 30%, transparent) !important; }
 
 /* Each hit region extends outward in the physical button edge's coordinates. */
 .duo-hardware-anchor {
