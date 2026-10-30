@@ -58,7 +58,7 @@ Tags the server handles (see `handleHidMessage` in `device-session.ts`):
 
 A tap is `0x03 begin` then `0x03 end` on the same socket ~40 ms apart.
 
-**Frames the server sends you:** a config frame with first byte `0x82` and body `{width, height, orientation, ...}`, pushed on connect and whenever the display changes. (Duo sessions also send a projection frame.) Read `0x82` for live dimensions; ignore other inbound frames if you don't need them.
+**Frames the server sends you:** a config frame with first byte `0x82` and body `{width, height, orientation, ...}`, pushed on connect if the screen size is already known (otherwise as soon as it is) and whenever the display changes. Wait for it before sending input. (Duo sessions also send a projection frame.) Read `0x82` for live dimensions; ignore other inbound frames if you don't need them.
 
 For most agents, the CLI is the right entry point. Use the WebSocket directly only when you need sub-CLI-latency input streams (drag animations, multi-finger gestures).
 

@@ -15,7 +15,7 @@ Read it top to bottom the first time. Fill in the values from [Variables](#varia
 | Tunnel (SSH, Tailscale, or ngrok) | Mac to Linux | Mac operator; SSH forwards are opened from the Linux side |
 | Agent (`serve-sim` CLI with `--url`, or the WebSocket recipe below) | Linux | The agent |
 
-For serve-sim development I use my Mac mini as the Mac. Our bot has a remote shell on it, so the bot runs the Mac steps itself. An agent with no shell on the Mac needs someone to run the Mac steps and hand it two values: the URL and the auth token (see [Handing the URL and token to the agent](#handing-the-url-and-token-to-the-agent)).
+If the agent has a remote shell on the Mac, it can run the Mac steps itself. An agent with no shell on the Mac needs someone to run the Mac steps and hand it three values: the URL, the auth token, and the simulator UDID (see [Handing the URL and token to the agent](#handing-the-url-and-token-to-the-agent)).
 
 ## Prerequisites
 
@@ -51,7 +51,7 @@ The preview server gates every non-loopback route behind `--auth-token`. Still, 
 1. **SSH local forward (preferred).** No public surface at all. From Linux:
    `ssh -N -L "$PORT:127.0.0.1:$PORT" mac-user@mac-host`. Then `URL=http://127.0.0.1:$PORT`. Over an SSH local forward serve-sim sees a loopback client, so your SSH access is the access control; still start serve-sim with `--auth-token` so the same commands work unchanged over any tunnel.
 2. **Tailscale (preferred for long-lived).** On the Mac: `tailscale serve --bg "$PORT"`; URL = the `https://<mac>.<tailnet>.ts.net` address it prints. Restrict with tailnet ACLs. (serve-sim binds to loopback, so the tailnet IP alone won't reach it.)
-3. **ngrok with auth.** `ngrok http "$PORT"` gives an HTTPS URL. serve-sim's `--auth-token` is what actually protects it; keep the URL out of git and chat. Free ngrok injects a browser warning — send `ngrok-skip-browser-warning: 1` on every request. ngrok forwards from loopback with `X-Forwarded-For`, which serve-sim treats as remote, so the token is enforced.
+3. **ngrok with auth.** `ngrok http "$PORT"` gives an HTTPS URL. serve-sim's `--auth-token` is what actually protects it; keep the URL out of git and chat. Free ngrok shows a warning page to browser user agents — if a browser or script gets that interstitial, send `ngrok-skip-browser-warning: 1` (the `serve-sim` CLI can't add custom headers and normally doesn't need it). ngrok forwards from loopback with `X-Forwarded-For`, which serve-sim treats as remote, so the token is enforced.
 
 ### What #166's local-only check refuses through a tunnel
 
@@ -243,7 +243,7 @@ Run the rebuilt local CLI (`node packages/serve-sim/dist/serve-sim.js ...`), not
 |---|---|---|---|
 | 401/403 on every remote call | No/wrong token | Set `SERVE_SIM_AUTH_TOKEN` (or `--auth-token`) to the server's token | Agent |
 | 403 only from the tunnel, fine on loopback | Server started without `--auth-token` | Restart serve-sim with `--auth-token` | Mac |
-| `--detach` exits: `already running for <udid> but was started with a different --auth-token` (or `with/without an --auth-token`) | An older server for this UDID has another token | `serve-sim -k "$UDID"`, then rerun the `--detach` step | Mac |
+| `--detach` exits: `already running for <udid> but was started with a different --auth-token` (or `was started with an --auth-token, but none was given now` / `without an --auth-token`) | An older server for this UDID has another token | `serve-sim -k "$UDID"`, then rerun the `--detach` step | Mac |
 | `--detach` exits: `already running for <udid> but was started with --allow-exec, but it was not given now` | An older server for this UDID has the host shell on | `serve-sim -k "$UDID"`, then rerun the `--detach` step (without `--allow-exec`) | Mac |
 | 403 `exec disabled; start with --allow-exec` (or, with it on, `exec is only available to loopback clients`) | Something called `/exec`; the host shell is off by default and never reachable through a tunnel | Remote agents can't use exec. Do host-side work in a Mac shell, and don't enable `--allow-exec` on a tunneled port | Mac |
 | Preview UI tools (screenshot, camera, permissions, drops) fail over the tunnel with `host actions are only available to loopback clients` | Those tools are host actions, served only to a loopback same-origin page | Expected for a remote browser. Use the stream/HID/CLI routes, or run the action in a Mac shell | Agent |
@@ -251,7 +251,7 @@ Run the rebuilt local CLI (`node packages/serve-sim/dist/serve-sim.js ...`), not
 | `config` width/height stay 0 | Helper not ready yet | Wait and re-poll `/config`; restart serve-sim if it persists | Mac |
 | Port already in use | Another preview on that port | Use the port from the `--detach` JSON; never take `:3200` | Mac |
 | ngrok `ERR_NGROK_3200` | Stale ngrok URL | Restart ngrok; refresh `URL` | Mac |
-| ngrok browser interstitial | Free-plan warning page | Send `ngrok-skip-browser-warning: 1` | Agent |
+| ngrok browser interstitial | Free-plan warning page (browser user agents) | Send `ngrok-skip-browser-warning: 1` from the browser/script that gets it | Agent |
 | Taps logged but UI unchanged | Device Hub input not attached | `serve-sim repair-input -d "$UDID"`, then restart serve-sim | Mac |
 | **TCC / permission dialog on the simulator (human only)** | First camera/photos/etc. access | **A person must click it on the Mac** (or script an AX lookup + tap on the Mac). A remote agent cannot dismiss a TCC prompt. | **Human on the Mac** |
 | **Xcode "install additional components" prompt (human only)** | First run of a new Xcode/runtime | **A person must complete it on the Mac.** | **Human on the Mac** |

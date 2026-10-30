@@ -109,9 +109,14 @@ xcrun simctl openurl booted "myapp://settings"
 # 3. Resolve the device's routes — never hardcode a port, it may differ
 HELPER=$(npx serve-sim --list -q | jq -r '(.streams // [.])[0].streamUrl' | sed 's|/stream.mjpeg$||')
 
-# 4. Grab a screenshot from the MJPEG stream
-curl -s "${HELPER}/stream.mjpeg?raw=1" \
-  --max-time 1 -o /tmp/blended.jpg
+# 4. Grab a screenshot: the first JPEG part of the MJPEG stream
+#    (?raw=1 does not strip multipart framing, so extract the part)
+curl -sN --max-time 5 "${HELPER}/stream.mjpeg" | python3 -c '
+import sys,re
+b=sys.stdin.buffer.read()
+m=re.search(rb"Content-Length: (\d+)\r\n\r\n",b)
+if not m: raise SystemExit("no MJPEG part")
+sys.stdout.buffer.write(b[m.end():m.end()+int(m.group(1))])' > /tmp/blended.jpg
 
 # 5. Inspect — red regions are blended (expensive); green is opaque (good)
 open /tmp/blended.jpg
@@ -166,7 +171,14 @@ const touch = (type, x, y) => frame(0x03, { type, x, y });
 
 // `serve-sim --list -q` -> .wsUrl. Add { headers: { Authorization: `Bearer ${token}` } } for a remote server.
 const ws = new WebSocket("ws://127.0.0.1:<port>/helper/<udid>/ws");
-await new Promise((r) => ws.once("open", r));
+// Wait for the first 0x82 config frame: the screen is ready for input.
+await new Promise((resolve) => {
+  ws.on("message", function onMsg(data) {
+    if (Buffer.from(data)[0] !== 0x82) return;
+    ws.off("message", onMsg);
+    resolve();
+  });
+});
 
 // Long vertical drag on one socket.
 ws.send(touch("begin", 0.5, 0.2));
@@ -179,7 +191,7 @@ ws.send(touch("end", 0.5, 0.8));
 ws.close();
 ```
 
-The server sends you frames too: a config frame (first byte `0x82`, body `{width,height,orientation,...}`) on connect and whenever the display changes. Read it if you need live dimensions; otherwise ignore inbound frames.
+The server sends you frames too: a config frame (first byte `0x82`, body `{width,height,orientation,...}`) on connect if the screen size is already known (otherwise as soon as it is) and whenever the display changes. The recipe above waits for the first one before sending touches; other inbound frames can be ignored.
 
 ## Workflow 7: Show the simulator stream in the host's preview
 
