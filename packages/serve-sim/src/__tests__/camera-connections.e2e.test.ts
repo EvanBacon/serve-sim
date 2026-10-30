@@ -32,6 +32,38 @@ const describeIfSimulator = udid && existsSync(DYLIB) ? describe : describe.skip
 let buildDir: string | null = null;
 let resultPath: string | null = null;
 
+async function runTestApp(mode: "graph" | "teardown") {
+  try {
+    execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
+      stdio: "pipe",
+    });
+  } catch {}
+  if (resultPath) {
+    try {
+      unlinkSync(resultPath);
+    } catch {}
+  }
+
+  execFileSync("xcrun", ["simctl", "launch", udid!, BUNDLE_ID], {
+    env: {
+      ...process.env,
+      SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: DYLIB,
+      SIMCTL_CHILD_SIMCAM_CONNECTION_TEST_MODE: mode,
+    },
+  });
+
+  const deadline = Date.now() + 10_000;
+  while (resultPath && !existsSync(resultPath) && Date.now() < deadline) {
+    await Bun.sleep(100);
+  }
+  expect(resultPath && existsSync(resultPath)).toBe(true);
+  const result = JSON.parse(readFileSync(resultPath!, "utf-8")) as {
+    passed: boolean;
+    message: string;
+  };
+  expect(result.passed, result.message).toBe(true);
+}
+
 describeIfSimulator("synthetic camera connection graph", () => {
   beforeAll(() => {
     buildDir = mkdtempSync(join(tmpdir(), "serve-sim-camera-connection-test-"));
@@ -94,22 +126,10 @@ describeIfSimulator("synthetic camera connection graph", () => {
   }, 30_000);
 
   test("preserves no-connections state until the explicit connection is added", async () => {
-    execFileSync("xcrun", ["simctl", "launch", udid!, BUNDLE_ID], {
-      env: {
-        ...process.env,
-        SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: DYLIB,
-      },
-    });
+    await runTestApp("graph");
+  }, 20_000);
 
-    const deadline = Date.now() + 10_000;
-    while (resultPath && !existsSync(resultPath) && Date.now() < deadline) {
-      await Bun.sleep(100);
-    }
-    expect(resultPath && existsSync(resultPath)).toBe(true);
-    const result = JSON.parse(readFileSync(resultPath!, "utf-8")) as {
-      passed: boolean;
-      message: string;
-    };
-    expect(result.passed, result.message).toBe(true);
+  test("deallocates automatic metadata and video outputs without crashing", async () => {
+    await runTestApp("teardown");
   }, 20_000);
 });
