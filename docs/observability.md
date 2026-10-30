@@ -135,13 +135,21 @@ remap input, which is a behavior change, not a log field.
 `parseIntegratedScreenOrientations` only keys `primary`/`primary-1`; confirm what a
 non-Duo device reports before reusing it.
 
-**Did the screen change, without keeping pixels.** `onSharedMjpegFrame` sees
-every frame. Keep a monotonic `frameSeq` (and optionally a cheap content seed, not
-the image). Store `frameSeq` at `begin`; at `end`, record `screen_changed:true` if
-it already advanced, else `false` and patch the entry with `updateEventLogEvent`
-on the first later frame within a short window. This requires `recordTouchEvent`
-to return the entry id (it returns `void` today) and the window timer to be
-cleared in `close()`.
+**Did the screen change, without keeping pixels.** Frame arrival is not a
+signal: the idle timer in `FrameCapture.swift` force-emits the current frame
+every 200 ms even when nothing changed, so a frame counter advances after every
+touch. And `onSharedMjpegFrame` only runs on foldables (`device-session.ts`
+subscribes it only when `isFoldable`). Use the content stamp the native capture
+already computes instead: `captureFrame` builds a `SurfaceFrameStamp` (IOSurface
+ID + seed) and compares it to the previous one. Expose a counter that increments
+only when that stamp changes (not on forced idle re-emits) as a cheap native
+getter, read it at `begin` and `end`, and record `screen_changed:true` if it
+advanced. If not, record `false`, re-read it once after a short window, and patch
+the entry with `updateEventLogEvent` if it advanced then. This requires
+`recordTouchEvent` to return the entry id (it returns `void` today) and the window
+timer to be cleared in `close()`. The seed changes on any surface write, so a
+caret blink or running animation can still read `true`; treat `false` as the
+reliable signal.
 
 Example (proposed shape): portrait hit vs landscape miss, same send time.
 
