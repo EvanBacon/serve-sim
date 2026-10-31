@@ -1493,8 +1493,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     if (!ownsPath(pathname)) return next?.();
     const refused = await scope.check(request);
     if (refused) {
-      res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ ok: false, error: refused }));
+      res.writeHead(refused.status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: false, error: refused.message }));
       return;
     }
 
@@ -2318,7 +2318,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     }
     const request = requestContext(req, { base, device: options?.device }, "upgrade");
     void scope.check(request).then((refused) => {
-      if (refused) rejectUpgrade(socket, 404, refused);
+      if (refused) rejectUpgrade(socket, refused.status, refused.message);
       else upgradeOwned(request, req, socket, head);
     });
   };
