@@ -25,12 +25,12 @@ export function findBootedDevice(): string | null {
   return null;
 }
 
-/** Whether the selected device set lists `udid`. */
+/** Whether the selected device set lists `udid`, in any case, as simctl reads it. */
 export function isInDeviceSet(udid: string): boolean {
   try {
     const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as { devices: Record<string, Array<{ udid: string }>> };
-    return Object.values(data.devices).some((devices) => devices.some((device) => device.udid === udid));
+    return Object.values(data.devices).some((devices) => devices.some((device) => device.udid.toUpperCase() === udid.toUpperCase()));
   } catch {
     return false;
   }

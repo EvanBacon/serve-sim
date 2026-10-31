@@ -328,6 +328,8 @@ describe("serve-sim --device-set", () => {
       const listed = camera([udid]);
       expect(listed.status).toBe(1);
       expect(listed.stderr).not.toContain("is not in the selected device set");
+      // simctl reads a UDID in any case.
+      expect(camera([udid], udid.toLowerCase()).stderr).not.toContain("is not in the selected device set");
     });
   });
 
