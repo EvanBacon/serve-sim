@@ -14,7 +14,7 @@ import type { Socket } from "net";
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
 import { readCameraStatus } from "./camera-helper";
-import { getDeviceSession, closeDeviceSession, liveDeviceSessions, type HidSocket } from "./device-session";
+import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
 import {
   buildDiagnosticsBundle,
   collectDeviceDiagnostics,
@@ -620,13 +620,14 @@ async function handleCameraStatus(req: SimReq, res: SimRes, device: string): Pro
   }
 }
 
-const defaultDiagnosticsSources: DiagnosticsSources = {
+// Sessions come through the scope, which drops those it does not serve.
+const defaultDiagnosticsSources: Omit<DiagnosticsSources, "sessions"> = {
   host: () => collectHostDiagnostics(),
   device: (udid) => collectDeviceDiagnostics(udid),
-  sessions: (device) => Promise.all(liveDeviceSessions(device).map((session) => session.diagnostics())),
 };
 
 export type DiagnosticsOptions = {
+  /** `sessions` reaches the bundle through the device scope, like the event log. */
   sources?: DiagnosticsSources;
   /** Reuse a collection for this long. Default 2s. */
   cacheTtlMs?: number;
@@ -642,7 +643,7 @@ export type DiagnosticsOptions = {
  * the sessions and event log `scope` serves.
  */
 function createDiagnosticsHandler(
-  scope: Pick<DeviceScope<unknown>, "allows" | "events">,
+  scope: Pick<DeviceScope<unknown>, "sessions" | "events">,
   options: DiagnosticsOptions = {},
 ) {
   const sources = options.sources ?? defaultDiagnosticsSources;
@@ -650,8 +651,7 @@ function createDiagnosticsHandler(
   const cache = createTtlCache<DiagnosticsBundle>(options.cacheTtlMs ?? 2000, options.now);
 
   const collect = async (device: string | null): Promise<DiagnosticsBundle> => {
-    const sessionDiagnostics = (await sources.sessions(device))
-      .filter((session) => scope.allows(String(session.udid)));
+    const sessionDiagnostics = await scope.sessions(device);
     const udids = device ? [device] : sessionDiagnostics.map((session) => String(session.udid));
     const [host, devices] = await Promise.all([
       sources.host(),
@@ -1318,7 +1318,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // A dev server that embeds this middleware never runs the CLI: settle the
   // device set (and refuse a bad SERVE_SIM_DEVICE_SET) here, not mid-request.
   resolveDeviceSet();
-  const scope = hostDeviceScope(options?.restrictToDevices, options?.isKnownDevice);
+  const scope = hostDeviceScope(options?.restrictToDevices, {
+    isKnown: options?.isKnownDevice,
+    sessions: options?.diagnostics?.sources?.sessions,
+  });
   const serveDiagnostics = createDiagnosticsHandler(scope, options?.diagnostics);
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.

@@ -2,6 +2,7 @@ import {
   forgetBootedSimulators,
   isBooted,
   listAllSimulators,
+  liveSessionDiagnostics,
   readServeSimStates,
   simulatorName,
   type SimctlDevice,
@@ -62,6 +63,8 @@ export interface DeviceScope<Simulator> {
   simulatorName(udid: string): Promise<string | undefined>;
   /** Whether host actions may drive `udid`: in scope, and known to the host. */
   isKnown(udid: string): Promise<boolean>;
+  /** Diagnostics of served simulators' live sessions (`device` narrows to one). */
+  sessions(device: string | null): Promise<Record<string, unknown>[]>;
   /** Event-log entries for served simulators, and those that name none. */
   events: typeof readEventLog;
   onEvent: typeof subscribeEventLog;
@@ -98,6 +101,7 @@ export function deviceScope<Simulator extends { udid: string }>(
     forgetBootedSimulators: read.forgetBootedSimulators,
     simulatorName: async (udid) => (allows(udid) ? read.simulatorName(udid) : undefined),
     isKnown: async (udid) => allows(udid) && (await read.isKnown(udid)),
+    sessions: async (device) => (await read.sessions(device)).filter((session) => allows(String(session.udid))),
     events: (query) => read.events({ ...query, include: logged }),
     onEvent: (subscriber) => read.onEvent((entry) => {
       if (logged(entry)) subscriber(entry);
@@ -138,17 +142,18 @@ function bodyTarget(field: Unreadable["unreadable"], value: unknown): DeviceTarg
   }
 }
 
-/** The scope over this host's simulators, previews and event log. */
+/** The scope over this host's simulators, previews, sessions and event log. */
 export function hostDeviceScope(
   restrictToDevices: readonly string[] | undefined,
-  isKnown: (udid: string) => Promise<boolean> = isBooted,
+  sources: Partial<Pick<DeviceSources<SimctlDevice>, "isKnown" | "sessions">> = {},
 ): DeviceScope<SimctlDevice> {
   return deviceScope(restrictToDevices, {
     states: readServeSimStates,
     simulators: listAllSimulators,
     forgetBootedSimulators,
     simulatorName: (udid) => simulatorName(udid),
-    isKnown,
+    isKnown: sources.isKnown ?? isBooted,
+    sessions: sources.sessions ?? liveSessionDiagnostics,
     events: readEventLog,
     onEvent: subscribeEventLog,
   });

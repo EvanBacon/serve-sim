@@ -2,7 +2,7 @@ import { execFile } from "child_process";
 import { readdirSync, readFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { debugMw } from "./debug";
-import { closeDeviceSession } from "./device-session";
+import { closeDeviceSession, liveDeviceSessions } from "./device-session";
 import { classifyStaleState, persistRecoveredState, resolveLiveHelperState } from "./helper-lifecycle";
 import { uniqueSimulatorName } from "./metro-reload";
 import { resolveDeviceSet, sameDeviceSet, simctlArguments } from "./simctl";
@@ -184,4 +184,9 @@ export function listAllSimulators(): Promise<SimctlDevice[]> {
       },
     );
   });
+}
+
+/** Diagnostics of live sessions (`device` narrows to one); never starts capture. */
+export function liveSessionDiagnostics(device: string | null): Promise<Record<string, unknown>[]> {
+  return Promise.all(liveDeviceSessions(device).map((session) => session.diagnostics()));
 }
