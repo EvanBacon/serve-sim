@@ -7,9 +7,11 @@ import { tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
 import { deviceScope } from "../device-scope";
+import { forgetBootedSimulators } from "../device-sources";
 import { clearEventLogForTests, recordEventLogEvent, type EventLogEntry } from "../event-log";
 import { simMiddleware, type ServeSimState } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
+import { STATE_DIR, stateFileForDevice } from "../state";
 
 // `restrictToDevices` (`serve-sim --restrict-devices`): a preview on a shared
 // Mac serves only its own simulators, so neither its page nor its API can
@@ -26,15 +28,28 @@ const OTHER = "BBBBBBBB-0000-0000-0000-000000000002";
 let preview: PreviewServer;
 let port: number;
 
-// An xcrun that lists no simulators and changes none, so a request that got
-// past the scope could not reach a real simulator on this Mac.
+// An xcrun that lists only SERVED, booted, and changes nothing, so a request
+// that got past the scope could not reach a real simulator on this Mac.
 const fakeXcrunDir = mkdtempSync(join(tmpdir(), "serve-sim-restrict-xcrun-"));
 const realPath = process.env.PATH;
 
 beforeAll(async () => {
-  writeFileSync(join(fakeXcrunDir, "xcrun"), `#!/bin/sh\necho '{"devices":{}}'\n`);
+  const devices = { devices: { test: [{ udid: SERVED, name: "Served", state: "Booted" }] } };
+  writeFileSync(join(fakeXcrunDir, "xcrun"), `#!/bin/sh\necho '${JSON.stringify(devices)}'\n`);
   chmodSync(join(fakeXcrunDir, "xcrun"), 0o755);
   process.env.PATH = `${fakeXcrunDir}:${realPath}`;
+  forgetBootedSimulators();
+  // A live preview of SERVED, so /api has a state to keep or drop.
+  mkdirSync(STATE_DIR, { recursive: true });
+  const state: ServeSimState = {
+    pid: process.pid,
+    port: 3100,
+    device: SERVED,
+    url: "http://127.0.0.1:3100",
+    streamUrl: `http://127.0.0.1:3100/helper/${SERVED}/stream.mjpeg`,
+    wsUrl: `ws://127.0.0.1:3100/helper/${SERVED}/ws`,
+  };
+  writeFileSync(stateFileForDevice(SERVED), JSON.stringify(state));
   // servePreview's front server, because Bun 1.3's node:http swallows an
   // upgrade rejection's status line (remote-access.test.ts).
   preview = await servePreview({
@@ -61,6 +76,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await preview?.stop(true);
+  rmSync(stateFileForDevice(SERVED), { force: true });
   process.env.PATH = realPath;
   rmSync(fakeXcrunDir, { recursive: true, force: true });
 });
@@ -313,6 +329,7 @@ describe("restrictToDevices", () => {
   test("still serves its own simulator", async () => {
     const api = await send(`/api?device=${SERVED}`);
     expect(api.status).toBe(200);
+    expect((JSON.parse(api.body) as ServeSimState | null)?.device).toBe(SERVED);
   });
 });
 
