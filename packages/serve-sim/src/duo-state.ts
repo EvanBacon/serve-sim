@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import type { SimulatorOrientation } from "./client/types";
+import { simctlArguments } from "./simctl";
 
 export function parseHingeSample(line: string): number | null {
   if (!/AngleValid:Y\b/.test(line)) return null;
@@ -60,7 +61,7 @@ export class DuoStateMonitor {
   refreshOrientation(): void {
     if (this.stopped || this.enumeration) return;
     if (this.poll) clearTimeout(this.poll);
-    this.enumeration = execFile("/usr/bin/xcrun", ["simctl", "io", this.udid, "enumerate"],
+    this.enumeration = execFile("/usr/bin/xcrun", simctlArguments(["io", this.udid, "enumerate"]),
       { timeout: 3000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
         this.enumeration = undefined;
         if (this.stopped) return;
@@ -88,7 +89,7 @@ export class DuoStateMonitor {
       this.onState(this.state);
       this.refreshOrientation();
     };
-    const child = spawn("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", predicate], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", predicate]), { stdio: ["ignore", "pipe", "ignore"] });
     this.panelMonitor = child;
     let pending = "";
     child.stdout.setEncoding("utf8");
@@ -102,7 +103,7 @@ export class DuoStateMonitor {
       }
     });
     // Seed from this boot's most recent transition, then let live events win.
-    this.panelSeed = execFile("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate],
+    this.panelSeed = execFile("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate]),
       { timeout: 10000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
         this.panelSeed = undefined;
         if (!error && !liveSample) {

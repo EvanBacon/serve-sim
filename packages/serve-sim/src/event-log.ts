@@ -145,12 +145,15 @@ export function readEventLog(options: {
   device?: string | null;
   sinceId?: number;
   limit?: number;
+  /** Narrows the entries before `limit` takes the latest. */
+  include?: (entry: EventLogEntry) => boolean;
 } = {}): EventLogEntry[] {
-  const { device, sinceId } = options;
+  const { device, sinceId, include } = options;
   const limit = clampLimit(options.limit);
   const filtered = entries.filter((entry) => {
     if (device && entry.device !== device) return false;
     if (sinceId != null && entry.id <= sinceId) return false;
+    if (include && !include(entry)) return false;
     return true;
   });
   return filtered.slice(Math.max(0, filtered.length - limit));
@@ -627,9 +630,11 @@ function isUploadPlumbing(tokens: string[]): boolean {
 function simctlCommand(tokens: string[]): { verb: string; args: string[] } | null {
   const i = tokens.findIndex((token) => token === "simctl");
   if (i < 0 || tokens[i - 1] !== "xcrun") return null;
-  const verb = tokens[i + 1];
+  // `simctl --set <path> <verb>` (a `--device-set`) names its verb after the set.
+  const v = tokens[i + 1] === "--set" ? i + 3 : i + 1;
+  const verb = tokens[v];
   if (!verb) return null;
-  return { verb, args: tokens.slice(i + 2) };
+  return { verb, args: tokens.slice(v + 1) };
 }
 
 function serveSimCommand(tokens: string[]): { verb: string; args: string[] } | null {

@@ -1,5 +1,6 @@
 import Foundation
 import NodeAPI
+import SimNativeSupport
 
 /// Safe Int→UInt32 for HID codes coming from JS. Plain `UInt32(x)` traps on
 /// negative or too-large values, which would crash the in-process server on
@@ -278,6 +279,10 @@ private func axQuery(
 }
 
 #NodeModule(exports: [
+    // setDeviceSet(path | null): the `--device-set` lookups and simctl calls use.
+    "setDeviceSet": try NodeFunction { (path: String?) in
+        DeviceSet.configure(path: path)
+    },
     "SimHID": SimHID.deferredConstructor,
     "SimCapture": SimCapture.deferredConstructor,
     // axDescribe(udid): Promise<string> — axe-shaped accessibility JSON.

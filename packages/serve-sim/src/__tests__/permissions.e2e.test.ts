@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, execSync } from "child_process";
 import { existsSync } from "fs";
-import { homedir } from "os";
 import { join } from "path";
+import { simctlArguments, simulatorDevicesDir } from "../simctl";
 
 // Drives the built CLI against whatever simulator is already booted (the CI
 // `sim-test.yml` job boots one before running this directory). Each assertion
@@ -19,7 +19,7 @@ const CLI = join(PKG_DIR, "dist/serve-sim.js");
 
 function bootedUdid(): string | null {
   try {
-    const out = execSync("xcrun simctl list devices booted -j", { encoding: "utf-8" });
+    const out = execFileSync("xcrun", simctlArguments(["list", "devices", "booted", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(out) as {
       devices: Record<string, Array<{ udid: string; state: string }>>;
     };
@@ -46,12 +46,7 @@ function cli(...args: string[]): string {
 }
 
 function libDir(): string {
-  return join(
-    homedir(),
-    "Library/Developer/CoreSimulator/Devices",
-    udid!,
-    "data/Library",
-  );
+  return join(simulatorDevicesDir(), udid!, "data/Library");
 }
 
 function tccAuthValue(service: string): string {
