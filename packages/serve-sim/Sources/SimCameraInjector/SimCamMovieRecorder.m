@@ -20,6 +20,14 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
                            userInfo:userInfo];
 }
 
+// A limit that ends the recording leaves a finished file that plays, which
+// AVFoundation reports with AVErrorRecordingSuccessfullyFinishedKey set to YES.
+static NSError *SimCamRecordingLimitReached(AVError code) {
+    return [NSError errorWithDomain:AVFoundationErrorDomain
+                               code:code
+                           userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }];
+}
+
 @implementation SimCamMovieRecorder {
     // Held until the delegate hears the recording finished, as AVFoundation
     // always tells it, even when the app lets the output go first.
@@ -185,20 +193,14 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
     // as it finishes, so the finished file runs past the limit by what it
     // had buffered.
     if (_maxFileSize > 0 && self.recordedFileSize >= _maxFileSize) {
-        [self finishWithError:[NSError errorWithDomain:AVFoundationErrorDomain
-                                                  code:AVErrorMaximumFileSizeReached
-                                              userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
-                     endingAt:kCMTimeInvalid];
+        [self finishWithError:SimCamRecordingLimitReached(AVErrorMaximumFileSizeReached) endingAt:kCMTimeInvalid];
         return;
     }
     if (_paused) return;
     CFTimeInterval elapsed = CACurrentMediaTime() - _startedAt - _pausedSeconds;
     CMTime now = CMTimeMakeWithSeconds(elapsed, kSimCamMovieTimescale);
     if (CMTIME_IS_VALID(_maxDuration) && CMTimeCompare(now, _maxDuration) >= 0) {
-        [self finishWithError:[NSError errorWithDomain:AVFoundationErrorDomain
-                                                  code:AVErrorMaximumDurationReached
-                                              userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
-                     endingAt:_maxDuration];
+        [self finishWithError:SimCamRecordingLimitReached(AVErrorMaximumDurationReached) endingAt:_maxDuration];
         return;
     }
     [self appendFrameAt:now];
