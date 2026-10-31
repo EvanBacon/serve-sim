@@ -448,6 +448,7 @@ describe("deviceScope", () => {
     expect([await scope.simulatorName(SERVED), await scope.simulatorName(OTHER)]).toEqual([`name of ${SERVED}`, undefined]);
     expect([scope.allows(SERVED), scope.allows(OTHER)]).toEqual([true, false]);
     expect(scope.events().map((event) => event.device)).toEqual([SERVED, undefined]);
+    expect(scope.events({ include: (event) => event.device !== SERVED }).map((event) => event.device)).toEqual([undefined]);
     const heard: Array<string | undefined> = [];
     scope.onEvent((event) => heard.push(event.device));
     expect(heard).toEqual([SERVED, undefined]);
