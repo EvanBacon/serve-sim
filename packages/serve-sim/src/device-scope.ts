@@ -91,7 +91,7 @@ export function deviceScope<Simulator extends { udid: string }>(
     simulatorName: async (udid) => (allows(udid) ? read.simulatorName(udid) : undefined),
     isKnown: async (udid) => allows(udid) && (await read.isKnown(udid)),
     sessions: (device) => servedSessions(read, device, allows),
-    events: (query) => read.events({ ...query, include: logged }),
+    events: (query) => read.events({ ...query, include: (entry) => logged(entry) && (query?.include?.(entry) ?? true) }),
     onEvent: (subscriber) => read.onEvent((entry) => {
       if (logged(entry)) subscriber(entry);
     }),
