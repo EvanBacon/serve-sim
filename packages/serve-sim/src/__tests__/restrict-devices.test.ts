@@ -6,7 +6,7 @@ import { connect, type AddressInfo, type Socket } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
-import { deviceScope, type Refusal } from "../device-scope";
+import { deviceScope } from "../device-scope";
 import { clearEventLogForTests, recordEventLogEvent, type EventLogEntry } from "../event-log";
 import { simMiddleware, type ServeSimState } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
@@ -433,8 +433,8 @@ describe("deviceScope", () => {
       devtools: fields.devtools ?? false,
       body: async () => ({ kind: "read" as const, text: "", json: { ok: true as const, value: fields.body } }),
     });
-    const refused: Refusal = { status: 404, message: `${OTHER} is not served by this preview` };
-    const devtoolsOff: Refusal = { status: 404, message: "DevTools are off in a preview with --restrict-devices" };
+    const refused = { status: 404, message: `${OTHER} is not served by this preview` } as const;
+    const devtoolsOff = { status: 404, message: "DevTools are off in a preview with --restrict-devices" } as const;
     expect(await scope.check(request({ requestedDevice: SERVED, helperDevice: SERVED, body: { udid: SERVED, device: SERVED } }))).toBeNull();
     expect(await scope.check(request({ requestedDevice: OTHER }))).toEqual(refused);
     expect(await scope.check(request({ helperDevice: OTHER }))).toEqual(refused);

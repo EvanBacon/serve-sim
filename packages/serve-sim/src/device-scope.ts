@@ -15,7 +15,7 @@ import type { ServeSimDeviceState } from "./state";
 type DeviceRequest = Pick<RequestContext, "method" | "requestedDevice" | "helperDevice" | "devtools" | "body">;
 
 /** Why a restricted scope refuses a request, and the status that says so. */
-export type Refusal = { status: 404 | 413; message: string };
+type Refusal = { status: 404 | 413; message: string };
 
 /**
  * How much of a POST body `check` reads. With --restrict-devices every owned
