@@ -141,7 +141,6 @@ const axStreamerCache = createAxStreamerCache();
 // the partial line is dropped rather than retained indefinitely.
 const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
 
-
 let inspectWebKitBridge: Promise<WebKitBridge> | null = null;
 
 function eventLogLimit(rawUrl: string): number | undefined {
@@ -284,7 +283,6 @@ export function selectServeSimState(
   return states[0] ?? null;
 }
 
-
 /**
  * Parse `/grid/api` pagination params. `limit` absent → return the whole list
  * (back-compat for embedded mounts that expect every device in one response).
@@ -390,7 +388,6 @@ export function rewriteStateForRequestHost(
   };
 }
 
-
 function devtoolsProxyPrefix(base: string): string {
   return `${base === "/" ? "" : base}/devtools`;
 }
@@ -403,8 +400,6 @@ function devtoolsProxyTarget(rawUrl: string, prefix: string): { upstreamPath: st
   const suffix = parsed.pathname.slice(prefix.length);
   return { upstreamPath: `/devtools${suffix}${parsed.search}` };
 }
-
-
 
 const WS_ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
