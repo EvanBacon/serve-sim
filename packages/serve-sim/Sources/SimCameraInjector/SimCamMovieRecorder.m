@@ -180,6 +180,17 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
         [self finishWithError:SimCamRecordingFailure(_writer.error) endingAt:kCMTimeInvalid];
         return;
     }
+    // Checked while paused too, in case the writer flushes what it had
+    // buffered then. The writer flushes in chunks and adds the movie header
+    // as it finishes, so the finished file runs past the limit by what it
+    // had buffered.
+    if (_maxFileSize > 0 && self.recordedFileSize >= _maxFileSize) {
+        [self finishWithError:[NSError errorWithDomain:AVFoundationErrorDomain
+                                                  code:AVErrorMaximumFileSizeReached
+                                              userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
+                     endingAt:kCMTimeInvalid];
+        return;
+    }
     if (_paused) return;
     CFTimeInterval elapsed = CACurrentMediaTime() - _startedAt - _pausedSeconds;
     CMTime now = CMTimeMakeWithSeconds(elapsed, kSimCamMovieTimescale);
@@ -188,16 +199,6 @@ static NSError *SimCamRecordingFailure(NSError *cause) {
                                                   code:AVErrorMaximumDurationReached
                                               userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
                      endingAt:_maxDuration];
-        return;
-    }
-    // The writer flushes in chunks and adds the movie header as it
-    // finishes, so the finished file runs past the limit by what it had
-    // buffered.
-    if (_maxFileSize > 0 && self.recordedFileSize >= _maxFileSize) {
-        [self finishWithError:[NSError errorWithDomain:AVFoundationErrorDomain
-                                                  code:AVErrorMaximumFileSizeReached
-                                              userInfo:@{ AVErrorRecordingSuccessfullyFinishedKey: @YES }]
-                     endingAt:kCMTimeInvalid];
         return;
     }
     [self appendFrameAt:now];
