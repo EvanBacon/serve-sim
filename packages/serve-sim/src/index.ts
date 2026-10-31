@@ -20,7 +20,7 @@ import {
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
-import { findBootedDevice, resolveDevice } from "./device";
+import { findBootedDevice, isInDeviceSet, resolveDevice } from "./device";
 import {
   authTokenFingerprint,
   classifyStaleState,
@@ -76,7 +76,7 @@ import {
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
-import { simctlBootStatusArguments } from "./simctl";
+import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { execCommandLine } from "./shell-quote";
 import { reExecArgs, selfServeSimBin } from "./self-bin";
 import {
@@ -123,14 +123,23 @@ function ensureStateDir() {
 
 function readState(udid?: string): ServerState | null {
   if (udid) {
-    return readStateFile(stateFileForDevice(udid));
+    const state = readStateFile(stateFileForDevice(udid));
+    return state && inThisDeviceSet(state) ? state : null;
   }
-  // No udid: return the first live device state
+  // No udid: the first live preview of this device set.
   for (const file of listStateFiles()) {
     const state = readStateFile(file);
-    if (state) return state;
+    if (state && inThisDeviceSet(state)) return state;
   }
   return null;
+}
+
+/**
+ * Previews in every device set share the state folder; a command acts only
+ * on a preview of its own set.
+ */
+function inThisDeviceSet(state: ServerState): boolean {
+  return sameDeviceSet(state.deviceSet, resolveDeviceSet());
 }
 
 /**
@@ -144,7 +153,7 @@ function getBootedUdids(): Set<string> | null {
     return bootedSnapshot.booted;
   }
   try {
-    const output = execSync("xcrun simctl list devices booted -j", {
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "booted", "-j"]), {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 3_000,
@@ -205,7 +214,7 @@ function readStateFile(file: string): ServerState | null {
 function readReusableState(udid: string, allowExec: boolean): ServerState | null {
   const state = readState(udid);
   if (!state) return null;
-  const action = classifyStaleState(state, getBootedUdids(), process.pid);
+  const action = classifyStaleState(state, getBootedUdids(), process.pid, resolveDeviceSet());
   if (action === "keep") {
     const mismatch =
       reuseAuthMismatch(state, resolveAuthToken(undefined)) ?? reuseExecMismatch(state, allowExec);
@@ -263,7 +272,7 @@ function clearState(udid?: string) {
  */
 function pickDefaultDevice(): { udid: string; name: string } | null {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string; isAvailable?: boolean }>>;
     };
@@ -292,7 +301,7 @@ function getDeviceName(udid: string): string | null {
 function readDeviceNamesByUdid(): Map<string, string> {
   const names = new Map<string, string>();
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
     };
@@ -307,7 +316,7 @@ function readDeviceNamesByUdid(): Map<string, string> {
 
 function isDeviceBooted(udid: string): boolean {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; state: string }>>;
     };
@@ -323,7 +332,7 @@ function isDeviceBooted(udid: string): boolean {
 function bootDevice(udid: string): void {
   if (!isDeviceBooted(udid)) {
     try {
-      execSync(`xcrun simctl boot ${udid}`, { encoding: "utf-8", stdio: "pipe" });
+      execFileSync("xcrun", simctlArguments(["boot", udid]), { encoding: "utf-8", stdio: "pipe" });
     } catch (err: any) {
       const msg = (err.stderr ?? err.message ?? "").toLowerCase();
       if (!msg.includes("booted") && !msg.includes("current state")) {
@@ -337,6 +346,9 @@ function bootDevice(udid: string): void {
   // (e.g. GitHub Actions runners) where `open` can block indefinitely waiting
   // for a window server that never arrives — in that environment the test
   // harness is expected to have already driven the sim via simctl.
+  // Simulator.app shows only Xcode's default device set, so it has nothing to
+  // wire up for a simulator in a `--device-set` of its own.
+  if (!sameDeviceSet(resolveDeviceSet(), undefined)) return;
   try {
     execSync("open -ga Simulator", {
       encoding: "utf-8",
@@ -1619,6 +1631,20 @@ async function ensureHelperWithSource(opts: {
 }
 
 /**
+ * The simulator a camera subcommand acts on: `-d`, or the booted one. The
+ * camera helper is keyed by UDID alone, so with `--device-set` a UDID the set
+ * does not list exits here, before any branch reaches another set's helper.
+ */
+function cameraTarget(deviceArg: string | undefined): string | null {
+  const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+  if (udid && resolveDeviceSet() && !isInDeviceSet(udid)) {
+    console.error(`${udid} is not in the selected device set.`);
+    process.exit(1);
+  }
+  return udid;
+}
+
+/**
  * `serve-sim camera <bundle-id> [-d udid] [source-options] [--build]`
  *
  * Launches a simulator app with SimCameraInjector loaded via
@@ -1719,13 +1745,13 @@ Examples:
   }
 
   if (stopWebcam) {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
     const injectedBundles = readInjectedBundles(udid);
     const terminated: string[] = [];
     for (const b of injectedBundles) {
       try {
-        execSync(`xcrun simctl terminate "${udid}" "${b}"`, { stdio: "ignore" });
+        execFileSync("xcrun", simctlArguments(["terminate", udid, b]), { stdio: "ignore" });
         terminated.push(b);
       } catch {}
     }
@@ -1741,7 +1767,7 @@ Examples:
   // `serve-sim camera mirror <auto|on|off> [-d udid]`
   // Hot-swap the preview-layer mirror mode without touching the app.
   if (filtered[0] === "mirror") {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
     const mode = filtered[1];
     if (mode !== "auto" && mode !== "on" && mode !== "off") {
@@ -1770,7 +1796,7 @@ Examples:
   // `serve-sim camera switch <source> [arg] [-d udid]`
   // Hot-swap the helper's source without touching the simulator app.
   if (filtered[0] === "switch") {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
     let wanted = filtered[1];
     let arg: string | undefined = filtered[2];
@@ -1821,7 +1847,7 @@ Examples:
   // `serve-sim camera status [-d udid]` — JSON probe for scripts and humans.
   // The preview UI reads the same shared implementation through middleware.
   if (filtered[0] === "status") {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) {
       console.log(JSON.stringify({ alive: false, error: "no booted simulator" }));
       return;
@@ -1836,7 +1862,7 @@ Examples:
     process.exit(1);
   }
 
-  const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+  const udid = cameraTarget(deviceArg);
   if (!udid) {
     console.error("No booted simulator. Boot one or pass -d <udid|name>.");
     process.exit(1);
@@ -1893,12 +1919,12 @@ Examples:
   // we want to bring a new app into the set. Source-only hot-swaps go
   // through `camera switch`, not this path.
   try {
-    execSync(`xcrun simctl privacy "${udid}" grant camera "${bundleId}"`, {
+    execFileSync("xcrun", simctlArguments(["privacy", udid, "grant", "camera", bundleId]), {
       stdio: "ignore",
     });
   } catch {}
   try {
-    execSync(`xcrun simctl terminate "${udid}" "${bundleId}"`, { stdio: "ignore" });
+    execFileSync("xcrun", simctlArguments(["terminate", udid, bundleId]), { stdio: "ignore" });
   } catch {}
 
   const env = {
@@ -1910,7 +1936,7 @@ Examples:
 
   let stdoutBuf = "";
   try {
-    stdoutBuf = execSync(`xcrun simctl launch "${udid}" "${bundleId}"`, {
+    stdoutBuf = execFileSync("xcrun", simctlArguments(["launch", udid, bundleId]), {
       env,
       encoding: "utf-8",
     });
@@ -1953,7 +1979,7 @@ Examples:
 /** Resolve which simulators to stream, without spawning anything. */
 function resolveTargetDevices(devices: string[]): string[] {
   if (devices.length > 0) return devices.map(resolveDevice);
-  const existing = readAllStates();
+  const existing = readAllStates().filter(inThisDeviceSet);
   if (existing.length > 0) return [existing[0]!.device];
   const booted = findBootedDevice();
   if (booted) return [booted];
@@ -1979,7 +2005,7 @@ async function serve(
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
   const targetDevices = resolveTargetDevices(devices);
-  if (devices.length === 0 && readAllStates().length === 0) {
+  if (devices.length === 0 && !readAllStates().some(inThisDeviceSet)) {
     console.log("Starting simulator stream...");
   }
   for (const udid of targetDevices) await ensureBooted(udid);
@@ -2197,6 +2223,11 @@ program
       }
     },
   )
+  .option(
+    "--device-set <path>",
+    "Use this CoreSimulator device set instead of Xcode's default (simctl --set). " +
+      "Applies to subcommands too. Also read from SERVE_SIM_DEVICE_SET.",
+  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2209,6 +2240,7 @@ Examples:
   serve-sim --max-bitrate 8              Cap the H.264 stream at 8 Mbps
   serve-sim --panes devices,tools --fit  Open panes and fit the simulator to the viewport
   serve-sim --theme dark                 Start the simulator in Dark Mode
+  serve-sim --device-set <path> <udid>   Preview a simulator of another device set
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --allow-exec                 Enable \`serve-sim exec\` and .ipa drag-to-install
@@ -2435,4 +2467,14 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
+// Settle the device set before any command runs. Commander matches the root
+// --device-set after a subcommand's name too.
+program.hook("preAction", () => {
+  try {
+    resolveDeviceSet(program.opts().deviceSet);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+});
 await program.parseAsync(process.argv);

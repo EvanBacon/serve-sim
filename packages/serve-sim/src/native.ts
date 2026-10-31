@@ -12,6 +12,7 @@ import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { maxBitrateFromEnv } from "./max-bitrate";
+import { resolveDeviceSet } from "./simctl";
 
 const require = createRequire(import.meta.url);
 
@@ -56,6 +57,7 @@ interface NativeAddon {
   SimCapture: new (udid: string, maxBitrate: number | null) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
+  setDeviceSet(path: string | null): void;
 }
 
 // (data, width, height, flags) — codec 0=MJPEG 1=AVCC 2=size-only; flags bit0=desc bit1=keyframe.
@@ -162,7 +164,12 @@ function resolveAddon(): string {
 
 let addon: NativeAddon | undefined;
 function load(): NativeAddon {
-  if (!addon) addon = require(resolveAddon()) as NativeAddon;
+  if (!addon) {
+    addon = require(resolveAddon()) as NativeAddon;
+    // The addon cannot read the set from the environment: under Bun a
+    // `process.env` write never reaches it.
+    addon.setDeviceSet(resolveDeviceSet() ?? null);
+  }
   return addon;
 }
 

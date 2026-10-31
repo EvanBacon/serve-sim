@@ -1,5 +1,6 @@
 import { tmpdir } from "os";
 import { join } from "path";
+import { resolveDeviceSet } from "./simctl";
 import {
   chmodSync,
   closeSync,
@@ -46,6 +47,12 @@ export interface ServeSimDeviceState {
    * opt-in differs from the one requested. Absent means off.
    */
   allowExec?: boolean;
+  /**
+   * The `--device-set` the server's simulator lives in. Absent means Xcode's
+   * default set. Previews in different sets share this state folder, and
+   * each can tell only whether its own set's simulators are booted.
+   */
+  deviceSet?: string;
 }
 
 /**
@@ -65,7 +72,9 @@ export function inProcessServeSimState(
   // leading slash (e.g. "foo") still yields well-formed `…:port/foo/helper/…`.
   const trimmed = base.replace(/^\/+/, "").replace(/\/+$/, "");
   const prefix = trimmed === "" ? "" : `/${trimmed}`;
+  const deviceSet = resolveDeviceSet();
   return {
+    ...(deviceSet !== undefined ? { deviceSet } : {}),
     pid: process.pid,
     port,
     device: udid,
