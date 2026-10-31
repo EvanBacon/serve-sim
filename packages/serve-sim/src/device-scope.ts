@@ -16,8 +16,11 @@ import type { ServeSimDeviceState } from "./state";
  */
 const EVERY_SIMULATOR = Symbol("every simulator");
 
-/** A simulator UDID a request names, or every simulator at once. */
-type DeviceTarget = string | typeof EVERY_SIMULATOR;
+/** A body's `udid` or `device` that String() cannot read, so it names no simulator. */
+type Unreadable = { unreadable: "udid" | "device" };
+
+/** A simulator UDID a request names, every simulator at once, or an unreadable name. */
+type DeviceTarget = string | typeof EVERY_SIMULATOR | Unreadable;
 
 /** What `check` reads of a request. */
 type DeviceRequest = Pick<RequestContext, "method" | "requestedDevice" | "helperDevice" | "devtools" | "body">;
@@ -84,10 +87,11 @@ export function deviceScope<Simulator extends { udid: string }>(
     check: async (request) => {
       const targets = await requestTargets(request);
       if (targets === TOO_LARGE) return { status: 413, message: "Body too large" };
-      const refused = targets.find((target) => target === EVERY_SIMULATOR || !allows(target));
+      const refused = targets.find((target) => typeof target !== "string" || !allows(target));
       if (refused === undefined) return null;
-      const message = refused === EVERY_SIMULATOR ? "DevTools are off in a preview with --restrict-devices" : notServed(refused);
-      return { status: 404, message };
+      if (refused === EVERY_SIMULATOR) return { status: 404, message: "DevTools are off in a preview with --restrict-devices" };
+      if (typeof refused !== "string") return { status: 404, message: `An unreadable ${refused.unreadable} is not served by this preview` };
+      return { status: 404, message: notServed(refused) };
     },
     states: () => read.states(allows),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
@@ -116,13 +120,22 @@ async function requestTargets(request: DeviceRequest): Promise<DeviceTarget[] | 
     const body = await request.body(CHECK_BODY_LIMIT);
     if (body.kind === "too-large") return TOO_LARGE;
     const value = body.json.ok ? body.json.value : null;
-    // Routes coerce what they read (`[udid]` passes as `udid`), so this does too.
     if (typeof value === "object" && value !== null) {
-      if ("udid" in value && value.udid !== undefined && value.udid !== null) targets.push(String(value.udid));
-      if ("device" in value && value.device !== undefined && value.device !== null) targets.push(String(value.device));
+      if ("udid" in value && value.udid !== undefined && value.udid !== null) targets.push(bodyTarget("udid", value.udid));
+      if ("device" in value && value.device !== undefined && value.device !== null) targets.push(bodyTarget("device", value.device));
     }
   }
   return targets;
+}
+
+// Routes coerce what they read (`[udid]` passes as `udid`), so this does too.
+// A value String() throws on (`{ "toString": null }`) is refused, not a 500.
+function bodyTarget(field: Unreadable["unreadable"], value: unknown): DeviceTarget {
+  try {
+    return String(value);
+  } catch {
+    return { unreadable: field };
+  }
 }
 
 /** The scope over this host's simulators, previews and event log. */

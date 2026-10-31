@@ -179,6 +179,17 @@ describe("restrictToDevices", () => {
     expect((await send("/grid/api/shutdown", { udid: [OTHER] })).status).toBe(404);
   });
 
+  test("refuses a udid or device that String() cannot read, instead of failing", async () => {
+    for (const field of ["udid", "device"]) {
+      const refused = await send(`/reload?device=${SERVED}`, { bundleId: "com.example.app", [field]: { toString: null } });
+      expect({ field, status: refused.status, body: JSON.parse(refused.body) }).toEqual({
+        field,
+        status: 404,
+        body: { ok: false, error: `An unreadable ${field} is not served by this preview` },
+      });
+    }
+  });
+
   test("answers a POST upgrade without reading a body", async () => {
     const answer = await upgradeAnswer(`/helper/${OTHER}/ws`, "POST");
     expect(answer).toStartWith("HTTP/1.1 404 ");
@@ -387,6 +398,11 @@ describe("deviceScope", () => {
     expect(await scope.check(request({ helperDevice: OTHER }))).toEqual(refused);
     expect(await scope.check(request({ body: { udid: OTHER } }))).toEqual(refused);
     expect(await scope.check(request({ body: { device: OTHER } }))).toEqual(refused);
+    expect(await scope.check(request({ body: { udid: [SERVED], device: [SERVED] } }))).toBeNull();
+    expect(await scope.check(request({ body: { udid: { toString: null } } }))).toEqual({
+      status: 404,
+      message: "An unreadable udid is not served by this preview",
+    });
     expect(await scope.check(request({ devtools: true }))).toEqual(devtoolsOff);
     // The check reads at most 4 KB of a body, whatever its route's own cap.
     const caps: Array<number | undefined> = [];
