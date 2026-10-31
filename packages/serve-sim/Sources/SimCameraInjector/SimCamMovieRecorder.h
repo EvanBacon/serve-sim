@@ -1,3 +1,5 @@
+#pragma once
+
 #import <AVFoundation/AVFoundation.h>
 
 // One AVCaptureMovieFileOutput recording from the injected frames. A session
