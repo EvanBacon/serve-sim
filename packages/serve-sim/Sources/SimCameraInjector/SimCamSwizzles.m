@@ -249,6 +249,7 @@ static char kSimCamSessionRunningKey;
 static char kSimCamSessionInputsKey;
 static char kSimCamSessionOutputsKey;
 static char kSimCamSessionConnectionsKey;
+static char kSimCamSessionSentinelKey;
 static char kSimCamOutputAttachedToFakeSessionKey;
 static char kSimCamOutputSessionKey;
 static char kSimCamMaxPhotoDimensionsKey;
@@ -261,11 +262,36 @@ static NSMutableArray *SimCamSessionTrackedInputs(AVCaptureSession *s) {
     }
     return arr;
 }
+// For a session that stopped or went away: its outputs' fake recordings end
+// as a stop.
+static void SimCamStopOutputRecordings(NSArray<AVCaptureOutput *> *outputs) {
+    for (AVCaptureOutput *output in [outputs copy]) {
+        SimCamFakeMovieOutputSessionStopped(output);
+    }
+}
+
+// Associated with a session beside its tracked outputs, so it goes when the
+// session does: a session the app lets go without stopping it ends its fake
+// recordings, as AVFoundation finishes the file when the session goes away.
+// It holds the outputs itself, since the session's other associated objects
+// may be released first, and never messages the session.
+@interface SimCamSessionSentinel : NSObject
+@property (nonatomic, strong) NSMutableArray<AVCaptureOutput *> *outputs;
+@end
+@implementation SimCamSessionSentinel
+- (void)dealloc {
+    SimCamStopOutputRecordings(_outputs);
+}
+@end
+
 static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
     NSMutableArray *arr = objc_getAssociatedObject(s, &kSimCamSessionOutputsKey);
     if (!arr) {
         arr = [NSMutableArray new];
         objc_setAssociatedObject(s, &kSimCamSessionOutputsKey, arr, OBJC_ASSOCIATION_RETAIN);
+        SimCamSessionSentinel *sentinel = [SimCamSessionSentinel new];
+        sentinel.outputs = arr;
+        objc_setAssociatedObject(s, &kSimCamSessionSentinelKey, sentinel, OBJC_ASSOCIATION_RETAIN);
     }
     return arr;
 }
@@ -574,9 +600,7 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
 }
 - (void)simcam_stopRunning {
     objc_setAssociatedObject(self, &kSimCamSessionRunningKey, @NO, OBJC_ASSOCIATION_RETAIN);
-    for (AVCaptureOutput *output in [objc_getAssociatedObject(self, &kSimCamSessionOutputsKey) copy]) {
-        SimCamFakeMovieOutputSessionStopped(output);
-    }
+    SimCamStopOutputRecordings(objc_getAssociatedObject(self, &kSimCamSessionOutputsKey));
     simcam_log(@"stopRunning intercepted");
     [self willChangeValueForKey:@"running"];
     [self didChangeValueForKey:@"running"];

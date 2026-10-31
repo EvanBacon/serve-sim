@@ -10,8 +10,8 @@ void SimCamInstallMovieOutputSwizzles(void);
 // stopped because the configuration of media sources and destinations
 // changed") is for the output leaving its fake session: removed, or the
 // session's last fake camera removed, after which stopRecording no longer
-// reaches the fake. A session stopped mid-recording has no error code of its
-// own (AVErrorSessionNotRunning is for a recording that cannot start), so its
-// recordings end as a stop.
+// reaches the fake. A session stopped or let go mid-recording has no error
+// code of its own (AVErrorSessionNotRunning is for a recording that cannot
+// start), so its recordings end as a stop.
 void SimCamFakeMovieOutputLeftSession(AVCaptureOutput *output);
 void SimCamFakeMovieOutputSessionStopped(AVCaptureOutput *output);

@@ -44,6 +44,7 @@ async function runTestApp(
     | "writer-failure-recording"
     | "dropped-output-recording"
     | "stopped-session-recording"
+    | "released-session-recording"
     | "removed-camera-recording"
     | "not-running-recording"
     | "foreign-connection-settings",
@@ -188,6 +189,10 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("finishes the movie when the app stops its session mid-recording and lets it go", async () => {
     await runTestApp("stopped-session-recording");
+  }, 20_000);
+
+  test("finishes the movie when the app lets its running session go", async () => {
+    await runTestApp("released-session-recording");
   }, 20_000);
 
   test("finishes the movie when the app removes the camera mid-recording", async () => {

@@ -678,11 +678,12 @@ static AVCaptureSession *RunningMovieSession(AVCaptureMovieFileOutput *movie) {
     return session;
 }
 
-// Records into a movie the app lets go of 0.5 s in: `letGo` drops the
-// output, and the delegate must still hear about a finished, playable file,
-// with no error when `expectedCode` is 0 and otherwise that AVFoundation
-// error with AVErrorRecordingSuccessfullyFinishedKey set to YES, from an
-// output that reports the movie's duration and size.
+// Records into a movie the app lets go of 0.5 s in: `letGo` is what the app
+// does just before it drops its session, and the delegate must still hear
+// about a finished, playable file, with no error when `expectedCode` is 0
+// and otherwise that AVFoundation error with
+// AVErrorRecordingSuccessfullyFinishedKey set to YES, from an output that
+// reports the movie's duration and size.
 static void RunLetGoRecording(NSString *what, NSString *fileName, NSInteger expectedCode,
                               void (^letGo)(AVCaptureSession *session, AVCaptureMovieFileOutput *movie)) {
     AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
@@ -764,6 +765,16 @@ static void RunStoppedSessionRecording(void) {
     RunLetGoRecording(@"Stopped session", @"stopped-session.mov", 0, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
         (void)movie;
         [session stopRunning];
+    });
+}
+
+// An app can also let a running session go with the output still in it and
+// never stop it. AVFoundation finishes the file when the session goes away,
+// and the recording ends as a stop.
+static void RunReleasedSessionRecording(void) {
+    RunLetGoRecording(@"Released session", @"released-session.mov", 0, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        (void)session;
+        (void)movie;
     });
 }
 
@@ -881,6 +892,7 @@ static void RunForeignConnectionSettings(void) {
             else if ([mode isEqualToString:@"writer-failure-recording"]) RunWriterFailureRecording();
             else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();
             else if ([mode isEqualToString:@"stopped-session-recording"]) RunStoppedSessionRecording();
+            else if ([mode isEqualToString:@"released-session-recording"]) RunReleasedSessionRecording();
             else if ([mode isEqualToString:@"removed-camera-recording"]) RunRemovedCameraRecording();
             else if ([mode isEqualToString:@"not-running-recording"]) RunNotRunningRecording();
             else if ([mode isEqualToString:@"foreign-connection-settings"]) RunForeignConnectionSettings();
