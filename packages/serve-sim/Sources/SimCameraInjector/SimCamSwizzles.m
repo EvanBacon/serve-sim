@@ -252,6 +252,7 @@ static char kSimCamSessionConnectionsKey;
 static char kSimCamSessionSentinelKey;
 static char kSimCamOutputAttachedToFakeSessionKey;
 static char kSimCamOutputSessionKey;
+static char kSimCamOutputOwnerKey;
 static char kSimCamMaxPhotoDimensionsKey;
 
 static NSMutableArray *SimCamSessionTrackedInputs(AVCaptureSession *s) {
@@ -294,6 +295,24 @@ static NSMutableArray *SimCamSessionTrackedOutputs(AVCaptureSession *s) {
         objc_setAssociatedObject(s, &kSimCamSessionSentinelKey, sentinel, OBJC_ASSOCIATION_RETAIN);
     }
     return arr;
+}
+// AVFoundation keeps an output in one session at a time: canAddOutput: says
+// NO while another session holds it, and adding it throws. So one session's
+// teardown, stop or release never reaches another's recording.
+static AVCaptureSession *SimCamOutputOwner(AVCaptureOutput *output) {
+    return ((SimCamWeakRef *)objc_getAssociatedObject(output, &kSimCamOutputOwnerKey)).target;
+}
+static void SimCamTakeOutput(AVCaptureSession *s, AVCaptureOutput *output, SEL adding) {
+    AVCaptureSession *owner = SimCamOutputOwner(output);
+    if (owner == s) return;
+    if (owner) {
+        [NSException raise:NSInvalidArgumentException
+                    format:@"*** -[AVCaptureSession %@] An AVCaptureOutput instance may not be added to more than one session",
+                           NSStringFromSelector(adding)];
+    }
+    SimCamWeakRef *ref = [SimCamWeakRef new];
+    ref.target = s;
+    objc_setAssociatedObject(output, &kSimCamOutputOwnerKey, ref, OBJC_ASSOCIATION_RETAIN);
 }
 static NSMutableArray *SimCamSessionTrackedConnections(AVCaptureSession *s) {
     NSMutableArray *arr = objc_getAssociatedObject(s, &kSimCamSessionConnectionsKey);
@@ -472,6 +491,7 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
         NSStringFromClass([input class]), (unsigned long)tracked.count);
 }
 - (void)simcam_addOutput:(AVCaptureOutput *)output {
+    SimCamTakeOutput(self, output, _cmd);
     SimCamSetPosition(output, SimCamPositionOf(self));
     SimCamMarkCameraInUse();
     NSMutableArray *tracked = SimCamSessionTrackedOutputs(self);
@@ -485,8 +505,12 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
         (unsigned long)tracked.count,
         (int)SimCamPositionOf(self));
 }
-- (BOOL)simcam_canAddOutput:(AVCaptureOutput *)output { return YES; }
+- (BOOL)simcam_canAddOutput:(AVCaptureOutput *)output {
+    AVCaptureSession *owner = SimCamOutputOwner(output);
+    return !owner || owner == self;
+}
 - (void)simcam_addOutputWithNoConnections:(AVCaptureOutput *)output {
+    SimCamTakeOutput(self, output, _cmd);
     SimCamSetPosition(output, SimCamPositionOf(self));
     SimCamMarkCameraInUse();
     NSMutableArray *tracked = SimCamSessionTrackedOutputs(self);
@@ -498,6 +522,8 @@ static void SimCamTrackInput(AVCaptureSession *s, AVCaptureInput *input,
         (int)SimCamPositionOf(self));
 }
 - (void)simcam_removeOutput:(AVCaptureOutput *)output {
+    if (SimCamOutputOwner(output) != self) return;
+    objc_setAssociatedObject(output, &kSimCamOutputOwnerKey, nil, OBJC_ASSOCIATION_RETAIN);
     SimCamRemoveConnectionsForOutput(self, output);
     SimCamUnmarkOutputAttachedToFakeSession(output);
     NSMutableArray *tracked = SimCamSessionTrackedOutputs(self);

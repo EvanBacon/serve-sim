@@ -46,6 +46,7 @@ async function runTestApp(
     | "stopped-session-recording"
     | "released-session-recording"
     | "removed-camera-recording"
+    | "moved-output-recording"
     | "not-running-recording"
     | "foreign-connection-settings",
 ) {
@@ -197,6 +198,10 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("finishes the movie when the app removes the camera mid-recording", async () => {
     await runTestApp("removed-camera-recording");
+  }, 20_000);
+
+  test("keeps an output in one session at a time, as AVFoundation does", async () => {
+    await runTestApp("moved-output-recording");
   }, 20_000);
 
   test("refuses to record on a stopped session with AVErrorSessionNotRunning", async () => {

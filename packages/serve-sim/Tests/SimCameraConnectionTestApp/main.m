@@ -776,6 +776,74 @@ static void RunReleasedSessionRecording(void) {
     });
 }
 
+// AVFoundation keeps an output in one session at a time ("An AVCaptureOutput
+// instance may not be added to more than one session"): a second session's
+// canAddOutput: says NO and adding the output throws until the first session
+// lets it go. Moved that way, it records in the new session while the old one
+// is taken apart, asked to remove it again, stopped and let go.
+static void RunMovedOutputRecording(void) {
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    __block AVCaptureSession *old = RunningMovieSession(movie);
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
+    AVCaptureSession *session = [AVCaptureSession new];
+    [session addInputWithNoConnections:camera];
+    if ([session canAddOutput:movie]) {
+        WriteResult(NO, @"Moved output: a second session could add an output the first still holds");
+        return;
+    }
+    @try {
+        [session addOutputWithNoConnections:movie];
+        WriteResult(NO, @"Moved output: adding an output another session holds did not throw");
+        return;
+    } @catch (NSException *exception) {
+        if (![exception.name isEqualToString:NSInvalidArgumentException]) {
+            WriteResult(NO, [NSString stringWithFormat:@"Moved output: adding it threw %@", exception.name]);
+            return;
+        }
+    }
+    [old beginConfiguration];
+    [old removeOutput:movie];
+    [old commitConfiguration];
+    if (![session canAddOutput:movie]) {
+        WriteResult(NO, @"Moved output: the second session could not add the output the first let go");
+        return;
+    }
+    [session addOutputWithNoConnections:movie];
+    AddVideoConnection(session, camera, movie);
+    [session startRunning];
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [old beginConfiguration];
+            for (AVCaptureInput *input in old.inputs) [old removeInput:input];
+            [old addInput:FakeCameraInput(AVCaptureDevicePositionFront)];
+            [old removeOutput:movie];
+            [old commitConfiguration];
+            [old stopRunning];
+            old = nil;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [movie stopRecording]; });
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        (void)session;
+        if (error) {
+            WriteResult(NO, [NSString stringWithFormat:@"Moved output: expected no error, got %@", error]);
+            return;
+        }
+        ReadVideoSeconds(url, ^(double seconds, NSString *problem) {
+            if (problem || seconds < 0.5) {
+                WriteResult(NO, [NSString stringWithFormat:@"Moved output: %@",
+                    problem ?: [NSString stringWithFormat:@"movie holds %.2f s, so the old session ended the recording", seconds]]);
+                return;
+            }
+            WriteResult(YES, [NSString stringWithFormat:@"Moved output: refused while held, then recorded %.2f s while its old session was taken apart and let go", seconds]);
+        });
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"moved-output.mov") recordingDelegate:gProbe];
+}
+
 // A movie output on a stopped session does not record: the delegate hears
 // AVErrorSessionNotRunning ("The recording couldn't start because the
 // session isn't running") and nothing is written.
@@ -892,6 +960,7 @@ static void RunForeignConnectionSettings(void) {
             else if ([mode isEqualToString:@"stopped-session-recording"]) RunStoppedSessionRecording();
             else if ([mode isEqualToString:@"released-session-recording"]) RunReleasedSessionRecording();
             else if ([mode isEqualToString:@"removed-camera-recording"]) RunRemovedCameraRecording();
+            else if ([mode isEqualToString:@"moved-output-recording"]) RunMovedOutputRecording();
             else if ([mode isEqualToString:@"not-running-recording"]) RunNotRunningRecording();
             else if ([mode isEqualToString:@"foreign-connection-settings"]) RunForeignConnectionSettings();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
