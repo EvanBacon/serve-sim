@@ -153,8 +153,9 @@ Options:
                       default (simctl --set). Applies to subcommands too.
                       Also read from SERVE_SIM_DEVICE_SET
       --restrict-devices
-                      Serve only the simulators named on the command line;
-                      refuse to boot, shut down, stream or drive any other
+                      Serve only the simulators named on the command line,
+                      for a shared Mac; the preview refuses any other and
+                      DevTools are off (preview server only)
       --list [device] List running streams
       --kill [device] Kill running stream(s)
 
