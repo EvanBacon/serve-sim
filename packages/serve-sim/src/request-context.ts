@@ -1,6 +1,6 @@
 import type { IncomingMessage } from "http";
 
-type BodyLimit = { max: number; size: (chunk: Buffer) => number };
+export type BodyLimit = { max: number; size: (chunk: Buffer) => number };
 
 /**
  * POST bodies the routes cap. `/reload` only carries `{ bundleId }` and
@@ -43,8 +43,11 @@ export interface RequestContext {
   helperDevice: string | null;
   /** DevTools routes, which reach every simulator. */
   devtools: boolean;
-  /** The body, read on first call, within its route's cap. */
-  body(): Promise<RequestBody>;
+  /**
+   * The body, read on the first call within `limit`, else its route's cap.
+   * Later calls get that same read.
+   */
+  body(limit?: BodyLimit): Promise<RequestBody>;
 }
 
 /** An upgrade's body is the WebSocket stream, never read here. */
@@ -72,9 +75,9 @@ export function requestContext(
     helper,
     helperDevice: helper ? helper.device ?? selectedDevice : null,
     devtools: pathname.startsWith(`${mount.base}/devtools`),
-    body: () => (body ??= kind === "upgrade"
+    body: (limit) => (body ??= kind === "upgrade"
       ? Promise.resolve(parsedBody(""))
-      : readBody(req, BODY_LIMITS[url.slice(mount.base.length)])),
+      : readBody(req, limit ?? BODY_LIMITS[url.slice(mount.base.length)])),
   };
 }
 

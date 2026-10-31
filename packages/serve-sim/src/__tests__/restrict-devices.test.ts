@@ -6,7 +6,7 @@ import { connect } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
-import { deviceScope } from "../device-scope";
+import { deviceScope, type Refusal } from "../device-scope";
 import { clearEventLogForTests, recordEventLogEvent, type EventLogEntry } from "../event-log";
 import { simMiddleware, type ServeSimState } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
@@ -185,12 +185,17 @@ describe("restrictToDevices", () => {
     expect((await send(`/api?device=${SERVED}`)).status).toBe(200);
   });
 
-  test("leaves a body over its route's cap to that route's own 413", async () => {
-    const refused = await send(`/reload?device=${SERVED}`, { udid: OTHER, pad: "x".repeat(8 * 1024) });
-    expect({ status: refused.status, body: JSON.parse(refused.body) }).toEqual({
-      status: 413,
-      body: { sent: false, error: "Body too large" },
-    });
+  test("refuses a body over its cap before any route reads it", async () => {
+    // The grid routes cap nothing of their own.
+    for (const path of [`/reload?device=${SERVED}`, "/grid/api/start", "/grid/api/shutdown"]) {
+      const refused = await send(path, { udid: SERVED, pad: "x".repeat(8 * 1024) });
+      expect({ path, status: refused.status, body: JSON.parse(refused.body) }).toEqual({
+        path,
+        status: 413,
+        body: { ok: false, error: "Body too large" },
+      });
+    }
+    expect((await send("/grid/api/shutdown", { udid: OTHER, pad: "x".repeat(3 * 1024) })).status).toBe(404);
   });
 
   test("refuses a request that names another simulator anywhere", async () => {
@@ -375,16 +380,19 @@ describe("deviceScope", () => {
       devtools: fields.devtools ?? false,
       body: async () => ({ kind: "read" as const, text: "", json: { ok: true as const, value: fields.body } }),
     });
-    const refused = `${OTHER} is not served by this preview`;
+    const refused: Refusal = { status: 404, message: `${OTHER} is not served by this preview` };
+    const devtoolsOff: Refusal = { status: 404, message: "DevTools are off in a preview with --restrict-devices" };
     expect(await scope.check(request({ requestedDevice: SERVED, helperDevice: SERVED, body: { udid: SERVED, device: SERVED } }))).toBeNull();
-    expect(await scope.check(request({ requestedDevice: OTHER }))).toBe(refused);
-    expect(await scope.check(request({ helperDevice: OTHER }))).toBe(refused);
-    expect(await scope.check(request({ body: { udid: OTHER } }))).toBe(refused);
-    expect(await scope.check(request({ body: { device: OTHER } }))).toBe(refused);
-    expect(await scope.check(request({ devtools: true }))).toBe("DevTools are off in a preview with --restrict-devices");
-    // A body over its route's cap names nothing; that route answers 413.
-    const tooLarge = { ...request({}), body: async () => ({ kind: "too-large" as const }) };
-    expect(await scope.check(tooLarge)).toBeNull();
+    expect(await scope.check(request({ requestedDevice: OTHER }))).toEqual(refused);
+    expect(await scope.check(request({ helperDevice: OTHER }))).toEqual(refused);
+    expect(await scope.check(request({ body: { udid: OTHER } }))).toEqual(refused);
+    expect(await scope.check(request({ body: { device: OTHER } }))).toEqual(refused);
+    expect(await scope.check(request({ devtools: true }))).toEqual(devtoolsOff);
+    // The check reads at most 4 KB of a body, whatever its route's own cap.
+    const caps: Array<number | undefined> = [];
+    const tooLarge = { ...request({}), body: async (limit?: { max: number }) => (caps.push(limit?.max), { kind: "too-large" as const }) };
+    expect(await scope.check(tooLarge)).toEqual({ status: 413, message: "Body too large" });
+    expect(caps).toEqual([4 * 1024]);
     // Without a restriction nothing is checked and the body is left unread.
     const unread = { ...request({ requestedDevice: OTHER, devtools: true }), body: () => Promise.reject(new Error("read")) };
     expect(await deviceScope(undefined, read).check(unread)).toBeNull();

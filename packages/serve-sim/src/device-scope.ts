@@ -7,7 +7,7 @@ import {
   type SimctlDevice,
 } from "./device-sources";
 import { readEventLog, subscribeEventLog } from "./event-log";
-import type { RequestContext } from "./request-context";
+import type { BodyLimit, RequestContext } from "./request-context";
 import type { ServeSimDeviceState } from "./state";
 
 /**
@@ -22,6 +22,18 @@ type DeviceTarget = string | typeof EVERY_SIMULATOR;
 /** What `check` reads of a request. */
 type DeviceRequest = Pick<RequestContext, "method" | "requestedDevice" | "helperDevice" | "devtools" | "body">;
 
+/** Why a restricted scope refuses a request, and the status that says so. */
+export type Refusal = { status: 404 | 413; message: string };
+
+/**
+ * How much of a POST body `check` reads. With --restrict-devices every owned
+ * POST is read here before its route runs, and most routes cap nothing, so an
+ * unbounded body would sit in the dev server's memory. A body that names a
+ * simulator is `{ udid }` or `{ device }` JSON; /reload's 4 KB is ample, and
+ * no route's own cap is smaller.
+ */
+const CHECK_BODY_LIMIT: BodyLimit = { max: 4 * 1024, size: (chunk) => chunk.length };
+
 /**
  * The simulators a preview serves (`--restrict-devices`). The middleware
  * reads states, simulators and the event log only through it, and `check`s
@@ -35,9 +47,10 @@ export interface DeviceScope<Simulator> {
   /**
    * Why the scope refuses `request`, or null when it serves every simulator
    * the request names: `?device=`, a helper route's, DevTools (all of them),
-   * and a POST body's `udid` or `device`. Reads the body only when restricted.
+   * and a POST body's `udid` or `device`. Reads the body only when
+   * restricted, and refuses one over `CHECK_BODY_LIMIT`.
    */
-  check(request: DeviceRequest): Promise<string | null>;
+  check(request: DeviceRequest): Promise<Refusal | null>;
   states(): Promise<ServeSimDeviceState[]>;
   simulators(): Promise<Simulator[]>;
   /** Make the next booted-set read ask simctl again, after a shutdown. */
@@ -69,9 +82,12 @@ export function deviceScope<Simulator extends { udid: string }>(
   return {
     allows,
     check: async (request) => {
-      const refused = (await requestTargets(request)).find((target) => target === EVERY_SIMULATOR || !allows(target));
+      const targets = await requestTargets(request);
+      if (targets === TOO_LARGE) return { status: 413, message: "Body too large" };
+      const refused = targets.find((target) => target === EVERY_SIMULATOR || !allows(target));
       if (refused === undefined) return null;
-      return refused === EVERY_SIMULATOR ? "DevTools are off in a preview with --restrict-devices" : notServed(refused);
+      const message = refused === EVERY_SIMULATOR ? "DevTools are off in a preview with --restrict-devices" : notServed(refused);
+      return { status: 404, message };
     },
     states: () => read.states(allows),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
@@ -90,14 +106,16 @@ export function notServed(udid: string): string {
   return `${udid === "" ? "An empty device" : udid} is not served by this preview`;
 }
 
-// A body over its route's cap names nothing here: that route answers 413
-// without reading it.
-async function requestTargets(request: DeviceRequest): Promise<DeviceTarget[]> {
+/** A body over `CHECK_BODY_LIMIT`, which was never read in full. */
+const TOO_LARGE = Symbol("too large");
+
+async function requestTargets(request: DeviceRequest): Promise<DeviceTarget[] | typeof TOO_LARGE> {
   const targets: DeviceTarget[] = [request.requestedDevice, request.helperDevice].filter((device) => device !== null);
   if (request.devtools) targets.push(EVERY_SIMULATOR);
   if (request.method === "POST") {
-    const body = await request.body();
-    const value = body.kind === "read" && body.json.ok ? body.json.value : null;
+    const body = await request.body(CHECK_BODY_LIMIT);
+    if (body.kind === "too-large") return TOO_LARGE;
+    const value = body.json.ok ? body.json.value : null;
     // Routes coerce what they read (`[udid]` passes as `udid`), so this does too.
     if (typeof value === "object" && value !== null) {
       if ("udid" in value && value.udid !== undefined && value.udid !== null) targets.push(String(value.udid));
