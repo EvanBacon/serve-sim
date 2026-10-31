@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
@@ -13,7 +13,10 @@ import { sameDeviceSet } from "../simctl";
 
 const DEVICE_SET_ENV = "SERVE_SIM_DEVICE_SET";
 const simctlModule = join(import.meta.dir, "..", "simctl.ts");
-const MISSING_SET = join(tmpdir(), "serve-sim-no-such-set");
+// Inside a folder of this run's own, so no other process can create it.
+const missingSetParent = mkdtempSync(join(tmpdir(), "serve-sim-missing-set-"));
+const MISSING_SET = join(missingSetParent, "no-such-set");
+afterAll(() => rmSync(missingSetParent, { recursive: true, force: true }));
 
 /**
  * Runs `body` in a fresh process, where the device set is not settled yet and
@@ -197,6 +200,12 @@ describe("readServeSimStates", () => {
           module: join(import.meta.dir, "..", "middleware.ts"),
         }),
       ).toEqual({ ok: true, value: ["OURS"] });
+      expect(
+        inFreshProcess(`return (await m.readServeSimStates()).map((state) => state.device);`, {
+          env: { TMPDIR: scratch, [DEVICE_SET_ENV]: scratch },
+          module: join(import.meta.dir, "..", "middleware.ts"),
+        }),
+      ).toEqual({ ok: true, value: ["THEIRS"] });
     });
   });
 });
@@ -329,11 +338,12 @@ describe("serve-sim --device-set", () => {
       const refused = camera([]);
       expect(refused.status).toBe(1);
       expect(refused.stderr).toContain(`${udid} is not in the selected device set`);
-      const listed = camera([udid]);
-      expect(listed.status).toBe(1);
-      expect(listed.stderr).not.toContain("is not in the selected device set");
       // simctl reads a UDID in any case.
-      expect(camera([udid], udid.toLowerCase()).stderr).not.toContain("is not in the selected device set");
+      for (const listed of [camera([udid]), camera([udid], udid.toLowerCase())]) {
+        expect(listed.status).toBe(1);
+        expect(listed.stderr).not.toContain("is not in the selected device set");
+        expect(listed.stderr).toMatch(/File not found:|Failed to obtain camera dylib/);
+      }
     });
   });
 
