@@ -321,6 +321,27 @@ describe("serve-sim --device-set", () => {
     });
   });
 
+  test("every camera subcommand refuses a UDID its device set does not list, before any helper", () => {
+    const udid = "CCCCCCCC-0000-0000-0000-000000000004";
+    withSet((scratch) => {
+      // An xcrun whose set lists no simulator. The helper is keyed by UDID
+      // alone, so a subcommand that skips the check would reach another
+      // set's helper (or report it, for `status`).
+      const bin = join(scratch, "bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, "xcrun"), `#!/bin/sh\necho '${JSON.stringify({ devices: {} })}'\n`);
+      chmodSync(join(bin, "xcrun"), 0o755);
+      for (const subcommand of [["--stop-webcam"], ["switch", "placeholder"], ["mirror", "on"], ["status"]]) {
+        const result = spawnSync("bun", [cli, "--device-set", scratch, "camera", ...subcommand, "-d", udid], {
+          encoding: "utf8",
+          env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}` },
+        });
+        expect({ subcommand, status: result.status }).toEqual({ subcommand, status: 1 });
+        expect(result.stderr).toContain(`${udid} is not in the selected device set`);
+      }
+    });
+  });
+
   test("drives only a preview of its own device set", () => {
     withOtherSetPreview((scratch) => {
       const result = spawnSync("bun", [cli, "--device-set", scratch, "tap", "0.5", "0.5"], {

@@ -1631,6 +1631,20 @@ async function ensureHelperWithSource(opts: {
 }
 
 /**
+ * The simulator a camera subcommand acts on: `-d`, or the booted one. The
+ * camera helper is keyed by UDID alone, so with `--device-set` a UDID the set
+ * does not list exits here, before any branch reaches another set's helper.
+ */
+function cameraTarget(deviceArg: string | undefined): string | null {
+  const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+  if (udid && resolveDeviceSet() && !isInDeviceSet(udid)) {
+    console.error(`${udid} is not in the selected device set.`);
+    process.exit(1);
+  }
+  return udid;
+}
+
+/**
  * `serve-sim camera <bundle-id> [-d udid] [source-options] [--build]`
  *
  * Launches a simulator app with SimCameraInjector loaded via
@@ -1731,7 +1745,7 @@ Examples:
   }
 
   if (stopWebcam) {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
     const injectedBundles = readInjectedBundles(udid);
     const terminated: string[] = [];
@@ -1753,7 +1767,7 @@ Examples:
   // `serve-sim camera mirror <auto|on|off> [-d udid]`
   // Hot-swap the preview-layer mirror mode without touching the app.
   if (filtered[0] === "mirror") {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
     const mode = filtered[1];
     if (mode !== "auto" && mode !== "on" && mode !== "off") {
@@ -1782,7 +1796,7 @@ Examples:
   // `serve-sim camera switch <source> [arg] [-d udid]`
   // Hot-swap the helper's source without touching the simulator app.
   if (filtered[0] === "switch") {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) { console.error("No booted simulator."); process.exit(1); }
     let wanted = filtered[1];
     let arg: string | undefined = filtered[2];
@@ -1833,7 +1847,7 @@ Examples:
   // `serve-sim camera status [-d udid]` — JSON probe for scripts and humans.
   // The preview UI reads the same shared implementation through middleware.
   if (filtered[0] === "status") {
-    const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+    const udid = cameraTarget(deviceArg);
     if (!udid) {
       console.log(JSON.stringify({ alive: false, error: "no booted simulator" }));
       return;
@@ -1848,15 +1862,9 @@ Examples:
     process.exit(1);
   }
 
-  const udid = deviceArg ? resolveDevice(deviceArg) : findBootedDevice();
+  const udid = cameraTarget(deviceArg);
   if (!udid) {
     console.error("No booted simulator. Boot one or pass -d <udid|name>.");
-    process.exit(1);
-  }
-  // The camera helper is keyed by UDID alone, so a UDID from another set
-  // would switch that set's camera before `simctl launch` failed here.
-  if (resolveDeviceSet() && !isInDeviceSet(udid)) {
-    console.error(`${udid} is not in the selected device set.`);
     process.exit(1);
   }
 
