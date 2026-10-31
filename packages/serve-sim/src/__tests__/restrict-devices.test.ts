@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { request } from "http";
-import { connect } from "net";
+import { createServer, request, type IncomingMessage } from "http";
+import { connect, type AddressInfo, type Socket } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
@@ -125,6 +125,22 @@ function firstEvent(path: string): Promise<{ events: Array<{ device?: string }> 
     });
     req.on("error", reject);
     req.end();
+  });
+}
+
+/** The whole answer a GET of `path` gets back, sent as written (`request()` rejects `//[`). */
+function rawAnswer(path: string, to = port): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(to, "127.0.0.1", () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${to}\r\nConnection: close\r\n\r\n`);
+    });
+    let raw = "";
+    socket.setEncoding("utf-8");
+    socket.on("data", (chunk: string) => {
+      raw += chunk;
+    });
+    socket.on("close", () => resolve(raw));
+    socket.on("error", reject);
   });
 }
 
@@ -303,6 +319,37 @@ describe("restrictToDevices", () => {
   test("still serves its own simulator", async () => {
     const api = await send(`/api?device=${SERVED}`);
     expect(api.status).toBe(200);
+  });
+});
+
+describe("a request URL that does not parse", () => {
+  // decodeURIComponent() rejects a helper path's `%E0`, and new URL() `//[`.
+  // servePreview's own front server cannot parse `//[` either, so that one is
+  // sent the way a dev server that embeds the middleware hands it over.
+  const restricted = () =>
+    simMiddleware({ basePath: "/", device: SERVED, restrictToDevices: [SERVED], isKnownDevice: async () => true });
+
+  test("answers 400 over HTTP", async () => {
+    expect((await rawAnswer("/helper/%E0/config")).split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+    const middleware = restricted();
+    const server = createServer((req, res) => void middleware(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const answer = await rawAnswer("//[", (server.address() as AddressInfo).port);
+      expect(answer.split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("answers 400 to a WebSocket upgrade, instead of throwing out of the upgrade listener", async () => {
+    expect((await upgradeAnswer("/helper/%E0/ws")).split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+    const middleware = restricted();
+    let answer = "";
+    const socket = { end: (text: string) => (answer = text), destroy: () => {} } as unknown as Socket;
+    const req = { method: "GET", url: "//[", headers: { host: "127.0.0.1:1" }, socket: { remoteAddress: "127.0.0.1" } };
+    middleware.handleUpgrade(req as unknown as IncomingMessage, socket, Buffer.alloc(0));
+    expect(answer.split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
   });
 });
 

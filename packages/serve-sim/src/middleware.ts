@@ -1263,7 +1263,7 @@ function safeEqualString(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-const STATUS_TEXT: Record<number, string> = { 401: "Unauthorized", 403: "Forbidden", 404: "Not Found" };
+const STATUS_TEXT: Record<number, string> = { 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found" };
 
 function sendAccessDenied(res: SimRes, access: Exclude<RemoteAccess, { ok: true }>): void {
   res.writeHead(access.status, {
@@ -1487,10 +1487,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       }
     }
 
-    const request = requestContext(req, { base, device: options?.device }, "http");
-    const { url, requestedDevice, selectedDevice } = request;
     // Every route below is under `base`.
     if (!ownsPath(pathname)) return next?.();
+    const request = requestContext(req, { base, device: options?.device }, "http");
+    if (!request) {
+      res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: false, error: "Malformed URL" }));
+      return;
+    }
+    const { url, requestedDevice, selectedDevice } = request;
     const refused = await scope.check(request);
     if (refused) {
       res.writeHead(refused.status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -2317,6 +2322,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
     const request = requestContext(req, { base, device: options?.device }, "upgrade");
+    if (!request) {
+      rejectUpgrade(socket, 400, "Malformed URL");
+      return;
+    }
     void scope.check(request).then((refused) => {
       if (refused) rejectUpgrade(socket, refused.status, refused.message);
       else upgradeOwned(request, req, socket, head);

@@ -411,12 +411,12 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
     expect((await rawRequest(withToken.port, "//[", PROXY)).status).toBe(401);
   });
 
-  test("an embedded mount fails on a malformed URL outside its base path, as before", async () => {
+  test("an embedded mount leaves a malformed URL outside its base path to the host server", async () => {
     const middleware = simMiddleware({ basePath: "/.sim", execToken: EXEC_TOKEN, device: DEVICE });
     const server = createServer((req, res) => {
       middleware(req, res, async () => {
         res.statusCode = 404;
-        res.end();
+        res.end("host-app");
       }).catch(() => {
         res.statusCode = 500;
         res.end();
@@ -424,7 +424,8 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
-      expect((await rawRequest((server.address() as AddressInfo).port, "//[")).status).toBe(500);
+      const res = await rawRequest((server.address() as AddressInfo).port, "//[");
+      expect({ status: res.status, body: res.body }).toEqual({ status: 404, body: "host-app" });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

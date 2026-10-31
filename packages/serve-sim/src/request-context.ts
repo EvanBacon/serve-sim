@@ -50,19 +50,28 @@ export interface RequestContext {
   body(limit?: BodyLimit): Promise<RequestBody>;
 }
 
-/** An upgrade's body is the WebSocket stream, never read here. */
+/**
+ * An upgrade's body is the WebSocket stream, never read here. null for a URL
+ * the helper routes cannot parse: new URL() rejects `//[`, and
+ * decodeURIComponent() a helper path's bad escape such as `%E0`.
+ */
 export function requestContext(
   req: IncomingMessage,
   mount: { base: string; device: string | undefined },
   kind: "http" | "upgrade",
-): RequestContext {
+): RequestContext | null {
   const rawUrl = req.url ?? "";
   const qIndex = rawUrl.indexOf("?");
   const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
   const pathname = requestPathname(rawUrl);
   const requestedDevice = queryDevice(rawUrl);
   const selectedDevice = requestedDevice ?? mount.device ?? null;
-  const helper = helperProxyTarget(rawUrl, helperProxyPrefix(mount.base));
+  let helper: RequestContext["helper"];
+  try {
+    helper = helperProxyTarget(rawUrl, helperProxyPrefix(mount.base));
+  } catch {
+    return null;
+  }
   let body: Promise<RequestBody> | null = null;
   return {
     method: (req.method ?? "GET").toUpperCase(),
