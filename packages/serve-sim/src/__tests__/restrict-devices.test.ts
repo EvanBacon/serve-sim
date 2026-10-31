@@ -7,7 +7,6 @@ import { tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
 import { deviceScope } from "../device-scope";
-import { forgetBootedSimulators } from "../device-sources";
 import { clearEventLogForTests, recordEventLogEvent, type EventLogEntry } from "../event-log";
 import { simMiddleware, type ServeSimState } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
@@ -22,23 +21,23 @@ delete process.env.SERVE_SIM_AUTH_TOKEN;
   "<!doctype html><html><head><!--__SIM_PREVIEW_CONFIG__--></head></html>",
 ).toString("base64");
 
-const SERVED = "AAAAAAAA-0000-0000-0000-000000000001";
+// Not a simulator UDID, so the state seeded below survives the booted-device
+// check of every serve-sim process on this Mac, not only this one.
+const SERVED = `RESTRICT-DEVICES-${process.pid}`;
 const OTHER = "BBBBBBBB-0000-0000-0000-000000000002";
 
 let preview: PreviewServer;
 let port: number;
 
-// An xcrun that lists only SERVED, booted, and changes nothing, so a request
-// that got past the scope could not reach a real simulator on this Mac.
+// An xcrun that lists no simulators and changes none, so a request that got
+// past the scope could not reach a real simulator on this Mac.
 const fakeXcrunDir = mkdtempSync(join(tmpdir(), "serve-sim-restrict-xcrun-"));
 const realPath = process.env.PATH;
 
 beforeAll(async () => {
-  const devices = { devices: { test: [{ udid: SERVED, name: "Served", state: "Booted" }] } };
-  writeFileSync(join(fakeXcrunDir, "xcrun"), `#!/bin/sh\necho '${JSON.stringify(devices)}'\n`);
+  writeFileSync(join(fakeXcrunDir, "xcrun"), `#!/bin/sh\necho '{"devices":{}}'\n`);
   chmodSync(join(fakeXcrunDir, "xcrun"), 0o755);
   process.env.PATH = `${fakeXcrunDir}:${realPath}`;
-  forgetBootedSimulators();
   // A live preview of SERVED, so /api has a state to keep or drop.
   mkdirSync(STATE_DIR, { recursive: true });
   const state: ServeSimState = {
