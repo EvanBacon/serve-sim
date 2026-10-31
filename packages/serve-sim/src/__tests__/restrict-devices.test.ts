@@ -128,12 +128,10 @@ function firstEvent(path: string): Promise<{ events: Array<{ device?: string }> 
   });
 }
 
-/** The whole answer a GET of `path` gets back, sent as written (`request()` rejects `//[`). */
-function rawAnswer(path: string, to = port): Promise<string> {
+/** Everything the server writes back to `head`, sent as is, until it closes the socket. */
+function answerTo(head: string, to = port): Promise<string> {
   return new Promise((resolve, reject) => {
-    const socket = connect(to, "127.0.0.1", () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${to}\r\nConnection: close\r\n\r\n`);
-    });
+    const socket = connect(to, "127.0.0.1", () => socket.write(head));
     let raw = "";
     socket.setEncoding("utf-8");
     socket.on("data", (chunk: string) => {
@@ -144,24 +142,20 @@ function rawAnswer(path: string, to = port): Promise<string> {
   });
 }
 
+/** The whole answer a GET of `path` gets back, sent as written (`request()` rejects `//[`). */
+function getAnswer(path: string, to = port): Promise<string> {
+  return answerTo(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${to}\r\nConnection: close\r\n\r\n`, to);
+}
+
+const statusLine = (answer: string) => answer.split("\r\n")[0];
+
 /** The whole answer a WebSocket upgrade to `path` gets back (Bun's `ws` has no unexpected-response). */
 function upgradeAnswer(path: string, method = "GET"): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const socket = connect(port, "127.0.0.1", () => {
-      socket.write(
-        `${method} ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: http://127.0.0.1:${port}\r\n` +
-          "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" +
-          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-      );
-    });
-    let raw = "";
-    socket.setEncoding("utf-8");
-    socket.on("data", (chunk: string) => {
-      raw += chunk;
-    });
-    socket.on("close", () => resolve(raw));
-    socket.on("error", reject);
-  });
+  return answerTo(
+    `${method} ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: http://127.0.0.1:${port}\r\n` +
+      "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" +
+      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+  );
 }
 
 describe("restrictToDevices", () => {
@@ -330,26 +324,25 @@ describe("a request URL that does not parse", () => {
     simMiddleware({ basePath: "/", device: SERVED, restrictToDevices: [SERVED], isKnownDevice: async () => true });
 
   test("answers 400 over HTTP", async () => {
-    expect((await rawAnswer("/helper/%E0/config")).split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+    expect(statusLine(await getAnswer("/helper/%E0/config"))).toBe("HTTP/1.1 400 Bad Request");
     const middleware = restricted();
     const server = createServer((req, res) => void middleware(req, res));
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
-      const answer = await rawAnswer("//[", (server.address() as AddressInfo).port);
-      expect(answer.split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+      expect(statusLine(await getAnswer("//[", (server.address() as AddressInfo).port))).toBe("HTTP/1.1 400 Bad Request");
     } finally {
       server.close();
     }
   });
 
   test("answers 400 to a WebSocket upgrade, instead of throwing out of the upgrade listener", async () => {
-    expect((await upgradeAnswer("/helper/%E0/ws")).split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+    expect(statusLine(await upgradeAnswer("/helper/%E0/ws"))).toBe("HTTP/1.1 400 Bad Request");
     const middleware = restricted();
     let answer = "";
     const socket = { end: (text: string) => (answer = text), destroy: () => {} } as unknown as Socket;
     const req = { method: "GET", url: "//[", headers: { host: "127.0.0.1:1" }, socket: { remoteAddress: "127.0.0.1" } };
     middleware.handleUpgrade(req as unknown as IncomingMessage, socket, Buffer.alloc(0));
-    expect(answer.split("\r\n")[0]).toBe("HTTP/1.1 400 Bad Request");
+    expect(statusLine(answer)).toBe("HTTP/1.1 400 Bad Request");
   });
 });
 
