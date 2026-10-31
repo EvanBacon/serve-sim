@@ -11,18 +11,6 @@ import { readEventLog, subscribeEventLog } from "./event-log";
 import type { BodyLimit, RequestContext } from "./request-context";
 import type { ServeSimDeviceState } from "./state";
 
-/**
- * What DevTools reach: inspect-webkit lists every booted simulator's web
- * views and cannot tell whose a target is, so it acts on all of them at once.
- */
-const EVERY_SIMULATOR = Symbol("every simulator");
-
-/** A body's `udid` or `device` that String() cannot read, so it names no simulator. */
-type Unreadable = { unreadable: "udid" | "device" };
-
-/** A simulator UDID a request names, every simulator at once, or an unreadable name. */
-type DeviceTarget = string | typeof EVERY_SIMULATOR | Unreadable;
-
 /** What `check` reads of a request. */
 type DeviceRequest = Pick<RequestContext, "method" | "requestedDevice" | "helperDevice" | "devtools" | "body">;
 
@@ -87,15 +75,7 @@ export function deviceScope<Simulator extends { udid: string }>(
   const logged = (entry: { device?: string }) => entry.device === undefined || allows(entry.device);
   return {
     allows,
-    check: async (request) => {
-      const targets = await requestTargets(request);
-      if (targets === TOO_LARGE) return { status: 413, message: "Body too large" };
-      const refused = targets.find((target) => typeof target !== "string" || !allows(target));
-      if (refused === undefined) return null;
-      if (refused === EVERY_SIMULATOR) return { status: 404, message: "DevTools are off in a preview with --restrict-devices" };
-      if (typeof refused !== "string") return { status: 404, message: `An unreadable ${refused.unreadable} is not served by this preview` };
-      return { status: 404, message: notServed(refused) };
-    },
+    check: (request) => refusal(request, allows),
     states: () => read.states(allows),
     simulators: async () => (await read.simulators()).filter((simulator) => allows(simulator.udid)),
     forgetBootedSimulators: read.forgetBootedSimulators,
@@ -114,31 +94,36 @@ export function notServed(udid: string): string {
   return `${udid === "" ? "An empty device" : udid} is not served by this preview`;
 }
 
-/** A body over `CHECK_BODY_LIMIT`, which was never read in full. */
-const TOO_LARGE = Symbol("too large");
-
-async function requestTargets(request: DeviceRequest): Promise<DeviceTarget[] | typeof TOO_LARGE> {
-  const targets: DeviceTarget[] = [request.requestedDevice, request.helperDevice].filter((device) => device !== null);
-  if (request.devtools) targets.push(EVERY_SIMULATOR);
-  if (request.method === "POST") {
-    const body = await request.body(CHECK_BODY_LIMIT);
-    if (body.kind === "too-large") return TOO_LARGE;
-    const value = body.json.ok ? body.json.value : null;
-    if (typeof value === "object" && value !== null) {
-      if ("udid" in value && value.udid !== undefined && value.udid !== null) targets.push(bodyTarget("udid", value.udid));
-      if ("device" in value && value.device !== undefined && value.device !== null) targets.push(bodyTarget("device", value.device));
-    }
+async function refusal(request: DeviceRequest, allows: (udid: string) => boolean): Promise<Refusal | null> {
+  for (const udid of [request.requestedDevice, request.helperDevice]) {
+    if (udid !== null && !allows(udid)) return { status: 404, message: notServed(udid) };
   }
-  return targets;
+  // inspect-webkit lists every booted simulator's web views and cannot tell
+  // whose a target is, so DevTools act on all of them at once.
+  if (request.devtools) return { status: 404, message: "DevTools are off in a preview with --restrict-devices" };
+  if (request.method !== "POST") return null;
+  const body = await request.body(CHECK_BODY_LIMIT);
+  if (body.kind === "too-large") return { status: 413, message: "Body too large" };
+  const value = body.json.ok ? body.json.value : null;
+  if (typeof value !== "object" || value === null) return null;
+  const named = { udid: "udid" in value ? value.udid : null, device: "device" in value ? value.device : null };
+  for (const field of ["udid", "device"] as const) {
+    if (named[field] === undefined || named[field] === null) continue;
+    const udid = coerced(named[field]);
+    if (udid === null) return { status: 404, message: `An unreadable ${field} is not served by this preview` };
+    if (!allows(udid)) return { status: 404, message: notServed(udid) };
+  }
+  return null;
 }
 
-// Routes coerce what they read (`[udid]` passes as `udid`), so this does too.
-// A value String() throws on (`{ "toString": null }`) is refused, not a 500.
-function bodyTarget(field: Unreadable["unreadable"], value: unknown): DeviceTarget {
+// Routes coerce what they read (`[udid]` passes as `udid`), so `check` does
+// too. null when String() throws (`{ "toString": null }`), which `check`
+// refuses rather than failing with a 500.
+function coerced(value: unknown): string | null {
   try {
     return String(value);
   } catch {
-    return { unreadable: field };
+    return null;
   }
 }
 
