@@ -2318,21 +2318,6 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     }
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
   };
-  middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
-    if (!ownsPath(requestPathname(req.url ?? ""))) {
-      socket.destroy();
-      return;
-    }
-    const request = requestContext(req, { base, device: options?.device }, "upgrade");
-    if (!request) {
-      rejectUpgrade(socket, 400, "Malformed URL");
-      return;
-    }
-    void scope.check(request).then((refused) => {
-      if (refused) rejectUpgrade(socket, refused.status, refused.message);
-      else upgradeOwned(request, req, socket, head);
-    });
-  };
   // WebSocket control channel, off the browser's per-origin HTTP connection
   // pool so multiple preview tabs (each holding MJPEG + SSE streams) can't
   // starve host actions. Shell commands need `allowExec`, a loopback
@@ -2364,28 +2349,35 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   });
 
   // WebSocket upgrades owned by the preview: the authenticated exec/control
-  // channel plus same-origin helper/devtools proxy sockets.
-  const handleProxyUpgrade = middleware.handleUpgrade;
+  // channel plus same-origin helper/devtools proxy sockets, each past the
+  // scope's check.
   middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
-    const rawUrl = req.url ?? "";
-    const pathname = requestPathname(rawUrl);
-    if (ownsPath(pathname)) {
-      if (!isTrustedLoopback(req)) {
-        const access = remoteAccess(req, authToken);
-        if (!access.ok) {
-          rejectUpgrade(socket, access.status, access.message);
-          return;
-        }
-      }
-      // Browsers always send Origin on WebSocket upgrades; a cross-site page
-      // must not drive HID input or DevTools through the user's browser.
-      if (originCheck(req) === "cross") {
-        rejectUpgrade(socket, 403, "Cross-origin WebSocket blocked");
+    if (!ownsPath(requestPathname(req.url ?? ""))) {
+      socket.destroy();
+      return;
+    }
+    if (!isTrustedLoopback(req)) {
+      const access = remoteAccess(req, authToken);
+      if (!access.ok) {
+        rejectUpgrade(socket, access.status, access.message);
         return;
       }
     }
-    if (handleExecUpgrade(req, socket, head)) return;
-    handleProxyUpgrade(req, socket, head);
+    // Browsers always send Origin on WebSocket upgrades; a cross-site page
+    // must not drive HID input or DevTools through the user's browser.
+    if (originCheck(req) === "cross") {
+      rejectUpgrade(socket, 403, "Cross-origin WebSocket blocked");
+      return;
+    }
+    const request = requestContext(req, { base, device: options?.device }, "upgrade");
+    if (!request) {
+      rejectUpgrade(socket, 400, "Malformed URL");
+      return;
+    }
+    void scope.check(request).then((refused) => {
+      if (refused) rejectUpgrade(socket, refused.status, refused.message);
+      else if (!handleExecUpgrade(req, socket, head)) upgradeOwned(request, req, socket, head);
+    });
   };
   middleware.setServerPort = (port: number) => {
     knownServerPort = port;

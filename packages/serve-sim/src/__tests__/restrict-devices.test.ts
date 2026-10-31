@@ -267,6 +267,20 @@ describe("restrictToDevices", () => {
     expect(helper).toContain(`${OTHER} is not served by this preview`);
   });
 
+  test("refuses the control channel for another simulator", async () => {
+    // Called directly: servePreview hands /exec-ws to Bun's node:http, which
+    // swallows an upgrade rejection's status line.
+    const middleware = simMiddleware({ basePath: "/", device: SERVED, restrictToDevices: [SERVED], isKnownDevice: async () => true });
+    const channel = await new Promise<string>((resolve) => {
+      const socket = { end: (text: string) => resolve(text), destroy: () => resolve("") } as unknown as Socket;
+      const headers = { host: "127.0.0.1:1", origin: "http://127.0.0.1:1", upgrade: "websocket", connection: "Upgrade" };
+      const req = { method: "GET", url: `/exec-ws?device=${OTHER}`, headers, socket: { remoteAddress: "127.0.0.1" } };
+      middleware.handleUpgrade(req as unknown as IncomingMessage, socket, Buffer.alloc(0));
+    });
+    expect(channel).toStartWith("HTTP/1.1 404 ");
+    expect(channel).toContain(`${OTHER} is not served by this preview`);
+  });
+
   test("has no DevTools, which list every simulator's web views", async () => {
     for (const path of ["/devtools", "/devtools/release", "/devtools/highlight"]) {
       const refused = await send(path, path === "/devtools" ? undefined : {});
