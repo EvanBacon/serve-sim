@@ -27,6 +27,7 @@ export class KeySequencer {
 
   constructor(private readonly sink: KeySink, private readonly timeoutMs = 250) {}
 
+  // Like the Swift actor, a wedged native call blocks later keys until close.
   key(type: KeyType, usage: number): Promise<void> {
     if (this.closing) return Promise.resolve();
     const pending = this.queue.then(async () => {

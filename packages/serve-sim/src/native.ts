@@ -247,7 +247,7 @@ export class NativeHid {
   }
 
   close(): Promise<void> {
-    return this.guard("close", () => this.keys.drainAndRelease(), undefined);
+    return this.keys.drainAndRelease();
   }
 
   pose(name: string, fromDegrees: number): Promise<boolean> {
