@@ -400,7 +400,7 @@ describe("deviceScope", () => {
     simulatorName: async (udid: string) => `name of ${udid}`,
     forgetBootedSimulators: () => {},
     isKnown: async () => true,
-    sessions: async () => [{ udid: SERVED }, { udid: OTHER }],
+    liveSessions: async () => [SERVED, OTHER].map((udid) => ({ udid, diagnostics: async () => ({ udid }) })),
     events: (query?: { include?: (event: EventLogEntry) => boolean }) =>
       [entry(SERVED), entry(OTHER), entry(undefined)].filter(query?.include ?? (() => true)),
     onEvent: (subscriber: (event: EventLogEntry) => void) => {
@@ -417,11 +417,19 @@ describe("deviceScope", () => {
     expect(await scope.isKnown(OTHER)).toBe(false);
     expect([await scope.simulatorName(SERVED), await scope.simulatorName(OTHER)]).toEqual([`name of ${SERVED}`, undefined]);
     expect([scope.allows(SERVED), scope.allows(OTHER)]).toEqual([true, false]);
-    expect(await scope.sessions(null)).toEqual([{ udid: SERVED }]);
     expect(scope.events().map((event) => event.device)).toEqual([SERVED, undefined]);
     const heard: Array<string | undefined> = [];
     scope.onEvent((event) => heard.push(event.device));
     expect(heard).toEqual([SERVED, undefined]);
+  });
+
+  test("asks only the sessions it serves for their diagnostics", async () => {
+    const asked: string[] = [];
+    const liveSessions = async () =>
+      [SERVED, OTHER].map((udid) => ({ udid, diagnostics: async () => (asked.push(udid), { udid }) }));
+    expect(await deviceScope([SERVED], { ...read, liveSessions }).sessions(null)).toEqual([{ udid: SERVED }]);
+    expect(asked).toEqual([SERVED]);
+    expect(await deviceScope(undefined, { ...read, liveSessions }).sessions(null)).toEqual([{ udid: SERVED }, { udid: OTHER }]);
   });
 
   test("checks every simulator a request names, in its URL or its body", async () => {

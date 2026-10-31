@@ -2,9 +2,10 @@ import {
   forgetBootedSimulators,
   isBooted,
   listAllSimulators,
-  liveSessionDiagnostics,
+  liveSessions,
   readServeSimStates,
   simulatorName,
+  type LiveSession,
   type SimctlDevice,
 } from "./device-sources";
 import { readEventLog, subscribeEventLog } from "./event-log";
@@ -59,8 +60,9 @@ export interface DeviceScope<Simulator> {
 }
 
 /** What a scope reads from, unfiltered except where it takes `allows`. */
-type DeviceSources<Simulator> = Omit<DeviceScope<Simulator>, "allows" | "check" | "states"> & {
+type DeviceSources<Simulator> = Omit<DeviceScope<Simulator>, "allows" | "check" | "states" | "sessions"> & {
   states(allows: (udid: string) => boolean): Promise<ServeSimDeviceState[]>;
+  liveSessions(device: string | null): Promise<LiveSession[]>;
 };
 
 export function deviceScope<Simulator extends { udid: string }>(
@@ -68,7 +70,14 @@ export function deviceScope<Simulator extends { udid: string }>(
   read: DeviceSources<Simulator>,
 ): DeviceScope<Simulator> {
   if (!restrictToDevices) {
-    return { ...read, allows: () => true, check: async () => null, states: () => read.states(() => true) };
+    const { liveSessions: _, ...rest } = read;
+    return {
+      ...rest,
+      allows: () => true,
+      check: async () => null,
+      states: () => read.states(() => true),
+      sessions: (device) => servedSessions(read, device, () => true),
+    };
   }
   const served = new Set(restrictToDevices.map((udid) => udid.toUpperCase()));
   const allows = (udid: string) => served.has(udid.toUpperCase());
@@ -81,12 +90,22 @@ export function deviceScope<Simulator extends { udid: string }>(
     forgetBootedSimulators: read.forgetBootedSimulators,
     simulatorName: async (udid) => (allows(udid) ? read.simulatorName(udid) : undefined),
     isKnown: async (udid) => allows(udid) && (await read.isKnown(udid)),
-    sessions: async (device) => (await read.sessions(device)).filter((session) => allows(String(session.udid))),
+    sessions: (device) => servedSessions(read, device, allows),
     events: (query) => read.events({ ...query, include: logged }),
     onEvent: (subscriber) => read.onEvent((entry) => {
       if (logged(entry)) subscriber(entry);
     }),
   };
+}
+
+/** Diagnostics of the live sessions `allows` serves; no other session is asked. */
+async function servedSessions(
+  read: Pick<DeviceSources<unknown>, "liveSessions">,
+  device: string | null,
+  allows: (udid: string) => boolean,
+): Promise<Record<string, unknown>[]> {
+  const served = (await read.liveSessions(device)).filter((session) => allows(session.udid));
+  return Promise.all(served.map((session) => session.diagnostics()));
 }
 
 /** Why a restricted scope refuses `udid`. */
@@ -130,7 +149,7 @@ function coerced(value: unknown): string | null {
 /** The scope over this host's simulators, previews, sessions and event log. */
 export function hostDeviceScope(
   restrictToDevices: readonly string[] | undefined,
-  sources: Partial<Pick<DeviceSources<SimctlDevice>, "isKnown" | "sessions">> = {},
+  sources: Partial<Pick<DeviceSources<SimctlDevice>, "isKnown" | "liveSessions">> = {},
 ): DeviceScope<SimctlDevice> {
   return deviceScope(restrictToDevices, {
     states: readServeSimStates,
@@ -138,7 +157,7 @@ export function hostDeviceScope(
     forgetBootedSimulators,
     simulatorName: (udid) => simulatorName(udid),
     isKnown: sources.isKnown ?? isBooted,
-    sessions: sources.sessions ?? liveSessionDiagnostics,
+    liveSessions: sources.liveSessions ?? liveSessions,
     events: readEventLog,
     onEvent: subscribeEventLog,
   });
