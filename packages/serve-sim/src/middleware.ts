@@ -1318,9 +1318,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // A dev server that embeds this middleware never runs the CLI: settle the
   // device set (and refuse a bad SERVE_SIM_DEVICE_SET) here, not mid-request.
   resolveDeviceSet();
+  // A test's `diagnostics.sources.sessions` stand in for the live sessions,
+  // and the scope drops the ones it does not serve the same way.
+  const injectedSessions = options?.diagnostics?.sources?.sessions;
   const scope = hostDeviceScope(options?.restrictToDevices, {
     isKnown: options?.isKnownDevice,
-    sessions: options?.diagnostics?.sources?.sessions,
+    liveSessions: injectedSessions && (async (device) =>
+      (await injectedSessions(device)).map((session) => ({ udid: String(session.udid), diagnostics: async () => session }))),
   });
   const serveDiagnostics = createDiagnosticsHandler(scope, options?.diagnostics);
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"

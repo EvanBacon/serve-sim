@@ -186,7 +186,10 @@ export function listAllSimulators(): Promise<SimctlDevice[]> {
   });
 }
 
-/** Diagnostics of live sessions (`device` narrows to one); never starts capture. */
-export function liveSessionDiagnostics(device: string | null): Promise<Record<string, unknown>[]> {
-  return Promise.all(liveDeviceSessions(device).map((session) => session.diagnostics()));
+/** A live session, asked for its diagnostics only once a scope serves it. */
+export type LiveSession = { udid: string; diagnostics(): Promise<Record<string, unknown>> };
+
+/** Live sessions only (`device` narrows to one); never starts capture. */
+export async function liveSessions(device: string | null): Promise<LiveSession[]> {
+  return liveDeviceSessions(device);
 }
