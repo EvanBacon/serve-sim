@@ -230,6 +230,8 @@ Sources:
 - **file** — image (PNG/JPEG/HEIC/…) or video (mp4/mov/m4v/webm/…). The CLI sniffs the kind from the extension and falls back to magic bytes for files without an extension.
 - **webcam** — live `AVCaptureDevice` (built-in, Continuity, external).
 
+Movies an app records from the injected camera (`AVCaptureMovieFileOutput`, as in expo-camera's `recordAsync` and VisionCamera) are video-only: they have no audio track, even with `recordAsync({ mute: false })`.
+
 ### Screen recording
 
 The record button in the preview toolbar and `serve-sim record` both drive a native recorder in the server: it encodes the simulator framebuffer directly (full native resolution, constant frame rate, hardware H.264/HEVC), independent of the stream codec the viewer uses. Stopping streams the finished MP4 to the client that stopped it (a browser download, or the `-o` file) and deletes the server's temp copy. One recording runs per device; any client may stop it, and a `serve-sim record` whose recording is stopped elsewhere exits with an error instead of saving.
