@@ -653,8 +653,7 @@ static void WaitForRelease(__weak id object, NSDate *deadline, NSString *passMes
                    dispatch_get_main_queue(), ^{ WaitForRelease(object, deadline, passMessage); });
 }
 
-// An explicit video connection from `camera` to `output`, which, unlike an
-// automatic one, can be freed safely.
+// An explicit video connection from `camera` to `output`.
 static AVCaptureConnection *AddVideoConnection(AVCaptureSession *session, AVCaptureDeviceInput *camera,
                                                AVCaptureOutput *output) {
     NSMutableArray<AVCaptureInputPort *> *videoPorts = [NSMutableArray new];
