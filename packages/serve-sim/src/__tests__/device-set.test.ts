@@ -308,13 +308,17 @@ describe("serve-sim --device-set", () => {
   test("camera refuses a UDID its device set does not list, before any helper", () => {
     const udid = "CCCCCCCC-0000-0000-0000-000000000003";
     withSet((scratch) => {
-      // An xcrun whose set lists `listed`; --file names no file, so a camera
-      // that gets past the check stops before any helper.
+      // An xcrun whose set lists `listed`, and Xcode's default set nothing;
+      // --file names no file, so a camera that gets past the check stops
+      // before any helper.
       const camera = (listed: string[], device = udid) => {
         const bin = join(scratch, "bin");
         mkdirSync(bin, { recursive: true });
         const devices = { devices: { "com.apple.CoreSimulator.SimRuntime.iOS-27-0": listed.map((u) => ({ udid: u, name: "x", state: "Booted" })) } };
-        writeFileSync(join(bin, "xcrun"), `#!/bin/sh\necho '${JSON.stringify(devices)}'\n`);
+        writeFileSync(
+          join(bin, "xcrun"),
+          `#!/bin/sh\nif [ "$2" = "--set" ] && [ "$3" = "${scratch}" ]; then echo '${JSON.stringify(devices)}'; else echo '{"devices":{}}'; fi\n`,
+        );
         chmodSync(join(bin, "xcrun"), 0o755);
         return spawnSync(
           "bun",
