@@ -141,6 +141,7 @@ void SimCamLogSwallowedRuntimeError(NSString *via, id object, NSDictionary *user
 }
 - (BOOL)isHighestPhotoQualitySupported { return YES; }
 - (BOOL)isVideoBinned { return NO; }
+- (BOOL)isVideoHDRSupported { return NO; }
 - (BOOL)isVideoStabilizationModeSupported:(AVCaptureVideoStabilizationMode)m { return NO; }
 - (CGFloat)videoMaxZoomFactor { return 16.0; }
 - (CGFloat)videoZoomFactorUpscaleThreshold { return 1.0; }
@@ -199,9 +200,20 @@ static char kFakePositionKey;
 - (BOOL)isSuspended { return NO; }
 - (BOOL)lockForConfiguration:(NSError **)e { return YES; }
 - (void)unlockForConfiguration { }
+// AVFoundation's setters validate against private format state the fakes
+// lack and throw, so configuration a library applies (VisionCamera 5 sets
+// format, frame rate and color space on every session) is accepted and
+// dropped: the injected frames have one size and rate.
 - (AVCaptureDeviceFormat *)activeFormat { return SimCamSharedFakeFormat(); }
+- (void)setActiveFormat:(AVCaptureDeviceFormat *)f { (void)f; }
 - (CMTime)activeVideoMinFrameDuration { return CMTimeMake(1, 30); }
+- (void)setActiveVideoMinFrameDuration:(CMTime)d { (void)d; }
 - (CMTime)activeVideoMaxFrameDuration { return CMTimeMake(1, 30); }
+- (void)setActiveVideoMaxFrameDuration:(CMTime)d { (void)d; }
+- (AVCaptureColorSpace)activeColorSpace { return AVCaptureColorSpace_sRGB; }
+- (void)setActiveColorSpace:(AVCaptureColorSpace)c { (void)c; }
+- (AVCaptureDeviceFormat *)activeDepthDataFormat { return nil; }
+- (void)setActiveDepthDataFormat:(AVCaptureDeviceFormat *)f { (void)f; }
 - (CGFloat)videoZoomFactor { return 1.0; }
 - (void)setVideoZoomFactor:(CGFloat)v { (void)v; }
 - (void)rampToVideoZoomFactor:(CGFloat)f withRate:(float)r { (void)f; (void)r; }
