@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { eventLogEventForCommand } from "../event-log";
 import { previewConfigForState, rewriteStateForRequestHost, type ServeSimState } from "../middleware";
-import { sameDeviceSet, simctlArguments, simctlBootStatusArguments, simulatorDevicesDir } from "../simctl";
+import { sameDeviceSet } from "../simctl";
 
 // `--device-set <path>` / SERVE_SIM_DEVICE_SET: simulators a tool keeps in a
 // CoreSimulator set of its own. Every simctl call gets `--set <path>` and the
@@ -16,8 +16,9 @@ const simctlModule = join(import.meta.dir, "..", "simctl.ts");
 const MISSING_SET = join(tmpdir(), "serve-sim-no-such-set");
 
 /**
- * Runs `body` in a fresh process, where the device set is not settled yet
- * (this file's process settles it once, to Xcode's default). `body` sees
+ * Runs `body` in a fresh process, where the device set is not settled yet and
+ * SERVE_SIM_DEVICE_SET is only what `env` sets (this file's process settles
+ * it once, from whatever it inherited). `body` sees
  * `module` (default: simctl) as `m` and returns what it observed.
  */
 function inFreshProcess(
@@ -46,7 +47,10 @@ function withSet<T>(run: (dir: string) => T): T {
 
 describe("simctlArguments", () => {
   test("targets Xcode's default set when none is configured", () => {
-    expect(simctlArguments(["list", "devices", "-j"])).toEqual(["simctl", "list", "devices", "-j"]);
+    expect(inFreshProcess(`return m.simctlArguments(["list", "devices", "-j"]);`)).toEqual({
+      ok: true,
+      value: ["simctl", "list", "devices", "-j"],
+    });
     expect(inFreshProcess(`return m.simctlArguments(["list"]);`, { env: { [DEVICE_SET_ENV]: " " } })).toEqual({
       ok: true,
       value: ["simctl", "list"],
@@ -67,7 +71,10 @@ describe("simctlArguments", () => {
         ],
       });
     });
-    expect(simctlBootStatusArguments("UDID")).toEqual(["simctl", "bootstatus", "UDID"]);
+    expect(inFreshProcess(`return m.simctlBootStatusArguments("UDID");`)).toEqual({
+      ok: true,
+      value: ["simctl", "bootstatus", "UDID"],
+    });
   });
 });
 
@@ -162,7 +169,10 @@ describe("sameDeviceSet", () => {
 
 describe("simulatorDevicesDir", () => {
   test("is Xcode's default folder, or the set itself", () => {
-    expect(simulatorDevicesDir()).toBe(join(homedir(), "Library/Developer/CoreSimulator/Devices"));
+    expect(inFreshProcess(`return m.simulatorDevicesDir();`)).toEqual({
+      ok: true,
+      value: join(homedir(), "Library/Developer/CoreSimulator/Devices"),
+    });
     withSet((dir) => {
       expect(inFreshProcess(`return m.simulatorDevicesDir();`, { env: { [DEVICE_SET_ENV]: dir } })).toEqual({ ok: true, value: dir });
     });
@@ -300,7 +310,7 @@ describe("serve-sim --device-set", () => {
     withSet((scratch) => {
       // An xcrun whose set lists `listed`; --file names no file, so a camera
       // that gets past the check stops before any helper.
-      const camera = (listed: string[]) => {
+      const camera = (listed: string[], device = udid) => {
         const bin = join(scratch, "bin");
         mkdirSync(bin, { recursive: true });
         const devices = { devices: { "com.apple.CoreSimulator.SimRuntime.iOS-27-0": listed.map((u) => ({ udid: u, name: "x", state: "Booted" })) } };
@@ -308,7 +318,7 @@ describe("serve-sim --device-set", () => {
         chmodSync(join(bin, "xcrun"), 0o755);
         return spawnSync(
           "bun",
-          [cli, "--device-set", scratch, "camera", "com.example.app", "-d", udid, "--file", join(scratch, "missing.png")],
+          [cli, "--device-set", scratch, "camera", "com.example.app", "-d", device, "--file", join(scratch, "missing.png")],
           { encoding: "utf8", env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}` } },
         );
       };
