@@ -4,6 +4,7 @@ import type { ServerResponse } from "http";
 import { join } from "node:path";
 import { DuoPreview, DUO_SETTLE_MS } from "../duo-preview";
 import type { DuoProjection } from "../duo-renderer";
+import { waitFor } from "./server-test-support";
 
 class FakeResponse {
   writableLength = 0;
@@ -40,14 +41,6 @@ function harness() {
     onStreamError() {},
   });
   return { preview, calls };
-}
-
-async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 1_000;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("condition not reached");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
 }
 
 describe("Duo live preview stream", () => {

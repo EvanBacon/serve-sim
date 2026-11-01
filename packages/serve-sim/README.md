@@ -202,7 +202,7 @@ serve-sim camera --stop-webcam
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
 
-Helpers started by `--detach` or `--no-preview` exit after their target simulators remain shut down beyond the grace period. Boot-state checks run asynchronously so a slow `simctl` query does not pause streaming. A failed check keeps the helper alive.
+Helpers started by `--detach` or `--no-preview` exit after their target simulators remain shut down beyond the grace period. A failed check keeps the helper alive.
 
 ### Remote access (`--auth-token`)
 

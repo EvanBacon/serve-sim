@@ -137,14 +137,8 @@ function readState(udid?: string): ServerState | null {
 
 /**
  * Snapshot simctl's boot state for `--detach` reuse and the shutdown watch.
- * Cached for 1 second so a flurry of lookups shares one `simctl` call.
  */
-let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
-async function getBootedUdids(): Promise<Set<string> | null> {
-  const now = Date.now();
-  if (bootedSnapshot.booted && now - bootedSnapshot.at < 1000) {
-    return bootedSnapshot.booted;
-  }
+async function queryBootedUdids(): Promise<Set<string> | null> {
   try {
     const { stdout: output } = await execFileAsync("xcrun", ["simctl", "list", "devices", "booted", "-j"], {
       encoding: "utf-8",
@@ -159,7 +153,6 @@ async function getBootedUdids(): Promise<Set<string> | null> {
         if (device.state === "Booted") booted.add(device.udid);
       }
     }
-    bootedSnapshot = { at: now, booted };
     return booted;
   } catch {
     // simctl lookup failed (Xcode offline, etc.) — we can't prove the device
@@ -167,6 +160,29 @@ async function getBootedUdids(): Promise<Set<string> | null> {
     // booted check for this invocation.
     return null;
   }
+}
+
+let bootedSnapshot: Promise<Set<string> | null> | null = null;
+let bootedSnapshotAt: number | null = null;
+
+/** Share in-flight lookups, then cache successful snapshots for 1 second. */
+function getBootedUdids(): Promise<Set<string> | null> {
+  if (
+    bootedSnapshot &&
+    (bootedSnapshotAt === null || Date.now() - bootedSnapshotAt < 1000)
+  ) {
+    return bootedSnapshot;
+  }
+  bootedSnapshotAt = null;
+  bootedSnapshot = queryBootedUdids().then((booted) => {
+    if (booted) {
+      bootedSnapshotAt = Date.now();
+    } else {
+      bootedSnapshot = null;
+    }
+    return booted;
+  });
+  return bootedSnapshot;
 }
 
 function readStateFile(file: string): ServerState | null {
@@ -2092,10 +2108,7 @@ async function serve(
   // grid can boot another device without tearing down the HTTP server.
   if (exitOnSimulatorShutdown) {
     startSimulatorShutdownWatch(targetDevices, {
-      checkBooted: async () => {
-        bootedSnapshot = { at: 0, booted: null };
-        return getBootedUdids();
-      },
+      checkBooted: queryBootedUdids,
       onExit: () => {
         const label = targetDevices.join(", ");
         console.error(
