@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
-import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
+import { execFile, execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createHash, randomBytes } from "crypto";
 import { networkInterfaces } from "os";
 import { dirname, join, resolve } from "path";
+import { promisify } from "util";
 import {
   STATE_DIR,
   stateFileForDevice,
@@ -93,6 +94,7 @@ import { redactHome } from "./diagnostics-redact";
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
 const __dirname = dirnameOf(import.meta.url);
+const execFileAsync = promisify(execFile);
 
 // Stamped in at build time (see build.ts), mirroring __PREVIEW_HTML_B64__. In
 // the un-bundled dev run the define is absent, so fall back to reading the
@@ -138,15 +140,14 @@ function readState(udid?: string): ServerState | null {
  * Cached for 1 second so a flurry of lookups shares one `simctl` call.
  */
 let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
-function getBootedUdids(): Set<string> | null {
+async function getBootedUdids(): Promise<Set<string> | null> {
   const now = Date.now();
   if (bootedSnapshot.booted && now - bootedSnapshot.at < 1000) {
     return bootedSnapshot.booted;
   }
   try {
-    const output = execSync("xcrun simctl list devices booted -j", {
+    const { stdout: output } = await execFileAsync("xcrun", ["simctl", "list", "devices", "booted", "-j"], {
       encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
       timeout: 3_000,
     });
     const data = JSON.parse(output) as {
@@ -202,10 +203,10 @@ function readStateFile(file: string): ServerState | null {
  * different `--auth-token` (or none), or a different `--allow-exec` opt-in,
  * is never reused: that is an error.
  */
-function readReusableState(udid: string, allowExec: boolean): ServerState | null {
+async function readReusableState(udid: string, allowExec: boolean): Promise<ServerState | null> {
   const state = readState(udid);
   if (!state) return null;
-  const action = classifyStaleState(state, getBootedUdids(), process.pid);
+  const action = classifyStaleState(state, await getBootedUdids(), process.pid);
   if (action === "keep") {
     const mismatch =
       reuseAuthMismatch(state, resolveAuthToken(undefined)) ?? reuseExecMismatch(state, allowExec);
@@ -477,7 +478,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean, allo
 
   for (const udid of udids) {
     // Return existing server if already running (and still bound to a booted sim)
-    const existing = readReusableState(udid, allowExec);
+    const existing = await readReusableState(udid, allowExec);
     if (existing) {
       if (!quiet) {
         const name = getDeviceName(udid) ?? udid;
@@ -594,7 +595,7 @@ async function detach(devices: string[], startPort: number, allowExec: boolean):
   let port = startPort;
 
   for (const udid of udids) {
-    const existing = readReusableState(udid, allowExec);
+    const existing = await readReusableState(udid, allowExec);
     if (existing) {
       states.push(existing);
       continue;
