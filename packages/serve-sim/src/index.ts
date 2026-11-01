@@ -220,9 +220,12 @@ function readStateFile(file: string): ServerState | null {
  * is never reused: that is an error.
  */
 async function readReusableState(udid: string, allowExec: boolean): Promise<ServerState | null> {
+  const previous = readState(udid);
+  if (!previous) return null;
+  const booted = await getBootedUdids();
   const state = readState(udid);
-  if (!state) return null;
-  const action = classifyStaleState(state, await getBootedUdids(), process.pid);
+  if (!state || state.pid !== previous.pid || state.port !== previous.port) return null;
+  const action = classifyStaleState(state, booted, process.pid);
   if (action === "keep") {
     const mismatch =
       reuseAuthMismatch(state, resolveAuthToken(undefined)) ?? reuseExecMismatch(state, allowExec);
