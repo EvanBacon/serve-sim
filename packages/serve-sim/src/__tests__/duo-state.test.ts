@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseHingeSample, parseIntegratedScreenOrientations, parsePrimaryPanel } from "../duo-state";
+import { hingeReaderCommand, parseHingeSample, parseIntegratedScreenOrientations, parsePrimaryPanel } from "../duo-state";
 
 test("primary panel readback follows guest hysteresis rather than angle", () => {
   expect(parsePrimaryPanel("[DisplayContentMode] COMPLETED: .cover:pri .inner:aux | 130.0°")).toBe("cover");
@@ -10,12 +10,29 @@ test("primary panel readback follows guest hysteresis rather than angle", () => 
   expect(parsePrimaryPanel('[com.apple.log:] log stream --predicate category == DisplayContentMode .cover:pri')).toBeNull();
 });
 
+test("hinge samples are the guest reader's angle lines", () => {
+  expect(parseHingeSample("angle 130.0")).toBe(130);
+  expect(parseHingeSample("angle 128.6\r")).toBe(128.6);
+  expect(parseHingeSample("angle 0.0")).toBe(0);
+  expect(parseHingeSample("angle 180")).toBe(180);
+});
+
 test("hinge samples reject invalid, non-finite, and out-of-range readings", () => {
-  expect(parseHingeSample("• +0.1s : Angle:130.0° Mech:130.0° AngleValid:Y")).toBe(130);
-  expect(parseHingeSample("• Angle:0.0° AngleValid:Y")).toBe(0);
-  for (const line of ["Angle:130.0° AngleValid:N", "Angle:181° AngleValid:Y", "Angle:NaN° AngleValid:Y", "monitoring started"]) {
+  for (const line of [
+    "angle 181.0", "angle -1.0", "angle NaN", "angle inf", "angle", "angle 1e2", "angle 130.0 extra",
+    "Hinge angle unavailable: CMAngleManager reports no hinge",
+    // The devicectl format this reader replaced.
+    "• +0.1s : Angle:130.0° Mech:130.0° AngleValid:Y",
+  ]) {
     expect(parseHingeSample(line)).toBeNull();
   }
+});
+
+test("the hinge is read inside the guest, not through devicectl", () => {
+  expect(hingeReaderCommand("UDID", "/dist/simduo/serve-sim-duo-hid")).toEqual({
+    command: "/usr/bin/xcrun",
+    args: ["simctl", "spawn", "UDID", "/dist/simduo/serve-sim-duo-hid", "watch-angle"],
+  });
 });
 
 test("orientation comes only from named integrated panels", () => {

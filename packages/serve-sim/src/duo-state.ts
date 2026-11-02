@@ -1,11 +1,20 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import type { SimulatorOrientation } from "./client/types";
 
+/** One `angle <degrees>` line from `serve-sim-duo-hid watch-angle`. */
 export function parseHingeSample(line: string): number | null {
-  if (!/AngleValid:Y\b/.test(line)) return null;
-  const match = /\bAngle:\s*(-?[\d.]+)°/.exec(line);
+  const match = /^angle (\d+(?:\.\d+)?)$/.exec(line.trim());
   const angle = match ? Number(match[1]) : NaN;
   return Number.isFinite(angle) && angle >= 0 && angle <= 180 ? angle : null;
+}
+
+/**
+ * The hinge is read inside the guest from CoreMotion (the source UIKit's UIHinge
+ * reads). `devicectl device motion hinge-angle` did this before CoreDevice
+ * dropped the `motion` subcommand with Xcode 27.1.
+ */
+export function hingeReaderCommand(udid: string, duoHelper: string): { command: string; args: string[] } {
+  return { command: "/usr/bin/xcrun", args: ["simctl", "spawn", udid, duoHelper, "watch-angle"] };
 }
 
 export function parseIntegratedScreenOrientations(text: string): Partial<Record<"cover" | "inner", SimulatorOrientation>> {
@@ -50,8 +59,13 @@ export class DuoStateMonitor {
   private retry?: ReturnType<typeof setTimeout>;
   private poll?: ReturnType<typeof setTimeout>;
   private state: DuoState = { orientations: {} };
+  private hingeFailureLogged = false;
 
-  constructor(private readonly udid: string, private readonly onState: (state: DuoState) => void) {
+  constructor(
+    private readonly udid: string,
+    private readonly onState: (state: DuoState) => void,
+    private readonly duoHelper: string,
+  ) {
     this.watchPanels();
     this.watchHinge();
     this.refreshOrientation();
@@ -121,10 +135,15 @@ export class DuoStateMonitor {
 
   private watchHinge(): void {
     if (this.stopped) return;
-    const child = spawn("/usr/bin/xcrun", ["devicectl", "device", "motion", "hinge-angle", "--device", this.udid,
-      "--session-timeout", "60", "--timeout", "65", "--change-threshold", "0.5"], { stdio: ["ignore", "pipe", "ignore"] });
+    const { command, args } = hingeReaderCommand(this.udid, this.duoHelper);
+    // stdin stays open: the reader exits when it closes.
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     this.monitor = child;
     let pending = "";
+    let stderr = "";
+    child.stdin.on("error", () => {});
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-1024); });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       pending += chunk;
@@ -139,9 +158,16 @@ export class DuoStateMonitor {
       }
     });
     child.on("error", () => {}); // close also fires for failed spawns; retry there.
-    child.once("close", () => {
+    child.once("close", (code, signal) => {
       if (this.monitor === child) this.monitor = undefined;
       if (this.stopped) return;
+      // A reader that keeps failing would otherwise leave the hinge unknown
+      // without a trace; say why once per session.
+      if (!this.hingeFailureLogged) {
+        this.hingeFailureLogged = true;
+        const reason = stderr.trim() || (signal ? `signal ${signal}` : `exit code ${code}`);
+        console.error(`[duo] Hinge reader stopped (${reason}); retrying.`);
+      }
       this.retry = setTimeout(() => this.watchHinge(), 1000);
       this.retry.unref();
     });
@@ -154,6 +180,7 @@ export class DuoStateMonitor {
     this.panelSeed?.kill();
     clearTimeout(this.retry);
     clearTimeout(this.poll);
+    this.monitor?.stdin?.end();
     this.monitor?.kill();
     this.enumeration?.kill();
   }

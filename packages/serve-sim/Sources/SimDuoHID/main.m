@@ -1,12 +1,68 @@
 // Guest HID transport for hinge angles, physical orientation, and hardware buttons.
 // Spawned inside iOS Simulator; one command/reply per line until EOF.
+// `watch-angle` instead streams the hinge angle the guest reports (see watchAngle).
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <math.h>
+#import <stdatomic.h>
 #import <unistd.h>
+
+// CoreMotion's private hinge-angle API, the source UIKit's UIHinge reads.
+@interface CMAngle : NSObject
+- (float)angleDegrees;
+@end
+@interface CMAngleManager : NSObject
++ (BOOL)isAvailable;
+- (void)startAngleUpdatesToQueue:(NSOperationQueue *)queue handler:(void (^)(CMAngle *angle))handler;
+- (void)stopAngleUpdates;
+@end
+
+static atomic_bool stdinClosed;
+
+// Prints `angle <degrees>` for the first sample and for every later change of at
+// least 0.5°, until the parent closes stdin. Read-only: it never creates the HID
+// services, so it can run next to the command transport. This replaces
+// `devicectl device motion hinge-angle`, which CoreDevice dropped with Xcode 27.1.
+static int watchAngle(void) {
+    dlopen("/System/Library/Frameworks/CoreMotion.framework/CoreMotion", RTLD_NOW);
+    Class managerClass = NSClassFromString(@"CMAngleManager");
+    if (!managerClass || ![managerClass respondsToSelector:@selector(isAvailable)] || ![managerClass isAvailable]) {
+        fprintf(stderr, "Hinge angle unavailable: CMAngleManager reports no hinge\n");
+        return 2;
+    }
+    CMAngleManager *manager = [managerClass new];
+    if (![manager respondsToSelector:@selector(startAngleUpdatesToQueue:handler:)]) {
+        fprintf(stderr, "Hinge angle unavailable: CMAngleManager has no angle updates\n");
+        return 2;
+    }
+    NSOperationQueue *queue = [NSOperationQueue new];
+    queue.maxConcurrentOperationCount = 1;
+    __block double last = NAN;
+    [manager startAngleUpdatesToQueue:queue handler:^(CMAngle *sample) {
+        double degrees = [sample angleDegrees];
+        if (!isfinite(degrees) || degrees < 0 || degrees > 180) return;
+        if (isfinite(last) && fabs(degrees - last) < 0.5) return;
+        last = degrees;
+        if (degrees == 0) degrees = 0; // never print -0.0
+        printf("angle %.1f\n", degrees);
+        fflush(stdout);
+    }];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        char buffer[64];
+        while (read(STDIN_FILENO, buffer, sizeof buffer) > 0) {}
+        atomic_store(&stdinClosed, true);
+        CFRunLoopStop(CFRunLoopGetMain());
+    });
+    while (!atomic_load(&stdinClosed)) {
+        // Returns at once while the run loop has no sources; don't spin.
+        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1, false) == kCFRunLoopRunFinished) usleep(100000);
+    }
+    [manager stopAngleUpdates];
+    return 0;
+}
 
 @interface DuoServiceDelegate : NSObject
 @property NSDictionary *properties;
@@ -87,8 +143,10 @@ static BOOL sendEvent(id service, CFTypeRef event) {
     CFRelease(event);
     return ok;
 }
-int main(void) {
+int main(int argc, char **argv) {
     @autoreleasepool {
+        if (argc == 2 && strcmp(argv[1], "watch-angle") == 0) return watchAngle();
+        if (argc != 1) { fprintf(stderr, "usage: serve-sim-duo-hid [watch-angle]\n"); return 64; }
         dlopen("/System/Library/PrivateFrameworks/HID.framework/HID", RTLD_NOW);
         void *io = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
         CFTypeRef (*vendor)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, const void *, CFIndex, uint32_t) = dlsym(io, "IOHIDEventCreateVendorDefinedEvent");
