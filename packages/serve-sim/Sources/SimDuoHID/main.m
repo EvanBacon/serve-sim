@@ -7,7 +7,6 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <math.h>
-#import <stdatomic.h>
 #import <unistd.h>
 
 // CoreMotion's private hinge-angle API, the source UIKit's UIHinge reads.
@@ -19,8 +18,6 @@
 - (void)startAngleUpdatesToQueue:(NSOperationQueue *)queue handler:(void (^)(CMAngle *angle))handler;
 - (void)stopAngleUpdates;
 @end
-
-static atomic_bool stdinClosed;
 
 // Prints `angle <degrees>` for the first sample and for every later change of at
 // least 0.5°, until the parent closes stdin. Read-only: it never creates the HID
@@ -50,16 +47,10 @@ static int watchAngle(void) {
         printf("angle %.1f\n", degrees);
         fflush(stdout);
     }];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        char buffer[64];
-        while (read(STDIN_FILENO, buffer, sizeof buffer) > 0) {}
-        atomic_store(&stdinClosed, true);
-        CFRunLoopStop(CFRunLoopGetMain());
-    });
-    while (!atomic_load(&stdinClosed)) {
-        // Returns at once while the run loop has no sources; don't spin.
-        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1, false) == kCFRunLoopRunFinished) usleep(100000);
-    }
+    // Updates arrive on `queue`, not the main run loop, so the main thread only
+    // waits for the parent to close stdin.
+    char buffer[64];
+    while (read(STDIN_FILENO, buffer, sizeof buffer) > 0) {}
     [manager stopAngleUpdates];
     return 0;
 }

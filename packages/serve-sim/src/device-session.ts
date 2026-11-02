@@ -312,7 +312,7 @@ export class DeviceSession {
         if (!this.dependencies?.createDuoMonitor) {
           void warnDeviceHubInput(this.udid).then((shadowed) => { this.deviceHubShadowed = shadowed; });
         }
-        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState) => new DuoStateMonitor(udid, onState, duoHidHelperPath()));
+        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState) => new DuoStateMonitor(udid, onState, { duoHelper: duoHidHelperPath }));
         this.duoMonitor = createMonitor(this.udid, (state) => {
           void this.followDuoState(state).catch((error) => {
             console.error("[duo] State update failed:", error);

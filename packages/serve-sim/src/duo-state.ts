@@ -8,15 +8,6 @@ export function parseHingeSample(line: string): number | null {
   return Number.isFinite(angle) && angle >= 0 && angle <= 180 ? angle : null;
 }
 
-/**
- * The hinge is read inside the guest from CoreMotion (the source UIKit's UIHinge
- * reads). `devicectl device motion hinge-angle` did this before CoreDevice
- * dropped the `motion` subcommand with Xcode 27.1.
- */
-export function hingeReaderCommand(udid: string, duoHelper: string): { command: string; args: string[] } {
-  return { command: "/usr/bin/xcrun", args: ["simctl", "spawn", udid, duoHelper, "watch-angle"] };
-}
-
 export function parseIntegratedScreenOrientations(text: string): Partial<Record<"cover" | "inner", SimulatorOrientation>> {
   const result: Partial<Record<"cover" | "inner", SimulatorOrientation>> = {};
   const names: Record<string, SimulatorOrientation> = {
@@ -48,6 +39,18 @@ export interface DuoState {
   orientations: Partial<Record<"cover" | "inner", SimulatorOrientation>>;
 }
 
+export interface DuoStateMonitorOptions {
+  /**
+   * Path of the guest helper (`serve-sim-duo-hid`). Resolved when the hinge
+   * reader starts; if it throws, the hinge stays unknown and the rest of the
+   * monitor keeps running.
+   */
+  duoHelper: () => string;
+  /** Process launchers; tests substitute fakes. */
+  spawn?: typeof spawn;
+  execFile?: typeof execFile;
+}
+
 /** One shared monitor per device session; phones never start these processes. */
 export class DuoStateMonitor {
   private stopped = false;
@@ -60,12 +63,16 @@ export class DuoStateMonitor {
   private poll?: ReturnType<typeof setTimeout>;
   private state: DuoState = { orientations: {} };
   private hingeFailureLogged = false;
+  private readonly spawn: typeof spawn;
+  private readonly execFile: typeof execFile;
 
   constructor(
     private readonly udid: string,
     private readonly onState: (state: DuoState) => void,
-    private readonly duoHelper: string,
+    private readonly options: DuoStateMonitorOptions,
   ) {
+    this.spawn = options.spawn ?? spawn;
+    this.execFile = options.execFile ?? execFile;
     this.watchPanels();
     this.watchHinge();
     this.refreshOrientation();
@@ -74,7 +81,7 @@ export class DuoStateMonitor {
   refreshOrientation(): void {
     if (this.stopped || this.enumeration) return;
     if (this.poll) clearTimeout(this.poll);
-    this.enumeration = execFile("/usr/bin/xcrun", ["simctl", "io", this.udid, "enumerate"],
+    this.enumeration = this.execFile("/usr/bin/xcrun", ["simctl", "io", this.udid, "enumerate"],
       { timeout: 3000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
         this.enumeration = undefined;
         if (this.stopped) return;
@@ -102,7 +109,7 @@ export class DuoStateMonitor {
       this.onState(this.state);
       this.refreshOrientation();
     };
-    const child = spawn("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", predicate], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = this.spawn("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", predicate], { stdio: ["ignore", "pipe", "ignore"] });
     this.panelMonitor = child;
     let pending = "";
     child.stdout.setEncoding("utf8");
@@ -116,7 +123,7 @@ export class DuoStateMonitor {
       }
     });
     // Seed from this boot's most recent transition, then let live events win.
-    this.panelSeed = execFile("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate],
+    this.panelSeed = this.execFile("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate],
       { timeout: 10000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
         this.panelSeed = undefined;
         if (!error && !liveSample) {
@@ -135,9 +142,19 @@ export class DuoStateMonitor {
 
   private watchHinge(): void {
     if (this.stopped) return;
-    const { command, args } = hingeReaderCommand(this.udid, this.duoHelper);
-    // stdin stays open: the reader exits when it closes.
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let duoHelper: string;
+    try {
+      duoHelper = this.options.duoHelper();
+    } catch (error) {
+      console.error(`[duo] Hinge reader unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    // Read inside the guest from CoreMotion, the source UIKit's UIHinge reads.
+    // (`devicectl device motion hinge-angle` did this until CoreDevice dropped
+    // the `motion` subcommand with Xcode 27.1.) stdin stays open: the reader
+    // exits when it closes.
+    const child = this.spawn("/usr/bin/xcrun", ["simctl", "spawn", this.udid, duoHelper, "watch-angle"],
+      { stdio: ["pipe", "pipe", "pipe"] });
     this.monitor = child;
     let pending = "";
     let stderr = "";
