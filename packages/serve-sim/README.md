@@ -220,6 +220,8 @@ The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control ch
 
 `--detach` and `--no-preview` reuse a running server only when it was started with the same `--auth-token` (or with none on both sides) and the same `--allow-exec` setting (on or off on both sides); otherwise they exit with an error — stop the old server with `serve-sim -k <udid>` first.
 
+If a helper is replaced again while its boot state is being confirmed, the command exits with a retry message and leaves the newest helper and registration untouched. Rerun the command once startup settles.
+
 ### Camera
 
 `serve-sim camera <bundle-id>` replaces the simulator's camera feed for a single app. A small host-side helper writes BGRA frames into a POSIX shared-memory region; an injected dylib (`DYLD_INSERT_LIBRARIES`) swizzles AVFoundation inside the simulator process so the app reads from that region instead of the simulator's stub camera.
