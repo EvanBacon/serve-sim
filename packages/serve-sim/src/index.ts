@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
-import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
+import { execFile, execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createHash, randomBytes } from "crypto";
 import { networkInterfaces } from "os";
 import { dirname, join, resolve } from "path";
+import { promisify } from "util";
 import {
   STATE_DIR,
   stateFileForDevice,
@@ -93,6 +94,7 @@ import { redactHome } from "./diagnostics-redact";
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
 const __dirname = dirnameOf(import.meta.url);
+const execFileAsync = promisify(execFile);
 
 // Stamped in at build time (see build.ts), mirroring __PREVIEW_HTML_B64__. In
 // the un-bundled dev run the define is absent, so fall back to reading the
@@ -135,18 +137,11 @@ function readState(udid?: string): ServerState | null {
 
 /**
  * Snapshot simctl's boot state for `--detach` reuse and the shutdown watch.
- * Cached for 1 second so a flurry of lookups shares one `simctl` call.
  */
-let bootedSnapshot: { at: number; booted: Set<string> | null } = { at: 0, booted: null };
-function getBootedUdids(): Set<string> | null {
-  const now = Date.now();
-  if (bootedSnapshot.booted && now - bootedSnapshot.at < 1000) {
-    return bootedSnapshot.booted;
-  }
+async function queryBootedUdids(): Promise<Set<string> | null> {
   try {
-    const output = execSync("xcrun simctl list devices booted -j", {
+    const { stdout: output } = await execFileAsync("xcrun", ["simctl", "list", "devices", "booted", "-j"], {
       encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
       timeout: 3_000,
     });
     const data = JSON.parse(output) as {
@@ -158,7 +153,6 @@ function getBootedUdids(): Set<string> | null {
         if (device.state === "Booted") booted.add(device.udid);
       }
     }
-    bootedSnapshot = { at: now, booted };
     return booted;
   } catch {
     // simctl lookup failed (Xcode offline, etc.) — we can't prove the device
@@ -166,6 +160,29 @@ function getBootedUdids(): Set<string> | null {
     // booted check for this invocation.
     return null;
   }
+}
+
+let bootedSnapshot: Promise<Set<string> | null> | null = null;
+let bootedSnapshotAt: number | null = null;
+
+/** Share in-flight lookups, then cache successful snapshots for 1 second. */
+function getBootedUdids(): Promise<Set<string> | null> {
+  if (
+    bootedSnapshot &&
+    (bootedSnapshotAt === null || Date.now() - bootedSnapshotAt < 1000)
+  ) {
+    return bootedSnapshot;
+  }
+  bootedSnapshotAt = null;
+  bootedSnapshot = queryBootedUdids().then((booted) => {
+    if (booted) {
+      bootedSnapshotAt = Date.now();
+    } else {
+      bootedSnapshot = null;
+    }
+    return booted;
+  });
+  return bootedSnapshot;
 }
 
 function readStateFile(file: string): ServerState | null {
@@ -201,11 +218,30 @@ function readStateFile(file: string): ServerState | null {
  * instead of being treated as a working stream. A live server started with a
  * different `--auth-token` (or none), or a different `--allow-exec` opt-in,
  * is never reused: that is an error.
+ * Confirm obsolete boot observations once; repeated replacement fails without cleanup.
  */
-function readReusableState(udid: string, allowExec: boolean): ServerState | null {
-  const state = readState(udid);
+async function readReusableState(udid: string, allowExec: boolean): Promise<ServerState | null> {
+  const previous = readState(udid);
+  if (!previous) return null;
+  const booted = await getBootedUdids();
+  let state = readState(udid);
   if (!state) return null;
-  const action = classifyStaleState(state, getBootedUdids(), process.pid);
+  let action = classifyStaleState(state, booted, process.pid);
+  if (
+    previous.pid !== state.pid ||
+    previous.port !== state.port ||
+    action !== "keep"
+  ) {
+    const confirmedBooted = await queryBootedUdids();
+    const confirmed = readState(udid);
+    if (!confirmed) return null;
+    if (confirmed.pid !== state.pid || confirmed.port !== state.port) {
+      console.error(`Helper for ${udid} changed again while checking boot state; retry the command.`);
+      process.exit(1);
+    }
+    state = confirmed;
+    action = classifyStaleState(state, confirmedBooted, process.pid);
+  }
   if (action === "keep") {
     const mismatch =
       reuseAuthMismatch(state, resolveAuthToken(undefined)) ?? reuseExecMismatch(state, allowExec);
@@ -477,7 +513,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean, allo
 
   for (const udid of udids) {
     // Return existing server if already running (and still bound to a booted sim)
-    const existing = readReusableState(udid, allowExec);
+    const existing = await readReusableState(udid, allowExec);
     if (existing) {
       if (!quiet) {
         const name = getDeviceName(udid) ?? udid;
@@ -594,7 +630,7 @@ async function detach(devices: string[], startPort: number, allowExec: boolean):
   let port = startPort;
 
   for (const udid of udids) {
-    const existing = readReusableState(udid, allowExec);
+    const existing = await readReusableState(udid, allowExec);
     if (existing) {
       states.push(existing);
       continue;
@@ -2091,10 +2127,7 @@ async function serve(
   // grid can boot another device without tearing down the HTTP server.
   if (exitOnSimulatorShutdown) {
     startSimulatorShutdownWatch(targetDevices, {
-      checkBooted: async () => {
-        bootedSnapshot = { at: 0, booted: null };
-        return getBootedUdids();
-      },
+      checkBooted: queryBootedUdids,
       onExit: () => {
         const label = targetDevices.join(", ");
         console.error(
