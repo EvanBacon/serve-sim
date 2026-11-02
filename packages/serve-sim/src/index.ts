@@ -218,13 +218,30 @@ function readStateFile(file: string): ServerState | null {
  * instead of being treated as a working stream. A live server started with a
  * different `--auth-token` (or none), or a different `--allow-exec` opt-in,
  * is never reused: that is an error.
+ * Confirm obsolete boot observations once; repeated replacement fails without cleanup.
  */
 async function readReusableState(udid: string, allowExec: boolean): Promise<ServerState | null> {
-  if (!readState(udid)) return null;
+  const previous = readState(udid);
+  if (!previous) return null;
   const booted = await getBootedUdids();
-  const state = readState(udid);
+  let state = readState(udid);
   if (!state) return null;
-  const action = classifyStaleState(state, booted, process.pid);
+  let action = classifyStaleState(state, booted, process.pid);
+  if (
+    previous.pid !== state.pid ||
+    previous.port !== state.port ||
+    action !== "keep"
+  ) {
+    const confirmedBooted = await queryBootedUdids();
+    const confirmed = readState(udid);
+    if (!confirmed) return null;
+    if (confirmed.pid !== state.pid || confirmed.port !== state.port) {
+      console.error(`Helper for ${udid} changed again while checking boot state; retry the command.`);
+      process.exit(1);
+    }
+    state = confirmed;
+    action = classifyStaleState(state, confirmedBooted, process.pid);
+  }
   if (action === "keep") {
     const mismatch =
       reuseAuthMismatch(state, resolveAuthToken(undefined)) ?? reuseExecMismatch(state, allowExec);
