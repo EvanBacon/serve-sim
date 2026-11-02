@@ -540,6 +540,28 @@ test.skipIf(process.platform === "win32")("follow does not report a helper remov
   }
 }, 45_000);
 
+test.skipIf(process.platform === "win32")("follow does not reuse a helper removed during its confirmation query", async () => {
+  const udid = "00000000-0000-4000-8000-000000000110";
+  const h = reuseConfirmationHarness(udid, [[], [udid]]);
+  try {
+    const original = await h.startListener();
+    h.publish(original.record);
+    const caller = await h.follow();
+    await h.waitForQuery(caller, 1);
+    h.releaseQuery(1);
+    await h.waitForQuery(caller, 2);
+    h.removeRecord();
+    h.releaseQuery(2);
+    await h.waitForFallback(caller);
+    expect(h.queryFinished(2)).toBe(true);
+    expect(caller.stdout).not.toContain(original.record.url);
+    expect(caller.stdout).not.toContain(`:${original.record.port}`);
+    await h.expectLive(original.record);
+  } finally {
+    await h.cleanup();
+  }
+}, 45_000);
+
 test.skipIf(process.platform === "win32")("follow preserves the latest registration when negative confirmation overlaps another replacement", async () => {
   const h = reuseConfirmationHarness("00000000-0000-4000-8000-000000000107", [[], []]);
   try {
