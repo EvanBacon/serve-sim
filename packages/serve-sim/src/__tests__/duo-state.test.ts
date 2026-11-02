@@ -17,11 +17,11 @@ class FakeChild extends EventEmitter {
 
 /** A monitor whose processes are fakes; `hingeReader()` is the guest reader, if started. */
 function fakeMonitor(duoHelper: () => string) {
-  const spawned: { args: string[]; child: FakeChild }[] = [];
+  const spawned: { command: string; args: string[]; child: FakeChild }[] = [];
   const states: DuoState[] = [];
-  const fakeSpawn = ((_command: string, args: string[]) => {
+  const fakeSpawn = ((command: string, args: string[]) => {
     const child = new FakeChild();
-    spawned.push({ args, child });
+    spawned.push({ command, args, child });
     return child;
   }) as unknown as typeof spawn;
   // Never calls back: orientation and panel seeding stay idle.
@@ -61,9 +61,14 @@ test("hinge samples reject invalid, non-finite, and out-of-range readings", () =
 });
 
 test("hinge angles from the guest reader reach the session state", async () => {
-  const { monitor, states, hingeReader } = fakeMonitor(() => "/helper");
+  const { monitor, states, spawned, hingeReader } = fakeMonitor(() => "/helper");
   const reader = hingeReader()!;
   expect(reader).toBeDefined();
+  // The guest helper is started inside the simulator (devicectl has no hinge reader any more).
+  expect(spawned.find(({ child }) => child === reader)).toMatchObject({
+    command: "/usr/bin/xcrun",
+    args: ["simctl", "spawn", "UDID", "/helper", "watch-angle"],
+  });
 
   reader.stdout.write("angle 13");
   reader.stdout.write("0.0\nangle 130.0\n"); // split across chunks; the repeat is not a change
@@ -75,6 +80,7 @@ test("hinge angles from the guest reader reach the session state", async () => {
   expect(states.at(-1)?.hingeDegrees).toBe(0);
 
   monitor.close();
+  expect(reader.stdin.writableEnded).toBe(true); // the guest reader exits on stdin EOF
   expect(reader.killed).toBe(true);
 });
 
