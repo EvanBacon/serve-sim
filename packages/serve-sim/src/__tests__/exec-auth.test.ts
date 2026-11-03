@@ -37,6 +37,66 @@ describe("/exec auth", () => {
     }, false);
   });
 
+  test("is disabled unless allowExec, whatever the body's size", async () => {
+    await withServer(async (origin) => {
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, Origin: origin },
+        body: JSON.stringify({ command: `echo ok # ${"x".repeat(5 * 1024 * 1024)}` }),
+      });
+      expect(r.status).toBe(403);
+    }, false);
+  });
+
+  test("counts the 4 MB cap in characters", async () => {
+    await withServer(async (origin) => {
+      // 3 Mi two-byte characters: 6 MiB, but under 4 Mi characters.
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, Origin: origin },
+        body: JSON.stringify({ command: "echo ok", pad: "é".repeat(3 * 1024 * 1024) }),
+      });
+      expect(r.status).toBe(200);
+    });
+  });
+
+  test("refuses a body over 4 MB", async () => {
+    await withServer(async (origin) => {
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, Origin: origin },
+        body: JSON.stringify({ command: `echo ok # ${"x".repeat(5 * 1024 * 1024)}` }),
+      });
+      expect({ status: r.status, body: await r.json() }).toEqual({
+        status: 413,
+        body: { stdout: "", stderr: "Payload Too Large", exitCode: 1 },
+      });
+    });
+  });
+
+  test("grid start reads a body of any size, as it names its simulator there", async () => {
+    await withServer(async (origin) => {
+      const r = await fetch(`${origin}/grid/api/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: origin },
+        body: JSON.stringify({ udid: "not-a-udid", pad: "x".repeat(8 * 1024) }),
+      });
+      expect(r.status).toBe(400);
+    });
+  });
+
+  test("accepts a command over 4 KB", async () => {
+    await withServer(async (origin) => {
+      const r = await fetch(`${origin}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}`, Origin: origin },
+        body: JSON.stringify({ command: `echo ok # ${"x".repeat(5 * 1024)}` }),
+      });
+      expect(r.status).toBe(200);
+      expect((await r.json()).stdout).toBe("ok\n");
+    });
+  });
+
   test("rejects unauthenticated POST", async () => {
     await withServer(async (origin) => {
       const r = await fetch(`${origin}/exec`, {

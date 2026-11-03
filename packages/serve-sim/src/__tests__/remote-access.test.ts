@@ -407,6 +407,30 @@ describe("/exec is loopback-only", () => {
 });
 
 describe("grid, DevTools, and helper routes require auth remotely", () => {
+  test("a malformed URL from a remote caller without the token gets 401", async () => {
+    expect((await rawRequest(withToken.port, "//[", PROXY)).status).toBe(401);
+  });
+
+  test("an embedded mount leaves a malformed URL outside its base path to the host server", async () => {
+    const middleware = simMiddleware({ basePath: "/.sim", execToken: EXEC_TOKEN, device: DEVICE });
+    const server = createServer((req, res) => {
+      middleware(req, res, async () => {
+        res.statusCode = 404;
+        res.end("host-app");
+      }).catch(() => {
+        res.statusCode = 500;
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const res = await rawRequest((server.address() as AddressInfo).port, "//[");
+      expect({ status: res.status, body: res.body }).toEqual({ status: 404, body: "host-app" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   test("grid start/shutdown: remote without token refused, cross-origin refused on loopback", async () => {
     for (const path of ["/grid/api/start", "/grid/api/shutdown"]) {
       const body = JSON.stringify({ udid: "not-a-udid" });
