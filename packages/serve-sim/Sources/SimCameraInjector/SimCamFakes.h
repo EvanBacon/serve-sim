@@ -69,6 +69,7 @@ void SimCamLogSwallowedRuntimeError(NSString *via, id object, NSDictionary *user
 
 AVCaptureDeviceFormat *SimCamSharedFakeFormat(void);
 AVCaptureDevice *SimCamFakeDeviceForPosition(AVCaptureDevicePosition p);
+NSArray<AVCaptureDevice *> *SimCamFakeDevices(void);
 AVCaptureDeviceInput *SimCamFakeInputForPosition(AVCaptureDevicePosition p);
 NSArray<AVCaptureInputPort *> *SimCamFakePortsForInput(AVCaptureInput *input);
 

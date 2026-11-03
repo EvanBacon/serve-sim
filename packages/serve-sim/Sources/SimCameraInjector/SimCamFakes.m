@@ -295,6 +295,13 @@ AVCaptureDevice *SimCamFakeDeviceForPosition(AVCaptureDevicePosition p) {
     return p == AVCaptureDevicePositionBack ? back : front;
 }
 
+NSArray<AVCaptureDevice *> *SimCamFakeDevices(void) {
+    return @[
+        SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront),
+        SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack),
+    ];
+}
+
 #pragma mark - SimCamFakeConnection
 
 @interface AVCaptureConnection (SimCamPrivate)
