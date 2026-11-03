@@ -143,6 +143,8 @@ void SimCamLogSwallowedRuntimeError(NSString *via, id object, NSDictionary *user
 - (BOOL)isVideoBinned { return NO; }
 - (BOOL)isVideoHDRSupported { return NO; }
 - (BOOL)isVideoStabilizationModeSupported:(AVCaptureVideoStabilizationMode)m { return NO; }
+// AVFoundation's description reads private state this instance doesn't have.
+- (NSString *)description { return @"<SimCamFakeFormat 1280x720 BGRA>"; }
 - (CGFloat)videoMaxZoomFactor { return 16.0; }
 - (CGFloat)videoZoomFactorUpscaleThreshold { return 1.0; }
 - (AVCaptureAutoFocusSystem)autoFocusSystem { return AVCaptureAutoFocusSystemNone; }

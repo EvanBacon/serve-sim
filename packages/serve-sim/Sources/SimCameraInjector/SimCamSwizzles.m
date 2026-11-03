@@ -129,6 +129,19 @@ BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
     }
     return [self simcam_defaultDeviceWithMediaType:m];
 }
++ (AVCaptureDevice *)simcam_deviceWithUniqueID:(NSString *)uniqueID {
+    NSArray<AVCaptureDevice *> *fakes = @[
+        SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront),
+        SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack),
+    ];
+    for (AVCaptureDevice *fake in fakes) {
+        if ([fake.uniqueID isEqualToString:uniqueID]) {
+            simcam_log(@"deviceWithUniqueID: %@ → fake", uniqueID);
+            return fake;
+        }
+    }
+    return [self simcam_deviceWithUniqueID:uniqueID];
+}
 + (NSArray<AVCaptureDevice *> *)simcam_devicesWithMediaType:(AVMediaType)m {
     if ([m isEqualToString:AVMediaTypeVideo]) {
         return @[
@@ -1221,6 +1234,9 @@ void SimCamInstallSwizzles(void) {
         @selector(devicesWithMediaType:),
         @selector(simcam_devicesWithMediaType:));
     SwizzleClassMethod(dev, @selector(devices), @selector(simcam_devices));
+    SwizzleClassMethod(dev,
+        @selector(deviceWithUniqueID:),
+        @selector(simcam_deviceWithUniqueID:));
 
     Class disc = [AVCaptureDeviceDiscoverySession class];
     SwizzleClassMethod(disc,

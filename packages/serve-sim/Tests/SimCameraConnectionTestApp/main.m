@@ -912,6 +912,44 @@ static void RunForeignConnectionSettings(void) {
     WriteResult(YES, @"Settings for another output's connection were ignored, and asking for them threw");
 }
 
+#pragma mark - Device and format lookups
+
+static void RunUniqueIDLookup(void) {
+    for (NSNumber *position in @[ @(AVCaptureDevicePositionBack), @(AVCaptureDevicePositionFront) ]) {
+        AVCaptureDevice *device = [AVCaptureDevice
+            defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                              mediaType:AVMediaTypeVideo
+                               position:(AVCaptureDevicePosition)position.integerValue];
+        AVCaptureDevice *found = [AVCaptureDevice deviceWithUniqueID:device.uniqueID];
+        if (found != device) {
+            WriteResult(NO, [NSString stringWithFormat:@"deviceWithUniqueID:%@ returned %@", device.uniqueID, found]);
+            return;
+        }
+    }
+    AVCaptureDevice *unknown = [AVCaptureDevice deviceWithUniqueID:@"not-a-camera"];
+    if (unknown) {
+        WriteResult(NO, [NSString stringWithFormat:@"deviceWithUniqueID: invented %@", unknown]);
+        return;
+    }
+    WriteResult(YES, @"deviceWithUniqueID: found both fake cameras and nothing else");
+}
+
+// A crash here leaves no result file, which fails the test.
+static void RunFormatDescription(void) {
+    AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    if (device.formats.count == 0) {
+        WriteResult(NO, @"The fake camera had no formats to log");
+        return;
+    }
+    for (AVCaptureDeviceFormat *format in device.formats) {
+        if (format.description.length == 0) {
+            WriteResult(NO, @"A fake format had an empty description");
+            return;
+        }
+    }
+    WriteResult(YES, @"Fake formats can be logged");
+}
+
 #pragma mark - App
 
 // iOS 27 stops an app that has not adopted the scene lifecycle, so the
@@ -963,6 +1001,8 @@ static void RunForeignConnectionSettings(void) {
             else if ([mode isEqualToString:@"moved-output-recording"]) RunMovedOutputRecording();
             else if ([mode isEqualToString:@"not-running-recording"]) RunNotRunningRecording();
             else if ([mode isEqualToString:@"foreign-connection-settings"]) RunForeignConnectionSettings();
+            else if ([mode isEqualToString:@"unique-id-lookup"]) RunUniqueIDLookup();
+            else if ([mode isEqualToString:@"format-description"]) RunFormatDescription();
             else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
             WriteResult(NO, [NSString stringWithFormat:@"Exception: %@", exception.reason]);

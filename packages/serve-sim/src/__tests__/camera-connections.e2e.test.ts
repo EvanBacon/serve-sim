@@ -48,7 +48,9 @@ async function runTestApp(
     | "removed-camera-recording"
     | "moved-output-recording"
     | "not-running-recording"
-    | "foreign-connection-settings",
+    | "foreign-connection-settings"
+    | "unique-id-lookup"
+    | "format-description",
 ) {
   try {
     execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
@@ -210,5 +212,13 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("ignores output settings for another output's connection, as AVFoundation does", async () => {
     await runTestApp("foreign-connection-settings");
+  }, 20_000);
+
+  test("finds the fake cameras by unique ID, and only them", async () => {
+    await runTestApp("unique-id-lookup");
+  }, 20_000);
+
+  test("can log a fake format", async () => {
+    await runTestApp("format-description");
   }, 20_000);
 });
