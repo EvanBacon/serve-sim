@@ -80,6 +80,7 @@ test("hinge angles from the guest reader reach the session state", async () => {
   reader.stdout.write("angle 0.0\n");
   await flush();
   expect(states.at(-1)?.hingeDegrees).toBe(0);
+  expect(reader.stdin.writableEnded).toBe(false); // stdin stays open while the monitor runs
 
   monitor.close();
   expect(reader.stdin.writableEnded).toBe(true); // the guest reader exits on stdin EOF
