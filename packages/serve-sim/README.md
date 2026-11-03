@@ -150,6 +150,10 @@ Options:
                       Cap the H.264 stream bitrate (default scales with
                       screen size, 6-30 Mbps). Also read from
                       SERVE_SIM_MAX_BITRATE
+      --device-set <path>
+                      Use this CoreSimulator device set instead of Xcode's
+                      default (simctl --set). Applies to subcommands too.
+                      Also read from SERVE_SIM_DEVICE_SET
       --list [device] List running streams
       --kill [device] Kill running stream(s)
 
@@ -177,6 +181,7 @@ serve-sim --panes devices,tools --fit  # start with selected panes open and fit 
 serve-sim --theme dark                 # start the simulator in Dark Mode
 serve-sim --allow-exec                 # enable `serve-sim exec` and .ipa drag-to-install
 serve-sim --max-bitrate 8              # cap H.264 at 8 Mbps (slow links / shared hosts)
+serve-sim --device-set ~/pool <udid>   # a simulator of another device set
 
 # Type text into the focused field
 serve-sim type "Hello, world!"
@@ -220,6 +225,10 @@ The host shell — `POST /exec`, `{command}` frames on the `/exec-ws` control ch
 
 `--detach` and `--no-preview` reuse a running server only when it was started with the same `--auth-token` (or with none on both sides) and the same `--allow-exec` setting (on or off on both sides); otherwise they exit with an error — stop the old server with `serve-sim -k <udid>` first.
 
+### Device sets (`--device-set`)
+
+Tools that keep simulators in a CoreSimulator device set of their own (device pools, CI runners) put them where `simctl list` and Simulator.app never look. `--device-set <path>` (or `SERVE_SIM_DEVICE_SET`, an existing directory) points serve-sim at that set: every `simctl` call gets `--set <path>`, each preview records its set in its state file so previews in different sets never take each other's simulators for shut down, the native capture, input and accessibility bridges look the device up in that set, and per-simulator data (permissions) is read from it. Simulator.app is not opened for such a set, since it only shows Xcode's default one. The flag applies to subcommands such as `serve-sim camera` too (each `camera` subcommand refuses a simulator the set does not list), and a command finds only previews of its own set, whether or not it names a simulator; `-l` and `-k` without a device still list and stop previews in every set. The toolbar's library shell commands (`homeButtonCommand`, the screenshot button) still name no device set; the preview page uses host actions instead.
+
 ### Camera
 
 `serve-sim camera <bundle-id>` replaces the simulator's camera feed for a single app. A small host-side helper writes BGRA frames into a POSIX shared-memory region; an injected dylib (`DYLD_INSERT_LIBRARIES`) swizzles AVFoundation inside the simulator process so the app reads from that region instead of the simulator's stub camera.
@@ -231,6 +240,8 @@ Sources:
 - **placeholder** — animated programmatic frames (default).
 - **file** — image (PNG/JPEG/HEIC/…) or video (mp4/mov/m4v/webm/…). The CLI sniffs the kind from the extension and falls back to magic bytes for files without an extension.
 - **webcam** — live `AVCaptureDevice` (built-in, Continuity, external).
+
+Movies an app records from the injected camera (`AVCaptureMovieFileOutput`, as in expo-camera's `recordAsync` and VisionCamera) are video-only: they have no audio track, even with `recordAsync({ mute: false })`.
 
 ### Screen recording
 

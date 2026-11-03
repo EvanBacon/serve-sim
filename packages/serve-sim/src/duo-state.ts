@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import type { SimulatorOrientation } from "./client/types";
+import { simctlArguments } from "./simctl";
 
 /** One `angle <degrees>` line from `serve-sim-duo-hid watch-angle`. */
 export function parseHingeSample(line: string): number | null {
@@ -81,7 +82,7 @@ export class DuoStateMonitor {
   refreshOrientation(): void {
     if (this.stopped || this.enumeration) return;
     if (this.poll) clearTimeout(this.poll);
-    this.enumeration = this.execFile("/usr/bin/xcrun", ["simctl", "io", this.udid, "enumerate"],
+    this.enumeration = this.execFile("/usr/bin/xcrun", simctlArguments(["io", this.udid, "enumerate"]),
       { timeout: 3000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
         this.enumeration = undefined;
         if (this.stopped) return;
@@ -109,7 +110,7 @@ export class DuoStateMonitor {
       this.onState(this.state);
       this.refreshOrientation();
     };
-    const child = this.spawn("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", predicate], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = this.spawn("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", predicate]), { stdio: ["ignore", "pipe", "ignore"] });
     this.panelMonitor = child;
     let pending = "";
     child.stdout.setEncoding("utf8");
@@ -123,7 +124,7 @@ export class DuoStateMonitor {
       }
     });
     // Seed from this boot's most recent transition, then let live events win.
-    this.panelSeed = this.execFile("/usr/bin/xcrun", ["simctl", "spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate],
+    this.panelSeed = this.execFile("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate]),
       { timeout: 10000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
         this.panelSeed = undefined;
         if (!error && !liveSample) {
@@ -153,7 +154,7 @@ export class DuoStateMonitor {
     // so the hinge doesn't depend on devicectl: `devicectl device motion` is
     // missing from devicectl 651.13.5 (Xcode 27.1 27A9275) and later.
     // stdin stays open: the reader exits when it closes.
-    const child = this.spawn("/usr/bin/xcrun", ["simctl", "spawn", this.udid, duoHelper, "watch-angle"],
+    const child = this.spawn("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, duoHelper, "watch-angle"]),
       { stdio: ["pipe", "pipe", "pipe"] });
     this.monitor = child;
     let pending = "";

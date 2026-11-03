@@ -6,9 +6,10 @@ import {
   rmSync,
   writeFileSync,
 } from "fs";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { join } from "path";
 import { findBootedDevice, resolveDevice } from "./device";
+import { simctlArguments, simulatorDevicesDir } from "./simctl";
 
 // ─── Permission catalogue ───
 
@@ -178,12 +179,7 @@ export function parsePermissionsArgs(
 // ─── Simulator paths ───
 
 function simLibraryDir(udid: string): string {
-  return join(
-    homedir(),
-    "Library/Developer/CoreSimulator/Devices",
-    udid,
-    "data/Library",
-  );
+  return join(simulatorDevicesDir(), udid, "data/Library");
 }
 
 export function tccDbPath(udid: string): string {
@@ -331,7 +327,7 @@ function setLocation(
     service = "location-always";
   }
   try {
-    execFileSync("xcrun", ["simctl", "privacy", udid, action, service, bundleId], {
+    execFileSync("xcrun", simctlArguments(["privacy", udid, action, service, bundleId]), {
       stdio: ["ignore", "ignore", "pipe"],
     });
   } catch (e: any) {

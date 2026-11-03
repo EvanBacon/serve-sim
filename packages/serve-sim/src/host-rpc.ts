@@ -14,6 +14,7 @@ import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { PERMISSION_SERVICES } from "./client/utils/permissions";
 import { shellJoin } from "./shell-quote";
+import { simctlArguments } from "./simctl";
 import { getUiOption, setUiOption } from "./ui-settings";
 
 // Narrow host actions for the preview page, carried as `{id, rpc}` frames on
@@ -193,7 +194,7 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
   };
 
   const appContainer = async (udid: string, bundleId: string): Promise<string> => {
-    const r = await run("xcrun", ["simctl", "get_app_container", udid, bundleId, "app"]);
+    const r = await run("xcrun", simctlArguments(["get_app_container", udid, bundleId, "app"]));
     if (r.exitCode !== 0) fail(r.stderr.trim() || "App not found on simulator");
     const appPath = r.stdout.trim();
     if (!appPath) fail("Empty app path");
@@ -216,7 +217,7 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       const watch = p.watch === true;
       await requireDevice(udid);
       if (watch) return { ...(await run("osascript", WATCH_HOME_SCRIPT.flatMap((line) => ["-e", line]))) };
-      return { ...(await run("xcrun", ["simctl", "launch", udid, "com.apple.springboard"])) };
+      return { ...(await run("xcrun", simctlArguments(["launch", udid, "com.apple.springboard"]))) };
     },
 
     async screenshot(p) {
@@ -224,11 +225,11 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       const display = p.display === undefined ? undefined : enumParam(p, "display", DISPLAYS);
       await requireDevice(udid);
       const path = join(desktop(), `serve-sim-screenshot-${timestampSlug()}.png`);
-      const r = await run("xcrun", [
-        "simctl", "io", udid, "screenshot",
+      const r = await run("xcrun", simctlArguments([
+        "io", udid, "screenshot",
         ...(display ? [`--display=${display}`] : []),
         path,
-      ]);
+      ]));
       return { ...r, path: r.exitCode === 0 ? path : "" };
     },
 
@@ -421,7 +422,7 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
         path = screenshotPathParam(p);
       }
       await requireDevice(udid);
-      return { ...(await run("xcrun", ["simctl", "addmedia", udid, path])) };
+      return { ...(await run("xcrun", simctlArguments(["addmedia", udid, path]))) };
     },
 
     async installApp(p) {
@@ -430,7 +431,7 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       const path = uploadPathParam(p, "path", ["install"]);
       if (!path.endsWith(".ipa")) fail("invalid path");
       await requireDevice(udid);
-      return { ...(await run("xcrun", ["simctl", "install", udid, path])) };
+      return { ...(await run("xcrun", simctlArguments(["install", udid, path]))) };
     },
 
     // Set (lat/lng) or clear the simulated location.
@@ -439,7 +440,7 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       const clear = p.lat === undefined && p.lng === undefined;
       const point = clear ? null : `${coordinate(p, "lat", 90).toFixed(7)},${coordinate(p, "lng", 180).toFixed(7)}`;
       await requireDevice(udid);
-      return { ...(await run("xcrun", ["simctl", "location", udid, ...(point ? ["set", point] : ["clear"])])) };
+      return { ...(await run("xcrun", simctlArguments(["location", udid, ...(point ? ["set", point] : ["clear"])]))) };
     },
   };
 

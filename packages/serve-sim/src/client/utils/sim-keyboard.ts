@@ -1,8 +1,9 @@
+import { isModifierUsage } from "../../keyboard-modifiers";
+
 /** HID usage for the R key (Usage Page 0x07). */
 export const HID_KEY_R = 0x15;
 
 const META_USAGES = new Set([0xe3, 0xe7]);
-const isModifierUsage = (usage: number) => usage >= 0xe0 && usage <= 0xe7;
 
 export interface SimKeyEvent {
   type: "down" | "up";

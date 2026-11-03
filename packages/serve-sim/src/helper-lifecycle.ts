@@ -16,6 +16,7 @@ import { readFileSync, unlinkSync } from "fs";
 import { sleepSync } from "./runtime";
 import { getPortHolders } from "./ports";
 import { debugHelper, debugState } from "./debug";
+import { sameDeviceSet } from "./simctl";
 import type { ServeSimDeviceState } from "./state";
 import { writeServeSimState } from "./state";
 
@@ -205,10 +206,14 @@ export type StaleStateAction = "keep" | "recycle-self" | "recycle-helper";
  * `recycle-*` as a reason to drop the pidfile — the process is still alive.
  */
 export function classifyStaleState(
-  state: { pid: number; device: string },
+  state: { pid: number; device: string; deviceSet?: string },
   booted: Set<string> | null,
   selfPid: number,
+  deviceSet: string | undefined,
 ): StaleStateAction {
+  // `booted` lists only this process's device set; another set's simulator
+  // is not in it whether or not it is booted.
+  if (!sameDeviceSet(state.deviceSet, deviceSet)) return "keep";
   if (booted && isSimulatorUdid(state.device) && !booted.has(state.device)) {
     return state.pid === selfPid ? "recycle-self" : "recycle-helper";
   }

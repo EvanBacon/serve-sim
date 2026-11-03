@@ -37,6 +37,8 @@ xcrun --sdk iphonesimulator clang \
     "$HERE/SimCamLog.m" \
     "$HERE/SimCamFakes.m" \
     "$HERE/SimCamFrameSource.m" \
+    "$HERE/SimCamMovieOutput.m" \
+    "$HERE/SimCamMovieRecorder.m" \
     "$HERE/SimCamSwizzles.m"
 
 echo "Built: $DYLIB"

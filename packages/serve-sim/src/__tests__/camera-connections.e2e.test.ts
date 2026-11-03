@@ -32,7 +32,24 @@ const describeIfSimulator = udid && existsSync(DYLIB) ? describe : describe.skip
 let buildDir: string | null = null;
 let resultPath: string | null = null;
 
-async function runTestApp(mode: "graph" | "teardown") {
+async function runTestApp(
+  mode:
+    | "graph"
+    | "teardown"
+    | "automatic-recording"
+    | "manual-recording"
+    | "max-duration-recording"
+    | "max-file-size-recording"
+    | "existing-file-recording"
+    | "writer-failure-recording"
+    | "dropped-output-recording"
+    | "stopped-session-recording"
+    | "released-session-recording"
+    | "removed-camera-recording"
+    | "moved-output-recording"
+    | "not-running-recording"
+    | "foreign-connection-settings",
+) {
   try {
     execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
       stdio: "pipe",
@@ -101,12 +118,22 @@ describeIfSimulator("synthetic camera connection graph", () => {
 <key>CFBundleVersion</key><string>1</string>
 <key>LSRequiresIPhoneOS</key><true/>
 <key>MinimumOSVersion</key><string>15.0</string>
+<key>NSMicrophoneUsageDescription</key><string>Records the microphone beside the synthetic camera.</string>
+<key>UIApplicationSceneManifest</key><dict>
+<key>UIApplicationSupportsMultipleScenes</key><false/>
+<key>UISceneConfigurations</key><dict><key>UIWindowSceneSessionRoleApplication</key><array><dict>
+<key>UISceneConfigurationName</key><string>Default</string>
+<key>UISceneDelegateClassName</key><string>SimCameraConnectionSceneDelegate</string>
+</dict></array></dict></dict>
 </dict></plist>\n`);
 
     try {
       execFileSync("xcrun", ["simctl", "uninstall", udid!, BUNDLE_ID]);
     } catch {}
     execFileSync("xcrun", ["simctl", "install", udid!, appDir]);
+    // The recording checks add the microphone, as expo-camera and
+    // VisionCamera do; a host without one skips that half.
+    execFileSync("xcrun", ["simctl", "privacy", udid!, "grant", "microphone", BUNDLE_ID]);
     const dataContainer = execFileSync(
       "xcrun",
       ["simctl", "get_app_container", udid!, BUNDLE_ID, "data"],
@@ -131,5 +158,57 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   test("deallocates automatic metadata and video outputs without crashing", async () => {
     await runTestApp("teardown");
+  }, 20_000);
+
+  test("records a movie from automatic connections beside a microphone (expo-camera)", async () => {
+    await runTestApp("automatic-recording");
+  }, 20_000);
+
+  test("records a movie from manual connections with a paused stretch (VisionCamera 5)", async () => {
+    await runTestApp("manual-recording");
+  }, 20_000);
+
+  test("stops a movie at maxRecordedDuration as a successful recording", async () => {
+    await runTestApp("max-duration-recording");
+  }, 20_000);
+
+  test("stops a movie at maxRecordedFileSize as a successful recording", async () => {
+    await runTestApp("max-file-size-recording");
+  }, 20_000);
+
+  test("refuses to record over an existing file, as AVFoundation does", async () => {
+    await runTestApp("existing-file-recording");
+  }, 20_000);
+
+  test("ends the recording with the writer's error when a write fails", async () => {
+    await runTestApp("writer-failure-recording");
+  }, 20_000);
+
+  test("finishes the movie when the app drops its output mid-recording (expo-camera remount)", async () => {
+    await runTestApp("dropped-output-recording");
+  }, 20_000);
+
+  test("finishes the movie when the app stops its session mid-recording and lets it go", async () => {
+    await runTestApp("stopped-session-recording");
+  }, 20_000);
+
+  test("finishes the movie when the app lets its running session go", async () => {
+    await runTestApp("released-session-recording");
+  }, 20_000);
+
+  test("finishes the movie when the app removes the camera mid-recording", async () => {
+    await runTestApp("removed-camera-recording");
+  }, 20_000);
+
+  test("keeps an output in one session at a time, as AVFoundation does", async () => {
+    await runTestApp("moved-output-recording");
+  }, 20_000);
+
+  test("refuses to record on a stopped session with AVErrorSessionNotRunning", async () => {
+    await runTestApp("not-running-recording");
+  }, 20_000);
+
+  test("ignores output settings for another output's connection, as AVFoundation does", async () => {
+    await runTestApp("foreign-connection-settings");
   }, 20_000);
 });

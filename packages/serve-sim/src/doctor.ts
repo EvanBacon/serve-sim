@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { duoModelPath, resolveDuoModel, resolveDuoRendererExecutable } from "./duo-renderer";
+import { simctlArguments } from "./simctl";
 import { readDeviceHubInputShadowed } from "./device-hub-input";
 import { redactHome } from "./diagnostics-redact";
 
@@ -144,7 +145,7 @@ export async function collectHostDiagnostics(options: HostDiagnosticsOptions = {
 
 /** Simulator facts for one UDID from `simctl list -j`, plus the guest Device Hub input flag. */
 export async function collectDeviceDiagnostics(udid: string, probe: Probe = defaultProbe): Promise<Record<string, unknown>> {
-  const listing = await probe("/usr/bin/xcrun", ["simctl", "list", "devices", "-j"]);
+  const listing = await probe("/usr/bin/xcrun", simctlArguments(["list", "devices", "-j"]));
   let device: Record<string, unknown> | null = null;
   try {
     const parsed = JSON.parse(listing ?? "{}") as { devices?: Record<string, Array<Record<string, unknown>>> };

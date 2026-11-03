@@ -11,7 +11,11 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { KeySequencer, type KeyType } from "./key-sequencer";
 import { maxBitrateFromEnv } from "./max-bitrate";
+import { resolveDeviceSet } from "./simctl";
+
+export type { KeyType } from "./key-sequencer";
 
 const require = createRequire(import.meta.url);
 
@@ -56,6 +60,7 @@ interface NativeAddon {
   SimCapture: new (udid: string, maxBitrate: number | null) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
+  setDeviceSet(path: string | null): void;
 }
 
 // (data, width, height, flags) — codec 0=MJPEG 1=AVCC 2=size-only; flags bit0=desc bit1=keyframe.
@@ -129,7 +134,6 @@ export type RecordingSummary = {
 };
 
 export type TouchType = "begin" | "move" | "end";
-export type KeyType = "down" | "up";
 export type ButtonPhase = "down" | "up" | "press";
 
 /** UIDeviceOrientation values the simulator's GraphicsServices accepts. */
@@ -167,7 +171,12 @@ export function duoHidHelperPath(): string {
 
 let addon: NativeAddon | undefined;
 function load(): NativeAddon {
-  if (!addon) addon = require(resolveAddon()) as NativeAddon;
+  if (!addon) {
+    addon = require(resolveAddon()) as NativeAddon;
+    // The addon cannot read the set from the environment: under Bun a
+    // `process.env` write never reaches it.
+    addon.setDeviceSet(resolveDeviceSet() ?? null);
+  }
   return addon;
 }
 
@@ -177,9 +186,11 @@ function load(): NativeAddon {
  */
 export class NativeHid {
   private readonly handle: SimHIDHandle;
+  private readonly keys: KeySequencer;
 
   constructor(udid: string) {
     this.handle = new (load().SimHID)(udid, duoHidHelperPath());
+    this.keys = new KeySequencer(this.handle);
   }
 
   // The N-API bindings throw synchronously when a JS value can't be coerced to
@@ -215,7 +226,7 @@ export class NativeHid {
   }
 
   key(type: KeyType, usage: number): Promise<void> {
-    return this.guard("key", () => this.handle.key(type, usage), undefined);
+    return this.guard("key", () => this.keys.key(type, usage), undefined);
   }
 
   /** anchorX/anchorY default to screen center when omitted. */
@@ -248,7 +259,7 @@ export class NativeHid {
   }
 
   close(): Promise<void> {
-    return this.guard("close", () => this.handle.close(), undefined);
+    return this.keys.drainAndRelease();
   }
 
   pose(name: string, fromDegrees: number): Promise<boolean> {

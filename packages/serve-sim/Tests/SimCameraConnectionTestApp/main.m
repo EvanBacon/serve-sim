@@ -1,9 +1,14 @@
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
+#include <signal.h>
+#include <sys/resource.h>
 
 static NSString *const kResultFileName = @"simcam-connection-result.json";
 
 static void WriteResult(BOOL passed, NSString *message) {
+    // The writer-failure check caps file writes; the result must still land.
+    struct rlimit unlimited = { RLIM_INFINITY, RLIM_INFINITY };
+    setrlimit(RLIMIT_FSIZE, &unlimited);
     NSURL *documents = [[[NSFileManager defaultManager]
         URLsForDirectory:NSDocumentDirectory
                inDomains:NSUserDomainMask] firstObject];
@@ -13,6 +18,96 @@ static void WriteResult(BOOL passed, NSString *message) {
     [data writeToURL:resultURL atomically:YES];
     exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
 }
+
+static AVCaptureDeviceInput *FakeCameraInput(AVCaptureDevicePosition position) {
+    AVCaptureDevice *device = [AVCaptureDevice
+        defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                          mediaType:AVMediaTypeVideo
+                           position:position];
+    return [AVCaptureDeviceInput deviceInputWithDevice:device error:nil];
+}
+
+// The simulator's microphone is the host's default input, so a Mac without
+// one (a CI runner) has none and the microphone half of a check is skipped.
+// A microphone that is there but gives no input fails the check instead.
+static AVCaptureDeviceInput *MicrophoneInput(void) {
+    AVCaptureDevice *microphone = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+    if (!microphone) return nil;
+    NSError *error = nil;
+    AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:microphone error:&error];
+    if (!input) WriteResult(NO, [NSString stringWithFormat:@"The microphone gave no input: %@", error]);
+    return input;
+}
+
+static NSURL *RecordingURL(NSString *name) {
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    return [NSURL fileURLWithPath:path];
+}
+
+static NSString *MicrophoneNote(AVCaptureDeviceInput *microphone) {
+    return microphone ? @"with a microphone input" : @"(no microphone on this host)";
+}
+
+#pragma mark - Explicit connection graph
+
+static void RunExplicitConnectionCheck(void) {
+    AVCaptureDeviceInput *input = FakeCameraInput(AVCaptureDevicePositionBack);
+    if (!input) {
+        WriteResult(NO, @"Could not create fake input");
+        return;
+    }
+
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCapturePhotoOutput *output = [AVCapturePhotoOutput new];
+    [session addInputWithNoConnections:input];
+    [session addOutputWithNoConnections:output];
+
+    if (session.connections.count != 0 || output.connections.count != 0) {
+        WriteResult(NO, @"addOutputWithNoConnections exposed a connection before addConnection");
+        return;
+    }
+
+    AVCaptureConnection *connection = [[AVCaptureConnection alloc]
+        initWithInputPorts:input.ports
+                    output:output];
+    if (!connection || ![session canAddConnection:connection]) {
+        WriteResult(NO, @"Could not create or add an explicit fake-input connection");
+        return;
+    }
+
+    AVCaptureDeviceInput *foreignInput = FakeCameraInput(AVCaptureDevicePositionFront);
+    AVCaptureSession *foreignSession = [AVCaptureSession new];
+    [foreignSession addInputWithNoConnections:foreignInput];
+    if ([foreignSession canAddConnection:connection]) {
+        WriteResult(NO, @"A foreign session accepted another session's connection endpoints");
+        return;
+    }
+    [foreignSession addConnection:connection];
+    if (foreignSession.connections.count != 0) {
+        WriteResult(NO, @"A foreign session recorded another session's connection");
+        return;
+    }
+
+    [session addConnection:connection];
+
+    if (![session.connections containsObject:connection] ||
+        ![output.connections containsObject:connection] ||
+        [output connectionWithMediaType:AVMediaTypeVideo] != connection) {
+        WriteResult(NO, @"The explicit connection was not exposed by the session and output");
+        return;
+    }
+
+    [session removeConnection:connection];
+    if (session.connections.count != 0 || output.connections.count != 0) {
+        WriteResult(NO, @"removeConnection left the explicit connection exposed");
+        return;
+    }
+
+    WriteResult(YES, @"No connection before addConnection; exact connection exposed after addConnection");
+}
+
+#pragma mark - Teardown
 
 // Weak handles to the objects released by the teardown exercise. The test only
 // proves the fake-connection dealloc path is safe once every one of these has
@@ -123,11 +218,724 @@ static void WaitForTeardownAndReport(SimCameraTeardownProbe *probe, NSDate *dead
         });
 }
 
+static void RunTeardownCheck(id<AVCaptureVideoDataOutputSampleBufferDelegate,
+                                AVCaptureMetadataOutputObjectsDelegate> delegate) {
+    SimCameraTeardownProbe *probe = [SimCameraTeardownProbe new];
+    NSString *message = nil;
+    if (!ExerciseAutomaticOutputTeardown(delegate, probe, &message)) {
+        WriteResult(NO, message);
+        return;
+    }
+    WaitForTeardownAndReport(probe, [NSDate dateWithTimeIntervalSinceNow:5.0]);
+}
+
+#pragma mark - Movie recording
+
+@interface SimCamRecordingProbe : NSObject <AVCaptureFileOutputRecordingDelegate>
+@property(nonatomic, copy) void (^onStart)(void);
+@property(nonatomic, copy) void (^onFinish)(NSURL *url, NSError *error);
+@property(atomic) BOOL finishedWithOutput;
+// What the output reported as its delegate heard the recording finished.
+@property(atomic) double finishedSeconds;
+@property(atomic) int64_t finishedFileSize;
+@end
+
+@implementation SimCamRecordingProbe
+- (void)captureOutput:(AVCaptureFileOutput *)output
+    didStartRecordingToOutputFileAtURL:(NSURL *)fileURL
+                       fromConnections:(NSArray<AVCaptureConnection *> *)connections {
+    (void)output; (void)fileURL; (void)connections;
+    dispatch_async(dispatch_get_main_queue(), ^{ if (self.onStart) self.onStart(); });
+}
+- (void)captureOutput:(AVCaptureFileOutput *)output
+    didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL
+                        fromConnections:(NSArray<AVCaptureConnection *> *)connections
+                                  error:(NSError *)error {
+    (void)connections;
+    self.finishedWithOutput = output != nil;
+    self.finishedSeconds = CMTimeGetSeconds(output.recordedDuration);
+    self.finishedFileSize = output.recordedFileSize;
+    dispatch_async(dispatch_get_main_queue(), ^{ if (self.onFinish) self.onFinish(outputFileURL, error); });
+}
+@end
+
+static SimCamRecordingProbe *gProbe = nil;
+
+// Seconds of video in the movie at `url`, or a negative number naming why
+// there is none.
+static void ReadVideoSeconds(NSURL *url, void (^done)(double seconds, NSString *problem)) {
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    [asset loadTracksWithMediaType:AVMediaTypeVideo
+                 completionHandler:^(NSArray<AVAssetTrack *> *tracks, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error || tracks.count == 0) {
+                done(0, [NSString stringWithFormat:@"no video track in %@ (%@)",
+                    url.lastPathComponent, error.localizedDescription ?: @"none"]);
+                return;
+            }
+            double seconds = CMTimeGetSeconds(tracks.firstObject.timeRange.duration);
+            done(seconds, nil);
+        });
+    }];
+}
+
+static void ExpectRecordedMovie(NSURL *url, NSError *error, BOOL expectMaxDuration,
+                                double minSeconds, double maxSeconds, NSString *what) {
+    if (expectMaxDuration) {
+        BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
+        if (error.code != AVErrorMaximumDurationReached || !finished) {
+            WriteResult(NO, [NSString stringWithFormat:@"%@: expected a successful max-duration stop, got %@", what, error]);
+            return;
+        }
+    } else if (error) {
+        WriteResult(NO, [NSString stringWithFormat:@"%@: recording failed: %@", what, error]);
+        return;
+    }
+    ReadVideoSeconds(url, ^(double seconds, NSString *problem) {
+        if (problem) {
+            WriteResult(NO, [NSString stringWithFormat:@"%@: %@", what, problem]);
+            return;
+        }
+        if (seconds < minSeconds || seconds > maxSeconds) {
+            WriteResult(NO, [NSString stringWithFormat:@"%@: movie holds %.2f s, expected %.2f-%.2f s", what, seconds, minSeconds, maxSeconds]);
+            return;
+        }
+        WriteResult(YES, [NSString stringWithFormat:@"%@: recorded %.2f s of video", what, seconds]);
+    });
+}
+
+// expo-camera's graph: automatic connections, a photo and a movie output,
+// the microphone added with addInput: inside one configuration, and a
+// preview layer it detaches when the camera view goes away.
+static void RunAutomaticConnectionsRecording(void) {
+    // expo-camera refuses to record on a simulator without a default camera.
+    if (![AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo]) {
+        WriteResult(NO, @"defaultDeviceWithMediaType: found no camera");
+        return;
+    }
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionFront);
+    AVCaptureDeviceInput *microphone = MicrophoneInput();
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCapturePhotoOutput *photo = [AVCapturePhotoOutput new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+
+    [session beginConfiguration];
+    [session addInput:camera];
+    [session addOutput:photo];
+    if ([session canAddOutput:movie]) [session addOutput:movie];
+    if (microphone && [session canAddInput:microphone]) [session addInput:microphone];
+    [session commitConfiguration];
+
+    if (microphone && ![session.inputs containsObject:microphone]) {
+        WriteResult(NO, @"The session does not list the microphone it added");
+        return;
+    }
+    AVCaptureConnection *video = [movie connectionWithMediaType:AVMediaTypeVideo];
+    if (!video) {
+        WriteResult(NO, @"The movie output has no video connection");
+        return;
+    }
+    video.videoOrientation = AVCaptureVideoOrientationPortrait;
+    AVCaptureVideoPreviewLayer *preview = [AVCaptureVideoPreviewLayer layerWithSession:session];
+    [session startRunning];
+
+    NSString *what = [NSString stringWithFormat:@"Automatic connections %@", MicrophoneNote(microphone)];
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        if (!movie.isRecording) {
+            WriteResult(NO, @"isRecording is NO after the recording started");
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [movie stopRecording]; });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        [session stopRunning];
+        preview.session = nil;
+        ExpectRecordedMovie(url, error, NO, 0.8, 1.4, what);
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"automatic.mov") recordingDelegate:gProbe];
+}
+
+// VisionCamera 5's graph: inputs and outputs without connections, explicit
+// video, preview and audio connections, then device and connection
+// configuration before the session runs.
+static void RunManualConnectionsRecording(void) {
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
+    AVCaptureDeviceInput *microphone = MicrophoneInput();
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    AVCaptureVideoPreviewLayer *preview = [AVCaptureVideoPreviewLayer new];
+
+    [session beginConfiguration];
+    [session addInputWithNoConnections:camera];
+    if (microphone) [session addInputWithNoConnections:microphone];
+    [session addOutputWithNoConnections:movie];
+    [preview setSessionWithNoConnection:session];
+
+    NSMutableArray<AVCaptureInputPort *> *videoPorts = [NSMutableArray new];
+    for (AVCaptureInputPort *port in camera.ports) {
+        if ([port.mediaType isEqualToString:AVMediaTypeVideo]) [videoPorts addObject:port];
+    }
+    if (videoPorts.count == 0) {
+        WriteResult(NO, @"The fake input has no video port");
+        return;
+    }
+    AVCaptureConnection *video = [[AVCaptureConnection alloc] initWithInputPorts:videoPorts output:movie];
+    if (![session canAddConnection:video]) {
+        WriteResult(NO, @"canAddConnection refused the video connection");
+        return;
+    }
+    [session addConnection:video];
+    AVCaptureConnection *previewConnection = [[AVCaptureConnection alloc]
+        initWithInputPort:videoPorts.firstObject
+        videoPreviewLayer:preview];
+    if (![session canAddConnection:previewConnection]) {
+        WriteResult(NO, @"canAddConnection refused the preview connection");
+        return;
+    }
+    [session addConnection:previewConnection];
+    AVCaptureConnection *audio = nil;
+    if (microphone) {
+        AVCaptureInputPort *audioPort = nil;
+        for (AVCaptureInputPort *port in microphone.ports) {
+            if ([port.mediaType isEqualToString:AVMediaTypeAudio]) audioPort = port;
+        }
+        audio = audioPort
+            ? [[AVCaptureConnection alloc] initWithInputPorts:@[audioPort] output:movie]
+            : nil;
+        if (!audio || ![session canAddConnection:audio]) {
+            WriteResult(NO, @"canAddConnection refused the audio connection");
+            return;
+        }
+        [session addConnection:audio];
+        if ([movie connectionWithMediaType:AVMediaTypeAudio] != audio) {
+            WriteResult(NO, @"connectionWithMediaType: did not return the audio connection");
+            return;
+        }
+    }
+
+    AVCaptureDevice *device = camera.device;
+    NSError *lockError = nil;
+    if (![device lockForConfiguration:&lockError]) {
+        WriteResult(NO, [NSString stringWithFormat:@"lockForConfiguration failed: %@", lockError]);
+        return;
+    }
+    device.activeFormat = device.formats.firstObject;
+    device.activeVideoMaxFrameDuration = CMTimeMake(1, 30);
+    device.activeVideoMinFrameDuration = CMTimeMake(1, 30);
+    device.activeColorSpace = AVCaptureColorSpace_sRGB;
+    if (device.activeFormat.isVideoHDRSupported) {
+        device.automaticallyAdjustsVideoHDREnabled = NO;
+        device.videoHDREnabled = NO;
+    }
+    [device unlockForConfiguration];
+
+    for (AVCaptureConnection *connection in session.connections) {
+        if (connection.videoPreviewLayer || !connection.isVideoStabilizationSupported) continue;
+        connection.preferredVideoStabilizationMode = AVCaptureVideoStabilizationModeStandard;
+    }
+    if (video.isVideoOrientationSupported) video.videoOrientation = AVCaptureVideoOrientationPortrait;
+    video.automaticallyAdjustsVideoMirroring = NO;
+    if (video.isVideoMirroringSupported) video.videoMirrored = NO;
+
+    if (![movie.availableVideoCodecTypes containsObject:AVVideoCodecTypeH264]) {
+        WriteResult(NO, @"The movie output offers no H.264 codec");
+        return;
+    }
+    if (![[movie supportedOutputSettingsKeysForConnection:video] containsObject:AVVideoCompressionPropertiesKey]) {
+        WriteResult(NO, @"The movie output cannot take a bit rate");
+        return;
+    }
+    NSDictionary *settings = @{
+        AVVideoCodecKey: AVVideoCodecTypeH264,
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @2000000 },
+    };
+    [movie setOutputSettings:settings forConnection:video];
+    if (audio) [movie setOutputSettings:@{} forConnection:audio];
+    if (![[movie outputSettingsForConnection:video] isEqual:settings]) {
+        WriteResult(NO, [NSString stringWithFormat:@"The movie output did not keep its video settings: %@",
+            [movie outputSettingsForConnection:video]]);
+        return;
+    }
+    [session commitConfiguration];
+    [session startRunning];
+
+    NSString *what = [NSString stringWithFormat:@"Manual connections %@", MicrophoneNote(microphone)];
+    gProbe = [SimCamRecordingProbe new];
+    // Recording 0.5 s, paused 0.5 s (iOS 18 and later), recording 0.5 s:
+    // the movie holds about 1 s, so the pause is left out of it.
+    gProbe.onStart = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (movie.recordedDuration.value <= 0) {
+                WriteResult(NO, @"recordedDuration did not advance");
+                return;
+            }
+            if (@available(iOS 18.0, *)) {
+                [movie pauseRecording];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    if (!movie.isRecordingPaused) {
+                        WriteResult(NO, @"isRecordingPaused is NO after pauseRecording");
+                        return;
+                    }
+                    [movie resumeRecording];
+                });
+            }
+        });
+        NSTimeInterval stopAfter = 1.0;
+        if (@available(iOS 18.0, *)) stopAfter = 1.5;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(stopAfter * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [movie stopRecording]; });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        [session stopRunning];
+        ExpectRecordedMovie(url, error, NO, 0.8, 1.3, what);
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"manual.mp4") recordingDelegate:gProbe];
+}
+
+static void RunMaxDurationRecording(void) {
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
+    [session addOutput:movie];
+    movie.maxRecordedDuration = CMTimeMakeWithSeconds(0.5, 600);
+    [session startRunning];
+
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        [session stopRunning];
+        double reported = CMTimeGetSeconds(movie.recordedDuration);
+        if (fabs(reported - 0.5) > 0.002) {
+            WriteResult(NO, [NSString stringWithFormat:@"recordedDuration reports %.3f s for a movie cut at 0.5 s", reported]);
+            return;
+        }
+        ExpectRecordedMovie(url, error, YES, 0.45, 0.51, @"Max duration");
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"max-duration.mov") recordingDelegate:gProbe];
+}
+
+// maxRecordedFileSize ends the recording, without a stop call, with
+// AVErrorMaximumFileSizeReached ("The recording stopped because it reached
+// the file's maximum size") and a playable movie. The limit is under the
+// writer's first flush, so the recording ends at that flush, about 0.6 s in.
+static void RunMaxFileSizeRecording(void) {
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
+    [session addOutput:movie];
+    int64_t limit = 10 * 1000;
+    movie.maxRecordedFileSize = limit;
+    [session startRunning];
+
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            WriteResult(NO, [NSString stringWithFormat:@"Still recording 5 s in at %lld bytes, past the %lld-byte limit",
+                movie.recordedFileSize, limit]);
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        [session stopRunning];
+        BOOL finished = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] boolValue];
+        if (error.code != AVErrorMaximumFileSizeReached || !finished) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected a successful max-file-size stop, got %@", error]);
+            return;
+        }
+        ExpectRecordedMovie(url, nil, NO, 0.3, 2.0,
+            [NSString stringWithFormat:@"Max file size (%lld bytes when finished)", gProbe.finishedFileSize]);
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"max-file-size.mov") recordingDelegate:gProbe];
+}
+
+// AVFoundation refuses to record over an existing file: the recording never
+// starts, and the delegate hears AVErrorFileAlreadyExists.
+static void RunExistingFileRecording(void) {
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
+    [session addOutput:movie];
+    [session startRunning];
+
+    NSURL *url = RecordingURL(@"existing.mov");
+    NSData *existing = [@"keep me" dataUsingEncoding:NSUTF8StringEncoding];
+    [existing writeToURL:url atomically:YES];
+
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        WriteResult(NO, @"The recording started over an existing file");
+    };
+    gProbe.onFinish = ^(NSURL *finishedURL, NSError *error) {
+        (void)finishedURL;
+        [session stopRunning];
+        BOOL failed = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@NO];
+        if (error.code != AVErrorFileAlreadyExists || !failed) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected AVErrorFileAlreadyExists, got %@", error]);
+            return;
+        }
+        if (![[NSData dataWithContentsOfURL:url] isEqualToData:existing]) {
+            WriteResult(NO, @"The existing file was replaced");
+            return;
+        }
+        if (movie.isRecording) {
+            WriteResult(NO, @"isRecording is YES after the recording failed");
+            return;
+        }
+        WriteResult(YES, @"Recording over an existing file failed with AVErrorFileAlreadyExists and kept the file");
+    };
+    [movie startRecordingToOutputFileURL:url recordingDelegate:gProbe];
+}
+
+// A write that fails mid-recording (here, a file-size cap) ends the
+// recording with the writer's error, unsuccessfully, without a stop call.
+static void RunWriterFailureRecording(void) {
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    [session addInput:FakeCameraInput(AVCaptureDevicePositionBack)];
+    [session addOutput:movie];
+    [session startRunning];
+
+    __block BOOL capped = NO;
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        signal(SIGXFSZ, SIG_IGN);
+        struct rlimit limit = { 1, RLIM_INFINITY };
+        if (setrlimit(RLIMIT_FSIZE, &limit) != 0) {
+            WriteResult(NO, @"Could not cap file writes");
+            return;
+        }
+        capped = YES;
+        // AVAssetWriter writes real-time media in chunks well under a
+        // second apart, so its first capped write fails long before this.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            WriteResult(NO, [NSString stringWithFormat:
+                @"Still recording 5 s after writes began failing (isRecording=%d)", movie.isRecording]);
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        (void)url;
+        [session stopRunning];
+        if (!capped) {
+            WriteResult(NO, [NSString stringWithFormat:@"The recording ended before writes were capped: %@", error]);
+            return;
+        }
+        BOOL failed = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@NO];
+        if (!error || !failed) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected an unsuccessful finish, got %@", error]);
+            return;
+        }
+        if (movie.isRecording) {
+            WriteResult(NO, @"isRecording is YES after the writer failed");
+            return;
+        }
+        WriteResult(YES, [NSString stringWithFormat:@"The writer's failure ended the recording: %@", error.localizedDescription]);
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"writer-failure.mov") recordingDelegate:gProbe];
+}
+
+// An app that lets its movie output go mid-recording still gets a finished
+// file: AVFoundation tells the delegate about every recording, and the
+// output then goes away.
+static void WaitForRelease(__weak id object, NSDate *deadline, NSString *passMessage) {
+    if (!object) {
+        WriteResult(YES, passMessage);
+        return;
+    }
+    if ([deadline timeIntervalSinceNow] <= 0) {
+        WriteResult(NO, @"The movie output was never released");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ WaitForRelease(object, deadline, passMessage); });
+}
+
+static AVCaptureConnection *AddVideoConnection(AVCaptureSession *session, AVCaptureDeviceInput *camera,
+                                               AVCaptureOutput *output) {
+    NSMutableArray<AVCaptureInputPort *> *videoPorts = [NSMutableArray new];
+    for (AVCaptureInputPort *port in camera.ports) {
+        if ([port.mediaType isEqualToString:AVMediaTypeVideo]) [videoPorts addObject:port];
+    }
+    AVCaptureConnection *connection = [[AVCaptureConnection alloc] initWithInputPorts:videoPorts output:output];
+    [session addConnection:connection];
+    return connection;
+}
+
+// A running session with the fake camera and a movie output on an explicit
+// video connection.
+static AVCaptureSession *RunningMovieSession(AVCaptureMovieFileOutput *movie) {
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
+    AVCaptureSession *session = [AVCaptureSession new];
+    [session addInputWithNoConnections:camera];
+    [session addOutputWithNoConnections:movie];
+    AddVideoConnection(session, camera, movie);
+    [session startRunning];
+    return session;
+}
+
+// Records into a movie the app lets go of 0.5 s in: `letGo` is what the app
+// does just before it drops its session, and the delegate must still hear
+// about a finished, playable file, with no error when `expectedCode` is 0
+// and otherwise that AVFoundation error with
+// AVErrorRecordingSuccessfullyFinishedKey set to YES, from an output that
+// reports the movie's duration and size.
+static void RunLetGoRecording(NSString *what, NSString *fileName, NSInteger expectedCode,
+                              void (^letGo)(AVCaptureSession *session, AVCaptureMovieFileOutput *movie)) {
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    __block AVCaptureSession *session = RunningMovieSession(movie);
+    __weak AVCaptureMovieFileOutput *weakMovie = movie;
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            letGo(session, weakMovie);
+            session = nil;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                WriteResult(NO, [NSString stringWithFormat:@"%@: the delegate never heard the recording finished", what]);
+            });
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        BOOL expected = expectedCode == 0
+            ? error == nil
+            : [error.domain isEqualToString:AVFoundationErrorDomain] && error.code == expectedCode &&
+                [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@YES];
+        if (!expected) {
+            WriteResult(NO, [NSString stringWithFormat:@"%@: expected %@, got %@", what,
+                expectedCode == 0 ? @"no error"
+                                  : [NSString stringWithFormat:@"error %ld, successfully finished", (long)expectedCode],
+                error]);
+            return;
+        }
+        if (!gProbe.finishedWithOutput) {
+            WriteResult(NO, [NSString stringWithFormat:@"%@: the delegate was told about a nil output", what]);
+            return;
+        }
+        ReadVideoSeconds(url, ^(double seconds, NSString *problem) {
+            if (problem || seconds < 0.4 || seconds > 1.0) {
+                WriteResult(NO, [NSString stringWithFormat:@"%@: %@", what,
+                    problem ?: [NSString stringWithFormat:@"movie holds %.2f s, expected 0.40-1.00 s", seconds]]);
+                return;
+            }
+            int64_t fileSize = (int64_t)[[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil].fileSize;
+            if (fabs(gProbe.finishedSeconds - seconds) > 0.002 || gProbe.finishedFileSize != fileSize) {
+                WriteResult(NO, [NSString stringWithFormat:
+                    @"%@: the output reported %.3f s and %lld bytes as it finished, for a movie of %.3f s and %lld bytes",
+                    what, gProbe.finishedSeconds, gProbe.finishedFileSize, seconds, fileSize]);
+                return;
+            }
+            WaitForRelease(weakMovie, [NSDate dateWithTimeIntervalSinceNow:3.0],
+                [NSString stringWithFormat:@"%@: recorded %.2f s of video, then released the output", what, seconds]);
+        });
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(fileName) recordingDelegate:gProbe];
+}
+
+// expo-camera removes its movie output when the camera view remounts.
+// AVErrorSessionConfigurationChanged: "Recording stopped because the
+// configuration of media sources and destinations changed."
+static void RunDroppedOutputRecording(void) {
+    RunLetGoRecording(@"Dropped output", @"dropped-output.mov", AVErrorSessionConfigurationChanged, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        [session beginConfiguration];
+        [session removeOutput:movie];
+        [session commitConfiguration];
+    });
+}
+
+// Removing the camera mid-recording, as a camera flip does, changes the
+// session's media sources and ends the recording the same way.
+static void RunRemovedCameraRecording(void) {
+    RunLetGoRecording(@"Removed camera", @"removed-camera.mov", AVErrorSessionConfigurationChanged, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        (void)movie;
+        [session beginConfiguration];
+        for (AVCaptureInput *input in session.inputs) [session removeInput:input];
+        [session commitConfiguration];
+    });
+}
+
+// An app can stop its session and let it go with the output still in it.
+// No AVError code names a stopped session, so the recording ends as a stop.
+static void RunStoppedSessionRecording(void) {
+    RunLetGoRecording(@"Stopped session", @"stopped-session.mov", 0, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        (void)movie;
+        [session stopRunning];
+    });
+}
+
+// An app can also let a running session go with the output still in it and
+// never stop it. AVFoundation finishes the file when the session goes away,
+// and the recording ends as a stop.
+static void RunReleasedSessionRecording(void) {
+    RunLetGoRecording(@"Released session", @"released-session.mov", 0, ^(AVCaptureSession *session, AVCaptureMovieFileOutput *movie) {
+        (void)session;
+        (void)movie;
+    });
+}
+
+// AVFoundation keeps an output in one session at a time ("An AVCaptureOutput
+// instance may not be added to more than one session"): a second session's
+// canAddOutput: says NO and adding the output throws until the first session
+// lets it go. Moved that way, it records in the new session while the old one
+// is taken apart, asked to remove it again, stopped and let go.
+static void RunMovedOutputRecording(void) {
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    __block AVCaptureSession *old = RunningMovieSession(movie);
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
+    AVCaptureSession *session = [AVCaptureSession new];
+    [session addInputWithNoConnections:camera];
+    if ([session canAddOutput:movie]) {
+        WriteResult(NO, @"Moved output: a second session could add an output the first still holds");
+        return;
+    }
+    @try {
+        [session addOutputWithNoConnections:movie];
+        WriteResult(NO, @"Moved output: adding an output another session holds did not throw");
+        return;
+    } @catch (NSException *exception) {
+        if (![exception.name isEqualToString:NSInvalidArgumentException]) {
+            WriteResult(NO, [NSString stringWithFormat:@"Moved output: adding it threw %@", exception.name]);
+            return;
+        }
+    }
+    [old beginConfiguration];
+    [old removeOutput:movie];
+    [old commitConfiguration];
+    if (![session canAddOutput:movie]) {
+        WriteResult(NO, @"Moved output: the second session could not add the output the first let go");
+        return;
+    }
+    [session addOutputWithNoConnections:movie];
+    AddVideoConnection(session, camera, movie);
+    [session startRunning];
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [old beginConfiguration];
+            for (AVCaptureInput *input in old.inputs) [old removeInput:input];
+            [old addInput:FakeCameraInput(AVCaptureDevicePositionFront)];
+            [old removeOutput:movie];
+            [old commitConfiguration];
+            [old stopRunning];
+            old = nil;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [movie stopRecording]; });
+        });
+    };
+    gProbe.onFinish = ^(NSURL *url, NSError *error) {
+        (void)session;
+        if (error) {
+            WriteResult(NO, [NSString stringWithFormat:@"Moved output: expected no error, got %@", error]);
+            return;
+        }
+        ReadVideoSeconds(url, ^(double seconds, NSString *problem) {
+            if (problem || seconds < 0.5) {
+                WriteResult(NO, [NSString stringWithFormat:@"Moved output: %@",
+                    problem ?: [NSString stringWithFormat:@"movie holds %.2f s, so the old session ended the recording", seconds]]);
+                return;
+            }
+            WriteResult(YES, [NSString stringWithFormat:@"Moved output: refused while held, then recorded %.2f s while its old session was taken apart and let go", seconds]);
+        });
+    };
+    [movie startRecordingToOutputFileURL:RecordingURL(@"moved-output.mov") recordingDelegate:gProbe];
+}
+
+// A movie output on a stopped session does not record: the delegate hears
+// AVErrorSessionNotRunning ("The recording couldn't start because the
+// session isn't running") and nothing is written.
+static void RunNotRunningRecording(void) {
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    AVCaptureSession *session = RunningMovieSession(movie);
+    [session stopRunning];
+
+    NSURL *url = RecordingURL(@"not-running.mov");
+    gProbe = [SimCamRecordingProbe new];
+    gProbe.onStart = ^{
+        WriteResult(NO, @"The recording started on a stopped session");
+    };
+    gProbe.onFinish = ^(NSURL *finishedURL, NSError *error) {
+        (void)finishedURL;
+        (void)session;
+        BOOL failed = [error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] isEqual:@NO];
+        if (error.code != AVErrorSessionNotRunning || !failed) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected AVErrorSessionNotRunning, got %@", error]);
+            return;
+        }
+        if ([[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+            WriteResult(NO, @"A file was written for a recording that never started");
+            return;
+        }
+        if (movie.isRecording) {
+            WriteResult(NO, @"isRecording is YES on a stopped session");
+            return;
+        }
+        WriteResult(YES, @"Recording on a stopped session failed with AVErrorSessionNotRunning and wrote nothing");
+    };
+    [movie startRecordingToOutputFileURL:url recordingDelegate:gProbe];
+}
+
+// AVFoundation ignores settings given for another output's connection and
+// throws when asked for them ("Invalid connection passed"), so one movie
+// output never takes the settings meant for another's.
+static void RunForeignConnectionSettings(void) {
+    AVCaptureDeviceInput *camera = FakeCameraInput(AVCaptureDevicePositionBack);
+    AVCaptureSession *session = [AVCaptureSession new];
+    AVCaptureMovieFileOutput *movie = [AVCaptureMovieFileOutput new];
+    AVCaptureMovieFileOutput *other = [AVCaptureMovieFileOutput new];
+    [session addInputWithNoConnections:camera];
+    [session addOutputWithNoConnections:movie];
+    [session addOutputWithNoConnections:other];
+    AVCaptureConnection *video = AddVideoConnection(session, camera, movie);
+    AVCaptureConnection *otherVideo = AddVideoConnection(session, camera, other);
+
+    NSDictionary *settings = [movie outputSettingsForConnection:video];
+    [movie setOutputSettings:@{ AVVideoCodecKey: AVVideoCodecTypeHEVC } forConnection:otherVideo];
+    if (![[movie outputSettingsForConnection:video] isEqual:settings]) {
+        WriteResult(NO, [NSString stringWithFormat:@"Another output's connection replaced the settings %@ with %@",
+            settings, [movie outputSettingsForConnection:video]]);
+        return;
+    }
+    @try {
+        NSDictionary *answered = [movie outputSettingsForConnection:otherVideo];
+        WriteResult(NO, [NSString stringWithFormat:@"outputSettingsForConnection: answered %@ for another output's connection", answered]);
+        return;
+    } @catch (NSException *exception) {
+        if (![exception.name isEqualToString:NSInvalidArgumentException]) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected NSInvalidArgumentException, got %@", exception]);
+            return;
+        }
+    }
+    WriteResult(YES, @"Settings for another output's connection were ignored, and asking for them threw");
+}
+
+#pragma mark - App
+
+// iOS 27 stops an app that has not adopted the scene lifecycle, so the
+// window comes from a scene delegate the Info.plist names.
+@interface SimCameraConnectionSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property(nonatomic, strong) UIWindow *window;
+@end
+
+@implementation SimCameraConnectionSceneDelegate
+- (void)scene:(UIScene *)scene
+    willConnectToSession:(UISceneSession *)session
+                 options:(UISceneConnectionOptions *)connectionOptions {
+    (void)session;
+    (void)connectionOptions;
+    self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+    self.window.rootViewController = [UIViewController new];
+    [self.window makeKeyAndVisible];
+}
+@end
+
 @interface SimCameraConnectionTestDelegate : UIResponder <
     UIApplicationDelegate,
     AVCaptureVideoDataOutputSampleBufferDelegate,
     AVCaptureMetadataOutputObjectsDelegate>
-@property(nonatomic, strong) UIWindow *window;
 @end
 
 @implementation SimCameraConnectionTestDelegate
@@ -136,96 +944,26 @@ static void WaitForTeardownAndReport(SimCameraTeardownProbe *probe, NSDate *dead
     didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     (void)application;
     (void)launchOptions;
-    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    self.window.rootViewController = [UIViewController new];
-    [self.window makeKeyAndVisible];
 
+    NSString *mode = NSProcessInfo.processInfo.environment[@"SIMCAM_CONNECTION_TEST_MODE"] ?: @"graph";
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *mode = NSProcessInfo.processInfo.environment[@"SIMCAM_CONNECTION_TEST_MODE"];
-        if ([mode isEqualToString:@"teardown"]) {
-            SimCameraTeardownProbe *probe = [SimCameraTeardownProbe new];
-            NSString *message = nil;
-            BOOL passed = NO;
-            @try {
-                passed = ExerciseAutomaticOutputTeardown(self, probe, &message);
-            } @catch (NSException *exception) {
-                message = [NSString stringWithFormat:@"Exception: %@", exception.reason];
-            }
-            if (!passed) {
-                WriteResult(NO, message);
-                return;
-            }
-            WaitForTeardownAndReport(probe, [NSDate dateWithTimeIntervalSinceNow:5.0]);
-            return;
-        }
-
         @try {
-            AVCaptureDevice *device = [AVCaptureDevice
-                defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
-                                  mediaType:AVMediaTypeVideo
-                                   position:AVCaptureDevicePositionBack];
-            NSError *inputError = nil;
-            AVCaptureDeviceInput *input = [AVCaptureDeviceInput
-                deviceInputWithDevice:device
-                                error:&inputError];
-            if (!input || inputError) {
-                WriteResult(NO, [NSString stringWithFormat:@"Could not create fake input: %@", inputError]);
-                return;
-            }
-
-            AVCaptureSession *session = [AVCaptureSession new];
-            AVCapturePhotoOutput *output = [AVCapturePhotoOutput new];
-            [session addInputWithNoConnections:input];
-            [session addOutputWithNoConnections:output];
-
-            if (session.connections.count != 0 || output.connections.count != 0) {
-                WriteResult(NO, @"addOutputWithNoConnections exposed a connection before addConnection");
-                return;
-            }
-
-            AVCaptureConnection *connection = [[AVCaptureConnection alloc]
-                initWithInputPorts:input.ports
-                            output:output];
-            if (!connection || ![session canAddConnection:connection]) {
-                WriteResult(NO, @"Could not create or add an explicit fake-input connection");
-                return;
-            }
-
-            AVCaptureDevice *foreignDevice = [AVCaptureDevice
-                defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
-                                  mediaType:AVMediaTypeVideo
-                                   position:AVCaptureDevicePositionFront];
-            AVCaptureDeviceInput *foreignInput = [AVCaptureDeviceInput
-                deviceInputWithDevice:foreignDevice
-                                error:nil];
-            AVCaptureSession *foreignSession = [AVCaptureSession new];
-            [foreignSession addInputWithNoConnections:foreignInput];
-            if ([foreignSession canAddConnection:connection]) {
-                WriteResult(NO, @"A foreign session accepted another session's connection endpoints");
-                return;
-            }
-            [foreignSession addConnection:connection];
-            if (foreignSession.connections.count != 0) {
-                WriteResult(NO, @"A foreign session recorded another session's connection");
-                return;
-            }
-
-            [session addConnection:connection];
-
-            if (![session.connections containsObject:connection] ||
-                ![output.connections containsObject:connection] ||
-                [output connectionWithMediaType:AVMediaTypeVideo] != connection) {
-                WriteResult(NO, @"The explicit connection was not exposed by the session and output");
-                return;
-            }
-
-            [session removeConnection:connection];
-            if (session.connections.count != 0 || output.connections.count != 0) {
-                WriteResult(NO, @"removeConnection left the explicit connection exposed");
-                return;
-            }
-
-            WriteResult(YES, @"No connection before addConnection; exact connection exposed after addConnection");
+            if ([mode isEqualToString:@"graph"]) RunExplicitConnectionCheck();
+            else if ([mode isEqualToString:@"teardown"]) RunTeardownCheck(self);
+            else if ([mode isEqualToString:@"automatic-recording"]) RunAutomaticConnectionsRecording();
+            else if ([mode isEqualToString:@"manual-recording"]) RunManualConnectionsRecording();
+            else if ([mode isEqualToString:@"max-duration-recording"]) RunMaxDurationRecording();
+            else if ([mode isEqualToString:@"max-file-size-recording"]) RunMaxFileSizeRecording();
+            else if ([mode isEqualToString:@"existing-file-recording"]) RunExistingFileRecording();
+            else if ([mode isEqualToString:@"writer-failure-recording"]) RunWriterFailureRecording();
+            else if ([mode isEqualToString:@"dropped-output-recording"]) RunDroppedOutputRecording();
+            else if ([mode isEqualToString:@"stopped-session-recording"]) RunStoppedSessionRecording();
+            else if ([mode isEqualToString:@"released-session-recording"]) RunReleasedSessionRecording();
+            else if ([mode isEqualToString:@"removed-camera-recording"]) RunRemovedCameraRecording();
+            else if ([mode isEqualToString:@"moved-output-recording"]) RunMovedOutputRecording();
+            else if ([mode isEqualToString:@"not-running-recording"]) RunNotRunningRecording();
+            else if ([mode isEqualToString:@"foreign-connection-settings"]) RunForeignConnectionSettings();
+            else WriteResult(NO, [NSString stringWithFormat:@"Unknown mode %@", mode]);
         } @catch (NSException *exception) {
             WriteResult(NO, [NSString stringWithFormat:@"Exception: %@", exception.reason]);
         }

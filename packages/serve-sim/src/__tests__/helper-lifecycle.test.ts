@@ -8,7 +8,8 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "child_process";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import {
   classifyStaleState,
@@ -49,23 +50,36 @@ function state(overrides: Partial<ServeSimDeviceState> = {}): ServeSimDeviceStat
 
 describe("classifyStaleState", () => {
   test("keeps a helper when simctl cannot prove the device is gone", () => {
-    expect(classifyStaleState(state(), null, 1)).toBe("keep");
+    expect(classifyStaleState(state(), null, 1, undefined)).toBe("keep");
   });
 
   test("keeps a helper whose simulator is still booted", () => {
-    expect(classifyStaleState(state(), new Set([UDID]), 1)).toBe("keep");
+    expect(classifyStaleState(state(), new Set([UDID]), 1, undefined)).toBe("keep");
   });
 
   test("does not recycle non-UDID device labels", () => {
-    expect(classifyStaleState(state({ device: "iPhone 17" }), new Set(), 1)).toBe("keep");
+    expect(classifyStaleState(state({ device: "iPhone 17" }), new Set(), 1, undefined)).toBe("keep");
   });
 
   test("recycles our own in-process session without treating it as a foreign helper", () => {
-    expect(classifyStaleState(state({ pid: 99 }), new Set(), 99)).toBe("recycle-self");
+    expect(classifyStaleState(state({ pid: 99 }), new Set(), 99, undefined)).toBe("recycle-self");
   });
 
   test("recycles a foreign helper bound to a shut-down simulator", () => {
-    expect(classifyStaleState(state({ pid: 88 }), new Set(), 99)).toBe("recycle-helper");
+    expect(classifyStaleState(state({ pid: 88 }), new Set(), 99, undefined)).toBe("recycle-helper");
+  });
+
+  test("keeps a helper in another device set, which `booted` does not cover", () => {
+    expect(classifyStaleState(state({ pid: 88, deviceSet: "/pool" }), new Set(), 99, undefined)).toBe("keep");
+    expect(classifyStaleState(state({ pid: 88 }), new Set(), 99, "/pool")).toBe("keep");
+    expect(classifyStaleState(state({ pid: 88, deviceSet: "/pool" }), new Set(), 99, "/pool")).toBe("recycle-helper");
+    // One set reached through a symlink (/tmp is /private/tmp on macOS) is still one set.
+    const set = mkdtempSync(join(tmpdir(), "serve-sim-set-"));
+    try {
+      expect(classifyStaleState(state({ pid: 88, deviceSet: set }), new Set(), 99, realpathSync(set))).toBe("recycle-helper");
+    } finally {
+      rmSync(set, { recursive: true, force: true });
+    }
   });
 });
 
