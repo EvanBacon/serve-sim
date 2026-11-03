@@ -51,7 +51,7 @@ import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler 
 import { createHostRpcHandler } from "./host-rpc";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
-import { simctlBootStatusArguments } from "./simctl";
+import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { authBootstrapPage } from "./auth-bootstrap";
 import {
   AUTH_COOKIE,
@@ -222,7 +222,7 @@ export function parseForegroundAppLogMessage(message: string): { bundleId: strin
 function detectReactNative(udid: string, bundleId: string): Promise<boolean> {
   if (RN_BUNDLE_IDS.has(bundleId)) return Promise.resolve(true);
   return new Promise((resolve) => {
-    execFile("xcrun", ["simctl", "get_app_container", udid, bundleId, "app"],
+    execFile("xcrun", simctlArguments(["get_app_container", udid, bundleId, "app"]),
       { timeout: 2000 },
       (err, stdout) => {
         if (err) return resolve(false);
@@ -280,7 +280,7 @@ async function getBootedUdids(): Promise<Set<string> | null> {
     const stdout = await new Promise<string>((resolve, reject) => {
       execFile(
         "xcrun",
-        ["simctl", "list", "devices", "booted", "-j"],
+        simctlArguments(["list", "devices", "booted", "-j"]),
         { encoding: "utf-8", timeout: 3_000 },
         (err, stdout) => {
           if (err) {
@@ -338,6 +338,7 @@ export async function readServeSimStates(): Promise<ServeSimState[]> {
     return [];
   }
   const booted = await getBootedUdids();
+  const deviceSet = resolveDeviceSet();
   const states: ServeSimState[] = [];
   for (const f of files) {
     const path = join(STATE_DIR, f);
@@ -350,11 +351,14 @@ export async function readServeSimStates(): Promise<ServeSimState[]> {
         continue;
       }
       if (state.pid !== recorded.pid) persistRecoveredState(state);
+      // Previews in every device set share this folder; another set's
+      // simulator is not one this preview can stream.
+      if (!sameDeviceSet(state.deviceSet, deviceSet)) continue;
       // Helper alive but its simulator was shut down — the MJPEG stream
       // would accept connections yet never produce frames, leaving the
       // preview stuck on "Connecting...". Recycle the stale state so the
       // caller can spawn a fresh helper bound to whatever is booted.
-      const action = classifyStaleState(state, booted, process.pid);
+      const action = classifyStaleState(state, booted, process.pid, deviceSet);
       if (action !== "keep") {
         if (action === "recycle-self") {
           // This device is streamed in-process by *us* (the close button just
@@ -439,11 +443,12 @@ function endpoint(base: string, path: string, device: string): string {
 /**
  * A state record as it may be served over HTTP: drops the server-private
  * fields (the auth-token fingerprint and the exec opt-in recorded for
- * `--detach` reuse checks), which no client needs.
+ * `--detach` reuse checks, and the host path of the device set), which no
+ * client needs.
  */
 export function publicState(state: ServeSimState): ServeSimState {
-  if (!("authTokenSha256" in state) && !("allowExec" in state)) return state;
-  const { authTokenSha256: _fingerprint, allowExec: _allowExec, ...rest } = state;
+  if (!("authTokenSha256" in state) && !("allowExec" in state) && !("deviceSet" in state)) return state;
+  const { authTokenSha256: _fingerprint, allowExec: _allowExec, deviceSet: _deviceSet, ...rest } = state;
   return rest;
 }
 
@@ -887,7 +892,7 @@ export async function startDeviceInProcess(
   record: Pick<ServeSimDeviceState, "authTokenSha256" | "allowExec"> = {},
 ): Promise<string | null> {
   // `simctl boot` errors when already booted — ignore and let bootstatus confirm.
-  await new Promise<void>((resolve) => execFile("xcrun", ["simctl", "boot", udid], () => resolve()));
+  await new Promise<void>((resolve) => execFile("xcrun", simctlArguments(["boot", udid]), () => resolve()));
   const ready = await new Promise<boolean>((resolve) => {
     // Boot was already requested above. Passing `-b` redundantly can remain
     // blocked on Xcode 27 even after `simctl list` reports Booted, so only
@@ -898,7 +903,7 @@ export async function startDeviceInProcess(
     // bootstatus can exit non-zero even when the device is actually ready;
     // confirm against the real state before reporting failure.
     const booted = await new Promise<boolean>((resolve) => {
-      execFile("xcrun", ["simctl", "list", "devices", "-j"], (err, stdout) => {
+      execFile("xcrun", simctlArguments(["list", "devices", "-j"]), (err, stdout) => {
         if (err) return resolve(false);
         try {
           const data = JSON.parse(stdout) as { devices: Record<string, Array<{ udid: string; state: string }>> };
@@ -1244,7 +1249,7 @@ function listAllSimulators(): Promise<SimctlDevice[]> {
   return new Promise((resolve) => {
     execFile(
       "xcrun",
-      ["simctl", "list", "devices", "-j"],
+      simctlArguments(["list", "devices", "-j"]),
       { encoding: "utf-8", timeout: 3_000 },
       (err, stdout) => {
         if (err) return resolve([]);
@@ -1502,6 +1507,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const authToken = resolveAuthToken(options?.authToken);
   const serveDiagnostics = createDiagnosticsHandler(options?.diagnostics);
   const serveSimBin = options?.serveSimBin ?? resolveServeSimBin();
+  // A dev server that embeds this middleware never runs the CLI: settle the
+  // device set (and refuse a bad SERVE_SIM_DEVICE_SET) here, not mid-request.
+  resolveDeviceSet();
   // Every path this middleware may answer. Standalone serve-sim mounts at "/"
   // (base ""), so it owns the whole origin; embedded mounts own only `base/…`.
   const ownsPath = (pathname: string) =>
@@ -1904,7 +1912,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // Drop the snapshot so the next /grid/api call re-queries simctl
         // and prunes any helper bound to this now-shutdown device.
         bootedSnapshot = { at: 0, booted: null };
-        execFile("xcrun", ["simctl", "shutdown", udid], { timeout: 30_000 }, (err, _stdout, stderr) => {
+        execFile("xcrun", simctlArguments(["shutdown", udid]), { timeout: 30_000 }, (err, _stdout, stderr) => {
           if (err) {
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
@@ -2450,13 +2458,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // AX bridge may be warming up — the log tail fills in once anything moves.
       }
 
-      const child: ChildProcess = spawn("xcrun", [
-        "simctl", "spawn", udid, "log", "stream",
+      const child: ChildProcess = spawn("xcrun", simctlArguments([
+        "spawn", udid, "log", "stream",
         "--style", "ndjson",
         "--level", "info",
         "--predicate",
         'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
-      ], { stdio: ["ignore", "pipe", "ignore"] });
+      ]), { stdio: ["ignore", "pipe", "ignore"] });
 
       let closed = false;
       const emitApp = async (bundleId: string, pid?: number) => {

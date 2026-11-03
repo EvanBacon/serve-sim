@@ -3,6 +3,7 @@ import { existsSync } from "fs";
 import { join, resolve } from "path";
 import { findBootedDevice, resolveDevice } from "./device";
 import { dirnameOf } from "./runtime";
+import { simctlArguments } from "./simctl";
 
 // Bun's bundler inlines a bare `__dirname` as the build machine's source
 // directory; shadow it with the runtime location so the published bundle
@@ -199,14 +200,14 @@ function run(file: string, args: string[]): Promise<string> {
 }
 
 function simctlUi(udid: string, subcommand: string, value?: string): Promise<string> {
-  const args = ["simctl", "ui", udid, subcommand];
+  const args = simctlArguments(["ui", udid, subcommand]);
   if (value !== undefined) args.push(value);
   return run("xcrun", args);
 }
 
 async function axRun(udid: string, ...args: string[]): Promise<string> {
   const tool = await axSettingsTool();
-  return run("xcrun", ["simctl", "spawn", udid, tool, ...args]);
+  return run("xcrun", simctlArguments(["spawn", udid, tool, ...args]));
 }
 
 function toToggle(simctlValue: string): string {

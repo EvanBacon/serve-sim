@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { simctlArguments } from "./simctl";
 
 const exec = promisify(execFile);
 type Run = (args: string[]) => Promise<string>;
@@ -13,7 +14,7 @@ export function isDeviceHubInputShadowed(output: string): boolean {
 /** Warns when shadowed. Resolves the guest flag, or undefined when the runtime does not publish it. */
 export async function warnDeviceHubInput(udid: string, invoke: Run = run): Promise<boolean | undefined> {
   try {
-    const shadowed = isDeviceHubInputShadowed(await invoke(["simctl", "spawn", udid, "notifyutil", "-g", key]));
+    const shadowed = isDeviceHubInputShadowed(await invoke(simctlArguments(["spawn", udid, "notifyutil", "-g", key])));
     if (shadowed) {
       console.warn(`[hid] Device Hub has disconnected legacy input. Run serve-sim repair-input -d ${udid} before using touch or keyboard. Repair restarts SpringBoard and closes running apps.`);
     }
@@ -24,7 +25,7 @@ export async function warnDeviceHubInput(udid: string, invoke: Run = run): Promi
 /** Raw guest flag for diagnostics: true/false, or null when unreadable. */
 export async function readDeviceHubInputShadowed(udid: string, invoke: Run = run): Promise<boolean | null> {
   try {
-    return isDeviceHubInputShadowed(await invoke(["simctl", "spawn", udid, "notifyutil", "-g", key]));
+    return isDeviceHubInputShadowed(await invoke(simctlArguments(["spawn", udid, "notifyutil", "-g", key])));
   } catch {
     return null;
   }
@@ -32,7 +33,7 @@ export async function readDeviceHubInputShadowed(udid: string, invoke: Run = run
 
 /** Explicit recovery only: restarting backboardd also terminates running apps. */
 export async function repairDeviceHubInput(udid: string, invoke: Run = run): Promise<boolean> {
-  const args = ["simctl", "spawn", udid];
+  const args = simctlArguments(["spawn", udid]);
   if (!isDeviceHubInputShadowed(await invoke([...args, "notifyutil", "-g", key]))) return false;
   // Order is essential: the replacement backboardd must start with state zero.
   await invoke([...args, "notifyutil", "-s", key, "0"]);
