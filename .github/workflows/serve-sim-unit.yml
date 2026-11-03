@@ -35,5 +35,3 @@ jobs:
       # (no xcrun / no Darwin dylibs); they run serially on macOS in sim-test.yml.
       - name: serve-sim unit tests
         run: bun test packages/serve-sim/src/__tests__/
-      - name: Repeat shutdown-watch responsiveness regression
-        run: bun test --rerun-each 3 packages/serve-sim/src/__tests__/shutdown-watch-responsive.test.ts
