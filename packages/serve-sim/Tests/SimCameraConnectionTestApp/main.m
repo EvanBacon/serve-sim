@@ -942,8 +942,10 @@ static void RunFormatDescription(void) {
         return;
     }
     for (AVCaptureDeviceFormat *format in device.formats) {
-        if (format.description.length == 0) {
-            WriteResult(NO, @"A fake format had an empty description");
+        CMVideoDimensions size = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+        NSString *expected = [NSString stringWithFormat:@"%dx%d BGRA", size.width, size.height];
+        if (![format.description containsString:expected]) {
+            WriteResult(NO, [NSString stringWithFormat:@"Expected %@ in %@", expected, format.description]);
             return;
         }
     }
