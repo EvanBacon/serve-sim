@@ -2374,10 +2374,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       rejectUpgrade(socket, 400, "Malformed URL");
       return;
     }
-    void scope.check(request).then((refused) => {
-      if (refused) rejectUpgrade(socket, refused.status, refused.message);
-      else if (!handleExecUpgrade(req, socket, head)) upgradeOwned(request, req, socket, head);
-    });
+    void scope
+      .check(request)
+      .then((refused) => {
+        if (refused) rejectUpgrade(socket, refused.status, refused.message);
+        else if (!handleExecUpgrade(req, socket, head)) upgradeOwned(request, req, socket, head);
+      })
+      .catch(() => socket.destroy());
   };
   middleware.setServerPort = (port: number) => {
     knownServerPort = port;

@@ -241,7 +241,12 @@ describe("restrictToDevices", () => {
 
   test("matches UDIDs case-insensitively", async () => {
     expect((await send("/grid/api/shutdown", { udid: OTHER.toLowerCase() })).status).toBe(404);
-    expect((await send(`/api?device=${SERVED.toLowerCase()}`)).status).toBe(200);
+    // The scope admits a lowercase served UDID, but preview state is keyed by
+    // the exact UDID, so it selects no preview.
+    const lowercase = await send(`/api?device=${SERVED.toLowerCase()}`);
+    expect({ status: lowercase.status, body: JSON.parse(lowercase.body) }).toEqual({ status: 200, body: null });
+    const exact = await send(`/api?device=${SERVED}`);
+    expect(JSON.parse(exact.body)).toMatchObject({ device: SERVED });
   });
 
   test("refuses another simulator's stream, input and page routes", async () => {
@@ -279,6 +284,23 @@ describe("restrictToDevices", () => {
     });
     expect(channel).toStartWith("HTTP/1.1 404 ");
     expect(channel).toContain(`${OTHER} is not served by this preview`);
+  });
+
+  test("destroys an upgrade whose dispatch throws", async () => {
+    const middleware = simMiddleware({ basePath: "/", device: SERVED, restrictToDevices: [SERVED], isKnownDevice: async () => true });
+    const destroyed = await new Promise<boolean>((resolve) => {
+      const socket = {
+        end: () => {
+          throw new Error("socket already closed");
+        },
+        destroy: () => resolve(true),
+      } as unknown as Socket;
+      const headers = { host: "127.0.0.1:1", origin: "http://127.0.0.1:1", upgrade: "websocket", connection: "Upgrade" };
+      // A served helper route with no WebSocket answers 400 through a bare socket.end.
+      const req = { method: "GET", url: `/helper/${SERVED}/stream.mjpeg`, headers, socket: { remoteAddress: "127.0.0.1" } };
+      middleware.handleUpgrade(req as unknown as IncomingMessage, socket, Buffer.alloc(0));
+    });
+    expect(destroyed).toBe(true);
   });
 
   test("has no DevTools, which list every simulator's web views", async () => {
