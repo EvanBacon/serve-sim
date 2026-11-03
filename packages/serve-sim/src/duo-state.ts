@@ -149,10 +149,10 @@ export class DuoStateMonitor {
       console.error(`[duo] Hinge reader unavailable: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    // Read inside the guest from CoreMotion, the source UIKit's UIHinge reads.
-    // (`devicectl device motion hinge-angle` did this until CoreDevice dropped
-    // the `motion` subcommand with Xcode 27.1.) stdin stays open: the reader
-    // exits when it closes.
+    // Read inside the guest from CoreMotion, the source UIKit's UIHinge reads,
+    // so the hinge doesn't depend on devicectl: `devicectl device motion` is
+    // missing from devicectl 651.13.5 (Xcode 27.1 27A9275) and later.
+    // stdin stays open: the reader exits when it closes.
     const child = this.spawn("/usr/bin/xcrun", ["simctl", "spawn", this.udid, duoHelper, "watch-angle"],
       { stdio: ["pipe", "pipe", "pipe"] });
     this.monitor = child;

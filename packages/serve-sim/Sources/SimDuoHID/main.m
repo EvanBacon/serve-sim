@@ -21,8 +21,11 @@
 
 // Prints `angle <degrees>` for the first sample and for every later change of at
 // least 0.5°, until the parent closes stdin. Read-only: it never creates the HID
-// services, so it can run next to the command transport. This replaces
-// `devicectl device motion hinge-angle`, which CoreDevice dropped with Xcode 27.1.
+// services, so it can run next to the command transport. Reading in the guest
+// keeps the hinge independent of CoreDevice: `devicectl device motion` exists in
+// devicectl 651.13.4 (Xcode 27.1 beta, 27A9269) but not in 651.13.5 (Xcode 27.1
+// 27A9275) or later (seen through 651.32, Xcode 27.2 27B52), and CoreDevice is
+// shared by every installed Xcode.
 static int watchAngle(void) {
     dlopen("/System/Library/Frameworks/CoreMotion.framework/CoreMotion", RTLD_NOW);
     Class managerClass = NSClassFromString(@"CMAngleManager");
