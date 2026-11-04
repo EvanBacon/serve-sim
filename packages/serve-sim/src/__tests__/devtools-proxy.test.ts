@@ -1,27 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
-import { createServer as createNetServer } from "net";
 import { spawn, type ChildProcess } from "child_process";
 import { simMiddleware, type ServeSimState, type WebKitBridge } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
 import { STATE_DIR, stateFileForDevice } from "../state";
-
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createNetServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        server.close();
-        reject(new Error("failed to allocate port"));
-        return;
-      }
-      const port = addr.port;
-      server.close(() => resolve(port));
-    });
-  });
-}
+import { freePort } from "./server-test-support";
 
 describe("devtools proxy", () => {
   const udid = "DEVTOOLS-PROXY-DEVICE";
