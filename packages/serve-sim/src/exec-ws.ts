@@ -43,6 +43,19 @@ import { isLoopbackSameOrigin, isTrustedLoopback, originCheck } from "./request-
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Frame limits for the control channel, set explicitly rather than relying on
+ * `ws` defaults (which vary by version). Every client message is one small
+ * JSON text frame; 128 fragments still covers a full MAX_MESSAGE_BYTES
+ * message chunked at 32 KiB. A socket that exceeds a limit is closed (1008)
+ * before its message is assembled — including the first, token-bearing frame.
+ */
+export const EXEC_WS_LIMITS = {
+  maxPayload: MAX_MESSAGE_BYTES,
+  maxFragments: 128,
+  maxBufferedChunks: 16 * 1024,
+} as const;
+
 export const EXEC_DISABLED_MESSAGE = "exec disabled; start with --allow-exec";
 export const EXEC_TOKEN_REQUIRED_MESSAGE = "exec requires the exec token";
 export const RPC_LOOPBACK_ONLY_MESSAGE = "host actions are only available to loopback clients";
@@ -302,7 +315,7 @@ function wireExecSocket(
  * caller should handle (or destroy) the socket itself.
  */
 export function createExecUpgradeHandler(opts: ExecChannelOptions) {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
+  const wss = new WebSocketServer({ noServer: true, ...EXEC_WS_LIMITS });
   return function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean {
     const rawUrl = req.url ?? "";
     const qIndex = rawUrl.indexOf("?");
