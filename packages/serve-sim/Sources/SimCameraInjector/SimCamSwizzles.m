@@ -129,22 +129,24 @@ BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
     }
     return [self simcam_defaultDeviceWithMediaType:m];
 }
++ (AVCaptureDevice *)simcam_deviceWithUniqueID:(NSString *)uniqueID {
+    for (AVCaptureDevice *fake in SimCamFakeDevices()) {
+        if ([fake.uniqueID isEqualToString:uniqueID]) {
+            simcam_log(@"deviceWithUniqueID: %@ → fake", uniqueID);
+            return fake;
+        }
+    }
+    return [self simcam_deviceWithUniqueID:uniqueID];
+}
 + (NSArray<AVCaptureDevice *> *)simcam_devicesWithMediaType:(AVMediaType)m {
     if ([m isEqualToString:AVMediaTypeVideo]) {
-        return @[
-            SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront),
-            SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack),
-        ];
+        return SimCamFakeDevices();
     }
     return [self simcam_devicesWithMediaType:m];
 }
 + (NSArray<AVCaptureDevice *> *)simcam_devices {
     NSArray *real = [self simcam_devices];
-    NSArray *fakes = @[
-        SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront),
-        SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack),
-    ];
-    return [fakes arrayByAddingObjectsFromArray:real ?: @[]];
+    return [SimCamFakeDevices() arrayByAddingObjectsFromArray:real ?: @[]];
 }
 @end
 
@@ -160,10 +162,9 @@ BOOL SwizzleInstanceMethod(Class cls, SEL orig, SEL swiz) {
         [self simcam_discoverySessionWithDeviceTypes:types mediaType:m position:p];
     if ([m isEqualToString:AVMediaTypeVideo] || m == nil) {
         NSMutableArray *list = [NSMutableArray new];
-        if (p == AVCaptureDevicePositionUnspecified || p == AVCaptureDevicePositionFront)
-            [list addObject:SimCamFakeDeviceForPosition(AVCaptureDevicePositionFront)];
-        if (p == AVCaptureDevicePositionUnspecified || p == AVCaptureDevicePositionBack)
-            [list addObject:SimCamFakeDeviceForPosition(AVCaptureDevicePositionBack)];
+        for (AVCaptureDevice *fake in SimCamFakeDevices()) {
+            if (p == AVCaptureDevicePositionUnspecified || p == fake.position) [list addObject:fake];
+        }
         @try {
             [real setValue:list forKey:@"devices"];
         } @catch (__unused id e) {
@@ -1221,6 +1222,9 @@ void SimCamInstallSwizzles(void) {
         @selector(devicesWithMediaType:),
         @selector(simcam_devicesWithMediaType:));
     SwizzleClassMethod(dev, @selector(devices), @selector(simcam_devices));
+    SwizzleClassMethod(dev,
+        @selector(deviceWithUniqueID:),
+        @selector(simcam_deviceWithUniqueID:));
 
     Class disc = [AVCaptureDeviceDiscoverySession class];
     SwizzleClassMethod(disc,
