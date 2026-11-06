@@ -38,6 +38,7 @@ actor HIDInjector {
     let queue = DispatchSerialQueue(label: "hid-injector", qos: .userInteractive)
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
+    private var modernInput: DTUHIDBridge?
     private var hidClient: NSObject?
     private var sendSel: Selector?
     private var simDevice: NSObject?
@@ -92,6 +93,14 @@ actor HIDInjector {
            identifier == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo" {
             duoBridge = DuoHIDBridge(udid: deviceUDID, executable: duoHelper)
             touchTarget = 0x40000001 // Duo's integrated cover; never the shared 0x32 slot.
+        }
+
+        if ProcessInfo.processInfo.environment["SERVE_SIM_DTUHID"] == "1" {
+            guard duoBridge == nil else {
+                throw NSError(domain: "HIDInjector", code: 6,
+                              userInfo: [NSLocalizedDescriptionKey: "DTUHID opt-in currently supports single-panel devices only"])
+            }
+            modernInput = try DTUHIDBridge(device: device)
         }
 
         guard let funcPtr = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IndigoHIDMessageForMouseNSEvent") else {
@@ -203,17 +212,29 @@ actor HIDInjector {
     /// Synchronously build + send a single touch. For use inside gesture blocks
     /// already running on `inputQueue`.
     private func rawSendTouch(type: String, x: Double, y: Double, edge: UInt32 = 0) {
+        if let modernInput {
+            modernInput.touch(type: type, x: x, y: y, edge: edge)
+            return
+        }
         if let msg = touchMessage(type: type, x: x, y: y, edge: edge) { rawSend(msg) }
     }
 
     func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) {
         updateTouchTarget(width: screenWidth, height: screenHeight)
+        if let modernInput {
+            modernInput.touch(type: type, x: x, y: y, edge: edge)
+            return
+        }
         guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return }
         hidLog("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
         rawSend(msg)
     }
 
     func sendMultiTouch(type: String, x1: Double, y1: Double, x2: Double, y2: Double, screenWidth: Int, screenHeight: Int) {
+        if let modernInput {
+            modernInput.touch(type: type, x: x1, y: y1, second: CGPoint(x: x2, y: y2))
+            return
+        }
         guard let mouseFunc = mouseFunc else { return }
 
         let eventType: Int32
@@ -280,6 +301,11 @@ actor HIDInjector {
         case "down": direction = 1
         case "up":   direction = 2
         default: return
+        }
+
+        if let modernInput {
+            modernInput.key(usage: usage, down: type == "down")
+            return
         }
 
         if deviceHubKeyboardBridge?.send(type: type, usage: usage) == true {
@@ -543,7 +569,7 @@ actor HIDInjector {
 
     func isFoldable() -> Bool { duoBridge != nil }
 
-    func close() { duoBridge = nil }
+    func close() { modernInput = nil; duoBridge = nil }
 
     private func updateTouchTarget(width: Int, height: Int) {
         guard duoBridge != nil else { return }
