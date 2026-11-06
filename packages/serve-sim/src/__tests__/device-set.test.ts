@@ -79,6 +79,32 @@ describe("simctlArguments", () => {
       value: ["simctl", "bootstatus", "UDID"],
     });
   });
+
+  test("the iPhone Duo hinge reader runs in the configured set", () => {
+    // Every Duo monitor process goes through simctl; the hinge reader is the
+    // one that spawns serve-sim-duo-hid inside the simulator.
+    const readerArgs = `
+      const child = { stdin: { on() {}, end() {} }, stdout: { setEncoding() {}, on() {} }, stderr: { setEncoding() {}, on() {} }, on() {}, once() {}, kill() {} };
+      const calls = [];
+      const monitor = new m.DuoStateMonitor("UDID", () => {}, {
+        duoHelper: () => "/helper",
+        spawn: (command, args) => { calls.push(args); return child; },
+        execFile: (command, args) => { calls.push(args); return child; },
+      });
+      monitor.close();
+      return { reader: calls.find((args) => args.at(-1) === "watch-angle"), all: calls.every((args) => args[0] === "simctl") };`;
+    const duoState = join(import.meta.dir, "..", "duo-state.ts");
+    withSet((dir) => {
+      expect(inFreshProcess(readerArgs, { env: { [DEVICE_SET_ENV]: dir }, module: duoState })).toEqual({
+        ok: true,
+        value: { reader: ["simctl", "--set", dir, "spawn", "UDID", "/helper", "watch-angle"], all: true },
+      });
+    });
+    expect(inFreshProcess(readerArgs, { module: duoState })).toEqual({
+      ok: true,
+      value: { reader: ["simctl", "spawn", "UDID", "/helper", "watch-angle"], all: true },
+    });
+  });
 });
 
 describe("resolveDeviceSet", () => {

@@ -164,6 +164,11 @@ function resolveAddon(): string {
   );
 }
 
+/** The guest-side Duo helper (`simctl spawn`): HID commands and the hinge reader. */
+export function duoHidHelperPath(): string {
+  return join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid");
+}
+
 let addon: NativeAddon | undefined;
 function load(): NativeAddon {
   if (!addon) {
@@ -184,7 +189,7 @@ export class NativeHid {
   private readonly keys: KeySequencer;
 
   constructor(udid: string) {
-    this.handle = new (load().SimHID)(udid, join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid"));
+    this.handle = new (load().SimHID)(udid, duoHidHelperPath());
     this.keys = new KeySequencer(this.handle);
   }
 

@@ -54,7 +54,9 @@ serve-sim fold 100 -d <udid>
 
 Commands wait for the guest to acknowledge dispatch. Invalid angles and failed
 commands do not change capture. The bundled `simduo/serve-sim-duo-hid` executable
-runs inside the simulator and exits with the device session.
+runs inside the simulator and exits with the device session. Its `watch-angle` mode
+reads the hinge angle inside the simulator from CoreMotion, so it doesn't depend on
+`devicectl`. That is how the preview learns the current angle and follows Device Hub.
 
 Duo uses one interactive RealityKit preview of the installed Xcode model, with
 live screen textures and touches mapped to each bent screen half. Apple's model

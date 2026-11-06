@@ -51,7 +51,7 @@ physical, UI, and model orientations before retrying.
 ```sh
 node packages/serve-sim/dist/serve-sim.js fold 180 -d <udid>
 node packages/serve-sim/dist/serve-sim.js fold 130 -d <udid>
-xcrun devicectl device motion hinge-angle --device <udid> --timeout 5
+xcrun simctl spawn <udid> "$PWD/packages/serve-sim/dist/simduo/serve-sim-duo-hid" watch-angle  # Ctrl-C to stop
 xcrun simctl io <udid> enumerate
 ```
 
