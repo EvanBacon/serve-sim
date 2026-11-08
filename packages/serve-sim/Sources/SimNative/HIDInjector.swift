@@ -21,6 +21,12 @@ private func hidLog(_ message: @autoclosure () -> String) {
     fflush(stdout)
 }
 
+/// Carries the `SimDevice` to `SpringBoardLauncher`'s queue. The object is
+/// never mutated from Swift; the launch only sends it one message.
+private struct UncheckedSimDevice: @unchecked Sendable {
+    let device: NSObject
+}
+
 /// Injects touch, button, and orientation HID events into the iOS Simulator.
 ///
 /// Uses IndigoHIDMessageForMouseNSEvent to create touch messages and
@@ -41,6 +47,7 @@ actor HIDInjector {
     private var hidClient: NSObject?
     private var sendSel: Selector?
     private var simDevice: NSObject?
+    private let springBoardLauncher = SpringBoardLauncher()
     private var deviceHubKeyboardBridge: DeviceHubKeyboardBridge?
 
     // IndigoHIDMessageForMouseNSEvent(CGPoint*, CGPoint*, IndigoHIDTarget, NSEventType, NSSize, IndigoHIDEdge)
@@ -473,7 +480,7 @@ actor HIDInjector {
             // and is functionally identical to a single home press, so use it
             // unconditionally rather than depending on whether the HID symbol
             // resolved.
-            launchSpringBoard(deviceUDID: deviceUDID)
+            await launchSpringBoard(deviceUDID: deviceUDID)
 
         case "swipe_home":
             sendSwipeHome()
@@ -618,11 +625,33 @@ actor HIDInjector {
         rawSendTouch(type: "end", x: xPos, y: yEnd, edge: edge)
     }
 
-    private func launchSpringBoard(deviceUDID: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = DeviceSet.simctlArguments(["launch", deviceUDID, "com.apple.springboard"])
-        try? process.run()
+    private func launchSpringBoard(deviceUDID: String) async {
+        let device = simDevice.map(UncheckedSimDevice.init)
+        await springBoardLauncher.launch(
+            direct: { Self.launchSpringBoardDirectly(device: device?.device) },
+            fallback: {
+                // Older CoreSimulator versions may not expose the direct launch API.
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                process.arguments = DeviceSet.simctlArguments(["launch", deviceUDID, "com.apple.springboard"])
+                try? process.run()
+            }
+        )
+    }
+
+    /// Blocks until CoreSimulator answers, so it must stay off the actor's executor.
+    private nonisolated static func launchSpringBoardDirectly(device: NSObject?) -> SpringBoardLauncher.DirectResult {
+        let sel = NSSelectorFromString("launchApplicationWithID:options:pid:error:")
+        guard let device, device.responds(to: sel) else { return .unavailable }
+        typealias Fn = @convention(c) (
+            AnyObject, Selector, NSString, NSDictionary,
+            UnsafeMutablePointer<pid_t>, AutoreleasingUnsafeMutablePointer<NSError?>
+        ) -> ObjCBool
+        let fn = unsafeBitCast(device.method(for: sel), to: Fn.self)
+        var pid: pid_t = 0
+        var error: NSError?
+        if fn(device, sel, "com.apple.springboard", [:], &pid, &error).boolValue { return .launched }
+        return .failed(error?.localizedDescription ?? "unknown error")
     }
 
     // MARK: - Orientation (GSEvent via PurpleWorkspacePort)
