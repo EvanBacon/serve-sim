@@ -28,6 +28,15 @@ public final class SpringBoardLauncher: @unchecked Sendable {
         self.log = log
     }
 
+    /// Presses currently waiting on the in-flight launch, including its initiator.
+    var waiterCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return waiters.count
+    }
+
+    /// Runs `direct`, then `fallback` if it didn't launch, on the launcher's
+    /// queue. Returns when the attempt this press started or joined finishes.
     public func launch(
         direct: @escaping @Sendable () -> DirectResult,
         fallback: @escaping @Sendable () -> Void
@@ -59,6 +68,29 @@ public final class SpringBoardLauncher: @unchecked Sendable {
         }
     }
 
+    /// Starts `process` and blocks until it exits, terminating it after `timeout`
+    /// so a hung child can't hold up later launches forever. Call only from a
+    /// thread that may block, such as a `fallback`. Returns whether the process
+    /// started and exited within `timeout`.
+    @discardableResult
+    public static func runToExit(
+        _ process: Process,
+        timeout: TimeInterval,
+        log: @Sendable (String) -> Void = SpringBoardLauncher.logToStderr
+    ) -> Bool {
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        guard (try? process.run()) != nil else { return false }
+        if exited.wait(timeout: .now() + timeout) == .success { return true }
+
+        log("[hid] \(process.executableURL?.path ?? "process") timed out after \(timeout)s; terminating")
+        process.terminate()
+        // Brief grace period so the common case is fully gone before the next launch.
+        _ = exited.wait(timeout: .now() + 1)
+        return false
+    }
+
+    /// Writes one line to stderr; the default `log` destination.
     @Sendable
     public static func logToStderr(_ message: String) {
         FileHandle.standardError.write(Data((message + "\n").utf8))

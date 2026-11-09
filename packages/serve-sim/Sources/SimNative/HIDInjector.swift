@@ -625,6 +625,8 @@ actor HIDInjector {
         rawSendTouch(type: "end", x: xPos, y: yEnd, edge: edge)
     }
 
+    /// Launches SpringBoard off the actor, falling back to `simctl`, and returns
+    /// once the attempt finishes.
     private func launchSpringBoard(deviceUDID: String) async {
         let device = simDevice.map(UncheckedSimDevice.init)
         await springBoardLauncher.launch(
@@ -634,7 +636,9 @@ actor HIDInjector {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
                 process.arguments = DeviceSet.simctlArguments(["launch", deviceUDID, "com.apple.springboard"])
-                try? process.run()
+                // Already on the launcher's queue; waiting keeps repeat presses
+                // coalesced instead of starting overlapping simctl processes.
+                SpringBoardLauncher.runToExit(process, timeout: 30)
             }
         )
     }

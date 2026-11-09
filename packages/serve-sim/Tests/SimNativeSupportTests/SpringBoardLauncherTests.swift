@@ -161,9 +161,11 @@ final class SpringBoardLauncherTests: XCTestCase {
             }
         }
 
-        // Give the extras time to join before the in-flight launch completes.
-        try? await Task.sleep(for: .milliseconds(100))
+        // Release only once every extra has joined; release even on failure so
+        // the launcher's queue can't stay blocked past the end of the test.
+        let didJoin = await Self.waitForWaiters(on: launcher, count: 9, timeout: 5)
         release.signal()
+        XCTAssertTrue(didJoin, "extra presses never joined the in-flight launch")
 
         await first.value
         for extra in extras { await extra.value }
@@ -182,6 +184,58 @@ final class SpringBoardLauncherTests: XCTestCase {
         }
 
         XCTAssertEqual(recorder.all, ["direct", "direct", "direct"])
+    }
+
+    func testRunToExitWaitsForProcessToFinish() throws {
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("springboard-launcher-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let process = Self.shell("sleep 0.2; touch '\(marker.path)'")
+
+        XCTAssertTrue(SpringBoardLauncher.runToExit(process, timeout: 10))
+
+        XCTAssertFalse(process.isRunning)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "returned before the process finished")
+    }
+
+    func testRunToExitTerminatesHungProcessAtTimeout() {
+        let recorder = Recorder()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+
+        XCTAssertFalse(SpringBoardLauncher.runToExit(process, timeout: 0.1, log: { recorder.record($0) }))
+
+        XCTAssertFalse(process.isRunning, "hung process was left running")
+        XCTAssertEqual(recorder.all.count, 1, "unexpected log: \(recorder.all)")
+    }
+
+    func testRunToExitReturnsWhenProcessCannotStart() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/nonexistent/serve-sim-test-binary")
+
+        XCTAssertFalse(SpringBoardLauncher.runToExit(process, timeout: 10))
+    }
+
+    private static func shell(_ command: String) -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        return process
+    }
+
+    /// Polls until `count` presses are waiting on the in-flight launch.
+    private static func waitForWaiters(
+        on launcher: SpringBoardLauncher,
+        count: Int,
+        timeout: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while launcher.waiterCount < count {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return true
     }
 
     private static func wait(for semaphore: DispatchSemaphore, timeout: TimeInterval) async -> Bool {
