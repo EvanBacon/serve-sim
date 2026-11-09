@@ -2018,6 +2018,7 @@ async function serve(
   theme: SimulatorTheme | undefined,
   exitOnSimulatorShutdown = false,
   allowExec = false,
+  restrictDevices = false,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -2040,6 +2041,7 @@ async function serve(
   const middleware = simMiddleware({
     basePath: "/",
     device: targetDevice,
+    ...(restrictDevices ? { restrictToDevices: targetDevices } : {}),
     codec,
     initialState,
     proxyHelpers: true,
@@ -2242,6 +2244,11 @@ program
     "Use this CoreSimulator device set instead of Xcode's default (simctl --set). " +
       "Applies to subcommands too. Also read from SERVE_SIM_DEVICE_SET.",
   )
+  .option(
+    "--restrict-devices",
+    "Serve only the simulators named on the command line, for a shared Mac; " +
+      "DevTools are off (preview server only)",
+  )
   .option("-l, --list [device]", "List running streams")
   .option("-k, --kill [device]", "Kill running stream(s)")
   .addHelpText(
@@ -2277,6 +2284,18 @@ Examples:
       killStreams(typeof opts.kill === "string" ? opts.kill : undefined);
       return;
     }
+    if (opts.restrictDevices && (opts.detach || opts.preview === false)) {
+      console.error("--restrict-devices applies to the preview server; drop --detach and --no-preview.");
+      process.exit(1);
+    }
+    if (opts.restrictDevices && opts.allowExec) {
+      console.error("--restrict-devices cannot be combined with --allow-exec: the host shell reaches every simulator.");
+      process.exit(1);
+    }
+    if (opts.restrictDevices && devices.length === 0) {
+      console.error("--restrict-devices serves the simulators named on the command line; name at least one.");
+      process.exit(1);
+    }
     const startPort: number | undefined = opts.port;
     if (opts.detach) {
       const states = await detach(devices, startPort ?? 3100, !!opts.allowExec);
@@ -2299,6 +2318,7 @@ Examples:
         opts.theme,
         !!opts.exitOnSimulatorShutdown,
         !!opts.allowExec,
+        !!opts.restrictDevices,
       );
     }
   });
