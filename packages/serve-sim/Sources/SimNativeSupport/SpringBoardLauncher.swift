@@ -85,8 +85,12 @@ public final class SpringBoardLauncher: @unchecked Sendable {
 
         log("[hid] \(process.executableURL?.path ?? "process") timed out after \(timeout)s; terminating")
         process.terminate()
-        // Brief grace period so the common case is fully gone before the next launch.
-        _ = exited.wait(timeout: .now() + 1)
+        // Give SIGTERM a short grace period, then SIGKILL (which can't be ignored)
+        // so a timed-out child is gone before the next launch can start.
+        if exited.wait(timeout: .now() + 1) == .timedOut {
+            kill(process.processIdentifier, SIGKILL)
+            _ = exited.wait(timeout: .now() + 5)
+        }
         return false
     }
 

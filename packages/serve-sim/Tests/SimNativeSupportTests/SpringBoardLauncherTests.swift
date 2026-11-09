@@ -210,6 +210,33 @@ final class SpringBoardLauncherTests: XCTestCase {
         XCTAssertEqual(recorder.all.count, 1, "unexpected log: \(recorder.all)")
     }
 
+    func testRunToExitKillsProcessThatIgnoresSIGTERM() {
+        let recorder = Recorder()
+        // The loop is bounded (~30s) so the shell can't outlive a crashed test run.
+        let process = Self.shell(
+            "trap '' TERM; i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done"
+        )
+        // Only reached with a live child if the escalation regresses.
+        defer { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+
+        // Long enough for the shell to install its trap before SIGTERM arrives.
+        XCTAssertFalse(SpringBoardLauncher.runToExit(process, timeout: 2, log: { recorder.record($0) }))
+
+        // `terminationStatus` raises if read while the process is still running.
+        guard !process.isRunning else {
+            return XCTFail("process that ignored SIGTERM was left running")
+        }
+        // SIGTERM would report 15, so this proves the trap held and SIGKILL landed.
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+        XCTAssertEqual(process.terminationStatus, SIGKILL)
+        // Capture errno immediately; XCTest calls in between could overwrite it.
+        let probe = kill(process.processIdentifier, 0)
+        let probeErrno = errno
+        XCTAssertEqual(probe, -1, "process still exists")
+        XCTAssertEqual(probeErrno, ESRCH)
+        XCTAssertEqual(recorder.all.count, 1, "unexpected log: \(recorder.all)")
+    }
+
     func testRunToExitReturnsWhenProcessCannotStart() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/nonexistent/serve-sim-test-binary")
