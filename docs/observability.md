@@ -7,6 +7,15 @@
 >
 > Source paths are relative to `packages/serve-sim/`.
 
+**Priority (this cycle):** error-reproduction fields first (`coord_space`,
+`orientation`/`observed_orientation`, `frame`, `remapped`/`remap_expected`,
+`source`, `screen_changed`, `hid.state`, `inject.result`, `input.shadowed`,
+`ack`), then performance timing spans as additive keys on the same entries
+(`input.send_ms`, `stream.ttff_ms`, `stream.reconnect_ms`,
+`stream.producer_frame_age_ms`, `camera.helper_shutdown_ms`,
+`helper.uptime_ms`). Clipboard path for #174 follows the same pattern
+(`payload_bytes`, `method`, `verified_readback`, `clipboard.send_ms`).
+
 serve-sim already keeps an in-memory **event log** of simulator actions. This
 document proposes small, additive fields that make the silent failures
 ([#153](https://github.com/EvanBacon/serve-sim/issues/153),
