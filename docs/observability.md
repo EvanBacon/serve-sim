@@ -16,6 +16,24 @@
 `helper.uptime_ms`). Clipboard path for #174 follows the same pattern
 (`payload_bytes`, `method`, `verified_readback`, `clipboard.send_ms`).
 
+**Recent PRs (keep hooks current):**
+- [#189](https://github.com/EvanBacon/serve-sim/pull/189) (Duo hinge): `DuoStateMonitor` now reads hinge via
+  guest `serve-sim-duo-hid watch-angle` / CoreMotion, not the removed `devicectl device motion hinge-angle`
+  path, so `/config` and `0x82` config frames carry `hingeDegrees` / `duoViewOrientation` on Xcode versions
+  without that subcommand. Only the angle source changed: panel orientations still come from
+  `simctl io enumerate`, and a `0x0e` result still comes from the native pose/hinge call. Caveat from the
+  merge: if the reader dies, the last angle can stay stale.
+- [#190](https://github.com/EvanBacon/serve-sim/pull/190) (fake cameras): the injector now swizzles
+  `deviceWithUniqueID:`, so apps that look up a fake camera by ID get it instead of `nil`, and fake formats
+  no longer crash on `-description`. No proposed field changes: `camera.helper.exit` carries no camera identity.
+- [#191](https://github.com/EvanBacon/serve-sim/pull/191) (async boot query, fixes #186): detached /
+  `--no-preview` shutdown watch no longer blocks the stream event loop on sync `simctl`. Proposed
+  `helper.lifecycle` entries should treat boot-state checks as async and non-blocking; a failed check
+  keeps the helper alive. The pre-existing `--detach`/follow helper-replacement race was accepted as a follow-up.
+- [#192](https://github.com/EvanBacon/serve-sim/pull/192) (Home / SpringBoard direct launch) is still open;
+  if it lands, Home becomes a queued SpringBoard launch with simctl fallback — useful for
+  `input.send_ms` / button entries, but not yet `main`.
+
 serve-sim already keeps an in-memory **event log** of simulator actions. This
 document proposes small, additive fields that make the silent failures
 ([#153](https://github.com/EvanBacon/serve-sim/issues/153),
@@ -144,6 +162,12 @@ remap input, which is a behavior change, not a log field.
 `parseIntegratedScreenOrientations` only keys `primary`/`primary-1`; confirm what a
 non-Duo device reports before reusing it.
 
+For Duo, `hingeDegrees` in `/config` now comes from the guest CoreMotion reader added
+in [#189](https://github.com/EvanBacon/serve-sim/pull/189) (`watch-angle`), not
+`devicectl`; panel orientations still come from the `enumerate` poll above. The reader
+is its own child process, so a dead reader (stale last angle) leaves `hid.state` and
+`inject.result` unchanged and neither field can detect it.
+
 **Did the screen change, without keeping pixels.** Frame arrival is not a
 signal: the idle timer in `FrameCapture.swift` force-emits the current frame
 every 200 ms even when nothing changed, so a frame counter advances after every
@@ -219,12 +243,17 @@ shut down. Decisions live in `src/helper-lifecycle.ts`: `classifyStaleState`
 (`keep | recycle-self | recycle-helper`) and `startSimulatorShutdownWatch`
 (a `setTimeout` loop). `middleware.ts` acts on `recycle-self`, `index.ts` on
 `recycle-helper`, and the watch's `onExit` in `index.ts` calls `process.exit(0)`.
+Since [#191](https://github.com/EvanBacon/serve-sim/pull/191) the watch's boot-state
+check is the async, uncached `queryBootedUdids`, so a pending `simctl` no longer
+stalls detached HTTP/streams (#186); the shared in-flight `getBootedUdids` snapshot
+serves `--detach`/follow reuse. Proposed `helper.lifecycle` entries should assume
+that model; a failed check keeps the helper alive.
 
 **Proposed:** record one `kind:"helper.lifecycle"` entry when a recycle/exit is
 decided, with `decision`, `sim.booted`, and `helper.uptime_ms`. `keep` emits
 nothing. An entry written right before `process.exit(0)` is only best-effort for
-SSE readers. There is no separate helper binary; HID and capture run in-process
-via the native addon.
+SSE readers. The helper is the serve-sim process itself; HID and capture run
+in-process via the native addon (Duo also spawns the guest `serve-sim-duo-hid`).
 
 ## Stream and camera (#128, #143, #103)
 
@@ -243,6 +272,9 @@ via the native addon.
   `shutdown_phase`. `SimCameraHelper` already ignores SIGPIPE (`main.m`), so don't
   attribute exits to it; the real race was the placeholder timer vs. surface
   release (mitigated by [#161](https://github.com/EvanBacon/serve-sim/pull/161)).
+  [#190](https://github.com/EvanBacon/serve-sim/pull/190) fixed app-side crashes
+  and lookups in the injector (fake `-description`, `deviceWithUniqueID:`), which
+  are a separate failure path from helper exits.
 
 ## Timing
 
