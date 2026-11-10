@@ -1276,6 +1276,9 @@ async function record(
   if (opts.codec) query.searchParams.set("codec", opts.codec);
   if (opts.fps) query.searchParams.set("fps", opts.fps);
   if (opts.bitrate) query.searchParams.set("bitrate", opts.bitrate);
+  // Ask for the index sidecar; servers that predate it ignore the param.
+  const wantIndex = opts.index !== false;
+  if (wantIndex) query.searchParams.set("index", "1");
 
   const failed = async (what: string, res: Response): Promise<never> => {
     const body = await res.json().catch(() => null) as { message?: string; error?: string } | null;
@@ -1368,7 +1371,12 @@ async function record(
     });
     if (!stopRes.ok) await failed("Stopping the recording", stopRes);
     // Don't clobber a recording saved earlier in the same second.
-    out = outputPath ?? resolve(uniqueRecordingFileName(recordingFileName(), (name) => existsSync(resolve(name))));
+    // With the index, its sidecar name must be free too (a leftover
+    // `<name>.index.jsonl` from a deleted MP4 would fail the exclusive save).
+    out = outputPath ?? resolve(uniqueRecordingFileName(
+      recordingFileName(),
+      (name) => existsSync(resolve(name)) || (wantIndex && existsSync(resolve(recordingIndexPath(name)))),
+    ));
     try {
       if (!stopRes.body) throw new Error("empty response");
       // Streamed, not buffered: a long recording can be several GB.
@@ -1390,13 +1398,14 @@ async function record(
     ? ` (${summary.width}x${summary.height} @ ${summary.fps} fps, ${summary.frames} frames, ${summary.duration?.toFixed(2)}s)`
     : "";
   console.log(`Saved ${out}${detail}`);
-  if (opts.index !== false) await saveRecordingIndex(indexUrl, token, out, { exclusive: !outputPath, headers: target.headers });
+  if (wantIndex) await saveRecordingIndex(indexUrl, token, out, { exclusive: !outputPath, headers: target.headers });
 }
 
 /**
  * Fetch the `.index.jsonl` sidecar for the recording just saved and write it
- * next to the MP4. Best effort: the MP4 is already saved, so a missing index
- * (older server, addon without frame metadata) only warns on stderr.
+ * next to the MP4. Best effort: the MP4 is already saved. A server that
+ * predates indexes (no token, 404/405) is skipped silently, so its output is
+ * as before; other failures warn on stderr.
  */
 async function saveRecordingIndex(
   indexUrl: string | null,
@@ -1404,10 +1413,7 @@ async function saveRecordingIndex(
   mp4Path: string,
   { exclusive, headers }: { exclusive: boolean; headers: Record<string, string> },
 ): Promise<void> {
-  if (!indexUrl || !token) {
-    console.error("No recording index: the server did not return a recording token.");
-    return;
-  }
+  if (!indexUrl || !token) return;
   const url = new URL(indexUrl);
   url.searchParams.set("token", token);
   url.searchParams.set("file", basename(mp4Path));
@@ -1416,7 +1422,9 @@ async function saveRecordingIndex(
     const res = await fetch(url, { headers });
     if (!res.ok || !res.body) {
       await res.body?.cancel().catch(() => {});
-      console.error(`No recording index (HTTP ${res.status}); the server may predate indexes. Saved the MP4 only.`);
+      if (res.status !== 404 && res.status !== 405) {
+        console.error(`Could not fetch the recording index (HTTP ${res.status}); saved the MP4 only.`);
+      }
       return;
     }
     await saveRecordingBody(res.body, indexPath, { exclusive });
