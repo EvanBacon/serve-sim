@@ -8,6 +8,7 @@ import {
   DeviceSession,
   type DeviceSessionDependencies,
 } from "../device-session";
+import { duoHidHelperPath } from "../native";
 
 const servers: Server[] = [];
 
@@ -518,6 +519,25 @@ describe("DeviceSession fold pose HID", () => {
     expect(hinges).toEqual([0]);
     expect(sizes).toEqual([[1398, 2034]]);
   });
+});
+
+test("only a Duo's state monitor gets the launchable-helper resolver (#193)", async () => {
+  const monitors: Array<() => string> = [];
+  const createDuoMonitor: DeviceSessionDependencies["createDuoMonitor"] = (_udid, _onState, duoHelper) => {
+    monitors.push(duoHelper);
+    return { close() {}, refreshOrientation() {} };
+  };
+  for (const foldable of [false, true]) {
+    const session = new DeviceSession("TEST-UDID", {
+      ...dependencies(),
+      hid: { ...dependencies().hid, isFoldable: async () => foldable },
+      createDuoMonitor,
+    });
+    await session.start();
+    session.close();
+  }
+  // Passed uncalled: resolving runs `codesign`, which the monitor defers to the hinge reader.
+  expect(monitors).toEqual([duoHidHelperPath]);
 });
 
 test("3D attach and hinge updates render cached frames; stale worker failures cannot close a replacement", async () => {
