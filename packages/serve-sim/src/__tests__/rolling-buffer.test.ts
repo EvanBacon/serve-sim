@@ -190,6 +190,18 @@ describe("event join", () => {
     expect(c).not.toBe(d);
   });
 
+  test("updateEvent patches a collected event and moves its end; unknown ids are ignored", () => {
+    const store = new RollingFrameStore(opts(), "DEV");
+    store.addFrame(T0, jpeg(1), meta);
+    store.addEvent(hidEntry(4, T0 + 100, { kind: "drag", details: { start: { x: 0.5, y: 0.8 }, current: { x: 0.5, y: 0.2 } } }), T0 + 100);
+    store.updateEvent(4, { summary: "Drag to (0.50, 0.10)", details: { start: { x: 0.5, y: 0.8 }, current: { x: 0.5, y: 0.1 } } }, T0 + 700);
+    store.updateEvent(99, { summary: "nope" }, T0 + 700);
+    const d = store.addFrame(T0 + 900, jpeg(2), meta);
+    const events = store.view(T0 + 1000).events;
+    expect(events.map((e) => e.id)).toEqual([4]);
+    expect(events[0]).toMatchObject({ tEnd: 0.7, y: 0.1, summary: "Drag to (0.50, 0.10)", nextChange: { frame: d, after: 0.2 } });
+  });
+
   test("events older than the window are pruned and the count is capped", () => {
     const store = new RollingFrameStore(opts({ seconds: 5 }));
     store.addFrame(T0, jpeg(1), meta);
@@ -231,6 +243,19 @@ describe("RollingBufferSampler", () => {
     await h.tick();
     expect(h.armed).toBe(false);
     expect(h.calls).toEqual({ count: 0, thumbnail: 0 });
+  });
+
+  test("noteEvent/updateEvent feed the running store and are no-ops while off", async () => {
+    const h = harness();
+    h.sampler.noteEvent(hidEntry(1, T0));
+    h.sampler.updateEvent(1, { summary: "x" });
+    expect(h.sampler.store).toBeNull();
+    h.sampler.start(opts());
+    await h.tick(0);
+    h.sampler.noteEvent(hidEntry(1, T0, { kind: "drag" }));
+    h.sampler.updateEvent(1, { summary: "Drag moved" });
+    expect(h.sampler.store!.view(T0 + 100).events).toMatchObject([{ id: 1, summary: "Drag moved" }]);
+    h.sampler.stop();
   });
 
   test("start captures the first frame, then only snapshots when the content counter moves", async () => {

@@ -1538,8 +1538,13 @@ export class DeviceSession {
           // Silent updates skip subscribers; an indexed recording still
           // wants the drag's latest point (and when it arrived), even once
           // the drag has fallen out of the global log.
-          if (updated) this.recording?.events?.add(updated);
-          else this.recording?.events?.update(gesture.eventId, patch);
+          if (updated) {
+            this.recording?.events?.add(updated);
+            this.rollingBuffer?.noteEvent(updated);
+          } else {
+            this.recording?.events?.update(gesture.eventId, patch);
+            this.rollingBuffer?.updateEvent(gesture.eventId, patch);
+          }
         }
       }
       return;
@@ -1570,7 +1575,10 @@ export class DeviceSession {
             };
             // A notified update reaches the collector via its subscription;
             // one the global log already evicted has to be patched directly.
-            if (!updateEventLogEvent(gesture.eventId, patch)) this.recording?.events?.update(gesture.eventId, patch);
+            if (!updateEventLogEvent(gesture.eventId, patch)) {
+              this.recording?.events?.update(gesture.eventId, patch);
+              this.rollingBuffer?.updateEvent(gesture.eventId, patch);
+            }
           }
         } else {
           recordEventLogEvent({

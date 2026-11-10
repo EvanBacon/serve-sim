@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "http";
 import type { AddressInfo } from "net";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
-import { clearEventLogForTests, recordEventLogEvent, subscribeEventLog } from "../event-log";
+import { clearEventLogForTests, EVENT_LOG_MAX_ENTRIES, recordEventLogEvent, subscribeEventLog } from "../event-log";
 import { ROLLING_BUFFER_ENV } from "../rolling-buffer";
 
 const servers: Server[] = [];
@@ -273,6 +273,40 @@ describe("rolling buffer endpoints", () => {
     expect(view.events[0]).toMatchObject({ kind: "tap", frame: view.frames[0]!.id, nextChange: { frame: view.frames[1]!.id } });
     const noEvents = await (await fetch(`${base}/buffer?events=0`)).json() as { events?: unknown };
     expect(noEvents.events).toBeUndefined();
+  });
+
+  test("silent mid-drag updates and an evicted drag's end reach the buffer", async () => {
+    const fake = fakeCapture();
+    const session = new DeviceSession("DEV", { capture: fake.capture, hid: hid(), rollingBuffer: null, subscribeEventLog });
+    const base = await serve(session);
+    let receive!: (data: Buffer) => void;
+    session.attachHidSocket({ send() {}, close() {}, on(event, cb) { if (event === "message") receive = cb as (data: Buffer) => void; } });
+    const touch = (type: string, x: number, y: number) =>
+      receive(Buffer.concat([Buffer.from([0x03]), Buffer.from(JSON.stringify({ type, x, y }))]));
+    type View = { events: Array<{ kind: string; x?: number; y?: number; t: number; tEnd?: number }> };
+    const drag = async () => ((await (await fetch(`${base}/buffer`)).json()) as View).events.find((e) => e.kind === "drag")!;
+
+    await fetch(`${base}/buffer/start?fps=10`, { method: "POST" });
+    await wait(150);
+    touch("begin", 0.1, 0.1);
+    touch("move", 0.3, 0.3); // first move: logged (and notified)
+    await wait(60);
+    touch("move", 0.6, 0.7); // silent update
+    const moving = await drag();
+    expect(moving).toMatchObject({ x: 0.6, y: 0.7 });
+    expect(moving.tEnd!).toBeGreaterThan(moving.t);
+
+    // Busy input on another device pushes the drag out of the global ring.
+    for (let i = 0; i < EVENT_LOG_MAX_ENTRIES + 10; i++) {
+      recordEventLogEvent({ device: "OTHER", source: "hid", kind: "tap", summary: `Other ${i}` });
+    }
+    await wait(60);
+    touch("move", 0.65, 0.75); // silent update, no longer in the global log
+    expect(await drag()).toMatchObject({ x: 0.65, y: 0.75 });
+    touch("end", 0.8, 0.9); // notified update, also evicted
+    const ended = await drag();
+    expect(ended).toMatchObject({ x: 0.8, y: 0.9 });
+    expect(ended.tEnd!).toBeGreaterThan(moving.tEnd!);
   });
 
   test("closing the session stops the buffer", async () => {

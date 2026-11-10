@@ -237,6 +237,22 @@ export class RollingFrameStore {
     while (this.events.size > MAX_BUFFER_EVENTS) this.events.delete(this.events.keys().next().value!);
   }
 
+  /**
+   * Patch an event already collected, independent of the global event log
+   * (a long drag can fall out of its ring while still going). Unknown ids
+   * are ignored.
+   */
+  updateEvent(id: number, patch: Partial<Omit<EventLogEntry, "id">>, receivedAtMs: number): void {
+    const current = this.events.get(id);
+    if (!current) return;
+    this.addEvent({
+      ...current.entry,
+      ...patch,
+      id,
+      ...(patch.summary != null && patch.msg == null ? { msg: patch.summary } : {}),
+    }, receivedAtMs);
+  }
+
   noteError(error: unknown): void {
     this.counters.errors++;
     this.lastError = error instanceof Error ? error.message : String(error);
@@ -423,6 +439,16 @@ export class RollingBufferSampler {
     this.current = current;
     current.unsubscribe = this.deps.subscribeEventLog?.((entry) => store.addEvent(entry, this.now()));
     this.schedule(current, 0);
+  }
+
+  /** An event-log entry that skipped subscribers (a silent drag update); ignored while off. */
+  noteEvent(entry: EventLogEntry): void {
+    this.current?.store.addEvent(entry, this.now());
+  }
+
+  /** Patch a collected event the global log already evicted; ignored while off. */
+  updateEvent(id: number, patch: Partial<Omit<EventLogEntry, "id">>): void {
+    this.current?.store.updateEvent(id, patch, this.now());
   }
 
   stop(): void {
