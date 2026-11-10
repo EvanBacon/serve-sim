@@ -290,7 +290,7 @@ t = (Date.parse(timestamp) / 1000 - wallMinusUptimeSec) - originUptime
 
 Events are logged when the server handles the input, so the frames they cause follow a frame or more later.
 
-Indexing is opt-in per recording: `serve-sim record` starts with `index=1` (unless `--no-index`), and recordings without it, including the preview toolbar's, collect nothing extra. Any HTTP client can start with `POST …/recording/start?index=1` and fetch the index after `/recording/stop` with `GET …/recording/index?token=<start token>`. The server keeps the last four indexes, each for 30 minutes after its MP4 has finished downloading; an optional `&file=<name>` only relabels the header's `file` and the download name. The stop response itself is unchanged. If the index has expired or been evicted, `serve-sim record` warns and keeps the MP4.
+Indexing is opt-in per recording: `serve-sim record` starts with `index=1` (unless `--no-index`), and so does the preview toolbar's record button while the scrub timeline is open (see below). Recordings without it collect nothing extra. Any HTTP client can start with `POST …/recording/start?index=1` and fetch the index after `/recording/stop` with `GET …/recording/index?token=<start token>`. The server keeps the last four indexes, each for 30 minutes after its MP4 has finished downloading; an optional `&file=<name>` only relabels the header's `file` and the download name. The stop response itself is unchanged. If the index has expired or been evicted, `serve-sim record` warns and keeps the MP4.
 
 Limitations:
 
@@ -356,6 +356,15 @@ HTTP, under the same device helper routes and auth as `/recording` (`--auth-toke
 - `GET …/buffer/frame[?id=<n> | ?ago=<s>]`: one `image/jpeg`, the latest by default, with `X-Serve-Sim-Buffer-Frame: {id, at, width, height, sourceWidth, sourceHeight}`. `409 buffer_off` when off, `404 frame_not_found` when it isn't held.
 
 Limits: sampling at 4 fps can miss a state shown for less than a tick (record for frame-exact history). Frames are the raw framebuffer orientation, like the stream before rotation. When serve-sim is embedded as middleware, `SERVE_SIM_BUFFER` in the dev server's environment starts the buffer when a device's session opens (its first viewer or command), not at startup.
+
+### Scrub timeline (web UI)
+
+The history button next to record in the preview toolbar opens a timeline under the device. It scrubs either the rolling buffer or a finished recording, with HID input drawn as markers: taps as dots, drags as bars, other input (buttons, keys) as squares. Hover or click a marker for its kind, time, and where it landed (normalized %), and the scrubbed frame shows a ring at the tap or a line along the drag.
+
+- **Buffer**: when no recording is selected and the buffer is on, the track re-reads `GET …/buffer` about once a second (each read waits for the last; an unavailable buffer is asked less and less often, up to every 30 s) and freezes while you scrub; frames come from `GET …/buffer/frame?id=` (at most three at a time, cached). Buffer frames and event points are raw framebuffer orientation, so in landscape the scrubbed frame and its ring are rotated with the live stream. If the buffer is off, the timeline offers a Start buffer button.
+- **Recording**: a recording started from the toolbar while the timeline is open is indexed (`index=1`). After it downloads, its sidecar comes from `GET …/recording/index?token=` and the MP4 you just saved plays in the browser (no ffmpeg, no server-side copy). If you closed the timeline before the recording finished, it loads when you reopen it; each recording is loaded once, and the page drops its copy of the MP4 once the recording is loaded or has failed to load. Markers on a recording use the sidecar's `rotation`, so they line up with the upright video. The folder button opens an `.mp4` together with its `.index.jsonl` from `serve-sim record`.
+
+Click or drag on the track to seek. While a past frame covers the screen it takes the pointer, so you can't tap the live app by mistake. With the track focused, ←/→ steps one frame, ⇧←/⇧→ jumps to the previous/next marker, Home/End go to the ends, Space plays and pauses, and Esc (or Live) returns to the stream. These keys are handled only while the track has focus; elsewhere they still go to the simulator. While the timeline is closed it makes no requests, and recordings, the stream, and the buffer behave exactly as before. It is not offered on iPhone Duo (its screen is a 3D projection).
 
 ### Accessibility refs for agents
 

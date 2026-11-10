@@ -9,9 +9,35 @@ export type ScreenRecordingState =
   | { status: "recording"; startedAt: number }
   | { status: "saving" };
 
-function recordingEndpoint(device: string, action?: "start" | "stop", token?: string): string {
-  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+function recordingEndpoint(device: string, action?: "start" | "stop" | "index", params: Record<string, string | undefined> = {}): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) if (value != null) search.set(key, value);
+  const encoded = search.toString();
+  const query = encoded ? `?${encoded}` : "";
   return simEndpoint(`helper/${encodeURIComponent(device)}/recording${action ? `/${action}` : ""}${query}`);
+}
+
+/** A recording this hook started with `index` on, once its MP4 has downloaded. */
+export type SavedRecording = {
+  device: string;
+  /** The start token: `GET /recording/index?token=` serves its sidecar. */
+  token: string;
+  fileName: string;
+  blob: Blob;
+};
+
+/** A failed `GET /recording/index`; `status` 404 means the sidecar is gone. */
+export class RecordingIndexFetchError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+/** `GET /recording/index` for a saved recording → sidecar text. */
+export async function fetchRecordingIndexText(saved: Pick<SavedRecording, "device" | "token" | "fileName">): Promise<string> {
+  const res = await fetch(recordingEndpoint(saved.device, "index", { token: saved.token, file: saved.fileName }));
+  if (!res.ok) throw new RecordingIndexFetchError(await errorMessage(res), res.status);
+  return res.text();
 }
 
 /** `filename="…"` from a Content-Disposition header, if present. */
@@ -65,7 +91,21 @@ async function fetchRecordingStatus(device: string): Promise<RecordingStatusBody
  */
 export function useScreenRecording(
   device: string | null | undefined,
-  { pollMs = RECORDING_STATUS_POLL_MS }: { pollMs?: number } = {},
+  {
+    pollMs = RECORDING_STATUS_POLL_MS,
+    index = false,
+    onSaved,
+  }: {
+    pollMs?: number;
+    /**
+     * Ask the server to index starts made while this is true (`index=1`:
+     * frame/event sidecar, as `serve-sim record` does). Off by default, so
+     * the recorder is unchanged unless the scrub timeline wants it.
+     */
+    index?: boolean;
+    /** Called after an indexed recording this hook started is downloaded. */
+    onSaved?: (saved: SavedRecording) => void;
+  } = {},
 ) {
   const [state, setState] = useState<ScreenRecordingState>({ status: "idle" });
   // The device whose recording this hook drives; cleared on unmount/switch so
@@ -76,7 +116,11 @@ export function useScreenRecording(
   // Monotonic id per status poll: a slow response older than the latest is dropped.
   const pollIdRef = useRef(0);
   // Token from the start this hook made: only it may auto-collect at the cap.
-  const ownedRef = useRef<{ device: string; token: string } | null>(null);
+  const ownedRef = useRef<{ device: string; token: string; indexed: boolean } | null>(null);
+  const indexRef = useRef(index);
+  indexRef.current = index;
+  const onSavedRef = useRef(onSaved);
+  onSavedRef.current = onSaved;
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
@@ -86,14 +130,17 @@ export function useScreenRecording(
     epochRef.current++;
     const previous = stateRef.current;
     setState({ status: "saving" });
-    const owned = ownedRef.current?.device === udid ? ownedRef.current.token : undefined;
+    const ownedRecording = ownedRef.current?.device === udid ? ownedRef.current : null;
+    const owned = ownedRecording?.token;
     try {
-      const res = await fetch(recordingEndpoint(udid, "stop", owned), { method: "POST" });
+      const res = await fetch(recordingEndpoint(udid, "stop", { token: owned }), { method: "POST" });
       if (!res.ok) throw new Error(await errorMessage(res));
       if (ownedRef.current?.token === owned) ownedRef.current = null;
       const fileName = attachmentFileName(res.headers.get("content-disposition")) ?? recordingFileName();
-      download(await res.blob(), fileName);
+      const blob = await res.blob();
+      download(blob, fileName);
       toast.success(`Saved ${fileName}`);
+      if (ownedRecording?.indexed) onSavedRef.current?.({ device: udid, token: ownedRecording.token, fileName, blob });
       if (deviceRef.current === udid) setState({ status: "idle" });
     } catch (error) {
       toast.error(`Could not save recording: ${error instanceof Error ? error.message : String(error)}`);
@@ -152,18 +199,19 @@ export function useScreenRecording(
     epochRef.current++;
     setState({ status: "starting" });
     try {
-      const res = await fetch(recordingEndpoint(udid, "start"), { method: "POST" });
+      const indexed = indexRef.current;
+      const res = await fetch(recordingEndpoint(udid, "start", { index: indexed ? "1" : undefined }), { method: "POST" });
       if (!res.ok) throw new Error(await errorMessage(res));
       const body = await res.json() as { startedAt?: string; token?: string };
       if (deviceRef.current !== udid) {
         // Unmounted or switched devices mid-start: don't orphan a recording
         // nobody can see. The server drops the file when we hang up.
-        void fetch(recordingEndpoint(udid, "stop", body.token), { method: "POST" })
+        void fetch(recordingEndpoint(udid, "stop", { token: body.token }), { method: "POST" })
           .then((stopRes) => stopRes.body?.cancel())
           .catch(() => {});
         return;
       }
-      ownedRef.current = body.token ? { device: udid, token: body.token } : null;
+      ownedRef.current = body.token ? { device: udid, token: body.token, indexed } : null;
       setState(recordingState(body.startedAt));
     } catch (error) {
       toast.error(`Could not start recording: ${error instanceof Error ? error.message : String(error)}`);
