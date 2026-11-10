@@ -190,4 +190,12 @@ final class RecordingFrameSchedulerTests: XCTestCase {
         // Backlog drained: the fill resumes behind the last real frame.
         XCTAssertEqual(scheduler.repeatsDue(at: 0.5 + 0.001, framesPending: 0), 19..<29)
     }
+
+    func testOriginIsTheFirstPlacedFramesCaptureTime() {
+        var scheduler = RecordingFrameScheduler(fps: 60)
+        XCTAssertNil(scheduler.originTime)
+        _ = scheduler.place(captureTime: 42.5)
+        _ = scheduler.place(captureTime: 43)
+        XCTAssertEqual(scheduler.originTime, 42.5)
+    }
 }

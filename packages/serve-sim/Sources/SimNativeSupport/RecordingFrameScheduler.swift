@@ -57,6 +57,10 @@ public struct RecordingFrameScheduler: Sendable {
         self.fillHeadroom = fillHeadroom
     }
 
+    /// Capture time of the first placed frame: presentation time 0 of the
+    /// recording. Nil until a frame is placed.
+    public var originTime: Double? { origin }
+
     /// Number of slots written so far (the next free slot).
     public var slotCount: Int64 { lastSlot + 1 }
 

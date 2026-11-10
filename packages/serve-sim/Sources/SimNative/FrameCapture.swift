@@ -18,7 +18,7 @@ actor FrameCapture {
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
     private var photocopier = Photocopier()
-    private var onFrame: ((CVPixelBuffer, CMTime, Bool) -> Void)?
+    private var onFrame: ((CVPixelBuffer, CMTime, Bool, SurfaceFrameStamp) -> Void)?
     private var pixelConsumers: PixelConsumerCount?
     private var frameCount: UInt64 = 0
     /// Captures whose IOSurface seed (or surface) changed. Unlike `frameCount`
@@ -59,13 +59,15 @@ actor FrameCapture {
     private var sourceCache = FramebufferSourceCache<FramebufferSource>(maxAge: 1.0)
     private var recheckGeneration: UInt64 = 0
 
-    /// `onFrame(buffer, captureTime, isPrivateCopy)`: frames are deep-copied only
-    /// while `pixelConsumers` is non-empty; otherwise the buffer wraps the live
-    /// framebuffer surface and is only good for its dimensions.
+    /// `onFrame(buffer, captureTime, isPrivateCopy, stamp)`: frames are
+    /// deep-copied only while `pixelConsumers` is non-empty; otherwise the
+    /// buffer wraps the live framebuffer surface and is only good for its
+    /// dimensions. `stamp` is the surface identity + seed read for the frame
+    /// (an idle re-emit of unchanged pixels repeats the previous stamp).
     func start(
         deviceUDID: String,
         pixelConsumers: PixelConsumerCount,
-        onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Bool) -> Void
+        onFrame: @escaping @Sendable (CVPixelBuffer, CMTime, Bool, SurfaceFrameStamp) -> Void
     ) throws {
         self.onFrame = onFrame
         self.pixelConsumers = pixelConsumers
@@ -379,11 +381,11 @@ actor FrameCapture {
         // Monotonic capture time (uptime ns): recordings place frames by it.
         let timestamp = CMTime(value: CMTimeValue(DispatchTime.now().uptimeNanoseconds), timescale: 1_000_000_000)
         if pixelConsumers?.isEmpty ?? false {
-            onFrame?(pb, timestamp, false)
+            onFrame?(pb, timestamp, false, stamp)
             return true
         }
         guard let copy = photocopier.copy(pb) else { return true }
-        onFrame?(copy, timestamp, true)
+        onFrame?(copy, timestamp, true, stamp)
         return true
     }
 
