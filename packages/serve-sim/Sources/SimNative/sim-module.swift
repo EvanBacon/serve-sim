@@ -104,8 +104,9 @@ private func u32(_ v: Int) -> UInt32 {
         return await injector.setCADebugOption(name: name, enabled: enabled)
     }
 
-    @NodeMethod func hardwareKeyboard(_ enabled: Bool) async -> Bool {
-        await injector.setHardwareKeyboard(enabled: enabled)
+    @NodeMethod func hardwareKeyboard(_ enabled: Bool) async throws -> Bool {
+        try await setupTask.value
+        return await injector.setHardwareKeyboard(enabled: enabled)
     }
 
     @NodeMethod func isFoldable() async throws -> Bool {
