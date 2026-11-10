@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, request, type IncomingMessage, type Server } from "http";
 import { writeFileSync } from "fs";
+import { PassThrough } from "stream";
 import type { AddressInfo } from "net";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
 import { clearEventLogForTests, EVENT_LOG_MAX_ENTRIES, recordEventLogEvent, subscribeEventLog } from "../event-log";
@@ -266,26 +267,33 @@ describe("GET /recording/index", () => {
   });
 
   test("the TTL starts once the MP4 has been sent, not at stop", async () => {
-    // Big enough that a paused reader stalls the transfer on socket buffers.
+    // Don't rely on socket backpressure: on a fast Linux runner the MP4 can
+    // finish (and arm the TTL) before a paused HTTP client holds the socket.
+    // Pause the file stream itself so the transfer cannot complete until we say.
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    let opened = false;
     const base = await serve(new DeviceSession("TEST-UDID", {
-      capture: fakeCapture({ mp4Bytes: 64 * 1024 * 1024 }), hid: hid(), recordingIndexTtlMs: 300,
+      capture: fakeCapture(), hid: hid(), recordingIndexTtlMs: 300,
+      // A PassThrough that does not end until we release it: pipe() of a
+      // paused ReadStream resumes the file, so a short MP4 would finish
+      // immediately and arm the TTL.
+      openRecordingFile: () => {
+        const out = new PassThrough();
+        opened = true;
+        void hold.then(() => out.end(Buffer.from("fake-mp4")));
+        return out;
+      },
     }));
     const { token } = await (await fetch(`${base}/recording/start?index=1`, { method: "POST" })).json() as { token: string };
-    // Pause in the response callback, before the body can drain into the
-    // socket buffer. Pausing after await is too late on a fast runner: the
-    // 64 MB MP4 can finish (and arm the TTL) before stop.pause() runs.
-    const stop = await new Promise<IncomingMessage>((resolve, reject) => {
-      const req = request(`${base}/recording/stop?token=${token}`, { method: "POST" }, (res) => {
-        res.pause();
-        resolve(res);
-      });
-      req.once("error", reject);
-      req.end();
-    });
-    expect(stop.statusCode).toBe(200);
+    const stopPromise = fetch(`${base}/recording/stop?token=${token}`, { method: "POST" });
+    await waitFor(() => opened);
     await Bun.sleep(500); // past the TTL, download still in flight
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
-    await new Promise<void>((resolve) => { stop.on("end", resolve); stop.resume(); });
+    release();
+    const stop = await stopPromise;
+    expect(stop.status).toBe(200);
+    await stop.arrayBuffer();
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
     await Bun.sleep(500);
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(404);

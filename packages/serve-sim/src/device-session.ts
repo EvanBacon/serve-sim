@@ -34,6 +34,7 @@ import {
   type MjpegFrame,
 } from "./native";
 import { createReadStream } from "fs";
+import type { Readable } from "stream";
 import { mkdir, rm, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, join } from "path";
@@ -285,6 +286,8 @@ export interface DeviceSessionDependencies {
   recordingIndexTtlMs?: number;
   /** Event-log subscription for indexed recordings; defaults to `subscribeEventLog`. */
   subscribeEventLog?: (subscriber: (entry: EventLogEntry) => void) => () => void;
+  /** Stream the finished MP4 to the client; defaults to `createReadStream`. */
+  openRecordingFile?: (path: string) => Readable;
 }
 
 type ActiveRecording = {
@@ -1015,7 +1018,7 @@ export class DeviceSession {
     });
     try {
       await new Promise<void>((resolve) => {
-        const file = createReadStream(active.path);
+        const file = (this.dependencies?.openRecordingFile ?? createReadStream)(active.path);
         const done = () => {
           file.destroy();
           void rm(active.path, { force: true }).finally(resolve);
