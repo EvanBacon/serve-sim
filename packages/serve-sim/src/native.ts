@@ -182,8 +182,10 @@ function load(): NativeAddon {
 }
 
 // How long a new HID client is given before touch/button input is sent to it.
-// Measured on iOS 27.2: a tap 0.5s after the session was created landed 1/2
-// times; at 1.5s, 2/2 (and every later tap) landed.
+// A heuristic, not a guarantee: measured on iOS 27.2 from only a few runs (a tap
+// 0.5s after the session was created landed 1/2 times; at 1.5s, 2/2 and every
+// later tap landed). If the first tap after a fresh start is flaky on a slower
+// machine or runtime, suspect this value first.
 const GUEST_HID_SETTLE_MS = 1_500;
 
 /**

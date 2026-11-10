@@ -711,6 +711,8 @@ interface InputTarget {
   url: string;
   wsUrl: string;
   headers: Record<string, string>;
+  /** The server sends input delivery acks (#136); older servers don't. */
+  inputAck: boolean;
 }
 
 /**
@@ -731,7 +733,7 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
       console.error("No serve-sim server running. Run `serve-sim` first.");
       process.exit(1);
     }
-    return { device: state.device, url: state.url, wsUrl: state.wsUrl, headers };
+    return { device: state.device, url: state.url, wsUrl: state.wsUrl, headers, inputAck: state.inputAck === true };
   }
 
   let base: URL;
@@ -761,7 +763,7 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
     console.error(`serve-sim at ${base.origin} returned HTTP ${res.status} for /api`);
     process.exit(1);
   }
-  const config = await res.json().catch(() => null) as { device?: string } | null;
+  const config = await res.json().catch(() => null) as { device?: string; inputAck?: unknown } | null;
   const device = config?.device;
   if (!device) {
     console.error(
@@ -773,7 +775,13 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
   }
   const ws = new URL(`helper/${encodeURIComponent(device)}/ws`, base);
   ws.protocol = base.protocol === "https:" ? "wss:" : "ws:";
-  return { device, url: base.toString().replace(/\/$/, ""), wsUrl: ws.toString(), headers };
+  return {
+    device,
+    url: base.toString().replace(/\/$/, ""),
+    wsUrl: ws.toString(),
+    headers,
+    inputAck: config.inputAck === true,
+  };
 }
 
 /**
@@ -958,9 +966,10 @@ async function touchInputOrientation(
 }
 
 // Server→client input ack ([0x84]{ ack, ok }), sent by servers that support
-// #136 for frames carrying an `ack` id. Older servers never reply, so a missing
-// ack within INPUT_ACK_TIMEOUT_MS keeps the old fire-and-forget exit 0. Covers
-// HID setup plus the new-client settle delay on a session's first input.
+// #136 (they advertise `inputAck` in their state / `/api`) for frames carrying
+// an `ack` id. Older servers never reply, so input to them stays
+// fire-and-forget. INPUT_ACK_TIMEOUT_MS covers HID setup plus the new-client
+// settle delay on a session's first input; a missing ack within it exits 0.
 const WS_MSG_INPUT_ACK = 0x84;
 const INPUT_ACK_TIMEOUT_MS = 4_000;
 
@@ -969,7 +978,9 @@ const INPUT_ACK_TIMEOUT_MS = 4_000;
  * injector delivered them. Each frame goes out `delayMs` after the previous
  * one regardless of acks (a tap's begin/end spacing must not stretch into a
  * long-press). When the server reports a frame was not delivered, or closes
- * the socket before acknowledging, prints why and sets exit code 1.
+ * the socket before acknowledging, prints why and sets exit code 1. A server
+ * that doesn't advertise acks gets the frames untagged and the socket closes
+ * 50ms after the last one, as before #136.
  */
 function sendAckedInput(
   target: InputTarget,
@@ -1013,8 +1024,10 @@ function sendAckedInput(
       finish(`serve-sim closed the connection before the ${what} reached simulator ${target.device}.`);
     };
     ws.onerror = () => {
+      if (settled) return;
       console.error("Failed to connect to serve-sim server at", target.wsUrl);
       settled = true;
+      if (timer) clearTimeout(timer);
       reject(new Error("WebSocket connection failed"));
     };
     ws.onopen = () => {
@@ -1022,15 +1035,23 @@ function sendAckedInput(
       const sendNext = (index: number) => {
         if (settled) return;
         const { tag, payload } = frames[index]!;
-        ack += 1;
-        pending.add(ack);
-        sendHid(ws, tag, { ...payload, ack });
+        if (target.inputAck) {
+          ack += 1;
+          pending.add(ack);
+          sendHid(ws, tag, { ...payload, ack });
+        } else {
+          sendHid(ws, tag, payload);
+        }
         const next = frames[index + 1];
         if (next) {
           setTimeout(() => sendNext(index + 1), next.delayMs ?? 0);
           return;
         }
         sentAll = true;
+        if (!target.inputAck) {
+          timer = setTimeout(() => finish(), 50);
+          return;
+        }
         timer = setTimeout(() => {
           debugCli("no input ack from %s after %dms; assuming an older server", target.wsUrl, INPUT_ACK_TIMEOUT_MS);
           finish();
