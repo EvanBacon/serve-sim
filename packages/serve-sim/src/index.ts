@@ -957,6 +957,90 @@ async function touchInputOrientation(
   }
 }
 
+// Server→client input ack ([0x84]{ ack, ok }), sent by servers that support
+// #136 for frames carrying an `ack` id. Older servers never reply, so a missing
+// ack within INPUT_ACK_TIMEOUT_MS keeps the old fire-and-forget exit 0. Covers
+// HID setup plus the new-client settle delay on a session's first input.
+const WS_MSG_INPUT_ACK = 0x84;
+const INPUT_ACK_TIMEOUT_MS = 4_000;
+
+/**
+ * Send touch/button frames and wait for the server to say whether the HID
+ * injector delivered them. Each frame goes out `delayMs` after the previous
+ * one regardless of acks (a tap's begin/end spacing must not stretch into a
+ * long-press). When the server reports a frame was not delivered, or closes
+ * the socket before acknowledging, prints why and sets exit code 1.
+ */
+function sendAckedInput(
+  target: InputTarget,
+  what: string,
+  frames: Array<{ tag: number; payload: object; delayMs?: number }>,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const ws = new WebSocket(target.wsUrl, { headers: target.headers });
+    ws.binaryType = "arraybuffer";
+    const pending = new Set<number>();
+    let sentAll = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (failure?: string) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      ws.onclose = null;
+      ws.close();
+      if (failure) {
+        console.error(failure);
+        process.exitCode = 1;
+      }
+      resolve();
+    };
+    const undelivered = () => (
+      `serve-sim could not deliver the ${what} to simulator ${target.device}: the HID injector ` +
+        `reported it was not sent (simulator not booted, HID setup failed, or unsupported input). ` +
+        `See the serve-sim server log; restart with \`serve-sim --kill ${target.device}\` and start it again.`
+    );
+    ws.onmessage = ({ data }) => {
+      const frame = Buffer.from(data as ArrayBuffer);
+      if (frame[0] !== WS_MSG_INPUT_ACK) return;
+      let reply: { ack?: unknown; ok?: unknown };
+      try { reply = JSON.parse(frame.subarray(1).toString()); } catch { return; }
+      if (typeof reply.ack !== "number" || !pending.delete(reply.ack)) return;
+      if (reply.ok !== true) return finish(undelivered());
+      if (sentAll && pending.size === 0) finish();
+    };
+    ws.onclose = () => {
+      finish(`serve-sim closed the connection before the ${what} reached simulator ${target.device}.`);
+    };
+    ws.onerror = () => {
+      console.error("Failed to connect to serve-sim server at", target.wsUrl);
+      settled = true;
+      reject(new Error("WebSocket connection failed"));
+    };
+    ws.onopen = () => {
+      let ack = 0;
+      const sendNext = (index: number) => {
+        if (settled) return;
+        const { tag, payload } = frames[index]!;
+        ack += 1;
+        pending.add(ack);
+        sendHid(ws, tag, { ...payload, ack });
+        const next = frames[index + 1];
+        if (next) {
+          setTimeout(() => sendNext(index + 1), next.delayMs ?? 0);
+          return;
+        }
+        sentAll = true;
+        timer = setTimeout(() => {
+          debugCli("no input ack from %s after %dms; assuming an older server", target.wsUrl, INPUT_ACK_TIMEOUT_MS);
+          finish();
+        }, INPUT_ACK_TIMEOUT_MS);
+      };
+      sendNext(0);
+    };
+  });
+}
+
 async function gesture(jsonStr: string, deviceArg?: string, raw?: boolean) {
   const state = await resolveInputTarget(deviceArg);
 
@@ -971,24 +1055,7 @@ async function gesture(jsonStr: string, deviceArg?: string, raw?: boolean) {
   const orientation = await touchInputOrientation(state, raw);
   const rawTouch = displayTouchToRaw(touch, orientation);
 
-  return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl, { headers: state.headers });
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify(rawTouch));
-      const msg = new Uint8Array(1 + json.length);
-      msg[0] = 0x03;
-      msg.set(json, 1);
-      ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
-    };
-
-    ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", state.wsUrl);
-      reject(new Error("WebSocket connection failed"));
-    };
-  });
+  await sendAckedInput(state, "gesture", [{ tag: 0x03, payload: rawTouch }]);
 }
 
 async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean) {
@@ -1002,28 +1069,10 @@ async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean
   }
   const state = await resolveInputTarget(deviceArg);
   const orientation = await touchInputOrientation(state, raw);
-  return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl, { headers: state.headers });
-    ws.binaryType = "arraybuffer";
-    const send = (type: "begin" | "end") => {
-      const json = new TextEncoder().encode(JSON.stringify(displayTouchToRaw({ type, x, y }, orientation)));
-      const msg = new Uint8Array(1 + json.length);
-      msg[0] = 0x03;
-      msg.set(json, 1);
-      ws.send(msg);
-    };
-    ws.onopen = () => {
-      send("begin");
-      setTimeout(() => {
-        send("end");
-        setTimeout(() => { ws.close(); resolve(); }, 50);
-      }, 40);
-    };
-    ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", state.wsUrl);
-      reject(new Error("WebSocket connection failed"));
-    };
-  });
+  await sendAckedInput(state, "tap", [
+    { tag: 0x03, payload: displayTouchToRaw({ type: "begin", x, y }, orientation) },
+    { tag: 0x03, payload: displayTouchToRaw({ type: "end", x, y }, orientation), delayMs: 40 },
+  ]);
 }
 
 /**
@@ -1318,24 +1367,7 @@ async function button(buttonName = "home", deviceArg?: string) {
   const hid = HID_BUTTON_CODES[buttonName];
   const payload = hid ? { button: buttonName, ...hid } : { button: buttonName };
 
-  return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl, { headers: state.headers });
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-      const json = new TextEncoder().encode(JSON.stringify(payload));
-      const msg = new Uint8Array(1 + json.length);
-      msg[0] = 0x04;
-      msg.set(json, 1);
-      ws.send(msg);
-      setTimeout(() => { ws.close(); resolve(); }, 50);
-    };
-
-    ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", state.wsUrl);
-      reject(new Error("WebSocket connection failed"));
-    };
-  });
+  await sendAckedInput(state, `${buttonName} button press`, [{ tag: 0x04, payload }]);
 }
 
 // Send a CoreAnimation debug option toggle to the helper, which invokes
