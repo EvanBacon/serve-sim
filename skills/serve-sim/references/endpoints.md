@@ -23,7 +23,7 @@ This is the per-device binary started for each booted simulator. It serves the v
 | `GET` | `/ax` | JSON accessibility tree (axe-compatible flat-array shape). |
 | `GET` | `/ax/snapshot[?all=1]` | Compact agent snapshot `{screen, nodes:[{ref, role, type, label?, value?, id?, enabled?, frame:{x,y,w,h}, center, offscreen?}]}` in device points. Becomes the device's ref session. |
 | `POST` | `/ax/act` | JSON `{ref:"@e2", action?:"tap"\|"longpress", settle?:bool, timeoutMs?}`. Taps the element's center → `{ok, action, ref, target, settle, diff}`. Unknown/stale/offscreen refs → `404 unknown_ref` / `409 stale_ref` / `409 offscreen` (`409 no_snapshot` before any snapshot); nothing is tapped. Requires `Content-Type: application/json`. |
-| `GET` | `/ax/settle[?timeoutMs=]` | Waits for the AX tree and framebuffer to go quiet (default 3000 ms) → `{settle:{settled, waitedMs, reason, samples, signals, busy?}, diff:{added, removed, changed}}` vs the last snapshot. |
+| `GET` | `/ax/settle[?timeoutMs=]` | Waits for the framebuffer to go quiet and confirms with one AX read (default timeout 3000 ms, hard) → `{settle:{settled, waitedMs, reason, samples, signals, busy?}, diff:{added, removed, changed}}` vs the last snapshot. `reason` is `frames-quiet`, `ax-quiet` (two matching AX reads; used on screens that keep drawing, such as a caret or spinner, and when frames are unavailable) or `timeout`. |
 | `GET` | `/foreground` | JSON `{bundleId: string, pid: number}` of the frontmost app. |
 
 This server sends no CORS headers and accepts WebSockets only from a same-origin page. Browser pages on another origin should go through `simMiddleware`'s same-origin `{basePath}/helper/<device>/…` proxy; non-browser clients (curl, scripts) are unaffected.
