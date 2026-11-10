@@ -273,6 +273,9 @@ describe("rolling buffer endpoints", () => {
     expect(view.events[0]).toMatchObject({ kind: "tap", frame: view.frames[0]!.id, nextChange: { frame: view.frames[1]!.id } });
     const noEvents = await (await fetch(`${base}/buffer?events=0`)).json() as { events?: unknown };
     expect(noEvents.events).toBeUndefined();
+    const statsOnly = await (await fetch(`${base}/buffer?stats=1`)).json() as Record<string, unknown>;
+    expect(Object.keys(statsOnly).sort()).toEqual(["enabled", "options", "startedAt", "stats"]);
+    expect(statsOnly.stats).toMatchObject({ frames: 2, events: 1 });
   });
 
   test("silent mid-drag updates and an evicted drag's end reach the buffer", async () => {

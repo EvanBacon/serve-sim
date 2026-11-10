@@ -104,6 +104,14 @@ describe("runBufferCommand", () => {
     expect(err.join("\n")).toContain("serve-sim buffer stop");
   });
 
+  test("status asks for stats only", async () => {
+    const { enabled, options, startedAt, stats } = VIEW as typeof VIEW & { startedAt: string };
+    const { d, calls, out } = deps({ "/buffer": json({ enabled, options, startedAt, stats }) });
+    expect(await runBufferCommand("status", {}, d)).toBe(0);
+    expect(calls[0]!.url).toBe("http://127.0.0.1:3400/helper/DEV/buffer?stats=1");
+    expect(JSON.parse(out[0]!)).toMatchObject({ enabled: true, options: { seconds: 20 }, stats: { frames: 2 } });
+  });
+
   test("server errors exit 1 with the message", async () => {
     const { d, err } = deps({ "/buffer/start": json({ error: "invalid_buffer_options", message: "seconds must be an integer 1..60" }, 400) });
     expect(await runBufferCommand("start", { seconds: "600" }, d)).toBe(1);
@@ -292,6 +300,7 @@ describe("serve-sim buffer (CLI wiring)", () => {
       expect(list.stdout).toContain("frame 2");
       expect(seen).toContain("POST /helper/DEV/buffer/start?seconds=30&maxMB=8 Bearer TOK");
       expect(seen).toContain("GET /helper/DEV/buffer?since=5 Bearer TOK");
+      expect(seen).toContain("GET /helper/DEV/buffer?stats=1 Bearer TOK");
     } finally {
       server.closeAllConnections();
       await new Promise<void>((r) => server.close(() => r()));

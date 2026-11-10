@@ -902,6 +902,10 @@ export class DeviceSession {
       this.sendJson(res, 200, { enabled: false });
       return;
     }
+    if (params.get("stats") === "1") {
+      this.sendJson(res, 200, { ...this.bufferState(), stats: { ...store.stats(), maxBytes: store.options.maxBytes } });
+      return;
+    }
     const now = Date.now();
     const view = store.view(now, since === undefined ? {} : { sinceMs: now - since * 1000 });
     const { events, ...rest } = view;

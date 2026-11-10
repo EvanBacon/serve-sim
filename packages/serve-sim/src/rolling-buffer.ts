@@ -17,9 +17,9 @@
  * stays); and the sample/event counts are capped. A frame is freed once no
  * sample shows it.
  *
- * Timeline: every time is server wall-clock ms (`Date.now()` at the tick),
- * the same clock event-log entries are stamped with, so the event join needs
- * no offset. Views report `t` = seconds since the oldest sample in the view
+ * Timeline: every time is server wall-clock ms (`Date.now()` at the tick,
+ * or when a snapshot resolves), the same clock event-log entries are
+ * stamped with, so the event join needs no offset. Views report `t` = seconds since the oldest sample in the view
  * (`origin`), like recording media time, and reuse the recording index's
  * event shaping (`recordingIndexEvents`).
  */
@@ -479,8 +479,10 @@ export class RollingBufferSampler {
         if (frame) {
           const { data, ...meta } = frame;
           // Own the bytes: the addon's buffer is ours, but a caller-provided
-          // view could be reused.
-          store.addFrame(atMs, Buffer.from(data), meta);
+          // view could be reused. Stamped when the snapshot resolves, not
+          // at the tick start: the surface is copied inside the call, so an
+          // event landing during the await precedes this frame.
+          store.addFrame(this.now(), Buffer.from(data), meta);
           current.lastCount = count;
         }
       }

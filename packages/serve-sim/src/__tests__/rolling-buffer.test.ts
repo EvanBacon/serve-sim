@@ -308,6 +308,8 @@ describe("RollingBufferSampler", () => {
     (pending as unknown as () => void)();
     await new Promise((r) => setTimeout(r, 0));
     expect(delays).toEqual([0, 170, 200]);
+    // A frame is stamped when its snapshot resolved, not at the tick start.
+    expect(sampler.store!.latest()!.atMs).toBe(T0 + 30);
     sampler.stop();
   });
 

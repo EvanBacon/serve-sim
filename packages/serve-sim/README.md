@@ -335,11 +335,11 @@ serve-sim buffer list --since 5      # changed frames + input, as seconds before
 #   -2.09s  frame 88   294x640  26.3 KB
 #   -1.84s  frame 89   294x640  25.1 KB
 serve-sim buffer frame --ago 2 -o before.jpg    # the frame on screen 2 s ago (or --id 89; piped: stdout)
-serve-sim buffer dump                # every frame + buffer.json into a new temp dir (or -o <empty dir>)
+serve-sim buffer dump                # every frame + buffer.json into a new temp dir (or -o <empty dir>); frames evicted mid-dump are marked missing
 serve-sim buffer stop                # turn it off and free the frames
 ```
 
-`buffer start` takes `--seconds` (window, 1-60, default 20), `--fps` (1-10, default 4), `--size` (long edge in px, 64-1280, default 640), `--quality` (JPEG, 0.1-0.95, default 0.6) and `--max-mb` (memory cap, 1-64 MiB, default 24). Out-of-range values are refused, not clamped. A second `start` with the same options is a no-op; with other options it is refused until `buffer stop`. `buffer` alone prints the status as JSON. `--buffer` on the server applies the defaults with that window to every device it serves.
+`buffer start` takes `--seconds` (window, 1-60, default 20), `--fps` (1-10, default 4), `--size` (long edge in px, 64-1280, default 640), `--quality` (JPEG, 0.1-0.95, default 0.6) and `--max-mb` (memory cap, 1-64 MiB, default 24). Out-of-range values are refused, not clamped. A second `start` with the same options is a no-op; with other options it is refused until `buffer stop`. `buffer` alone prints the status as JSON. `--buffer` on the server applies the defaults with that window to every device it serves (pass a device as `serve-sim --buffer=20 <device>`, since `--buffer <device>` reads the device as the seconds); if a server for the device is already running, `--buffer` starts the buffer on it, or warns when it can't.
 
 How it samples: at each tick the server reads the capture's content-change counter (the one `settle` uses). Only when the screen changed does it copy the current frame, downscale it and encode a JPEG, on a low-priority queue separate from the stream encoders. An unchanged tick stores a repeat entry pointing at the previous frame (no bytes), so timestamps stay on a steady grid and events can still be placed. A snapshot identical to the previous frame is stored as a repeat too. Each sample is `{t, at, frame, changed}`, with `t` in seconds from the oldest sample in the view.
 
@@ -351,7 +351,7 @@ Events: while the buffer is on it collects this device's HID input from the even
 
 HTTP, under the same device helper routes and auth as `/recording` (`--auth-token` remotely; start/stop need a same-origin `Origin` from browsers):
 
-- `GET …/helper/<udid>/buffer[?since=<s>][&events=0]`: `{enabled:false}`, or `{enabled, options, startedAt, stats, origin, now, samples, frames, events}`.
+- `GET …/helper/<udid>/buffer[?since=<s>][&events=0]`: `{enabled:false}`, or `{enabled, options, startedAt, stats, origin, now, samples, frames, events}`. `?stats=1` returns only `{enabled, options, startedAt, stats}`.
 - `POST …/buffer/start?seconds=&fps=&size=&quality=&maxMB=` and `POST …/buffer/stop`.
 - `GET …/buffer/frame[?id=<n> | ?ago=<s>]`: one `image/jpeg`, the latest by default, with `X-Serve-Sim-Buffer-Frame: {id, at, width, height, sourceWidth, sourceHeight}`. `409 buffer_off` when off, `404 frame_not_found` when it isn't held.
 

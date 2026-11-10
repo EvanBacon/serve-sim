@@ -221,7 +221,8 @@ export async function runBufferCommand(verb: BufferVerb, opts: BufferCliOptions,
   try {
     switch (verb) {
       case "status": {
-        const view = await fetchView(deps);
+        // stats=1 skips the samples/frames/events (older servers ignore it).
+        const view = await (await request(deps, bufferUrlForWsUrl(deps.wsUrl, undefined, { stats: "1" }))).json() as ServerView;
         const { enabled, options, startedAt, stats } = view;
         deps.log(JSON.stringify({ enabled, ...(options ? { options, startedAt, stats } : {}) }));
         return 0;

@@ -2599,7 +2599,8 @@ program
   .option(
     "--buffer [seconds]",
     "Keep a rolling buffer of the last N seconds (default 20, max 60) of small frames for every " +
-      `device (off by default; see \`serve-sim buffer\`). Also read from ${ROLLING_BUFFER_ENV}.`,
+      `device (off by default; see \`serve-sim buffer\`). Also read from ${ROLLING_BUFFER_ENV}. ` +
+      "Put a device after the value, not right after the flag: --buffer=20 <device>.",
   )
   .option(
     "--device-set <path>",
