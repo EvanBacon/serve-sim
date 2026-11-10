@@ -111,6 +111,9 @@ actor CaptureEngine {
     // Separate so viewer seeds don't queue behind (or evict the cache of)
     // per-frame MJPEG viewer encodes.
     private let snapshotEncoder = MJPEGEncoder()
+    // Opt-in rolling buffer stills; its own queue so neither seeds nor
+    // viewer encodes wait on it. Idle unless `thumbnailJPEG` is called.
+    private let thumbnailEncoder = ThumbnailEncoder()
 
     private(set) var screenSize = Dimensions(width: 0, height: 0)
     private var consumers = [UUID: CaptureConsuming]()
@@ -247,6 +250,15 @@ actor CaptureEngine {
         return (frame.pixelBuffer.dimensions, try await snapshotEncoder.encode(frame))
     }
 
+    /// Downscaled JPEG of the current screen for the opt-in rolling buffer:
+    /// one copy of the current surface (as for viewer seeds), then a
+    /// downscale + encode off the actor. Nothing runs unless it's called.
+    func thumbnailJPEG(maxDimension: Int, quality: Double) async throws -> (source: Dimensions, size: ThumbnailSize, data: Data)? {
+        guard phase == .running, let pixelBuffer = await frameCapture.copyCurrentFrame() else { return nil }
+        let (size, data) = try await thumbnailEncoder.encode(pixelBuffer, maxDimension: maxDimension, quality: quality)
+        return (pixelBuffer.dimensions, size, data)
+    }
+
     func addMJPEGConsumer(
         onFrame: sending @escaping (Dimensions, Data) async -> Void
     ) -> (@Sendable () async -> Void) {
@@ -370,6 +382,27 @@ actor MJPEGEncoder: FrameEncoder {
         let data = try await videoEncoder.encode(pixelBuffer: frame.pixelBuffer)
         lastImage = (frame.id, data)
         return data
+    }
+}
+
+/// Rolling-buffer stills (see `ThumbnailJPEG`), on a utility queue so they
+/// never compete with the live encoders' user-interactive work.
+actor ThumbnailEncoder {
+    let queue = DispatchSerialQueue(label: "thumbnail-encoder", qos: .utility)
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
+
+    func encode(_ pixelBuffer: CVPixelBuffer, maxDimension: Int, quality: Double) throws -> (ThumbnailSize, Data) {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { throw ThumbnailJPEG.Errors.emptySource }
+        return try ThumbnailJPEG.encode(
+            bgra: base,
+            width: CVPixelBufferGetWidth(pixelBuffer),
+            height: CVPixelBufferGetHeight(pixelBuffer),
+            bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+            maxDimension: maxDimension,
+            quality: quality
+        )
     }
 }
 
