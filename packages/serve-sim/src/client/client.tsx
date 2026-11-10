@@ -57,8 +57,13 @@ import type { StreamError } from "./utils/stream-retry";
 import { useAvccStream } from "./hooks/use-avcc-stream";
 import { useResizableWidth } from "./hooks/use-resizable-width";
 import { useScreenshotToast } from "./hooks/use-screenshot-toast";
-import { useScreenRecording } from "./hooks/use-screen-recording";
+import { useScreenRecording, type SavedRecording } from "./hooks/use-screen-recording";
 import { RecordToolbarButton } from "./components/record-toolbar-button";
+import {
+  SCRUB_TIMELINE_RESERVED_HEIGHT,
+  ScrubTimeline,
+  ScrubTimelineToolbarButton,
+} from "./components/scrub-timeline";
 import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
@@ -1084,7 +1089,17 @@ function AppWithConfig({
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
-  const screenRecording = useScreenRecording(config.device);
+  // Scrub timeline (not on Duo: its screen is a 3D projection). Closed, it
+  // fetches nothing and recordings start exactly as before; open, toolbar
+  // recordings ask for the index sidecar so they land on the timeline.
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const scrubTimelineOpen = timelineOpen && !foldable;
+  const [savedRecording, setSavedRecording] = useState<SavedRecording | null>(null);
+  const [scrubOverlayEl, setScrubOverlayEl] = useState<HTMLDivElement | null>(null);
+  const screenRecording = useScreenRecording(config.device, {
+    index: scrubTimelineOpen,
+    onSaved: setSavedRecording,
+  });
   const mediaDrop = useMediaDrop({
     host: hostAction,
     udid: config.device,
@@ -1106,7 +1121,9 @@ function AppWithConfig({
   const simulatorResize = useSimulatorResize({
     defaultWidth: containerDefaultWidth,
     viewportWidth,
-    viewportHeight,
+    viewportHeight: scrubTimelineOpen
+      ? Math.max(0, viewportHeight - SCRUB_TIMELINE_RESERVED_HEIGHT)
+      : viewportHeight,
     aspectRatio: containerAspectRatioValue,
     initialFit: foldable || initialState?.fit === true,
     onStart: () => setSimFocused(false),
@@ -1265,6 +1282,9 @@ function AppWithConfig({
               <>
                 {streamView}
                 {axOverlayEnabled && <AxDomOverlay />}
+                {scrubTimelineOpen && (
+                  <div ref={setScrubOverlayEl} className="absolute inset-0 z-[15] pointer-events-none" />
+                )}
               </>
             );
             if (!wrapChrome) return screenContent;
@@ -1374,6 +1394,9 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <RecordToolbarButton state={screenRecording.state} onToggle={screenRecording.toggle} />
+              {!foldable && (
+                <ScrubTimelineToolbarButton open={timelineOpen} onToggle={() => setTimelineOpen((o) => !o)} />
+              )}
               <SimulatorToolbar.RotateButton title="Rotate device" />
               {!foldable && !!activeChrome && (
                 <ChromeToolbarButton
@@ -1425,6 +1448,16 @@ function AppWithConfig({
             </SimulatorToolbar>
           )}
         </div>
+        {!foldable && (
+          <ScrubTimeline
+            device={config.device}
+            open={scrubTimelineOpen}
+            saved={savedRecording}
+            overlayTarget={scrubOverlayEl}
+            overlayBorderRadius={useChrome ? undefined : imgBorderRadius}
+            style={{ width: Math.max(360, deviceWidth), maxWidth: "calc(100vw - 48px)" }}
+          />
+        )}
       </div>
 
       {/* The left device sidebar + its rail live in App so they persist across
