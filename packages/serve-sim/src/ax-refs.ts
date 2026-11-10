@@ -19,9 +19,10 @@
  *   included, not just the elements that got a ref.
  * - Nothing carries at all when the screen shows other content in the same
  *   place: a named text, button, link, image or group whose name occurs
- *   fewer times than before, with a name that occurs more times now at its
- *   top edge (whatever the two widths and heights, and duplicates included),
- *   a keyed element's read-only value changed, a visible title gone without
+ *   fewer times than before, with a name that occurs more times now in its
+ *   place (whatever the two sizes, and duplicates included), names that
+ *   traded or rotated places or form a chain of records, a keyed element's
+ *   read-only value changed, a visible title gone without
  *   scrolling away, or titles reordered (see {@link screenReplaced}).
  * - Otherwise neither a unique id/label nor position is enough on its own:
  *   the uniquely labelled content around an element must have survived too
@@ -191,11 +192,14 @@ const CONTENT_VALUE_TYPES = new Set(["StaticText", "Heading", "Cell", "Row", "Im
 const TEXT_TYPES = new Set(["Heading", "StaticText", "Cell", "Other", "Group", "Image", "Button", "Link"]);
 
 /**
- * Types whose label is content when an AXUniqueId keys them: a text keeps
- * its identifier while showing another record's name. A control's
- * identifier names the control, so its label is state ("Play" → "Pause").
+ * Types whose label is content when an AXUniqueId keys them: a text, a
+ * combined header (React Native `testID` on an `accessible` View) or an
+ * avatar image keeps its identifier while showing another record's name.
+ * A control's identifier names the control, so its label is state
+ * ("Play" → "Pause"): an identified Button or Link is not checked as a
+ * record name.
  */
-const ID_LABEL_CONTENT_TYPES = new Set(["Heading", "StaticText", "Cell"]);
+const ID_LABEL_CONTENT_TYPES = new Set(["Heading", "StaticText", "Cell", "Other", "Group", "Image"]);
 
 /** Types keyed by their value when they have no label (SwiftUI/UIKit text exposed as AXValue only). */
 const VALUE_NAMED_TYPES = new Set(["Heading", "StaticText"]);
@@ -297,15 +301,19 @@ function framesClose(a: AxRect, b: AxRect, offset: Offset): boolean {
 }
 
 /**
- * `b` sits where `a` was once `a` is moved by `offset`: the same top edge
- * within tolerance, and the two overlap horizontally. Width and height are
- * ignored, since a label or SwiftUI Text is as wide as its text: "Alice" and
- * a centred "Bartholomew Jones", or a name that wraps to two lines, take
- * the same place.
+ * `b` sits where `a` was once `a` is moved by `offset`: the two overlap
+ * horizontally, and vertically either overlap or have the same top edge
+ * within tolerance. Sizes and exact positions are ignored, since a label or
+ * SwiftUI Text is as wide as its text and is laid out around it: "Alice" and
+ * a centred "Bartholomew Jones", a name that wraps to two lines and is
+ * recentred beside an avatar, or a name pushed down by an optional company
+ * line in a fixed-height header, take the same place.
  */
 function inPlace(a: AxRect, b: AxRect, offset: Offset): boolean {
   const x = a.x + offset.dx;
-  return Math.abs(a.y + offset.dy - b.y) <= FRAME_TOLERANCE && x < b.x + b.width && b.x < x + a.width;
+  const y = a.y + offset.dy;
+  const vertical = Math.abs(y - b.y) <= FRAME_TOLERANCE || (y < b.y + b.height && b.y < y + a.height);
+  return vertical && x < b.x + b.width && b.x < x + a.width;
 }
 
 function countValues(values: string[]): Map<string, number> {
@@ -534,27 +542,40 @@ function offsetsAround(anchors: Array<{ path: string; offset: Offset }>, contain
   }
 }
 
-/** Texts bucketed by top edge, so "what sits at this top edge" is a lookup, not a scan. */
-class TextsByTop {
-  private readonly buckets = new Map<number, NamedText[]>();
+/**
+ * Texts bucketed by the vertical band they span, so "what sits in this
+ * place" is a lookup, not a scan. A text is filed under every band from its
+ * top to its bottom edge, so a tall or wrapped one is found from anywhere
+ * it overlaps.
+ */
+class TextsByBand {
+  private readonly bands = new Map<number, NamedText[]>();
   constructor(texts: NamedText[]) {
     for (const t of texts) {
-      const bucket = Math.floor(t.rect.y / FRAME_TOLERANCE);
-      const list = this.buckets.get(bucket);
-      if (list) list.push(t);
-      else this.buckets.set(bucket, [t]);
+      for (let band = bandOf(t.rect.y), last = bandOf(t.rect.y + t.rect.height); band <= last; band++) {
+        const list = this.bands.get(band);
+        if (list) list.push(t);
+        else this.bands.set(band, [t]);
+      }
     }
   }
   /** Texts of `type` in the place of `rect` moved by `offset` (see {@link inPlace}). */
   at(rect: AxRect, type: string, offset: Offset): NamedText[] {
-    const bucket = Math.floor((rect.y + offset.dy) / FRAME_TOLERANCE);
-    const out: NamedText[] = [];
-    for (let b = bucket - 1; b <= bucket + 1; b++) {
-      for (const t of this.buckets.get(b) ?? []) if (t.type === type && inPlace(rect, t.rect, offset)) out.push(t);
+    const y = rect.y + offset.dy;
+    const out = new Set<NamedText>();
+    for (let band = bandOf(y - FRAME_TOLERANCE), last = bandOf(y + Math.max(rect.height, FRAME_TOLERANCE)); band <= last; band++) {
+      for (const t of this.bands.get(band) ?? []) if (t.type === type && inPlace(rect, t.rect, offset)) out.add(t);
     }
-    return out;
+    return [...out];
   }
 }
+
+function bandOf(y: number): number {
+  return Math.floor(y / FRAME_TOLERANCE);
+}
+
+/** How many places a chain of moved names is followed (see {@link textSwapped}). */
+const CHAIN_HOPS = 4;
 
 /**
  * A named text was replaced in place by another (see {@link screenReplaced}),
@@ -563,10 +584,17 @@ class TextsByTop {
  *   the same type whose name occurs more times than before (Alice 2 → 1 and
  *   Bob 1 → 2 in a split view); or
  * - two names traded places (counts unchanged): Alice now where Bob was and
- *   Bob where Alice was.
- * A row deleted with the rest reflowing up is neither: the row that moved
- * into the gap still occurs as often as before, and nothing took its old
- * place in exchange.
+ *   Bob where Alice was; or
+ * - a chain: the name in its place only moved there from elsewhere on
+ *   screen, and following it back to its old place (up to
+ *   {@link CHAIN_HOPS} places) ends at new content or back where it started.
+ *   Alice's card naming her manager Bob becoming Bob's card naming Carol,
+ *   a mail thread [Alice, Bob] followed by [Bob, Carol], or three names
+ *   rotating places.
+ * A row deleted with the rest reflowing up, a row inserted, or a one-row
+ * scroll is none of these: each name that moved into another's place moved
+ * by the offset its container's other anchors share, so it is not followed,
+ * and nothing took its old place in exchange.
  * Offsets tried: staying put, plus where the content around it moved
  * ({@link candidateOffsets}). Content above an inserted row stays put while
  * its container's anchors below move, and each extra offset can only add a
@@ -575,6 +603,7 @@ class TextsByTop {
 function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor[]): boolean {
   const prevCounts = countValues(prevTexts.map((t) => t.key));
   const currentCounts = countValues(texts.map((t) => t.key));
+  const grew = (key: string) => currentCounts.get(key)! > (prevCounts.get(key) ?? 0);
   const byKey = (list: NamedText[]) => {
     const map = new Map<string, NamedText[]>();
     for (const t of list) {
@@ -586,27 +615,56 @@ function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor
   };
   const prevByKey = byKey(prevTexts);
   const currentByKey = byKey(texts);
-  const currentByTop = new TextsByTop(texts);
+  const currentByBand = new TextsByBand(texts);
   // Per container, not per text: the text's own anchor is not left out, which
   // can only add an offset to try.
   const offsetsByContainer = new Map<string, Offset[]>();
-  for (const before of prevTexts) {
-    const fewer = (currentCounts.get(before.key) ?? 0) < prevCounts.get(before.key)!;
-    const container = ancestorPath(before.path, 1);
+  const offsetsFor = (path: string) => {
+    const container = ancestorPath(path, 1);
     let offsets = offsetsByContainer.get(container);
     if (!offsets) {
       offsets = [{ dx: 0, dy: 0 }, ...offsetsAround(anchors, container, null)];
       offsetsByContainer.set(container, offsets);
     }
-    for (const offset of offsets) {
-      for (const now of currentByTop.at(before.rect, before.type, offset)) {
+    return offsets;
+  };
+  // `now` was already there, or got there by the offset the other anchors
+  // around one of its old copies share (a scroll or reflow), not by a jump
+  // into another record's place.
+  const stayed = (now: NamedText) => (prevByKey.get(now.key) ?? []).some((old) => {
+    const dx = now.rect.x - old.rect.x;
+    const dy = now.rect.y - old.rect.y;
+    return [{ dx: 0, dy: 0 }, ...offsetsAround(anchors, ancestorPath(old.path, 1), old.path)].some((o) =>
+      Math.abs(o.dx - dx) <= FRAME_TOLERANCE && Math.abs(o.dy - dy) <= FRAME_TOLERANCE);
+  });
+  // `now` moved into `start`'s place: does the place it left now hold new
+  // content, or (through more moved names) `start` itself?
+  const chainEnds = (now: NamedText, start: string, hops: number, seen: Set<string>): boolean => {
+    if (hops === 0 || seen.has(now.key) || stayed(now)) return false;
+    seen.add(now.key);
+    for (const old of prevByKey.get(now.key) ?? []) {
+      for (const offset of offsetsFor(old.path)) {
+        for (const next of currentByBand.at(old.rect, old.type, offset)) {
+          if (next.key === now.key) continue;
+          if (next.key === start || grew(next.key)) return true;
+          if (chainEnds(next, start, hops - 1, seen)) return true;
+        }
+      }
+    }
+    return false;
+  };
+  for (const before of prevTexts) {
+    const fewer = (currentCounts.get(before.key) ?? 0) < prevCounts.get(before.key)!;
+    for (const offset of offsetsFor(before.path)) {
+      for (const now of currentByBand.at(before.rect, before.type, offset)) {
         if (now.key === before.key) continue;
-        if (fewer && currentCounts.get(now.key)! > (prevCounts.get(now.key) ?? 0)) return true;
+        if (fewer && grew(now.key)) return true;
         // Did `before`'s name take the old place of a copy of `now`'s name?
         const mine = currentByKey.get(before.key) ?? [];
         for (const t of prevByKey.get(now.key) ?? []) {
           if (mine.some((c) => c.type === t.type && inPlace(t.rect, c.rect, offset))) return true;
         }
+        if (chainEnds(now, before.key, CHAIN_HOPS, new Set([before.key]))) return true;
       }
     }
   }
@@ -622,14 +680,16 @@ function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor
  * one label that names the record. Each check needs only one element:
  * - In-place swap ({@link textSwapped}): a named text, heading, cell,
  *   button, link, image or group was replaced by another of the same type
- *   at its top edge, whatever their widths and heights, duplicates included.
- *   Alice's name becoming "Bartholomew Jones" (or wrapping to two lines), a
- *   split view's detail pane switching from Alice to Bob while both stay in
- *   the list, a card's name and a linked contact's trading places, or a
+ *   in its place, whatever their sizes, duplicates included. Alice's name
+ *   becoming "Bartholomew Jones" (or wrapping to two lines and recentring),
+ *   a split view's detail pane switching from Alice to Bob while both stay
+ *   in the list, a card's name and a linked contact's trading places, a
+ *   chain of records (Alice → manager Bob, then Bob → manager Carol), or a
  *   full-page scroll showing other rows.
  * - Content swap: a uniquely keyed element kept its key but shows other
  *   read-only content: a cell, text or button value ("Phone: 555-0001" →
- *   "555-0002"), or an AXUniqueId-keyed text's label. Editable values (text
+ *   "555-0002"), or the label of an AXUniqueId-keyed text, cell, heading,
+ *   group, image or combined element ({@link ID_LABEL_CONTENT_TYPES}). Editable values (text
  *   fields) and on/off state don't count.
  * - Vanished title: a visible heading or navigation-bar title is gone, and
  *   the content around it didn't scroll it offscreen.

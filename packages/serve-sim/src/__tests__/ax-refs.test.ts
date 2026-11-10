@@ -1170,3 +1170,144 @@ describe("record names of any size, duplicated or not, retire every ref (review 
     expect(carried(before, after)).toEqual([]);
   });
 });
+
+describe("chains, recentred names and identified name holders retire every ref (review 203g)", () => {
+  type State = ReturnType<typeof assignRefs>;
+  type Node = ReturnType<typeof agentSnapshot>["nodes"][number];
+  const text = (label: string) => ({ type: "StaticText", role: "text", label });
+  const refWhere = (state: State, pred: (n: Node) => boolean) => agentSnapshot(state, { all: true }).nodes.find(pred)?.ref;
+  const carried = (before: State, after: State) =>
+    agentSnapshot(before, { all: true }).nodes.filter((n) => resolveRef(after, n.ref).ok).map((n) => `${n.ref} ${n.label ?? n.type}`);
+  /** Nothing carries from `a` to `b`, and the `label` ref in particular is stale. */
+  const swapped = (a: AxSnapshot, b: AxSnapshot, label = "Block this Caller") => {
+    const before = assignRefs(null, a);
+    const after = assignRefs(before, b);
+    expect(carried(before, after)).toEqual([]);
+    const ref = refWhere(before, (n) => n.label === label);
+    expect(ref).toBeDefined();
+    expect(resolveRef(after, ref!)).toMatchObject({ ok: false, code: "stale_ref" });
+  };
+  const unchanged = (screen: AxSnapshot) => {
+    const before = assignRefs(null, screen);
+    expect(agentSnapshot(assignRefs(before, screen), { all: true })).toEqual(agentSnapshot(before, { all: true }));
+  };
+  const buttons = (base: string) => [
+    el({ path: `${base}.6`, label: "Send Message", frame: { x: 0, y: 420, width: 402, height: 44 } }),
+    el({ path: `${base}.7`, label: "Share Contact", frame: { x: 0, y: 464, width: 402, height: 44 } }),
+    el({ path: `${base}.8`, label: "Block this Caller", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+  ];
+  const back = el({ path: "0.0", label: "Contacts", frame: { x: 0, y: 50, width: 90, height: 44 } });
+
+  // N1: Alice's card names her manager Bob; Bob's card names his manager Carol.
+  const card = (name: string, manager: string) => snap([
+    back,
+    el({ path: "0.2.0", ...text(name), frame: { x: 201 - name.length * 5, y: 200, width: name.length * 10, height: 30 } }),
+    ...buttons("0.2"),
+    el({ path: "0.2.10", ...text("manager"), frame: { x: 16, y: 700, width: 80, height: 20 } }),
+    el({ path: "0.2.11", ...text(manager), frame: { x: 16, y: 722, width: manager.length * 10, height: 22 } }),
+  ]);
+
+  test("N1: following a chain of records (Alice → manager Bob → manager Carol) is a swap", () =>
+    swapped(card("Alice", "Bob"), card("Bob", "Carol")));
+  test("N1: re-reading the card keeps every ref", () => unchanged(card("Alice", "Bob")));
+
+  // N1d: a mail thread with senders [Alice, Bob] followed by the next thread [Bob, Carol].
+  const thread = (first: string, second: string) => snap([
+    el({ path: "0.0", label: "Inbox", frame: { x: 0, y: 50, width: 60, height: 44 } }),
+    el({ path: "0.1.0.0", ...text(first), frame: { x: 16, y: 120, width: first.length * 9, height: 20 } }),
+    el({ path: "0.1.1.0", ...text(second), frame: { x: 16, y: 400, width: second.length * 9, height: 20 } }),
+    el({ path: "0.9.0", label: "Delete", frame: { x: 0, y: 800, width: 80, height: 44 } }),
+    el({ path: "0.9.1", label: "Reply", frame: { x: 300, y: 800, width: 80, height: 44 } }),
+  ]);
+
+  test("N1d: the next mail thread [Bob, Carol] after [Alice, Bob] is a swap: Delete doesn't carry", () =>
+    swapped(thread("Alice", "Bob"), thread("Bob", "Carol"), "Delete"));
+  test("N1d: re-reading the thread keeps every ref", () => unchanged(thread("Alice", "Bob")));
+
+  // N6: three names rotating places (card name, linked, related).
+  const three = (a: string, b: string, c: string) => snap([
+    back,
+    el({ path: "0.2.0", ...text(a), frame: { x: 16, y: 200, width: 200, height: 30 } }),
+    ...buttons("0.2"),
+    el({ path: "0.2.10", ...text(b), frame: { x: 16, y: 700, width: 200, height: 22 } }),
+    el({ path: "0.2.11", ...text(c), frame: { x: 16, y: 740, width: 200, height: 22 } }),
+  ]);
+
+  test("N6: three names rotating places is a swap", () => swapped(three("Alice", "Bob", "Carol"), three("Bob", "Carol", "Alice")));
+  test("N6: re-reading the card keeps every ref", () => unchanged(three("Alice", "Bob", "Carol")));
+
+  // A one-row scroll of a list of senders must stay a scroll: each name
+  // moved into the place of the one above it, by the offset the other rows share.
+  test("a one-row scroll of a list of names is not a chain: the rows that stayed keep their refs", () => {
+    const names = ["Alice", "Bob", "Carol", "Dmitri", "Eve", "Florence"];
+    const rows = (first: number) => snap([
+      el({ path: "0.0", type: "Heading", role: "heading", label: "Inbox", frame: { x: 16, y: 50, width: 120, height: 40 } }),
+      ...names.slice(first, first + 4).map((n, i) =>
+        el({ path: `0.1.${i}`, ...text(n), frame: { x: 16, y: 100 + i * 60, width: n.length * 9, height: 20 } })),
+      el({ path: "0.9.0", label: "Compose", frame: { x: 300, y: 800, width: 80, height: 44 } }),
+    ]);
+    const before = assignRefs(null, rows(0));
+    const after = assignRefs(before, rows(1));
+    for (const name of ["Inbox", "Bob", "Carol", "Dmitri", "Compose"]) {
+      expect(refWhere(after, (n) => n.label === name)).toBe(refWhere(before, (n) => n.label === name));
+    }
+  });
+
+  // N3: SwiftUI HStack(alignment: .center) { avatar; name }: a name that
+  // wraps onto two lines is recentred, so its top edge moves up ~11pt.
+  const hstack = (name: string, lines: number) => snap([
+    back,
+    el({ path: "0.2.0", type: "Image", role: "image", frame: { x: 16, y: 190, width: 60, height: 60 } }),
+    el({ path: "0.2.1", ...text(name), frame: { x: 88, y: 220 - lines * 11, width: 290, height: lines * 22 } }),
+    ...buttons("0.3"),
+  ]);
+
+  test("N3: a name that wraps and is recentred beside an avatar is a swap", () =>
+    swapped(hstack("Alice", 1), hstack("Bartholomew Montgomery-Smythe", 2)));
+  test("N3: re-reading the card keeps every ref", () => unchanged(hstack("Alice", 1)));
+
+  // N4: an optional company line above the name in a fixed-height header pushes the name down 12pt.
+  const header = (name: string, company: string | null) => snap([
+    back,
+    ...(company ? [el({ path: "0.2.0", ...text(company), frame: { x: 16, y: 190, width: 200, height: 18 } })] : []),
+    el({ path: "0.2.1", ...text(name), frame: { x: 16, y: company ? 212 : 200, width: 200, height: 30 } }),
+    ...buttons("0.3"),
+  ]);
+
+  test("N4: a name pushed down by an optional company line is a swap", () =>
+    swapped(header("Alice", null), header("Bob", "Acme Inc")));
+  test("N4: re-reading the card keeps every ref", () => {
+    unchanged(header("Alice", null));
+    unchanged(header("Bob", "Acme Inc"));
+  });
+
+  // N2: React Native testID on a combined accessible View, a Group or an avatar Image.
+  const identified = (type: string, name: string) => snap([
+    back,
+    el({ path: "0.2.0", id: "contact-header", type, role: type.toLowerCase(), label: name, frame: { x: 16, y: 200, width: 370, height: 80 } }),
+    ...buttons("0.2"),
+  ]);
+
+  for (const type of ["Other", "Group", "Image"]) {
+    test(`N2: an identified ${type} naming the record is a swap`, () =>
+      swapped(identified(type, "Alice"), identified(type, "Bob")));
+    test(`N2: re-reading a card named by an identified ${type} keeps every ref`, () => unchanged(identified(type, "Alice")));
+  }
+
+  test("N2 (documented gap): an identified name Button is a control whose label is its state, so it carries", () => {
+    const before = assignRefs(null, identified("Button", "Alice"));
+    const after = assignRefs(before, identified("Button", "Bob"));
+    expect(carried(before, after)).toHaveLength(before.entries.size);
+  });
+
+  test("N5 (documented gap): a name that changes type (StaticText → Button) is not compared", () => {
+    const typed = (name: string, type: string) => snap([
+      back,
+      el({ path: "0.2.0", type, role: type.toLowerCase(), label: name, frame: { x: 16, y: 200, width: 200, height: 30 } }),
+      ...buttons("0.2"),
+    ]);
+    const before = assignRefs(null, typed("Alice", "StaticText"));
+    const after = assignRefs(before, typed("Bob", "Button"));
+    expect(resolveRef(after, refWhere(before, (n) => n.label === "Block this Caller")!).ok).toBe(true);
+  });
+});
