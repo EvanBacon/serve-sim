@@ -343,9 +343,9 @@ final class AccessibilityBridge: NSObject {
         var pointBudget = 600  // safety cap for misbehaving sims
         // Tagged with the grid index of the probe that found each one: agent
         // mode's re-probes find elements out of scan order, and sorting by
-        // index restores it (a no-op for the exhaustive single pass).
+        // index restores it (exhaustive mode is returned as scanned).
         var discovered: [(index: Int, element: [String: Any])] = []
-        var memo = AccessibilityProbeMemo()
+        var memo = AccessibilityProbeMemo(mode: mode)
         var plan = AccessibilityGridPlan(bounds: bounds, step: step)
         // Agent mode: points skipped because a soft leaf covered them or the
         // background stride passed over them, per row, so a row that turns
@@ -361,7 +361,7 @@ final class AccessibilityBridge: NSObject {
             guard let translation = objectAtPoint(translator, pointSel, point, 0, token as NSString) as? NSObject else {
                 return .nothing
             }
-            // Same remote element as an earlier probe: already handled.
+            // Agent mode: same remote element as an earlier probe, already handled.
             guard memo.firstSighting(translation) else { return .known }
             translation.setValue(token, forKey: "bridgeDelegateToken")
             guard let element = toMacElement(translator, macSel, translation) as? NSObject else {
@@ -440,9 +440,7 @@ final class AccessibilityBridge: NSObject {
             }
             if found { revisit += plan.force(aroundDiscoveriesIn: [row]).filter { softSkipped[$0] != nil } }
         }
-        return discovered.enumerated()
-            .sorted { ($0.element.index, $0.offset) < ($1.element.index, $1.offset) }
-            .map { $0.element.element }
+        return accessibilityDiscoveryOrder(discovered, mode: mode)
     }
 
     // MARK: - Token registry

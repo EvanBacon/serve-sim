@@ -173,15 +173,39 @@ public struct AccessibilityCoverage {
 /// dropped because it has no platform element, so on a static screen a
 /// repeat could only re-fetch that frame over XPC and `continue`. Skipping it
 /// is output-identical and saves ~0.35 ms per repeat probe.
+///
+/// Agent mode only. Exhaustive (`/ax`) keeps re-reading the frame on every
+/// repeat, so an element that moved mid-describe or whose first serialize
+/// failed can still be picked up, and its output never depends on how
+/// coarse AXPTranslationObject's `-isEqual:` is.
 public struct AccessibilityProbeMemo {
+    private let enabled: Bool
     private var seen = Set<NSObject>()
 
-    public init() {}
-
-    /// True the first time an equal object is passed in this call.
-    public mutating func firstSighting(_ object: NSObject) -> Bool {
-        seen.insert(object).inserted
+    public init(mode: AccessibilityDiscoveryMode) {
+        enabled = mode == .agent
     }
+
+    /// True the first time an equal object is passed in this call; always
+    /// true in exhaustive mode.
+    public mutating func firstSighting(_ object: NSObject) -> Bool {
+        guard enabled else { return true }
+        return seen.insert(object).inserted
+    }
+}
+
+/// Grid discoveries in output order. Agent mode's re-probes find elements
+/// out of scan order, so they are sorted by the grid index of the probe that
+/// found each one. Exhaustive mode's single pass is already in scan order and
+/// is returned untouched.
+public func accessibilityDiscoveryOrder<T>(
+    _ discovered: [(index: Int, element: T)],
+    mode: AccessibilityDiscoveryMode
+) -> [T] {
+    guard mode == .agent else { return discovered.map(\.element) }
+    return discovered.enumerated()
+        .sorted { ($0.element.index, $0.offset) < ($1.element.index, $1.offset) }
+        .map { $0.element.element }
 }
 
 public enum AccessibilityProbeOutcome: Equatable, Sendable {

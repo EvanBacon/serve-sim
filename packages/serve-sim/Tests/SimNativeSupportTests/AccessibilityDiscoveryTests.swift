@@ -117,13 +117,35 @@ final class AccessibilityGridPlanTests: XCTestCase {
 
 final class AccessibilityProbeMemoTests: XCTestCase {
     func testFirstSightingIsNewAndRepeatsAreNot() {
-        var memo = AccessibilityProbeMemo()
+        var memo = AccessibilityProbeMemo(mode: .agent)
         let a = NSString(string: "a")
         let aAgain = NSString(string: "a") // equal by -isEqual:/-hash, distinct object
         let b = NSString(string: "b")
         XCTAssertTrue(memo.firstSighting(a))
         XCTAssertFalse(memo.firstSighting(aAgain))
         XCTAssertTrue(memo.firstSighting(b))
+    }
+
+    func testExhaustiveModeNeverShortCircuitsRepeats() {
+        var memo = AccessibilityProbeMemo(mode: .exhaustive)
+        let a = NSString(string: "a")
+        XCTAssertTrue(memo.firstSighting(a))
+        XCTAssertTrue(memo.firstSighting(a))
+        XCTAssertTrue(memo.firstSighting(NSString(string: "a")))
+    }
+}
+
+final class AccessibilityDiscoveryOrderTests: XCTestCase {
+    func testExhaustiveKeepsScanOrderUntouched() {
+        // Indices are never out of order in a single exhaustive pass, but even
+        // if they were, exhaustive output is returned exactly as scanned.
+        let found = [(index: 5, element: "b"), (index: 2, element: "a"), (index: 9, element: "c")]
+        XCTAssertEqual(accessibilityDiscoveryOrder(found, mode: .exhaustive), ["b", "a", "c"])
+    }
+
+    func testAgentSortsByGridIndexStably() {
+        let found = [(index: 5, element: "b"), (index: 2, element: "a"), (index: 5, element: "b2"), (index: 9, element: "c")]
+        XCTAssertEqual(accessibilityDiscoveryOrder(found, mode: .agent), ["a", "b", "b2", "c"])
     }
 }
 
