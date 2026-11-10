@@ -54,6 +54,7 @@
     "src/max-bitrate.ts",
     "src/keyboard-modifiers.ts",
     "src/key-sequencer.ts",
+    "src/launchable-helper.ts",
     "src/metro-reload.ts",
     "src/middleware.ts",
     "src/native.ts",
