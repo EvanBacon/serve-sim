@@ -25,10 +25,11 @@ const require = createRequire(import.meta.url);
 // handle is garbage-collected (Swift `deinit`), so there are no explicit
 // destroy/free calls here.
 interface SimHIDHandle {
-  touch(type: TouchType, x: number, y: number, w: number, hh: number, edge: number): Promise<void>;
-  multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, hh: number): Promise<void>;
-  button(button: string): Promise<void>;
-  buttonHid(page: number, usage: number, phase: ButtonPhase): Promise<void>;
+  /** Resolves whether the event reached the HID client (addons before #136 resolve undefined). */
+  touch(type: TouchType, x: number, y: number, w: number, hh: number, edge: number): Promise<boolean | void>;
+  multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, hh: number): Promise<boolean | void>;
+  button(button: string): Promise<boolean | void>;
+  buttonHid(page: number, usage: number, phase: ButtonPhase): Promise<boolean | void>;
   key(type: KeyType, usage: number): Promise<void>;
   scroll(dx: number, dy: number, anchorX: number, anchorY: number, w: number, hh: number): Promise<void>;
   digitalCrown(delta: number): Promise<void>;
@@ -193,6 +194,13 @@ function load(): NativeAddon {
   return addon;
 }
 
+// How long a new HID client is given before touch/button input is sent to it.
+// A heuristic, not a guarantee: measured on iOS 27.2 from only a few runs (a tap
+// 0.5s after the session was created landed 1/2 times; at 1.5s, 2/2 and every
+// later tap landed). If the first tap after a fresh start is flaky on a slower
+// machine or runtime, suspect this value first.
+const GUEST_HID_SETTLE_MS = 1_500;
+
 /**
  * In-process HID injector for one simulator. Mirrors the WebSocket HID protocol
  * the spawned helper used to handle, but as direct native calls.
@@ -208,6 +216,16 @@ export interface NativeHidDeps {
 export class NativeHid {
   private readonly handle: SimHIDHandle;
   private readonly keys: KeySequencer;
+  /**
+   * Resolves once HID setup finished and the guest had time to pick up the
+   * new HID client. A brand-new SimDeviceLegacyHIDClient accepts messages
+   * (the send completion reports no error) but the guest ignores input for
+   * roughly the first second, so `serve-sim tap` right after a fresh start
+   * was silently dropped (#136). Touch/button input waits on this one shared
+   * promise; JS resolves its waiters in FIFO order, so a tap's begin/end can't
+   * be reordered. Later input passes through immediately.
+   */
+  private readonly ready: Promise<void>;
   /** Settles once a Duo's bridge points at the launchable helper. */
   private readonly duoHelperReady: Promise<void>;
   private duoHelperSettled = false;
@@ -216,12 +234,22 @@ export class NativeHid {
     const bundled = (deps.bundledDuoHelper ?? bundledDuoHidHelperPath)();
     this.handle = new (deps.SimHID ?? load().SimHID)(udid, bundled);
     this.keys = new KeySequencer(this.handle);
+    const setup = this.handle.isFoldable();
+    this.ready = setup.then(
+      () => new Promise<void>((resolve) => setTimeout(resolve, GUEST_HID_SETTLE_MS).unref?.()),
+      () => {}, // setup failed: let the sends run so they report the failure
+    );
     const resolve = deps.duoHelper ?? duoHidHelperPath;
-    this.duoHelperReady = this.handle.isFoldable().then(async (foldable) => {
+    this.duoHelperReady = setup.then(async (foldable) => {
       if (!foldable) return;
       const helper = resolve();
       if (helper !== bundled) await this.handle.setDuoHelper(helper);
     }).catch(() => {}).finally(() => { this.duoHelperSettled = true; });
+  }
+
+  private async settled<T>(fn: () => PromiseLike<T>): Promise<T> {
+    await this.ready;
+    return fn();
   }
 
   /**
@@ -239,30 +267,39 @@ export class NativeHid {
   // so an unhandled throw here crashes the whole server — and if it lands
   // mid-gesture, the guest is left with a stuck finger that wedges input until
   // the sim reboots. The spawned helper used to absorb this in its own process;
-  // `guard` restores that isolation by swallowing malformed-input errors.
+  // `guard` restores that isolation by swallowing malformed-input errors (and
+  // HID setup failures, which every input method now awaits).
   private async guard<T>(op: string, fn: () => PromiseLike<T>, fallback: T): Promise<T> {
     try {
       return await fn();
     } catch (err) {
-      console.error(`[hid] ${op} ignored bad input:`, err instanceof Error ? err.message : err);
+      console.error(`[hid] ${op} failed:`, err instanceof Error ? err.message : err);
       return fallback;
     }
   }
 
-  touch(type: TouchType, x: number, y: number, w: number, h: number, edge = 0): Promise<void> {
-    return this.guard("touch", () => this.handle.touch(type, x, y, w, h, edge), undefined);
+  // The four sends below resolve whether the injector handed the event to the
+  // guest: false when it couldn't (HID setup failed, message builder missing,
+  // unknown button) so `serve-sim tap/button/gesture` can exit non-zero (#136).
+
+  touch(type: TouchType, x: number, y: number, w: number, h: number, edge = 0): Promise<boolean> {
+    return this.delivered("touch", () => this.settled(() => this.handle.touch(type, x, y, w, h, edge)));
   }
 
-  multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, h: number): Promise<void> {
-    return this.guard("multiTouch", () => this.handle.multiTouch(type, x1, y1, x2, y2, w, h), undefined);
+  multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, h: number): Promise<boolean> {
+    return this.delivered("multiTouch", () => this.settled(() => this.handle.multiTouch(type, x1, y1, x2, y2, w, h)));
   }
 
-  button(button: string): Promise<void> {
-    return this.guard("button", this.viaDuoHelper(() => this.handle.button(button)), undefined);
+  button(button: string): Promise<boolean> {
+    return this.delivered("button", () => this.settled(this.viaDuoHelper(() => this.handle.button(button))));
   }
 
-  buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<void> {
-    return this.guard("buttonHid", this.viaDuoHelper(() => this.handle.buttonHid(page, usage, phase)), undefined);
+  buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<boolean> {
+    return this.delivered("buttonHid", () => this.settled(this.viaDuoHelper(() => this.handle.buttonHid(page, usage, phase))));
+  }
+
+  private async delivered(op: string, fn: () => PromiseLike<boolean | void>): Promise<boolean> {
+    return (await this.guard<boolean | void>(op, fn, false)) !== false;
   }
 
   key(type: KeyType, usage: number): Promise<void> {
@@ -271,11 +308,11 @@ export class NativeHid {
 
   /** anchorX/anchorY default to screen center when omitted. */
   scroll(dx: number, dy: number, w: number, h: number, anchorX?: number, anchorY?: number): Promise<void> {
-    return this.guard("scroll", () => this.handle.scroll(dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h), undefined);
+    return this.guard("scroll", () => this.settled(() => this.handle.scroll(dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h)), undefined);
   }
 
   digitalCrown(delta: number): Promise<void> {
-    return this.guard("digitalCrown", () => this.handle.digitalCrown(delta), undefined);
+    return this.guard("digitalCrown", () => this.settled(() => this.handle.digitalCrown(delta)), undefined);
   }
 
   orientation(orientation: number): Promise<boolean> {
@@ -287,7 +324,7 @@ export class NativeHid {
   }
 
   softwareKeyboard(): Promise<void> {
-    return this.guard("softwareKeyboard", () => this.handle.softwareKeyboard(), undefined);
+    return this.guard("softwareKeyboard", () => this.settled(() => this.handle.softwareKeyboard()), undefined);
   }
 
   caDebug(name: string, enabled: boolean): Promise<boolean> {

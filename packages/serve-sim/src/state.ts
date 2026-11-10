@@ -53,6 +53,12 @@ export interface ServeSimDeviceState {
    * each can tell only whether its own set's simulators are booted.
    */
   deviceSet?: string;
+  /**
+   * The server replies to input frames carrying an `ack` id with a delivery
+   * report (#136). Absent on servers older than that, which never reply, so
+   * the input subcommands only wait for acks when this is set.
+   */
+  inputAck?: boolean;
 }
 
 /**
@@ -81,6 +87,7 @@ export function inProcessServeSimState(
     url: `http://${h}:${port}`,
     streamUrl: `http://${h}:${port}${prefix}/helper/${udid}/stream.mjpeg`,
     wsUrl: `ws://${h}:${port}${prefix}/helper/${udid}/ws`,
+    inputAck: true,
   };
 }
 
