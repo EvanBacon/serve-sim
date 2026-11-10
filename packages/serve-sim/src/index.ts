@@ -107,6 +107,7 @@ import {
 import { redactHome } from "./diagnostics-redact";
 import { BUFFER_VERBS, runBufferCommand, startBufferOnReusedServer, type BufferCliOptions, type BufferVerb } from "./buffer-cli";
 import { ROLLING_BUFFER_ENV, parseRollingBufferEnv } from "./rolling-buffer";
+import { runCliMain } from "./control-protocol";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -2974,6 +2975,19 @@ program
   .argument("[args...]")
   .action((args: string[]) => uiSettings(args));
 
+// Handled by the node bin (src/bin.ts) before this bundle loads; registered
+// here so it shows in --help and explains itself in other builds.
+program
+  .command("control")
+  .description("Persistent control process that keeps short commands fast (status|start|stop)")
+  .allowUnknownOption(true)
+  .helpOption(false)
+  .argument("[args...]")
+  .action(() => {
+    console.error("serve-sim: the control process is only available from the node bin (dist/serve-sim.js).");
+    process.exit(1);
+  });
+
 // Settle the device set before any command runs. Commander matches the root
 // --device-set after a subcommand's name too.
 program.hook("preAction", () => {
@@ -2984,4 +2998,4 @@ program.hook("preAction", () => {
     process.exit(1);
   }
 });
-await program.parseAsync(process.argv);
+await runCliMain(() => program.parseAsync(process.argv));
