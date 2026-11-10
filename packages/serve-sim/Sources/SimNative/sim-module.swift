@@ -109,6 +109,12 @@ private func u32(_ v: Int) -> UInt32 {
         return await injector.isFoldable()
     }
 
+    /// Replace the guest helper the Duo bridge launches. No-op for other devices.
+    @NodeMethod func setDuoHelper(_ path: String) async throws {
+        try await setupTask.value
+        await injector.setDuoHelper(path)
+    }
+
     @NodeMethod func close() async {
         _ = try? await setupTask.value
         await injector.close()

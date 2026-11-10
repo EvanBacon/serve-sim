@@ -218,7 +218,8 @@ export interface DeviceSessionDependencies {
   capture: CaptureTransport;
   hid: HidTransport;
   createDuoRenderer?: (onFailure: (error: DuoRendererError) => void) => Pick<DuoRenderer, "render" | "close">;
-  createDuoMonitor?: (udid: string, onState: (state: DuoState) => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  /** `duoHelper` resolves the launchable guest helper (may run `codesign`); call it lazily. */
+  createDuoMonitor?: (udid: string, onState: (state: DuoState) => void, duoHelper: () => string) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
   /** Server-side recording cap; defaults to `MAX_RECORDING_MS`. */
   maxRecordingMs?: number;
   /** How long a capped file is held for its owner; defaults to `RECORDING_HOLD_MS`. */
@@ -333,12 +334,12 @@ export class DeviceSession {
         if (!this.dependencies?.createDuoMonitor) {
           void warnDeviceHubInput(this.udid).then((shadowed) => { this.deviceHubShadowed = shadowed; });
         }
-        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState) => new DuoStateMonitor(udid, onState, { duoHelper: duoHidHelperPath }));
+        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState, duoHelper) => new DuoStateMonitor(udid, onState, { duoHelper }));
         this.duoMonitor = createMonitor(this.udid, (state) => {
           void this.followDuoState(state).catch((error) => {
             console.error("[duo] State update failed:", error);
           });
-        });
+        }, duoHidHelperPath);
       }
     })().catch((error) => {
       // Failed DeviceSession instances are evicted by the registry below. Keep

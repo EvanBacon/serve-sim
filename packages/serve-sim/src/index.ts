@@ -1345,7 +1345,7 @@ async function fold(hinge: number, deviceArg?: string) {
       if (frame[0] !== FOLD_TAG) return;
       try {
         const reply = JSON.parse(frame.subarray(1).toString());
-        finish(reply.ok === true ? undefined : new Error("Simulator rejected the fold. An iPhone Duo with guest HID support is required."));
+        finish(reply.ok === true ? undefined : new Error("Simulator rejected the fold. An iPhone Duo with guest HID support is required. If this is an iPhone Duo, the guest helper (serve-sim-duo-hid) failed to start or reply; the serve-sim server log shows why."));
       } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     };
     ws.onclose = () => finish(new Error("Connection closed before the simulator acknowledged the fold."));

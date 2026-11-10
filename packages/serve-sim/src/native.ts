@@ -12,6 +12,7 @@ import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { KeySequencer, type KeyType } from "./key-sequencer";
+import { launchableHelper } from "./launchable-helper";
 import { maxBitrateFromEnv } from "./max-bitrate";
 import { resolveDeviceSet } from "./simctl";
 
@@ -37,6 +38,8 @@ interface SimHIDHandle {
   softwareKeyboard(): Promise<void>;
   caDebug(name: string, enabled: boolean): Promise<boolean>;
   isFoldable(): Promise<boolean>;
+  /** Swap the helper the Duo bridge launches; a no-op on other devices. */
+  setDuoHelper(path: string): Promise<void>;
   close(): Promise<void>;
   pose(name: string, fromDegrees: number): Promise<boolean>;
   hinge(degrees: number): Promise<boolean>;
@@ -165,9 +168,19 @@ function resolveAddon(): string {
   );
 }
 
-/** The guest-side Duo helper (`simctl spawn`): HID commands and the hinge reader. */
-export function duoHidHelperPath(): string {
+/** The guest-side Duo helper as bundled, without checking that it launches. */
+function bundledDuoHidHelperPath(): string {
   return join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid");
+}
+
+let duoHidHelper: string | undefined;
+/**
+ * The guest-side Duo helper (`simctl spawn`): HID commands and the hinge reader.
+ * A hardened-runtime re-signed bundle resolves to a copy dyld can launch.
+ * Resolving runs a blocking `codesign` probe, so only call it for an iPhone Duo.
+ */
+export function duoHidHelperPath(): string {
+  return duoHidHelper ??= launchableHelper(bundledDuoHidHelperPath());
 }
 
 let addon: NativeAddon | undefined;
@@ -192,6 +205,14 @@ const GUEST_HID_SETTLE_MS = 1_500;
  * In-process HID injector for one simulator. Mirrors the WebSocket HID protocol
  * the spawned helper used to handle, but as direct native calls.
  */
+export interface NativeHidDeps {
+  SimHID?: NativeAddon["SimHID"];
+  /** The helper as bundled; must be cheap. */
+  bundledDuoHelper?: () => string;
+  /** The launchable helper; may run `codesign`, so it is only called for a Duo. */
+  duoHelper?: () => string;
+}
+
 export class NativeHid {
   private readonly handle: SimHIDHandle;
   private readonly keys: KeySequencer;
@@ -205,19 +226,39 @@ export class NativeHid {
    * be reordered. Later input passes through immediately.
    */
   private readonly ready: Promise<void>;
+  /** Settles once a Duo's bridge points at the launchable helper. */
+  private readonly duoHelperReady: Promise<void>;
+  private duoHelperSettled = false;
 
-  constructor(udid: string) {
-    this.handle = new (load().SimHID)(udid, duoHidHelperPath());
+  constructor(udid: string, deps: NativeHidDeps = {}) {
+    const bundled = (deps.bundledDuoHelper ?? bundledDuoHidHelperPath)();
+    this.handle = new (deps.SimHID ?? load().SimHID)(udid, bundled);
     this.keys = new KeySequencer(this.handle);
-    this.ready = this.handle.isFoldable().then(
+    const setup = this.handle.isFoldable();
+    this.ready = setup.then(
       () => new Promise<void>((resolve) => setTimeout(resolve, GUEST_HID_SETTLE_MS).unref?.()),
       () => {}, // setup failed: let the sends run so they report the failure
     );
+    const resolve = deps.duoHelper ?? duoHidHelperPath;
+    this.duoHelperReady = setup.then(async (foldable) => {
+      if (!foldable) return;
+      const helper = resolve();
+      if (helper !== bundled) await this.handle.setDuoHelper(helper);
+    }).catch(() => {}).finally(() => { this.duoHelperSettled = true; });
   }
 
   private async settled<T>(fn: () => PromiseLike<T>): Promise<T> {
     await this.ready;
     return fn();
+  }
+
+  /**
+   * Commands a Duo routes through its guest helper wait for it to be resolved.
+   * Once it has been, they run immediately so they keep their order relative
+   * to touches and keys sent in the same tick.
+   */
+  private viaDuoHelper<T>(fn: () => PromiseLike<T>): () => PromiseLike<T> {
+    return () => (this.duoHelperSettled ? fn() : this.duoHelperReady.then(fn));
   }
 
   // The N-API bindings throw synchronously when a JS value can't be coerced to
@@ -250,11 +291,11 @@ export class NativeHid {
   }
 
   button(button: string): Promise<boolean> {
-    return this.delivered("button", () => this.settled(() => this.handle.button(button)));
+    return this.delivered("button", () => this.settled(this.viaDuoHelper(() => this.handle.button(button))));
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<boolean> {
-    return this.delivered("buttonHid", () => this.settled(() => this.handle.buttonHid(page, usage, phase)));
+    return this.delivered("buttonHid", () => this.settled(this.viaDuoHelper(() => this.handle.buttonHid(page, usage, phase))));
   }
 
   private async delivered(op: string, fn: () => PromiseLike<boolean | void>): Promise<boolean> {
@@ -275,7 +316,7 @@ export class NativeHid {
   }
 
   orientation(orientation: number): Promise<boolean> {
-    return this.guard("orientation", () => this.handle.orientation(orientation), false);
+    return this.guard("orientation", this.viaDuoHelper(() => this.handle.orientation(orientation)), false);
   }
 
   memoryWarning(): Promise<void> {
@@ -299,11 +340,11 @@ export class NativeHid {
   }
 
   pose(name: string, fromDegrees: number): Promise<boolean> {
-    return this.guard("pose", () => this.handle.pose(name, fromDegrees), false);
+    return this.guard("pose", this.viaDuoHelper(() => this.handle.pose(name, fromDegrees)), false);
   }
 
   hinge(degrees: number): Promise<boolean> {
-    return this.guard("hinge", () => this.handle.hinge(degrees), false);
+    return this.guard("hinge", this.viaDuoHelper(() => this.handle.hinge(degrees)), false);
   }
 }
 
