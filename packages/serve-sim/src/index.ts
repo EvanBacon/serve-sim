@@ -43,7 +43,17 @@ import { setUiOption, uiSettings } from "./ui-settings";
 import { debugCli, debugHelper, debugState } from "./debug";
 import type { EventLogEntry } from "./event-log";
 import { formatEventLogLine } from "./event-log-format";
-import { fetchAxSnapshot } from "./ax-cli";
+import {
+  AxCliError,
+  axAgentUrlForWsUrl,
+  fetchAxSnapshot,
+  formatAgentSnapshotText,
+  parseTapTarget,
+  parseTimeoutOption,
+  requestAxAgent,
+  type AxAgentPath,
+} from "./ax-cli";
+import type { AgentSnapshot } from "./ax-refs";
 import { AUTH_TOKEN_ENV, resolveAuthToken } from "./request-trust";
 import { MAX_BITRATE_ENV, applyMaxBitrateOption, parseMaxBitrateMbps } from "./max-bitrate";
 import { shareHost } from "./share-host";
@@ -1067,6 +1077,95 @@ function sendAckedInput(
       sendNext(0);
     };
   });
+}
+
+/** Print a failed `/ax/*` call to stderr (code: message) and exit 1. */
+function exitAxAgentError(err: unknown): never {
+  if (err instanceof AxCliError) {
+    console.error(`serve-sim: ${err.code ? `${err.code}: ` : ""}${err.message}`);
+  } else {
+    console.error(`serve-sim: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  process.exit(1);
+}
+
+async function axAgentCall(
+  deviceArg: string | undefined,
+  path: AxAgentPath,
+  opts: { params?: Record<string, string>; body?: unknown } = {},
+): Promise<unknown> {
+  const target = await resolveInputTarget(deviceArg);
+  const url = axAgentUrlForWsUrl(target.wsUrl, path, opts.params);
+  if (!url) {
+    console.error(`Cannot derive the accessibility endpoint from ${target.wsUrl}`);
+    process.exit(1);
+  }
+  try {
+    return await requestAxAgent(url, { headers: target.headers, body: opts.body });
+  } catch (err) {
+    exitAxAgentError(err);
+  }
+}
+
+/** `serve-sim ax --refs [--all] [--text]`: snapshot with @eN refs. */
+async function axRefs(deviceArg: string | undefined, opts: { all?: boolean; text?: boolean }) {
+  const snapshot = await axAgentCall(deviceArg, "snapshot", { params: opts.all ? { all: "1" } : {} }) as AgentSnapshot;
+  console.log(opts.text ? formatAgentSnapshotText(snapshot) : JSON.stringify(snapshot));
+}
+
+function timeoutOrExit(value: string | undefined): number | undefined {
+  try {
+    return parseTimeoutOption(value);
+  } catch (err) {
+    console.error(`serve-sim: ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/** `serve-sim settle [--timeout ms]`: wait for quiet, print {settle, diff} vs the last snapshot. */
+async function settleCmd(deviceArg: string | undefined, timeout: string | undefined) {
+  const timeoutMs = timeoutOrExit(timeout);
+  const params: Record<string, string> = timeoutMs === undefined ? {} : { timeoutMs: String(timeoutMs) };
+  console.log(JSON.stringify(await axAgentCall(deviceArg, "settle", { params })));
+}
+
+/**
+ * `serve-sim tap @e2 [--settle] [--timeout ms]` or the original
+ * `serve-sim tap <x> <y>` (unchanged; `--settle` then waits afterwards).
+ */
+async function tapCmd(
+  first: string,
+  second: string | undefined,
+  opts: { device?: string; raw?: boolean; settle?: boolean; timeout?: string },
+) {
+  const target = parseTapTarget(first, second);
+  if (target.kind === "error") {
+    console.error(`serve-sim: ${target.message}`);
+    process.exit(1);
+  }
+  const timeoutMs = timeoutOrExit(opts.timeout);
+  if (timeoutMs !== undefined && !opts.settle) {
+    console.error("serve-sim: --timeout only applies with --settle");
+    process.exit(1);
+  }
+  if (target.kind === "point") {
+    if (target.y === undefined) {
+      // Formerly commander's "missing required argument 'y'"; never let a
+      // lone x tap the top edge.
+      console.error("Usage: serve-sim tap <x> <y> [-d udid]   or   serve-sim tap @e2 [--settle]");
+      console.error("  x, y are normalized 0..1 of the simulator screen; @eN refs come from `serve-sim ax --refs`");
+      process.exit(1);
+    }
+    await tap(target.x, target.y, opts.device, opts.raw);
+    if (opts.settle) await settleCmd(opts.device, opts.timeout);
+    return;
+  }
+  if (opts.raw) {
+    console.error("serve-sim: --raw does not apply to element refs (the server picks the tap point)");
+    process.exit(1);
+  }
+  const body = { ref: target.ref, settle: opts.settle === true, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
+  console.log(JSON.stringify(await axAgentCall(opts.device, "act", { body })));
 }
 
 async function axDump(deviceArg?: string) {
@@ -2478,12 +2577,21 @@ program
 
 program
   .command("tap")
-  .description("Tap at normalized 0..1 coords")
-  .argument("<x>", "X coord, normalized 0..1")
-  .argument("<y>", "Y coord, normalized 0..1")
+  .description("Tap at normalized 0..1 coords, or an element ref (@e2) from `ax --refs`")
+  .argument("<x>", "X coord, normalized 0..1 — or an element ref like @e2")
+  .argument("[y]", "Y coord, normalized 0..1 (omit for a ref)")
   .option(...deviceOpt)
   .option(...rawOpt)
-  .action((x: string, y: string, opts) => tap(x, y, opts.device, opts.raw));
+  .option("--settle", "Wait for the screen to settle; with a ref, print the diff")
+  .option("--timeout <ms>", "Settle timeout in ms (default 3000)")
+  .action((x: string, y: string | undefined, opts) => tapCmd(x, y, opts));
+
+program
+  .command("settle")
+  .description("Wait until the screen settles; print the diff vs the last `ax --refs` snapshot as JSON")
+  .option(...deviceOpt)
+  .option("--timeout <ms>", "Give up after this many ms (default 3000)")
+  .action((opts) => settleCmd(opts.device, opts.timeout));
 
 program
   .command("record")
@@ -2600,7 +2708,7 @@ program
 // Input subcommands can drive a remote preview (e.g. through an
 // authenticated tunnel) instead of the local state file.
 const REMOTE_INPUT_COMMANDS = new Set([
-  "gesture", "tap", "button", "type", "paste", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record",
+  "gesture", "tap", "button", "type", "paste", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record", "settle",
 ]);
 for (const cmd of program.commands) {
   if (!REMOTE_INPUT_COMMANDS.has(cmd.name())) continue;
@@ -2626,9 +2734,18 @@ program
 
 program
   .command("ax")
-  .description("Dump the current accessibility tree as JSON")
+  .description("Dump the current accessibility tree as JSON (--refs: compact nodes with @eN refs for tap)")
   .option(...deviceOpt)
-  .action((opts) => axDump(opts.device));
+  .option("--refs", "Compact agent snapshot with element refs, in device points")
+  .option("--all", "With --refs, include offscreen elements")
+  .option("--text", "With --refs, print one line per element instead of JSON")
+  .action((opts) => {
+    if ((opts.all || opts.text) && !opts.refs) {
+      console.error("serve-sim: --all and --text need --refs");
+      process.exit(1);
+    }
+    return opts.refs ? axRefs(opts.device, { all: opts.all, text: opts.text }) : axDump(opts.device);
+  });
 
 // `camera` and `permissions` keep their own dedicated argument parsers (the
 // camera verb has nested sub-verbs and source flags; permissions has a
