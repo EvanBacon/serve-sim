@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "http";
 import type { AddressInfo } from "net";
 import { normalizeAxTree, type RawAxeNode } from "../ax";
-import { axUrlFromStreamUrl, fetchAxSnapshot } from "../ax-cli";
+import { axUrlForWsUrl, fetchAxSnapshot } from "../ax-cli";
 
 function rawNode(overrides: Partial<RawAxeNode> = {}): RawAxeNode {
   return {
@@ -20,15 +20,18 @@ function rawNode(overrides: Partial<RawAxeNode> = {}): RawAxeNode {
 
 const SCREEN = { x: 0, y: 0, width: 393, height: 852 };
 
-describe("axUrlFromStreamUrl", () => {
-  test("maps the stream URL to the sibling /ax endpoint", () => {
-    expect(axUrlFromStreamUrl("http://127.0.0.1:3200/helper/UDID-1/stream.mjpeg"))
-      .toBe("http://127.0.0.1:3200/helper/UDID-1/ax");
+describe("axUrlForWsUrl", () => {
+  test("maps the HID socket URL to the sibling /ax endpoint", () => {
+    expect(axUrlForWsUrl("ws://127.0.0.1:3200/helper/UDID-1/ws")).toBe("http://127.0.0.1:3200/helper/UDID-1/ax");
   });
 
-  test("only rewrites the trailing path segment", () => {
-    expect(axUrlFromStreamUrl("http://127.0.0.1:3200/stream.mjpeg/helper/UDID/stream.mjpeg"))
-      .toBe("http://127.0.0.1:3200/stream.mjpeg/helper/UDID/ax");
+  test("keeps a remote preview's TLS and base path", () => {
+    expect(axUrlForWsUrl("wss://tunnel.example/base/helper/UDID/ws")).toBe("https://tunnel.example/base/helper/UDID/ax");
+  });
+
+  test("rejects URLs that are not a /ws socket", () => {
+    expect(axUrlForWsUrl("http://127.0.0.1:3200/helper/UDID/stream.mjpeg")).toBeNull();
+    expect(axUrlForWsUrl("not a url")).toBeNull();
   });
 });
 
@@ -93,12 +96,14 @@ describe("normalizeAxTree", () => {
 
 describe("fetchAxSnapshot", () => {
   let server: Server;
-  let streamUrl: string;
+  let axUrl: string;
   let status = 200;
+  let lastAuth: string | undefined;
   let body: unknown = [];
 
   beforeAll(async () => {
     server = createServer((req, res) => {
+      lastAuth = req.headers.authorization;
       if (req.url !== "/helper/UDID-TEST/ax") {
         res.writeHead(404);
         res.end();
@@ -109,7 +114,7 @@ describe("fetchAxSnapshot", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const { port } = server.address() as AddressInfo;
-    streamUrl = `http://127.0.0.1:${port}/helper/UDID-TEST/stream.mjpeg`;
+    axUrl = axUrlForWsUrl(`ws://127.0.0.1:${port}/helper/UDID-TEST/ws`)!;
   });
 
   afterAll(() => {
@@ -125,7 +130,8 @@ describe("fetchAxSnapshot", () => {
       }),
     ];
 
-    const snapshot = await fetchAxSnapshot(streamUrl);
+    const snapshot = await fetchAxSnapshot(axUrl, { Authorization: "Bearer t0k" });
+    expect(lastAuth).toBe("Bearer t0k");
     expect(snapshot.screen).toEqual({ width: SCREEN.width, height: SCREEN.height });
     expect(snapshot.elements).toHaveLength(1);
     expect(snapshot.elements[0]).toMatchObject({ id: "ok", label: "OK", role: "button", enabled: true });
@@ -135,7 +141,7 @@ describe("fetchAxSnapshot", () => {
     status = 503;
     body = { error: "ax_unavailable", message: "Accessibility unavailable on this simulator." };
 
-    await expect(fetchAxSnapshot(streamUrl)).rejects.toThrow(
+    await expect(fetchAxSnapshot(axUrl)).rejects.toThrow(
       "Accessibility unavailable on this simulator.",
     );
   });

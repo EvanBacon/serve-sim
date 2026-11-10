@@ -46,6 +46,7 @@ import { formatEventLogLine } from "./event-log-format";
 import {
   AxCliError,
   axAgentUrlForWsUrl,
+  axUrlForWsUrl,
   fetchAxSnapshot,
   formatAgentSnapshotText,
   parseTapTarget,
@@ -1094,7 +1095,7 @@ async function axAgentCall(
   path: AxAgentPath,
   opts: { params?: Record<string, string>; body?: unknown } = {},
 ): Promise<unknown> {
-  const target = await resolveInputTarget(deviceArg);
+  const target = await resolveAxTarget(deviceArg);
   const url = axAgentUrlForWsUrl(target.wsUrl, path, opts.params);
   if (!url) {
     console.error(`Cannot derive the accessibility endpoint from ${target.wsUrl}`);
@@ -1168,16 +1169,27 @@ async function tapCmd(
   console.log(JSON.stringify(await axAgentCall(opts.device, "act", { body })));
 }
 
+/**
+ * Where every accessibility command (`ax`, `ax --refs`, `tap @eN`, `settle`)
+ * goes: the same local-or-`--url` target as the input commands. Locally a
+ * simulator name is accepted too (resolved to its UDID, as `ax -d` always
+ * did); a remote preview is asked for the device as given.
+ */
+function resolveAxTarget(deviceArg: string | undefined): Promise<InputTarget> {
+  const local = !remoteInputUrl();
+  return resolveInputTarget(local && deviceArg ? resolveDevice(deviceArg) : deviceArg);
+}
+
 async function axDump(deviceArg?: string) {
-  const udid = deviceArg ? resolveDevice(deviceArg) : undefined;
-  const state = readState(udid);
-  if (!state) {
-    console.error("No serve-sim server running. Run `serve-sim` first.");
+  const target = await resolveAxTarget(deviceArg);
+  const url = axUrlForWsUrl(target.wsUrl);
+  if (!url) {
+    console.error(`Cannot derive the accessibility endpoint from ${target.wsUrl}`);
     process.exit(1);
   }
 
   try {
-    const snapshot = await fetchAxSnapshot(state.streamUrl);
+    const snapshot = await fetchAxSnapshot(url, target.headers);
     console.log(JSON.stringify(snapshot));
   } catch (err) {
     console.error(`Failed to read accessibility tree: ${err instanceof Error ? err.message : String(err)}`);
@@ -2705,10 +2717,25 @@ program
   .option("-n, --limit <count>", "Maximum number of events")
   .action((opts) => eventLog(opts.device, { json: opts.json, limit: opts.limit }));
 
+program
+  .command("ax")
+  .description("Dump the current accessibility tree as JSON (--refs: compact nodes with @eN refs for tap)")
+  .option(...deviceOpt)
+  .option("--refs", "Compact agent snapshot with element refs, in device points")
+  .option("--all", "With --refs, include offscreen elements")
+  .option("--text", "With --refs, print one line per element instead of JSON")
+  .action((opts) => {
+    if ((opts.all || opts.text) && !opts.refs) {
+      console.error("serve-sim: --all and --text need --refs");
+      process.exit(1);
+    }
+    return opts.refs ? axRefs(opts.device, { all: opts.all, text: opts.text }) : axDump(opts.device);
+  });
+
 // Input subcommands can drive a remote preview (e.g. through an
 // authenticated tunnel) instead of the local state file.
 const REMOTE_INPUT_COMMANDS = new Set([
-  "gesture", "tap", "button", "type", "paste", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record", "settle",
+  "gesture", "tap", "button", "type", "paste", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record", "settle", "ax",
 ]);
 for (const cmd of program.commands) {
   if (!REMOTE_INPUT_COMMANDS.has(cmd.name())) continue;
@@ -2731,21 +2758,6 @@ program
   .option("-j, --json", "Print the full JSON bundle")
   .option("-o, --out <file>", "Write the JSON bundle to a file")
   .action((opts) => doctor(opts.device, { json: opts.json, out: opts.out }));
-
-program
-  .command("ax")
-  .description("Dump the current accessibility tree as JSON (--refs: compact nodes with @eN refs for tap)")
-  .option(...deviceOpt)
-  .option("--refs", "Compact agent snapshot with element refs, in device points")
-  .option("--all", "With --refs, include offscreen elements")
-  .option("--text", "With --refs, print one line per element instead of JSON")
-  .action((opts) => {
-    if ((opts.all || opts.text) && !opts.refs) {
-      console.error("serve-sim: --all and --text need --refs");
-      process.exit(1);
-    }
-    return opts.refs ? axRefs(opts.device, { all: opts.all, text: opts.text }) : axDump(opts.device);
-  });
 
 // `camera` and `permissions` keep their own dedicated argument parsers (the
 // camera verb has nested sub-verbs and source flags; permissions has a

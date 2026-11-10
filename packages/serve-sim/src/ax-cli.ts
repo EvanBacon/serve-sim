@@ -4,27 +4,17 @@ import type { AxSnapshot } from "./ax-shared";
 import { normalizeRef, type AgentSnapshot } from "./ax-refs";
 
 /**
- * Map a device's stream URL (`…/helper/<udid>/stream.mjpeg`) to its sibling
- * one-shot accessibility endpoint (`…/helper/<udid>/ax`). The state file only
- * records the stream URL, so the `ax` CLI command derives the endpoint the
- * same way the accessibility-endpoint test does.
- *
- * @lintignore exported for its unit test
- */
-export function axUrlFromStreamUrl(streamUrl: string): string {
-  return streamUrl.replace(/\/stream\.mjpeg$/, "/ax");
-}
-
-/**
- * Fetch the raw axe-shaped tree from a running serve-sim server and normalize
- * it into the flat {@link AxSnapshot} shape the web UI consumes (roles,
- * labels, values, enabled state, frames).
+ * Fetch the raw axe-shaped tree from a running serve-sim server's `/ax`
+ * endpoint (see {@link axUrlForWsUrl}) and normalize it into the flat
+ * {@link AxSnapshot} shape the web UI consumes (roles, labels, values,
+ * enabled state, frames). `headers` carries the bearer token for a remote
+ * preview.
  *
  * Throws with the helper's message when the endpoint reports AX unavailable
  * (503 while the simulator's accessibility framework warms up).
  */
-export async function fetchAxSnapshot(streamUrl: string): Promise<AxSnapshot> {
-  const res = await fetch(axUrlFromStreamUrl(streamUrl));
+export async function fetchAxSnapshot(axUrl: string, headers: Record<string, string> = {}): Promise<AxSnapshot> {
+  const res = await fetch(axUrl, { headers });
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
     try {
@@ -41,11 +31,7 @@ export async function fetchAxSnapshot(streamUrl: string): Promise<AxSnapshot> {
 
 export type AxAgentPath = "snapshot" | "act" | "settle";
 
-/**
- * Map a device's HID socket URL (`…/helper/<udid>/ws`, local or `--url`
- * remote) to one of its `/ax/*` agent endpoints.
- */
-export function axAgentUrlForWsUrl(wsUrl: string, path: AxAgentPath, params: Record<string, string> = {}): string | null {
+function helperUrlForWsUrl(wsUrl: string, suffix: string, params: Record<string, string>): string | null {
   let url: URL;
   try {
     url = new URL(wsUrl);
@@ -54,10 +40,23 @@ export function axAgentUrlForWsUrl(wsUrl: string, path: AxAgentPath, params: Rec
   }
   if (!url.pathname.endsWith("/ws")) return null;
   url.protocol = url.protocol === "wss:" ? "https:" : "http:";
-  url.pathname = url.pathname.slice(0, -"ws".length) + `ax/${path}`;
+  url.pathname = url.pathname.slice(0, -"ws".length) + suffix;
   url.search = "";
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   return url.toString();
+}
+
+/**
+ * Map a device's HID socket URL (`…/helper/<udid>/ws`, local or `--url`
+ * remote) to one of its `/ax/*` agent endpoints.
+ */
+export function axAgentUrlForWsUrl(wsUrl: string, path: AxAgentPath, params: Record<string, string> = {}): string | null {
+  return helperUrlForWsUrl(wsUrl, `ax/${path}`, params);
+}
+
+/** The same device's one-shot `/ax` tree dump (what plain `serve-sim ax` prints). */
+export function axUrlForWsUrl(wsUrl: string): string | null {
+  return helperUrlForWsUrl(wsUrl, "ax", {});
 }
 
 export type TapTarget =

@@ -23,6 +23,12 @@ const SNAPSHOT = {
   nodes: [{ ref: "@e1", role: "cell", type: "Cell", label: "General", frame: { x: 0, y: 300, w: 402, h: 52 }, center: { x: 201, y: 326 } }],
 };
 
+const RAW_TREE = [{
+  AXUniqueId: null, AXLabel: null, AXValue: null, enabled: true, role_description: "application", type: "Application",
+  frame: { x: 0, y: 0, width: 402, height: 874 },
+  children: [{ AXUniqueId: null, AXLabel: "General", AXValue: null, enabled: true, role_description: "cell", type: "Cell", frame: { x: 0, y: 300, width: 402, height: 52 }, children: [] }],
+}];
+
 beforeAll(async () => {
   const wss = new WebSocketServer({ noServer: true });
   server = createServer((req, res) => {
@@ -36,6 +42,7 @@ beforeAll(async () => {
       const path = (req.url ?? "").split("?")[0];
       if (path === "/api") return json(200, { device: DEVICE });
       if (path === `/helper/${DEVICE}/ax/snapshot`) return json(200, SNAPSHOT);
+      if (path === `/helper/${DEVICE}/ax`) return json(200, RAW_TREE);
       if (path === `/helper/${DEVICE}/ax/settle`) return json(200, { settle: { settled: true, waitedMs: 210, reason: "frames-quiet" }, diff: { added: [], removed: [], changed: [] } });
       if (path === `/helper/${DEVICE}/ax/act`) {
         const ref = (JSON.parse(body) as { ref: string }).ref;
@@ -58,8 +65,14 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-function runCli(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const env = { ...process.env, SERVE_SIM_URL: url, SERVE_SIM_AUTH_TOKEN: TOKEN };
+function runCli(args: string[], opts: { viaFlags?: boolean } = {}): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const env: NodeJS.ProcessEnv = { ...process.env, SERVE_SIM_URL: url, SERVE_SIM_AUTH_TOKEN: TOKEN };
+  if (opts.viaFlags) {
+    // Only --url / --auth-token point at the remote, as for tap and settle.
+    delete env.SERVE_SIM_URL;
+    delete env.SERVE_SIM_AUTH_TOKEN;
+    args = [...args, "--url", url, "--auth-token", TOKEN];
+  }
   return new Promise((resolve) => {
     const child = spawn("bun", ["run", cli, ...args], { env });
     let stdout = "";
@@ -83,6 +96,31 @@ describe("serve-sim ax --refs / tap @ref / settle", () => {
     expect(JSON.parse(r.stdout)).toEqual(SNAPSHOT);
     expect(lastRequest().url).toBe(`/helper/${DEVICE}/ax/snapshot`);
     expect(lastRequest().headers.authorization).toBe(`Bearer ${TOKEN}`);
+  }, 25_000);
+
+  test("ax --refs reaches a remote server through --url / --auth-token like tap and settle", async () => {
+    const r = await runCli(["ax", "--refs", "-d", DEVICE], { viaFlags: true });
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual(SNAPSHOT);
+    expect(lastRequest().url).toBe(`/helper/${DEVICE}/ax/snapshot`);
+    expect(lastRequest().headers.authorization).toBe(`Bearer ${TOKEN}`);
+  }, 25_000);
+
+  test("plain ax dumps a remote server's tree through --url / --auth-token", async () => {
+    const r = await runCli(["ax", "-d", DEVICE], { viaFlags: true });
+    expect(r.status).toBe(0);
+    expect(lastRequest().url).toBe(`/helper/${DEVICE}/ax`);
+    expect(lastRequest().headers.authorization).toBe(`Bearer ${TOKEN}`);
+    const dump = JSON.parse(r.stdout) as { elements: Array<{ label: string }> };
+    expect(dump.elements.map((e) => e.label)).toEqual(["General"]);
+  }, 25_000);
+
+  test("tap @e1 and settle accept --url / --auth-token too", async () => {
+    expect((await runCli(["tap", "@e1", "-d", DEVICE], { viaFlags: true })).status).toBe(0);
+    expect(lastRequest().url).toBe(`/helper/${DEVICE}/ax/act`);
+    expect((await runCli(["settle", "-d", DEVICE], { viaFlags: true })).status).toBe(0);
+    expect(lastRequest().url).toBe(`/helper/${DEVICE}/ax/settle`);
   }, 25_000);
 
   test("ax --refs --all --text asks for offscreen nodes and prints lines", async () => {
