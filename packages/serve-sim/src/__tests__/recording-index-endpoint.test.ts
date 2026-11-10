@@ -257,11 +257,11 @@ describe("GET /recording/index", () => {
   });
 
   test("an index expires after its TTL", async () => {
-    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid(), recordingIndexTtlMs: 40 }));
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid(), recordingIndexTtlMs: 300 }));
     const { token, stop } = await recordOnce(base);
     await stop.arrayBuffer();
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
-    await Bun.sleep(80);
+    await Bun.sleep(500);
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(404);
   });
 
