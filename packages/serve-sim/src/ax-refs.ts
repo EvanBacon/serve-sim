@@ -512,9 +512,16 @@ function contextSurvived(
  * so trying more of them when the anchors disagree is always safe.
  */
 function candidateOffsets(anchors: Array<{ path: string; offset: Offset }>, path: string): Offset[] {
-  for (let level = 1; ; level++) {
-    const root = ancestorPath(path, level);
-    const inside = anchors.filter((anchor) => inSubtree(anchor.path, root) && anchor.path !== path);
+  return offsetsAround(anchors, ancestorPath(path, 1), path);
+}
+
+/**
+ * {@link candidateOffsets} for whatever sits in `container`: the anchors of
+ * the nearest enclosing subtree that holds any, leaving out `except`.
+ */
+function offsetsAround(anchors: Array<{ path: string; offset: Offset }>, container: string, except: string | null): Offset[] {
+  for (let root = container; ; root = ancestorPath(root, 1)) {
+    const inside = anchors.filter((anchor) => inSubtree(anchor.path, root) && anchor.path !== except);
     if (inside.length > 0) {
       const first = inside[0]!.offset;
       const agree = inside.every((a) =>
@@ -568,23 +575,38 @@ class TextsByTop {
 function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor[]): boolean {
   const prevCounts = countValues(prevTexts.map((t) => t.key));
   const currentCounts = countValues(texts.map((t) => t.key));
-  const prevByKey = new Map<string, NamedText[]>();
-  for (const t of prevTexts) {
-    const list = prevByKey.get(t.key);
-    if (list) list.push(t);
-    else prevByKey.set(t.key, [t]);
-  }
+  const byKey = (list: NamedText[]) => {
+    const map = new Map<string, NamedText[]>();
+    for (const t of list) {
+      const copies = map.get(t.key);
+      if (copies) copies.push(t);
+      else map.set(t.key, [t]);
+    }
+    return map;
+  };
+  const prevByKey = byKey(prevTexts);
+  const currentByKey = byKey(texts);
   const currentByTop = new TextsByTop(texts);
+  // Per container, not per text: the text's own anchor is not left out, which
+  // can only add an offset to try.
+  const offsetsByContainer = new Map<string, Offset[]>();
   for (const before of prevTexts) {
     const fewer = (currentCounts.get(before.key) ?? 0) < prevCounts.get(before.key)!;
-    const offsets = [{ dx: 0, dy: 0 }, ...candidateOffsets(anchors, before.path)];
+    const container = ancestorPath(before.path, 1);
+    let offsets = offsetsByContainer.get(container);
+    if (!offsets) {
+      offsets = [{ dx: 0, dy: 0 }, ...offsetsAround(anchors, container, null)];
+      offsetsByContainer.set(container, offsets);
+    }
     for (const offset of offsets) {
       for (const now of currentByTop.at(before.rect, before.type, offset)) {
         if (now.key === before.key) continue;
         if (fewer && currentCounts.get(now.key)! > (prevCounts.get(now.key) ?? 0)) return true;
         // Did `before`'s name take the old place of a copy of `now`'s name?
-        const theirs = prevByKey.get(now.key) ?? [];
-        if (theirs.some((t) => currentByTop.at(t.rect, t.type, offset).some((c) => c.key === before.key))) return true;
+        const mine = currentByKey.get(before.key) ?? [];
+        for (const t of prevByKey.get(now.key) ?? []) {
+          if (mine.some((c) => c.type === t.type && inPlace(t.rect, c.rect, offset))) return true;
+        }
       }
     }
   }
