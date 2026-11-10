@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { bufferUrlForWsUrl, formatBufferView, runBufferCommand, type BufferCliDeps } from "../buffer-cli";
+import { bufferUrlForWsUrl, formatBufferView, runBufferCommand, startBufferOnReusedServer, type BufferCliDeps } from "../buffer-cli";
 import type { BufferStats, BufferView, RollingBufferOptions } from "../rolling-buffer";
 
 const WS = "ws://127.0.0.1:3400/helper/DEV/ws";
@@ -198,6 +198,37 @@ describe("runBufferCommand", () => {
     const { d, err } = deps({ "/buffer": json({ enabled: false }) });
     expect(await runBufferCommand("dump", {}, d)).toBe(1);
     expect(err[0]).toContain("off");
+  });
+});
+
+describe("startBufferOnReusedServer", () => {
+  const started = { enabled: true, options: { ...VIEW.options, seconds: 30 }, startedAt: "2026-11-10T12:00:00.000Z" };
+  test("starts the buffer with the --buffer seconds and says so on stderr", async () => {
+    const { d, calls, err, out } = deps({ "/buffer/start": json(started) });
+    expect(await startBufferOnReusedServer("30", d)).toBe(true);
+    expect(calls).toEqual([{ url: "http://127.0.0.1:3400/helper/DEV/buffer/start?seconds=30", method: "POST", headers: { Authorization: "Bearer T" } }]);
+    expect(err[0]).toContain("started on the existing server (last 30 s");
+    expect(out).toEqual([]);
+  });
+
+  test("`on` uses the server defaults; the same buffer already on is quiet", async () => {
+    const { d, calls, err } = deps({ "/buffer/start": json({ ...started, alreadyRunning: true }) });
+    expect(await startBufferOnReusedServer("on", d)).toBe(true);
+    expect(calls[0]!.url).toBe("http://127.0.0.1:3400/helper/DEV/buffer/start");
+    expect(err).toEqual([]);
+  });
+
+  test("other options already running, an old server, or an unreachable one only warn", async () => {
+    const conflict = deps({ "/buffer/start": json({ error: "buffer_running", ...started }, 409) });
+    expect(await startBufferOnReusedServer("10", conflict.d)).toBe(false);
+    expect(conflict.err[0]).toContain("already runs with other options (30 s");
+    const old = deps({});
+    expect(await startBufferOnReusedServer("on", old.d)).toBe(false);
+    expect(old.err[0]).toContain("existing server has no buffer");
+    expect(old.err[0]).toContain("serve-sim buffer start");
+    const down = deps({}, { fetch: async () => { throw new Error("ECONNREFUSED"); } });
+    expect(await startBufferOnReusedServer("on", down.d)).toBe(false);
+    expect(down.err[0]).toContain("ECONNREFUSED");
   });
 });
 

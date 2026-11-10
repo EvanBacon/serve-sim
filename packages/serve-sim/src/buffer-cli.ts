@@ -164,6 +164,51 @@ async function fetchFrame(deps: BufferCliDeps, params: Record<string, string>): 
   return new Uint8Array(await res.arrayBuffer());
 }
 
+/**
+ * `serve-sim --buffer` found a server already running for the device: the
+ * buffer default only reaches sessions that server creates itself, so start
+ * it there. `value` is the `SERVE_SIM_BUFFER` value (on, or seconds). Never
+ * throws; anything but a start (or the same buffer already on) is a stderr
+ * warning, since the server itself is fine to reuse.
+ */
+export async function startBufferOnReusedServer(
+  value: string,
+  deps: Pick<BufferCliDeps, "wsUrl" | "headers" | "fetch" | "error">,
+): Promise<boolean> {
+  const params: Record<string, string> = /^\d+$/.test(value.trim()) ? { seconds: value.trim() } : {};
+  const url = bufferUrlForWsUrl(deps.wsUrl, "start", params);
+  const fallback = "run `serve-sim buffer start` to turn it on";
+  if (!url) {
+    deps.error(`[serve-sim] --buffer: cannot reach the existing server's buffer at ${deps.wsUrl}; ${fallback}`);
+    return false;
+  }
+  let res: Response;
+  let body: ServerView & { alreadyRunning?: boolean; error?: string; message?: string };
+  try {
+    res = await deps.fetch(url, { method: "POST", headers: deps.headers });
+    body = await res.json().catch(() => ({ enabled: false }));
+  } catch (error) {
+    deps.error(`[serve-sim] --buffer: the existing server has no buffer (${error instanceof Error ? error.message : String(error)}); ${fallback}`);
+    return false;
+  }
+  if (res.ok && body.options) {
+    if (!body.alreadyRunning) {
+      deps.error(`  Buffer:    started on the existing server (last ${body.options.seconds} s; serve-sim buffer list)`);
+    }
+    return true;
+  }
+  if (res.status === 409 && body.error === "buffer_running" && body.options) {
+    deps.error(
+      `[serve-sim] --buffer: the existing server's buffer already runs with other options (${body.options.seconds} s at ${body.options.fps} fps); ` +
+        "`serve-sim buffer stop` then `serve-sim buffer start` to change it",
+    );
+    return false;
+  }
+  const reason = body.message ?? body.error ?? `HTTP ${res.status}`;
+  deps.error(`[serve-sim] --buffer: the existing server has no buffer (${reason}); ${fallback}`);
+  return false;
+}
+
 /** Run one `buffer` verb; resolves to the process exit code. */
 export async function runBufferCommand(verb: BufferVerb, opts: BufferCliOptions, deps: BufferCliDeps): Promise<number> {
   try {

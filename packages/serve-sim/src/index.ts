@@ -105,7 +105,7 @@ import {
   type DiagnosticsBundle,
 } from "./doctor";
 import { redactHome } from "./diagnostics-redact";
-import { BUFFER_VERBS, runBufferCommand, type BufferCliOptions, type BufferVerb } from "./buffer-cli";
+import { BUFFER_VERBS, runBufferCommand, startBufferOnReusedServer, type BufferCliOptions, type BufferVerb } from "./buffer-cli";
 import { ROLLING_BUFFER_ENV, parseRollingBufferEnv } from "./rolling-buffer";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
@@ -270,6 +270,18 @@ async function readReusableState(udid: string, allowExec: boolean): Promise<Serv
   }
   clearState(udid);
   return null;
+}
+
+/** `--buffer` (or SERVE_SIM_BUFFER) with a reused server: start the buffer there too. */
+async function applyBufferToReusedServer(state: ServerState): Promise<void> {
+  if (!parseRollingBufferEnv(process.env, () => {})) return;
+  const token = resolveAuthToken(undefined);
+  await startBufferOnReusedServer(process.env[ROLLING_BUFFER_ENV]!, {
+    wsUrl: state.wsUrl,
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    fetch: (input, init) => fetch(input, init),
+    error: (line) => console.error(line),
+  });
 }
 
 function readAllStates(): ServerState[] {
@@ -532,6 +544,7 @@ async function follow(devices: string[], startPort: number, quiet: boolean, allo
         console.log(`  Stream:    ${existing.streamUrl}`);
         console.log(`  WebSocket: ${existing.wsUrl}`);
       }
+      await applyBufferToReusedServer(existing);
       states.push(existing);
       continue;
     }
@@ -642,6 +655,7 @@ async function detach(devices: string[], startPort: number, allowExec: boolean):
   for (const udid of udids) {
     const existing = await readReusableState(udid, allowExec);
     if (existing) {
+      await applyBufferToReusedServer(existing);
       states.push(existing);
       continue;
     }
