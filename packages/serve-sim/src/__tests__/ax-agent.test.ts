@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AxElement, AxSnapshot } from "../ax-shared";
 import { AxAgent, AxAgentError, type AxAgentDeps } from "../ax-agent";
+import { cliInputOrientation, displayTouchToRaw } from "../touch-remap";
 
 const SCREEN = { width: 400, height: 800 };
 
@@ -194,6 +195,33 @@ describe("AxAgent.act", () => {
     await agent.snapshot();
     await agent.act({ ref: "@e1" });
     expect(taps[0]!.y).toBeCloseTo(750 / 800);
+  });
+
+  test("landscape: the AX frame's center lands on the matching raw portrait HID point", async () => {
+    // A landscape_left app on a 402x874 pt phone: AX reports a landscape
+    // screen while the captured buffer stays portrait (1206x2622 px), so
+    // DeviceSession.injectTap remaps the normalized point like `serve-sim tap`.
+    const landscape: AxSnapshot = {
+      screen: { width: 874, height: 402 },
+      elements: [el("Play", 0, { type: "Button", role: "button", frame: { x: 700, y: 300, width: 100, height: 50 } })],
+      errors: [],
+    };
+    const { deps, taps } = fakeDevice([landscape]);
+    const agent = new AxAgent(deps);
+    await agent.snapshot();
+    await agent.act({ ref: "@e1" });
+    const display = taps[0]!;
+    expect(display.x).toBeCloseTo(750 / 874);
+    expect(display.y).toBeCloseTo(325 / 402);
+    const orientation = cliInputOrientation({ width: 1206, height: 2622, orientation: "landscape_left" });
+    expect(orientation).toBe("landscape_left");
+    const raw = displayTouchToRaw({ type: "begin", x: display.x, y: display.y }, orientation);
+    // landscape_left: raw x runs along the display's y, raw y against its x.
+    expect(raw.x).toBeCloseTo(325 / 402);
+    expect(raw.y).toBeCloseTo(1 - 750 / 874);
+    // Portrait-shaped buffers with no rotation pass through untouched.
+    expect(displayTouchToRaw({ type: "begin", x: 0.3, y: 0.7 }, cliInputOrientation({ width: 1206, height: 2622, orientation: "portrait" })))
+      .toMatchObject({ x: 0.3, y: 0.7 });
   });
 
   test("validates the request body", async () => {
