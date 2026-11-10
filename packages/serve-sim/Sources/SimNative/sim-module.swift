@@ -221,8 +221,10 @@ private func u32(_ v: Int) -> UInt32 {
 
     /// Downscaled JPEG of the latest frame for the opt-in rolling buffer:
     /// `{ data, width, height, sourceWidth, sourceHeight }`, or null before
-    /// the first frame. `maxDimension` caps the long edge (64...2048 px);
-    /// `quality` is the JPEG quality (0.1...1).
+    /// the first frame. `maxDimension` caps the long edge and `quality` is
+    /// the JPEG quality. TypeScript refuses values outside 64...1280 px and
+    /// 0.1...0.95 (ROLLING_BUFFER_LIMITS); the wider clamps here
+    /// (64...2048, 0.1...1) are only a safety net for direct callers.
     @NodeMethod func thumbnailJpeg(_ maxDimension: Int, _ quality: Double) async throws -> NodeValueConvertible {
         let maxDimension = min(max(maxDimension, 64), 2048)
         let quality = min(max(quality.isFinite ? quality : 0.6, 0.1), 1)
