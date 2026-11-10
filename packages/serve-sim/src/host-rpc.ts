@@ -220,6 +220,17 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       return { ...(await run("xcrun", simctlArguments(["launch", udid, "com.apple.springboard"]))) };
     },
 
+    async relaunchApp(p) {
+      const udid = udidParam(p);
+      const bundleId = bundleIdParam(p);
+      // Terminating SpringBoard respawns the whole home screen.
+      if (bundleId === "com.apple.springboard") fail("cannot relaunch SpringBoard");
+      await requireDevice(udid);
+      // Fails when the app isn't running; launching it is still wanted.
+      await run("xcrun", simctlArguments(["terminate", udid, bundleId]));
+      return { ...(await run("xcrun", simctlArguments(["launch", udid, bundleId]))) };
+    },
+
     async screenshot(p) {
       const udid = udidParam(p);
       const display = p.display === undefined ? undefined : enumParam(p, "display", DISPLAYS);

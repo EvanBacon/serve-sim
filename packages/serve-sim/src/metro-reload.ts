@@ -14,6 +14,16 @@
 //     which by the check above reaches only this device. A device on the
 //     message socket without an inspector connection isn't in `/json/list`,
 //     so in that case a broadcast could also reach it.
+// Every reload leaves the previous JS instance's `/message` socket open, so
+// after the first reload `getpeers` lists several app sockets for one app.
+// The stale ones ignore a targeted `reload`, while a broadcast reloads the
+// app once. So when `/json/list` shows exactly one app (ours, on this
+// device) and every app socket in `getpeers` has role `ios` (the
+// simulator's platform), several app sockets are taken to be stale ones and
+// the reload is broadcast; with other apps, devices, or platforms connected
+// nothing is sent. A physical iOS device connected to `/message` without an
+// inspector connection isn't in `/json/list` and also has role `ios`, so it
+// could still receive that broadcast.
 // Anything else (no Metro, several devices or apps, Expo Go) is reported as
 // not sent so the caller can tap R in the guest instead. Metro is only looked
 // for on ports 8081-8090; Metro on any other port always gets the R tap.
@@ -98,6 +108,19 @@ export function metroServesOnlyDevice(
 }
 
 /**
+ * Whether `bundleId` on `deviceName` is the only app connected to this
+ * Metro: every inspector target with an app id is that app on that device.
+ */
+export function metroServesOnlyApp(
+  targets: readonly MetroTarget[],
+  bundleId: string,
+  deviceName: string,
+): boolean {
+  if (!metroServesOnlyDevice(targets, bundleId, deviceName)) return false;
+  return targets.every((t) => !t.appId || (t.appId === bundleId && t.deviceName === deviceName));
+}
+
+/**
  * Name to match against Metro's `deviceName` for simulator `udid`, or
  * undefined when it can't identify this simulator alone: Metro only knows
  * device names, so another booted simulator with the same name could be the
@@ -129,9 +152,19 @@ export type MetroReloadResult =
  */
 export type MetroSendOutcome = "targeted" | "broadcast" | "ambiguous" | "failed";
 
+export interface MetroSendOptions {
+  /**
+   * Broadcast when several app sockets are connected instead of reporting
+   * `ambiguous`; only safe when `/json/list` shows a single app, so the
+   * extra sockets are stale ones left by earlier reloads. Still `ambiguous`
+   * if any app socket has a role other than `ios`.
+   */
+  broadcastIfSeveral?: boolean;
+}
+
 export interface MetroReloadDeps {
   fetchJson?: (url: string) => Promise<unknown>;
-  sendReload?: (port: number) => Promise<MetroSendOutcome>;
+  sendReload?: (port: number, options: MetroSendOptions) => Promise<MetroSendOutcome>;
   /** Overrides METRO_LOOKUP_BUDGET_MS (tests). */
   lookupBudgetMs?: number;
 }
@@ -149,26 +182,47 @@ async function defaultFetchJson(url: string): Promise<unknown> {
 export function appPeerIds(peers: unknown): string[] {
   if (!peers || typeof peers !== "object") return [];
   return Object.entries(peers as Record<string, unknown>)
-    .filter(([, query]) => hasRole(query))
+    .filter(([, query]) => peerRole(query) != null)
     .map(([id]) => id);
 }
 
-function hasRole(query: unknown): boolean {
-  if (typeof query === "string") return new URLSearchParams(query).has("role");
-  if (query && typeof query === "object") return (query as { role?: unknown }).role != null;
-  return false;
+/** Roles (platforms) of the app sockets in a `getpeers` result. */
+export function appPeerRoles(peers: unknown): string[] {
+  if (!peers || typeof peers !== "object") return [];
+  return Object.values(peers as Record<string, unknown>)
+    .map(peerRole)
+    .filter((role): role is string => role != null);
 }
+
+/** A peer's `role` query param, from a raw or parsed query; null for tools. */
+function peerRole(query: unknown): string | null {
+  if (typeof query === "string") return new URLSearchParams(query).get("role");
+  if (query && typeof query === "object") {
+    const role = (query as { role?: unknown }).role;
+    return role == null ? null : String(role);
+  }
+  return null;
+}
+
+/** The simulator's platform, as app sockets report it in `getpeers`. */
+const SIMULATOR_ROLE = "ios";
 
 /**
  * Send `reload` on Metro's message socket. Asks Metro for its peers first;
  * with exactly one app connected the reload is addressed to that socket
  * only. If Metro doesn't answer `getpeers`, or answers with an error, the
  * reload is broadcast, which the caller only allows when a single device is
- * connected.
+ * connected. Several app sockets are `ambiguous` unless `broadcastIfSeveral`
+ * is set and every one of them has role `ios`, in which case the reload is
+ * broadcast.
  */
 export function sendMetroReload(
   port: number,
-  { peersTimeoutMs = 500, timeoutMs = METRO_SEND_TIMEOUT_MS }: { peersTimeoutMs?: number; timeoutMs?: number } = {},
+  {
+    peersTimeoutMs = 500,
+    timeoutMs = METRO_SEND_TIMEOUT_MS,
+    broadcastIfSeveral = false,
+  }: MetroSendOptions & { peersTimeoutMs?: number; timeoutMs?: number } = {},
 ): Promise<MetroSendOutcome> {
   return new Promise((resolve) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/message`);
@@ -211,7 +265,13 @@ export function sendMetroReload(
       }
       const apps = appPeerIds(msg.result);
       if (apps.length === 1) send({ method: "reload", target: apps[0] }, "targeted");
-      else done(apps.length === 0 ? "failed" : "ambiguous");
+      else if (apps.length === 0) done("failed");
+      // Another platform's app socket is a different device, which a
+      // broadcast would also reload.
+      else if (broadcastIfSeveral && appPeerRoles(msg.result).every((r) => r === SIMULATOR_ROLE)) {
+        send({ method: "reload" }, "broadcast");
+      }
+      else done("ambiguous");
     });
     ws.on("error", () => done(pending ?? "failed"));
   });
@@ -252,7 +312,7 @@ export async function reloadViaMetro(
   ports: readonly number[] = DEFAULT_METRO_PORTS,
   {
     fetchJson = defaultFetchJson,
-    sendReload = (port) => sendMetroReload(port),
+    sendReload = (port, options) => sendMetroReload(port, options),
     lookupBudgetMs = METRO_LOOKUP_BUDGET_MS,
   }: MetroReloadDeps = {},
 ): Promise<MetroReloadResult> {
@@ -272,7 +332,9 @@ export async function reloadViaMetro(
     return { sent: false, reason: "ambiguous", ports: servingPorts };
   }
   const port = servingPorts[0]!;
-  const outcome = await sendReload(port);
+  const outcome = await sendReload(port, {
+    broadcastIfSeveral: metroServesOnlyApp(serving[0]![1], bundleId, name),
+  });
   if (outcome === "targeted" || outcome === "broadcast") {
     return { sent: true, port, targeted: outcome === "targeted" };
   }
