@@ -38,13 +38,13 @@ const BLIP_MAX_FRAMES = 2;
 const BLIP_WINDOW_MS = 120;
 const BLIP_TAIL_MS = 80;
 
-export interface SettleRead<T> {
+interface SettleRead<T> {
   /** Equal signatures mean an unchanged AX tree. */
   signature: string;
   value: T;
 }
 
-export type SettleReason = "frames-quiet" | "ax-quiet" | "timeout";
+type SettleReason = "frames-quiet" | "ax-quiet" | "timeout";
 
 export interface SettleOptions<T> {
   /** One AX read of the current screen. */
