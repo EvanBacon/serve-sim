@@ -17,11 +17,16 @@
  *   loudly, which beats a tap on whatever now occupies its slot.
  * - "Unique" is judged against the whole previous tree, offscreen elements
  *   included, not just the elements that got a ref.
- * - Neither a unique id/label nor position is enough on its own: the
- *   uniquely labelled content around an element must have survived too (no
- *   heading or navigation-bar title replaced around it, most of its nearest
- *   context and of its own row's neighbours still there, read-only values
- *   included), see {@link contextSurvived}. That applies to AXUniqueIds too.
+ * - Nothing carries at all when the screen shows other content in the same
+ *   place: a keyed text swapped for a new one in its frame, a keyed
+ *   element's read-only value changed, a visible title gone without
+ *   scrolling away, or titles reordered (see {@link screenReplaced}).
+ * - Otherwise neither a unique id/label nor position is enough on its own:
+ *   the uniquely labelled content around an element must have survived too
+ *   (the first heading or navigation-bar title of each enclosing scope kept,
+ *   most of its nearest context and of its own row's neighbours still
+ *   there, read-only values included), see {@link contextSurvived}. That
+ *   applies to AXUniqueIds too.
  */
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
@@ -89,6 +94,14 @@ interface KeyedElement {
   rect: AxRect;
   /** A heading or navigation-bar title: replacing it means another screen. */
   title: boolean;
+  /** Element type, for spotting one text swapped for another in place. */
+  type: string;
+  /**
+   * What the element shows beyond its key: its read-only value, and for an
+   * AXUniqueId-keyed text its label. A change here on a uniquely keyed
+   * element is a content swap (see {@link screenReplaced}).
+   */
+  content: string;
 }
 
 export interface RefState {
@@ -104,6 +117,8 @@ export interface RefState {
   groups: Map<string, GroupMember[]>;
   /** The latest tree's uniquely keyed elements in tree order, for judging whether an element's context survived. */
   keyed: KeyedElement[];
+  /** Every labelled, identified or value-named key in the latest tree, duplicates included (unqualified). */
+  names: Set<string>;
   /** Refs of elements that vanished, newest last (bounded), for stale-ref messages. */
   retired: Array<{ ref: string; role: string; label: string }>;
   nextRef: number;
@@ -148,7 +163,17 @@ const INTERACTIVE_TYPES = new Set([
 ]);
 
 /** Types whose value is content (a field's contents on a detail screen), not state the user edits in place. */
-const CONTENT_VALUE_TYPES = new Set(["StaticText", "Heading", "Cell", "Row", "Image", "Group", "Other"]);
+const CONTENT_VALUE_TYPES = new Set(["StaticText", "Heading", "Cell", "Row", "Image", "Group", "Other", "Button", "Link"]);
+
+/**
+ * Types whose label names what is on screen (a contact's name, a row's
+ * title). One of these swapped for another in the same place means other
+ * content, see {@link screenReplaced}.
+ */
+const TEXT_TYPES = new Set(["Heading", "StaticText", "Cell"]);
+
+/** Types keyed by their value when they have no label (SwiftUI/UIKit text exposed as AXValue only). */
+const VALUE_NAMED_TYPES = new Set(["Heading", "StaticText"]);
 
 /** Values that are a control's state ("1", "Off"), not content that names a record. */
 const STATE_VALUE = /^(0|1|on|off|true|false|yes|no|selected|not selected|checked|unchecked)$/i;
@@ -170,6 +195,12 @@ export function isVisibleFrame(frame: AxRect, screen: { width: number; height: n
   return frame.x < screen.width && frame.y < screen.height && frame.x + frame.width > 0 && frame.y + frame.height > 0;
 }
 
+/** The element's content beyond its key: see {@link KeyedElement.content}. */
+function contentOf(element: AxElement): string {
+  const value = isContentValue(element) ? element.value : "";
+  return hasUniqueId(element) && TEXT_TYPES.has(element.type) ? `${element.label}\u0000${value}` : value;
+}
+
 function hasUniqueId(element: AxElement): boolean {
   // normalizeAxTree falls back to the tree path when AXUniqueId is null.
   return element.id !== "" && element.id !== element.path;
@@ -182,8 +213,9 @@ function isInterestingElement(element: AxElement): boolean {
 
 /**
  * Identity group per element: `id:<AXUniqueId>`, else `<type>|<label>`, else
- * `<type>@` (all unlabelled elements of a type). Values are deliberately
- * excluded so typing into a field reads as a change, not a replacement.
+ * `<type>=<value>` for value-only text, else `<type>@` (all unlabelled
+ * elements of a type). Values are otherwise excluded so typing into a field
+ * reads as a change, not a replacement.
  * A key shared by several elements in one tree (a repeated label or a
  * per-row accessibilityIdentifier) is qualified with the nearest labelled
  * (or identified) ancestor, so "Delete" in Alice's row and "Delete" in Bob's
@@ -191,17 +223,23 @@ function isInterestingElement(element: AxElement): boolean {
  * is the same element; anything else (duplicates, unlabelled elements) is
  * matched by frame, see {@link matchGroup}.
  */
+function namedKey(element: AxElement): string | null {
+  if (hasUniqueId(element)) return `id:${element.id}`;
+  if (element.label !== "") return `${element.type}|${element.label}`;
+  if (element.value !== "" && VALUE_NAMED_TYPES.has(element.type)) return `${element.type}=${element.value}`;
+  return null;
+}
+
 function identityGroups(elements: AxElement[]): Array<{ key: string; unique: boolean }> {
   const base = elements.map((element) => {
-    if (hasUniqueId(element)) return { key: `id:${element.id}`, unique: true, qualify: true };
-    if (element.label !== "") return { key: `${element.type}|${element.label}`, unique: true, qualify: true };
-    return { key: `${element.type}@`, unique: false, qualify: true };
+    const key = namedKey(element);
+    return key ? { key, unique: true, qualify: true } : { key: `${element.type}@`, unique: false, qualify: true };
   });
   const counts = countValues(base.map((group) => group.key));
   const anchorByPath = new Map<string, string>();
   for (const element of elements) {
-    if (hasUniqueId(element)) anchorByPath.set(element.path, `id:${element.id}`);
-    else if (element.label !== "") anchorByPath.set(element.path, `${element.type}|${element.label}`);
+    const key = namedKey(element);
+    if (key) anchorByPath.set(element.path, key);
   }
   return base.map((group, index) => {
     if (!group.qualify || counts.get(group.key)! < 2) return { key: group.key, unique: group.unique };
@@ -430,6 +468,86 @@ function contextSurvived(
   return true;
 }
 
+/** Where the content around a vanished element moved: the offsets worth testing for its replacement. */
+function candidateOffsets(anchors: Array<{ path: string; offset: Offset }>, path: string): Offset[] {
+  for (let level = 1; ; level++) {
+    const root = ancestorPath(path, level);
+    const inside = anchors.filter((anchor) => inSubtree(anchor.path, root) && anchor.path !== path);
+    if (inside.length > 0) {
+      const first = inside[0]!.offset;
+      const agree = inside.every((a) =>
+        Math.abs(a.offset.dx - first.dx) <= OFFSET_TOLERANCE && Math.abs(a.offset.dy - first.dy) <= OFFSET_TOLERANCE);
+      // Disagreeing anchors (a row deleted, sticky chrome over scrolled rows)
+      // can't say which way it went: try staying put as well as each of them.
+      return agree ? [first] : [{ dx: 0, dy: 0 }, ...inside.map((a) => a.offset)];
+    }
+    if (root === "") return [{ dx: 0, dy: 0 }];
+  }
+}
+
+/**
+ * The screen now shows other content in the same place: another record,
+ * another page of a list, another screen. Any one of these retires every
+ * ref, wherever it is, because shared chrome (action buttons, field headers,
+ * tab bars, a generic "Contact" title) can't say whose screen it now is, and
+ * however much of it survived, a majority vote can't tell chrome from the
+ * one label that names the record. Each check needs only one element:
+ * - In-place swap: a uniquely keyed text (Heading, StaticText, Cell) vanished,
+ *   and a text of the same type that wasn't in the previous tree now sits in
+ *   its frame (after the scroll measured from surviving keys around it).
+ *   Alice's name becoming Bob's, or a full-page scroll showing other rows.
+ * - Content swap: a uniquely keyed element kept its key but shows other
+ *   read-only content: a cell, text or button value ("Phone: 555-0001" →
+ *   "555-0002"), or an AXUniqueId-keyed text's label. Editable values (text
+ *   fields) and on/off state don't count.
+ * - Vanished title: a visible heading or navigation-bar title is gone, and
+ *   the content around it didn't scroll it offscreen.
+ * - Reordered titles: the headings both trees share are in another order.
+ * The cost is churn: a counter, clock or status line changing in place
+ * retires every ref on the screen. A stale ref beats a tap on another
+ * record's button.
+ */
+function screenReplaced(
+  prev: RefState,
+  keyed: KeyedElement[],
+  names: Set<string>,
+  screen: { width: number; height: number },
+): boolean {
+  const prevByKey = new Map<string, KeyedElement>();
+  for (const k of prev.keyed) if (k.fact === k.key) prevByKey.set(k.key, k);
+  const currentByKey = new Map<string, KeyedElement>();
+  for (const k of keyed) if (k.fact === k.key) currentByKey.set(k.key, k);
+
+  const anchors: Array<{ path: string; offset: Offset }> = [];
+  for (const [key, before] of prevByKey) {
+    const after = currentByKey.get(key);
+    if (!after) continue;
+    if (after.content !== before.content) return true;
+    anchors.push({ path: before.path, offset: { dx: after.rect.x - before.rect.x, dy: after.rect.y - before.rect.y } });
+  }
+
+  const arrived = [...currentByKey.values()].filter((k) => TEXT_TYPES.has(k.type) && !prev.names.has(k.key));
+  for (const before of prevByKey.values()) {
+    if (currentByKey.has(before.key)) continue;
+    // Still there as one of several duplicates: not gone.
+    if (names.has(before.key)) continue;
+    const swappable = TEXT_TYPES.has(before.type);
+    const vanishedTitle = before.title && isVisibleFrame(before.rect, prev.screen);
+    if (!swappable && !vanishedTitle) continue;
+    for (const offset of candidateOffsets(anchors, before.path)) {
+      if (swappable && arrived.some((k) => k.type === before.type && framesClose(before.rect, k.rect, offset))) return true;
+      if (vanishedTitle) {
+        const moved = { ...before.rect, x: before.rect.x + offset.dx, y: before.rect.y + offset.dy };
+        if (isVisibleFrame(moved, screen)) return true;
+      }
+    }
+  }
+
+  const prevTitles = prev.keyed.filter((k) => k.title && k.fact === k.key && currentByKey.get(k.key)?.title).map((k) => k.key);
+  const currentTitles = keyed.filter((k) => k.title && k.fact === k.key && prevByKey.get(k.key)?.title).map((k) => k.key);
+  return prevTitles.some((key, i) => currentTitles[i] !== key);
+}
+
 /**
  * Which previous member (index into `prev`, the group's members in the
  * whole previous tree) each current member continues, or -1 for a new
@@ -534,13 +652,19 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   for (const [key, indexes] of currentByGroup) {
     if (indexes.length !== 1 || !groups[indexes[0]!]!.unique) continue;
     const element = interesting[indexes[0]!]!;
-    keyed.push({ key, fact: key, path: element.path, rect: element.frame, title: isTitle(element) });
-    // A read-only value is a second fact of its own: Alice's "Phone" value is
+    const base = { key, path: element.path, rect: element.frame, type: element.type, content: contentOf(element) };
+    keyed.push({ ...base, fact: key, title: isTitle(element) });
+    // What it shows is a second fact of its own: Alice's "Phone" value is
     // lost on Bob's screen while the shared "Phone" header survives.
-    if (isContentValue(element)) keyed.push({ key, fact: `${key}=${element.value}`, path: element.path, rect: element.frame, title: false });
+    if (base.content !== "") keyed.push({ ...base, fact: `${key}=${base.content}`, title: false });
   }
   // Tree order, so "first title of a scope" means the topmost in the tree.
   keyed.sort((a, b) => comparePaths(a.path, b.path));
+
+  // Another record or another page in the same place: nothing carries.
+  const names = new Set(interesting.map(namedKey).filter((key): key is string => key !== null));
+  const replaced = prev !== null && screenReplaced(prev, keyed, names, screen);
+  const matchable = replaced ? new Map<string, number[]>() : currentByGroup;
 
   // Unique keys present once on both sides say how their content moved,
   // unless what surrounded them was replaced (then they aren't the same
@@ -548,7 +672,7 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   // on every detail screen names a different button on each.
   const anchors: Anchor[] = [];
   const loneOk = new Set<string>();
-  for (const [key, indexes] of currentByGroup) {
+  for (const [key, indexes] of matchable) {
     const previous = previousGroups.get(key);
     if (indexes.length !== 1 || previous?.length !== 1 || !groups[indexes[0]!]!.unique) continue;
     const element = interesting[indexes[0]!]!;
@@ -559,7 +683,7 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   }
 
   const carried = new Map<number, string>();
-  for (const [key, indexes] of currentByGroup) {
+  for (const [key, indexes] of matchable) {
     const previous = previousGroups.get(key) ?? [];
     const members = indexes.map((i) => interesting[i]!);
     const unique = groups[indexes[0]!]!.unique;
@@ -596,7 +720,7 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   }
   if (retired.length > MAX_RETIRED) retired.splice(0, retired.length - MAX_RETIRED);
 
-  return { screen, entries, groups: nextGroups, keyed, retired, nextRef };
+  return { screen, entries, groups: nextGroups, keyed, names, retired, nextRef };
 }
 
 /** The JSON an agent sees: visible nodes only unless `all`. */

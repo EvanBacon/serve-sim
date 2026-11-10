@@ -298,17 +298,20 @@ describe("normalizeRef / resolveRef", () => {
 
 describe("diffSnapshots", () => {
   test("reports added, removed and changed elements by identity", () => {
+    const at = (y: number) => ({ frame: { x: 0, y, width: 402, height: 44 } });
     const before = assignRefs(null, snap([
-      el({ path: "0.0", label: "Settings", type: "Heading" }),
-      el({ id: "wifi", path: "0.1", label: "Wi-Fi", value: "Off", type: "Cell" }),
-      el({ path: "0.2", label: "General", type: "Cell" }),
-      el({ path: "0.3", label: "Bluetooth", type: "Cell" }),
+      el({ path: "0.0", label: "Settings", type: "Heading", ...at(50) }),
+      el({ id: "wifi", path: "0.1", label: "Wi-Fi", value: "Off", type: "Cell", ...at(100) }),
+      el({ path: "0.2", label: "General", type: "Cell", ...at(144) }),
+      el({ path: "0.3", label: "Bluetooth", type: "Cell", ...at(188) }),
     ]));
+    // "General" removed and "About" added elsewhere (not swapped in place,
+    // which would retire every ref, see the in-place swap tests).
     const after = assignRefs(before, snap([
-      el({ path: "0.0", label: "Settings", type: "Heading" }),
-      el({ id: "wifi", path: "0.1", label: "Wi-Fi", value: "On", type: "Cell", enabled: false }),
-      el({ path: "0.2", label: "About", type: "Cell" }),
-      el({ path: "0.3", label: "Bluetooth", type: "Cell" }),
+      el({ path: "0.0", label: "Settings", type: "Heading", ...at(50) }),
+      el({ id: "wifi", path: "0.1", label: "Wi-Fi", value: "On", type: "Cell", enabled: false, ...at(100) }),
+      el({ path: "0.2", label: "Bluetooth", type: "Cell", ...at(188) }),
+      el({ path: "0.3", label: "About", type: "Cell", ...at(400) }),
     ]));
     const diff = diffSnapshots(before, after);
     expect(diff.added).toEqual([
@@ -701,8 +704,9 @@ describe("shared chrome and field headers never carry a ref to another record", 
     const after = assignRefs(before, inbox(["Carol", "Dave"]));
     const old = new Set(replies(before));
     expect(replies(after).filter((ref) => old.has(ref))).toEqual([]);
-    // The chrome itself is unchanged and keeps its refs.
-    expect(refWhere(after, (n) => n.label === "Home")).toBe(refWhere(before, (n) => n.label === "Home"));
+    // Other rows now sit where Alice's and Bob's were: an in-place swap, so
+    // even the unchanged tab bar retires (churn, but nothing retargets).
+    expectStale(after, refWhere(before, (n) => n.label === "Home"));
   });
 
   test("C: re-reading the unchanged inbox keeps the Reply refs", () => {
@@ -729,5 +733,210 @@ describe("shared chrome and field headers never carry a ref to another record", 
     const before = assignRefs(null, notes("Alice", "StaticText"));
     const after = assignRefs(before, notes("Alice", "StaticText"));
     expect(refWhere(after, (n) => n.label === "Delete")).toBe(refWhere(before, (n) => n.label === "Delete"));
+  });
+});
+
+describe("other content in the same place retires every ref (review 203e)", () => {
+  type State = ReturnType<typeof assignRefs>;
+  const text = (label: string) => ({ type: "StaticText", role: "text", label });
+  const heading = (label: string) => ({ type: "Heading", role: "heading", label });
+  const refWhere = (state: State, pred: (n: ReturnType<typeof agentSnapshot>["nodes"][number]) => boolean) =>
+    agentSnapshot(state, { all: true }).nodes.find(pred)?.ref;
+  const expectStale = (state: State, ref: string | undefined) => {
+    expect(ref).toBeDefined();
+    expect(resolveRef(state, ref!)).toMatchObject({ ok: false, code: "stale_ref" });
+  };
+  const carried = (before: State, after: State) =>
+    agentSnapshot(before, { all: true }).nodes.filter((n) => resolveRef(after, n.ref).ok).map((n) => n.label ?? n.type);
+  const unchanged = (screen: () => AxSnapshot) => {
+    const before = assignRefs(null, screen());
+    expect(agentSnapshot(assignRefs(before, screen()), { all: true })).toEqual(agentSnapshot(before, { all: true }));
+  };
+
+  // E1: an iOS-Contacts-style card. The name is plain text, the nav bar has
+  // no title, and the shared action buttons outnumber the record's labels.
+  const card = (name: string, phone: string) => snap([
+    el({ path: "0.0", label: "Contacts", frame: { x: 0, y: 50, width: 90, height: 44 } }),
+    el({ path: "0.1", label: "Edit", frame: { x: 330, y: 50, width: 60, height: 44 } }),
+    el({ path: "0.2.0", ...text(name), frame: { x: 16, y: 200, width: 370, height: 40 } }),
+    el({ path: "0.2.1", label: "message", frame: { x: 16, y: 250, width: 80, height: 60 } }),
+    el({ path: "0.2.2", label: "call", frame: { x: 106, y: 250, width: 80, height: 60 } }),
+    el({ path: "0.2.3", label: "video", frame: { x: 196, y: 250, width: 80, height: 60 } }),
+    el({ path: "0.2.4", label: "mail", frame: { x: 286, y: 250, width: 80, height: 60 } }),
+    el({ path: "0.2.5", type: "Cell", label: `mobile, ${phone}`, frame: { x: 0, y: 330, width: 402, height: 60 } }),
+    el({ path: "0.2.6", label: "Send Message", frame: { x: 0, y: 420, width: 402, height: 44 } }),
+    el({ path: "0.2.7", label: "Share Contact", frame: { x: 0, y: 464, width: 402, height: 44 } }),
+    el({ path: "0.2.8", label: "Add to Favourites", frame: { x: 0, y: 508, width: 402, height: 44 } }),
+    el({ path: "0.2.9", label: "Block this Caller", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+  ]);
+
+  test("E1: shared action buttons can't carry 'Block this Caller' from Alice's card to Bob's", () => {
+    const before = assignRefs(null, card("Alice Smith", "555-0001"));
+    const after = assignRefs(before, card("Bob Jones", "555-0002"));
+    expect(carried(before, after)).toEqual([]);
+    expectStale(after, refWhere(before, (n) => n.label === "Block this Caller"));
+  });
+
+  test("E1: re-reading Alice's card keeps every ref", () => unchanged(() => card("Alice Smith", "555-0001")));
+
+  test("E1 minimal: one plain-text name outvoted by three action buttons", () => {
+    const minimal = (name: string) => snap(card(name, "x").elements.filter((e) => ["0.2.0", "0.2.6", "0.2.7", "0.2.8", "0.2.9"].includes(e.path)));
+    const before = assignRefs(null, minimal("Alice"));
+    expect(before.entries.size).toBe(5);
+    const after = assignRefs(before, minimal("Bob"));
+    expectStale(after, refWhere(before, (n) => n.label === "Block this Caller"));
+  });
+
+  // E2: a generic nav title ("Contact") comes first; the record heading sits
+  // in another group than the footer actions.
+  const generic = (name: string) => snap([
+    el({ path: "0.0", type: "Group", role: "Nav bar", id: "Contact", frame: { x: 0, y: 50, width: 402, height: 44 } }),
+    el({ path: "0.0.0", label: "Back", frame: { x: 0, y: 50, width: 60, height: 44 } }),
+    el({ path: "0.0.1", ...text("Contact"), frame: { x: 150, y: 50, width: 100, height: 44 } }),
+    el({ path: "0.0.2", label: "Edit", frame: { x: 330, y: 50, width: 60, height: 44 } }),
+    el({ path: "0.1.0", ...heading(name), frame: { x: 16, y: 110, width: 300, height: 40 } }),
+    el({ path: "0.1.1", type: "Cell", label: "Phone", value: `${name}-p`, frame: { x: 0, y: 160, width: 402, height: 44 } }),
+    el({ path: "0.2.0", label: "Share Contact", frame: { x: 0, y: 500, width: 402, height: 44 } }),
+    el({ path: "0.2.1", label: "Add to Favourites", frame: { x: 0, y: 544, width: 402, height: 44 } }),
+    el({ path: "0.2.2", label: "Delete Contact", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+  ]);
+
+  test("E2: a generic nav title before the record heading doesn't hide the replaced heading", () => {
+    const before = assignRefs(null, generic("Alice"));
+    const after = assignRefs(before, generic("Bob"));
+    expect(carried(before, after)).toEqual([]);
+    expectStale(after, refWhere(before, (n) => n.label === "Delete Contact"));
+  });
+
+  test("E2: re-reading the same contact keeps every ref", () => unchanged(() => generic("Alice")));
+
+  // E3: the record shows only in button values.
+  const buttonValues = (name: string) => snap([
+    el({ path: "0.0", ...heading("Details"), frame: { x: 16, y: 50, width: 300, height: 40 } }),
+    el({ path: "0.1", label: "Phone", value: `${name}-p`, frame: { x: 0, y: 100, width: 402, height: 44 } }),
+    el({ path: "0.2", label: "Email", value: `${name}-e`, frame: { x: 0, y: 144, width: 402, height: 44 } }),
+    el({ path: "0.3", label: "Delete", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+  ]);
+
+  test("E3: button values are content: 'Delete' doesn't carry from Alice to Bob", () => {
+    const before = assignRefs(null, buttonValues("Alice"));
+    const after = assignRefs(before, buttonValues("Bob"));
+    expectStale(after, refWhere(before, (n) => n.label === "Delete"));
+  });
+
+  test("E3: re-reading the same record keeps every ref", () => unchanged(() => buttonValues("Alice")));
+
+  test("an AXUniqueId-keyed name relabelled in place is another record", () => {
+    const named = (name: string) => snap([
+      el({ path: "0.0", ...text(name), id: "contact-name", frame: { x: 16, y: 100, width: 300, height: 40 } }),
+      el({ path: "0.1", label: "Share", frame: { x: 0, y: 500, width: 402, height: 44 } }),
+      el({ path: "0.2", label: "Delete", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+    ]);
+    const before = assignRefs(null, named("Alice"));
+    const after = assignRefs(before, named("Bob"));
+    expectStale(after, refWhere(before, (n) => n.label === "Delete"));
+  });
+
+  // E4: documented gap. Typed text is not content (no focus in the AX tree
+  // to tell typing from another record's form), so two forms that differ
+  // only in a text field's value carry refs. See the README.
+  test("E4 (documented gap): forms differing only in a text field's value keep refs", () => {
+    const form = (name: string) => snap([
+      el({ path: "0.0", ...heading("Edit Contact"), frame: { x: 16, y: 50, width: 300, height: 40 } }),
+      el({ path: "0.1", type: "TextField", role: "text field", label: "First name", value: name, frame: { x: 0, y: 100, width: 402, height: 44 } }),
+      el({ path: "0.2", label: "Delete Contact", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+    ]);
+    const before = assignRefs(null, form("Alice"));
+    const after = assignRefs(before, form("Bob"));
+    expect(resolveRef(after, refWhere(before, (n) => n.label === "Delete Contact")!).ok).toBe(true);
+  });
+
+  // E6: Bob's screen still loading: Alice's heading is gone and nothing replaced it yet.
+  const loading = (name: string | null) => snap([
+    ...(name ? [el({ path: "0.0", ...heading(name), frame: { x: 16, y: 50, width: 300, height: 40 } })] : []),
+    el({ path: "0.1", label: "Contacts", frame: { x: 0, y: 0, width: 90, height: 44 } }),
+    el({ path: "0.2", label: "Edit", frame: { x: 330, y: 0, width: 60, height: 44 } }),
+    el({ path: "0.3", label: "Share", frame: { x: 0, y: 500, width: 402, height: 44 } }),
+    el({ path: "0.4", type: "Cell", label: "Phone", value: "—", frame: { x: 0, y: 100, width: 402, height: 44 } }),
+    el({ path: "0.5", label: "Delete", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+  ]);
+
+  test("E6: a visible heading that vanished without scrolling away retires every ref", () => {
+    const before = assignRefs(null, loading("Alice"));
+    const after = assignRefs(before, loading(null));
+    expect(carried(before, after)).toEqual([]);
+  });
+
+  test("a section header scrolled offscreen with its content is not a vanished title", () => {
+    const sections = (dy: number, withA: boolean) => snap([
+      el({ path: "0.0", label: "Edit", frame: { x: 330, y: 50, width: 60, height: 44 } }),
+      ...(withA ? [el({ path: "0.1.0", ...heading("Section A"), frame: { x: 16, y: 100 + dy, width: 300, height: 40 } })] : []),
+      ...[0, 1, 2, 3, 4].map((i) => el({ path: `0.1.${i + 1}`, type: "Cell", label: `Row ${i}`, frame: { x: 0, y: 150 + i * 60 + dy, width: 402, height: 60 } })),
+      el({ path: "0.1.6", ...heading("Section B"), frame: { x: 16, y: 460 + dy, width: 300, height: 40 } }),
+      el({ path: "0.1.7", label: "Delete", frame: { x: 0, y: 510 + dy, width: 402, height: 44 } }),
+    ]);
+    const before = assignRefs(null, sections(0, true));
+    const after = assignRefs(before, sections(-150, false));
+    for (const label of ["Edit", "Row 3", "Section B", "Delete"]) {
+      expect(refWhere(after, (n) => n.label === label)).toBe(refWhere(before, (n) => n.label === label));
+    }
+  });
+
+  test("E7: headings that swapped order (linked contacts) retire every ref", () => {
+    const related = (name: string, other: string) => snap([
+      el({ path: "0.0", ...heading(name), frame: { x: 16, y: 50, width: 300, height: 40 } }),
+      el({ path: "0.1", ...text("phone"), frame: { x: 16, y: 100, width: 100, height: 20 } }),
+      el({ path: "0.2", label: "Delete", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+      el({ path: "0.3", ...heading(other), frame: { x: 16, y: 700, width: 300, height: 40 } }),
+    ]);
+    const before = assignRefs(null, related("Alice", "Bob"));
+    const after = assignRefs(before, related("Bob", "Alice"));
+    expectStale(after, refWhere(before, (n) => n.label === "Delete"));
+  });
+
+  // F3: rows named only by a value-only StaticText (label "").
+  const ROW = 60;
+  const valueRows = (names: string[]) => snap([
+    el({ path: "0.0", ...heading("Inbox"), frame: { x: 16, y: 50, width: 300, height: 40 } }),
+    ...["Home", "Search", "Profile", "Settings"].map((t, i) => el({ path: `0.${i + 1}`, label: t, frame: { x: i * 100, y: 820, width: 100, height: 50 } })),
+    ...names.flatMap((n, i) => [
+      el({ path: `0.${5 + 2 * i}`, type: "StaticText", role: "text", value: n, frame: { x: 16, y: 100 + i * ROW, width: 200, height: 20 } }),
+      el({ path: `0.${6 + 2 * i}`, label: "Reply", frame: { x: 320, y: 100 + i * ROW, width: 70, height: 36 } }),
+    ]),
+  ]);
+  const replies = (state: State) => agentSnapshot(state, { all: true }).nodes.filter((n) => n.label === "Reply").map((n) => n.ref);
+
+  test("F3: value-only row names are keyed: a full-page scroll retires the Reply refs", () => {
+    const before = assignRefs(null, valueRows(["Alice", "Bob"]));
+    const after = assignRefs(before, valueRows(["Carol", "Dave"]));
+    const old = new Set(replies(before));
+    expect(replies(after).filter((ref) => old.has(ref))).toEqual([]);
+  });
+
+  test("F3: re-reading the same rows keeps the Reply refs", () => {
+    const before = assignRefs(null, valueRows(["Alice", "Bob"]));
+    expect(replies(assignRefs(before, valueRows(["Alice", "Bob"])))).toEqual(replies(before));
+  });
+
+  test("a row deleted with the rest reflowing up is not a swap: the surviving rows keep their refs", () => {
+    const rows = (names: string[]) => snap([
+      el({ path: "0.0", ...heading("Inbox"), frame: { x: 16, y: 50, width: 300, height: 40 } }),
+      ...names.map((n, i) => el({ path: `0.${i + 1}`, type: "Cell", label: n, frame: { x: 0, y: 100 + i * ROW, width: 402, height: ROW } })),
+    ]);
+    const before = assignRefs(null, rows(["Alice", "Bob", "Carol"]));
+    const after = assignRefs(before, rows(["Alice", "Carol"]));
+    expect(refWhere(after, (n) => n.label === "Carol")).toBe(refWhere(before, (n) => n.label === "Carol"));
+    expect(refWhere(after, (n) => n.label === "Alice")).toBe(refWhere(before, (n) => n.label === "Alice"));
+  });
+
+  test("churn (documented): a status line changing in place retires every ref", () => {
+    const status = (line: string) => snap([
+      el({ path: "0.0", ...heading("Downloads"), frame: { x: 16, y: 50, width: 300, height: 40 } }),
+      el({ path: "0.1", ...text(line), frame: { x: 16, y: 100, width: 300, height: 20 } }),
+      el({ path: "0.2", label: "Cancel", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+    ]);
+    const before = assignRefs(null, status("3 of 5"));
+    const after = assignRefs(before, status("4 of 5"));
+    expectStale(after, refWhere(before, (n) => n.label === "Cancel"));
   });
 });
