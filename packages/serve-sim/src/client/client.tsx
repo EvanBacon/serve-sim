@@ -910,7 +910,11 @@ function AppWithConfig({
   // terminated and launched again.
   const relaunchApp = useCallback(() => {
     const bundleId = currentAppRef.current?.bundleId;
-    if (bundleId) hostAction("relaunchApp", { udid: config.device, bundleId }).catch(() => {});
+    if (!bundleId) return;
+    const failed = () => toast.error("Could not relaunch the app.");
+    hostAction("relaunchApp", { udid: config.device, bundleId })
+      .then((r) => { if (r.exitCode !== 0) failed(); })
+      .catch(failed);
   }, [config.device]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
