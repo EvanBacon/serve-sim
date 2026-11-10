@@ -122,6 +122,10 @@ serve-sim record [-d udid]            Record the screen to an MP4 (native resolu
                                       60 fps H.264); Ctrl+C stops. -o <file>,
                                       -t <duration>, --codec h264|hevc, --fps, --bitrate
 serve-sim ax [-d udid]                Dump the accessibility tree as JSON
+serve-sim ax --refs [--all] [--text]  Compact snapshot with element refs (@e1…)
+serve-sim tap @e2 [--settle] [--timeout <ms>]
+                                      Tap an element ref; --settle prints the diff
+serve-sim settle [--timeout <ms>]     Wait for the screen to settle; print the diff
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
@@ -266,6 +270,20 @@ Limitations:
 
 - **Rotation is fixed at start.** The file's orientation comes from the simulator's orientation when recording starts; rotating mid-recording leaves the rest of the footage sideways. Stop and start a new recording after rotating.
 - **Size changes freeze the video.** A track can't change dimensions, so if the screen size changes mid-recording (e.g. switching the Duo's active panel), frames at the new size are dropped and the rest of the video repeats the last frame at the original size.
+
+### Accessibility refs for agents
+
+`serve-sim ax --refs` prints a compact snapshot of the visible screen: each interesting element gets a short ref (`@e1`, `@e2`, …, in tree order), its role, label, value (when set), `enabled: false` (only when disabled), and its frame and center in device points. `--all` includes offscreen elements; `--text` prints one line per element.
+
+```bash
+serve-sim ax --refs          # {"screen":{"width":402,"height":874},"nodes":[{"ref":"@e2","role":"button","label":"General",…}]}
+serve-sim tap @e2 --settle   # taps General's center, waits, prints {settle:{settled,waitedMs,reason}, diff:{added,removed,changed}}
+serve-sim settle             # after any other action: wait for quiet, diff vs the last snapshot
+```
+
+The server remembers the last snapshot per device, so a ref always means the element you saw. Before tapping, it looks the element up in the live tree and taps it where it is now. If the element has gone or scrolled offscreen, or the ref was never issued, the tap is refused (exit code 1, `stale_ref` / `unknown_ref` / `offscreen` on stderr) and nothing is tapped. Take a new snapshot and retry. A ref stays the same while its element stays on screen, and is never reused for a different element. Elements that appear in a diff come with refs you can tap right away.
+
+The screen counts as settled when two AX snapshots ~200 ms apart are identical and the captured framebuffer hasn't changed in between. The wait gives up after `--timeout` (default 3000 ms, max 30000) and reports `settled: false` with what was still busy; the command still exits 0. Coordinate taps (`serve-sim tap <x> <y>`) are unchanged.
 
 ## Connectors
 
