@@ -129,7 +129,7 @@ final class SpringBoardLauncherTests: XCTestCase {
             fallback: { recorder.record(String(cString: __dispatch_queue_get_label(nil))) }
         )
 
-        XCTAssertEqual(recorder.all, Array(repeating: "serve-sim.springboard-launch", count: 2))
+        XCTAssertEqual(recorder.all, ["serve-sim.springboard-launch.direct", "serve-sim.springboard-launch"])
     }
 
     func testConcurrentPressesCoalesceWhileLaunchIsInFlight() async {
@@ -184,6 +184,128 @@ final class SpringBoardLauncherTests: XCTestCase {
         }
 
         XCTAssertEqual(recorder.all, ["direct", "direct", "direct"])
+    }
+
+    func testHungDirectLaunchReleasesWaitersAfterTimeout() async {
+        let recorder = Recorder()
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let launcher = SpringBoardLauncher(directTimeout: 0.3, log: { recorder.record("log: \($0)") })
+        // Unblock the hung call even if an assertion fails, so it can't outlive the test.
+        defer { release.signal() }
+
+        let first = Task {
+            await launcher.launch(
+                direct: {
+                    recorder.record("direct")
+                    started.signal()
+                    release.wait()
+                    return .launched
+                },
+                fallback: { recorder.record("fallback") }
+            )
+            recorder.record("first-done")
+        }
+        let didStart = await Self.wait(for: started, timeout: 5)
+        XCTAssertTrue(didStart, "direct launch never started")
+
+        let extras = (0..<4).map { i in
+            Task {
+                await launcher.launch(
+                    direct: { recorder.record("extra-direct"); return .launched },
+                    fallback: { recorder.record("extra-fallback") }
+                )
+                recorder.record("extra-done-\(i)")
+            }
+        }
+        let didJoin = await Self.waitForWaiters(on: launcher, count: 5, timeout: 5)
+        XCTAssertTrue(didJoin, "extra presses never joined the in-flight launch")
+
+        // The direct call is still blocked; only the timeout can release these.
+        let released = await Self.waitUntil(timeout: 5) {
+            recorder.all.filter { $0.hasSuffix("-done") || $0.contains("-done-") }.count == 5
+        }
+        XCTAssertTrue(released, "waiters were not released after the direct launch timed out: \(recorder.all)")
+        // Without the timeout fix, only unblocking the call can end these tasks.
+        if !released { release.signal() }
+        await first.value
+        for extra in extras { await extra.value }
+
+        let calls = recorder.all.filter { !$0.hasPrefix("log: ") && !$0.contains("-done") }
+        XCTAssertEqual(calls, ["direct", "fallback"])
+        XCTAssertTrue(recorder.all.contains { $0.hasPrefix("log: ") && $0.contains("timed out") }, "\(recorder.all)")
+        XCTAssertEqual(launcher.waiterCount, 0)
+        XCTAssertTrue(launcher.isDirectLaunchAbandoned)
+    }
+
+    func testPressAfterTimeoutStartsFreshAttempt() async {
+        let recorder = Recorder()
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let launcher = SpringBoardLauncher(directTimeout: 0.2, log: { recorder.record("log: \($0)") })
+        defer { release.signal() }
+
+        // 1. The direct call hangs and the press is released by the timeout.
+        let hung = Task {
+            await launcher.launch(
+                direct: {
+                    recorder.record("hung-direct")
+                    started.signal()
+                    release.wait()
+                    // A late result must not run the fallback or resume anyone again.
+                    return .failed("late")
+                },
+                fallback: { recorder.record("hung-fallback") }
+            )
+            recorder.record("hung-done")
+        }
+        let didStart = await Self.wait(for: started, timeout: 5)
+        XCTAssertTrue(didStart, "direct launch never started")
+        let released = await Self.waitUntil(timeout: 5) { recorder.all.contains("hung-done") }
+        guard released else {
+            release.signal()
+            await hung.value
+            return XCTFail("hung direct launch was not released by the timeout")
+        }
+
+        // 2. A press while that call is still blocked gets its own attempt and
+        //    goes straight to the fallback instead of queueing behind it.
+        await launcher.launch(
+            direct: { recorder.record("second-direct"); return .launched },
+            fallback: { recorder.record("second-fallback") }
+        )
+
+        // 3. Once the blocked call returns, the direct path is used again.
+        release.signal()
+        let recovered = await Self.waitUntil(timeout: 5) { !launcher.isDirectLaunchAbandoned }
+        XCTAssertTrue(recovered, "abandoned direct launch never cleared")
+        await launcher.launch(
+            direct: { recorder.record("third-direct"); return .launched },
+            fallback: { recorder.record("third-fallback") }
+        )
+
+        let calls = recorder.all.filter { !$0.hasPrefix("log: ") && $0 != "hung-done" }
+        XCTAssertEqual(calls, ["hung-direct", "hung-fallback", "second-fallback", "third-direct"])
+        XCTAssertFalse(recorder.all.contains { $0.contains("late") }, "late result was acted on: \(recorder.all)")
+    }
+
+    func testDirectLaunchWithinTimeoutIsUnaffected() async {
+        let recorder = Recorder()
+        let launcher = SpringBoardLauncher(directTimeout: 30, log: { recorder.record("log: \($0)") })
+
+        for _ in 0..<5 {
+            await launcher.launch(
+                direct: {
+                    recorder.record("direct")
+                    Thread.sleep(forTimeInterval: 0.02)
+                    return .launched
+                },
+                fallback: { recorder.record("fallback") }
+            )
+        }
+
+        XCTAssertEqual(recorder.all, Array(repeating: "direct", count: 5))
+        XCTAssertFalse(launcher.isDirectLaunchAbandoned)
     }
 
     func testRunToExitWaitsForProcessToFinish() throws {
@@ -280,6 +402,19 @@ final class SpringBoardLauncherTests: XCTestCase {
         while launcher.waiterCount < count {
             guard Date() < deadline else { return false }
             try? await Task.sleep(for: .milliseconds(1))
+        }
+        return true
+    }
+
+    /// Polls `condition` so a regression fails the test instead of hanging it.
+    private static func waitUntil(
+        timeout: TimeInterval,
+        _ condition: @escaping @Sendable () -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(for: .milliseconds(5))
         }
         return true
     }
