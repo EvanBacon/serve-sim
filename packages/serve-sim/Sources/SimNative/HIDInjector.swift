@@ -583,7 +583,9 @@ actor HIDInjector {
             return false
         }
         if enabled {
-            _ = callSetHardwareKeyboard(device, sel, enabled: false)
+            // A failed NO must not be followed by a "successful" YES, or
+            // DeviceSession would persist a connected state the guest never reached.
+            guard callSetHardwareKeyboard(device, sel, enabled: false) else { return false }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
         return callSetHardwareKeyboard(device, sel, enabled: enabled)
