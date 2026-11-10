@@ -16,8 +16,11 @@ const INDEX_TEXT = '{"type":"header","version":1}\n{"type":"footer","frames":0}\
 
 let server: Server;
 let port = 0;
-/** Status the fake server answers `/recording/index` with. */
-let indexStatus = 200;
+/**
+ * How the fake server answers `/recording/index`: an HTTP status, or
+ * "expired" for a new server's `404 {"error":"index_not_found"}`.
+ */
+let indexStatus: number | "expired" = 200;
 const requests: string[] = [];
 const dir = mkdtempSync(join(tmpdir(), "serve-sim-record-index-"));
 
@@ -42,10 +45,13 @@ beforeAll(async () => {
       }).end("fake-mp4");
     } else if (path === `${prefix}/recording/index` && indexStatus === 200) {
       res.writeHead(200, { "Content-Type": "application/x-ndjson" }).end(INDEX_TEXT);
-    } else if (path === `${prefix}/recording/index` && indexStatus !== 404) {
-      res.writeHead(indexStatus, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "boom" }));
-    } else {
+    } else if (path === `${prefix}/recording/index` && indexStatus === "expired") {
       res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "index_not_found" }));
+    } else if (path === `${prefix}/recording/index` && indexStatus !== 404) {
+      res.writeHead(indexStatus as number, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "boom" }));
+    } else {
+      // An older server: no such route.
+      res.writeHead(404, { "Content-Type": "text/plain" }).end("Not Found");
     }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -115,6 +121,16 @@ describe("serve-sim record index sidecar", () => {
     expect(existsSync(out)).toBe(true);
     expect(existsSync(join(dir, "old-server.index.jsonl"))).toBe(false);
     expect(r.stderr).not.toContain("index");
+  }, 25_000);
+
+  test("an expired or evicted index (index_not_found) warns but still exits 0", async () => {
+    indexStatus = "expired";
+    const out = join(dir, "expired.mp4");
+    const r = await runRecord(["-o", out]);
+    expect(r.status).toBe(0);
+    expect(readFileSync(out, "utf8")).toBe("fake-mp4");
+    expect(existsSync(join(dir, "expired.index.jsonl"))).toBe(false);
+    expect(r.stderr).toContain("Could not fetch the recording index (expired or evicted); saved the MP4 only.");
   }, 25_000);
 
   test("any other index failure warns but still exits 0", async () => {

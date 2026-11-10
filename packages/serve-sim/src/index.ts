@@ -1404,8 +1404,9 @@ async function record(
 /**
  * Fetch the `.index.jsonl` sidecar for the recording just saved and write it
  * next to the MP4. Best effort: the MP4 is already saved. A server that
- * predates indexes (no token, 404/405) is skipped silently, so its output is
- * as before; other failures warn on stderr.
+ * predates indexes (no token, 404/405 without `index_not_found`) is skipped
+ * silently, so its output is as before; an expired or evicted index and other
+ * failures warn on stderr.
  */
 async function saveRecordingIndex(
   indexUrl: string | null,
@@ -1421,6 +1422,11 @@ async function saveRecordingIndex(
   try {
     const res = await fetch(url, { headers });
     if (!res.ok || !res.body) {
+      if (res.status === 404 && await isIndexNotFound(res)) {
+        // A server with indexes that no longer has this one (TTL or eviction).
+        console.error("Could not fetch the recording index (expired or evicted); saved the MP4 only.");
+        return;
+      }
       await res.body?.cancel().catch(() => {});
       if (res.status !== 404 && res.status !== 405) {
         console.error(`Could not fetch the recording index (HTTP ${res.status}); saved the MP4 only.`);
@@ -1432,6 +1438,16 @@ async function saveRecordingIndex(
   } catch (err) {
     const reason = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
     console.error(`Could not save the recording index to ${indexPath} (${reason}).`);
+  }
+}
+
+/** Whether a 404 body is the index route's own `{"error":"index_not_found"}`. */
+async function isIndexNotFound(res: Response): Promise<boolean> {
+  try {
+    const body = await res.json() as { error?: unknown } | null;
+    return body?.error === "index_not_found";
+  } catch {
+    return false;
   }
 }
 
