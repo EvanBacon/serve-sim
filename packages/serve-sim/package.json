@@ -58,6 +58,8 @@
     "src/metro-reload.ts",
     "src/middleware.ts",
     "src/native.ts",
+    "src/pasteboard.ts",
+    "src/pasteboard-shared.ts",
     "src/ports.ts",
     "src/preview-initial-state.ts",
     "src/recording.ts",

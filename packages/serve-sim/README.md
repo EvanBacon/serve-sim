@@ -99,6 +99,9 @@ serve-sim gesture '<json>' [-d udid]  Send a touch gesture
 serve-sim button [name] [-d udid]     Send a button press (default: home)
 serve-sim type <text> [-d udid]       Type text via the simulator keyboard
                                       (US keyboard only; also --stdin / --file <path>)
+serve-sim paste <text> [-d udid]      Paste any Unicode text: stage it on the guest
+                                      pasteboard (devicectl, verified by readback),
+                                      then Cmd+V (also --stdin / --file, --no-insert)
 serve-sim rotate <orientation> [-d udid]
                                       portrait | portrait_upside_down |
                                       landscape_left | landscape_right
@@ -187,6 +190,13 @@ serve-sim --device-set ~/pool <udid>   # a simulator of another device set
 serve-sim type "Hello, world!"
 echo "from stdin" | serve-sim type --stdin
 serve-sim type --file ./snippet.txt
+
+# Paste Unicode (emoji, Cyrillic, combining marks) into the focused field.
+# POST /pasteboard?device=<udid> with {"text": "..."} (max 256 KiB UTF-8, same
+# auth as other routes) succeeds only when `devicectl device pasteboard paste`
+# reads back the exact bytes. Cmd/Ctrl+V in the browser preview uses it too.
+serve-sim paste "Привет 👩‍🍳"
+serve-sim paste --no-insert --file ./notes.txt   # stage only; paste in the guest yourself
 
 # Camera injection
 serve-sim camera com.acme.MyApp                            # animated placeholder

@@ -19,6 +19,7 @@ import {
   type ServeSimDeviceState,
 } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
+import { PASTEBOARD_TEXT_LIMIT_BYTES, PASTE_KEY_EVENTS } from "./pasteboard";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, isInDeviceSet, resolveDevice } from "./device";
@@ -1306,6 +1307,88 @@ async function typeText(
   await sendKeyEventsToWs(state.wsUrl, events, undefined, state.headers);
 }
 
+/**
+ * `serve-sim paste`: any Unicode text, via the server's `POST /pasteboard`
+ * (CoreDevice pasteboard copy + exact readback), then Cmd+V into the focused
+ * guest field unless `--no-insert`. `type` stays HID keys for US ASCII.
+ */
+async function pasteText(
+  positional: string[],
+  opts: { device?: string; stdin?: boolean; file?: string; insert?: boolean },
+) {
+  const sourceCount = [positional.length > 0, opts.stdin ?? false, opts.file != null].filter(Boolean).length;
+  if (sourceCount !== 1) {
+    console.error("Usage: serve-sim paste <text> [-d udid] [--no-insert]");
+    console.error("       serve-sim paste --stdin [-d udid] [--no-insert]");
+    console.error("       serve-sim paste --file <path> [-d udid] [--no-insert]");
+    console.error("");
+    console.error("Stages any Unicode text on the simulator pasteboard (verified by readback),");
+    console.error("then presses Cmd+V in the focused field unless --no-insert.");
+    process.exit(1);
+  }
+
+  let text: string;
+  if (opts.stdin) {
+    try {
+      text = readFileSync(0, "utf8");
+    } catch (err) {
+      console.error(`Failed to read stdin: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  } else if (opts.file) {
+    try {
+      text = readFileSync(opts.file, "utf8");
+    } catch (err) {
+      console.error(`Failed to read file '${opts.file}': ${(err as Error).message}`);
+      process.exit(1);
+    }
+  } else {
+    text = positional.join(" ");
+  }
+  if (text === "") {
+    console.error("Nothing to paste.");
+    process.exit(1);
+  }
+  if (Buffer.byteLength(text, "utf8") > PASTEBOARD_TEXT_LIMIT_BYTES) {
+    console.error(`Text is larger than ${PASTEBOARD_TEXT_LIMIT_BYTES / 1024} KiB of UTF-8.`);
+    process.exit(1);
+  }
+
+  const state = await resolveInputTarget(opts.device);
+  const url = new URL("pasteboard", state.url.endsWith("/") ? state.url : `${state.url}/`);
+  url.searchParams.set("device", state.device);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { ...state.headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  } catch (err) {
+    console.error(`Failed to reach serve-sim at ${url.origin}: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  const body = await res.json().catch(() => null) as
+    | { ok?: boolean; verified?: boolean; bytes?: number; error?: string; detail?: string }
+    | null;
+  if (!res.ok || body?.ok !== true || body.verified !== true) {
+    const reason = [body?.error ?? `HTTP ${res.status}`, body?.detail].filter(Boolean).join(": ");
+    console.error(`Could not stage the simulator pasteboard (${reason}).`);
+    process.exit(1);
+  }
+  if (opts.insert === false) {
+    console.log(`Copied ${body.bytes} bytes to the simulator pasteboard (verified). Paste in the guest to insert it.`);
+    return;
+  }
+  try {
+    await sendKeyEventsToWs(state.wsUrl, PASTE_KEY_EVENTS, 20, state.headers);
+  } catch (err) {
+    console.error(`Pasteboard staged, but Cmd+V failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  console.log(`Pasted ${body.bytes} bytes (pasteboard verified, Cmd+V sent).`);
+}
+
 function openHidSocket(wsUrl: string, headers: Record<string, string> = {}): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl, { headers });
@@ -2414,6 +2497,18 @@ program
   );
 
 program
+  .command("paste")
+  .description("Paste any Unicode text via the simulator pasteboard (verified), then Cmd+V")
+  .argument("[text...]", "Text to paste")
+  .option(...deviceOpt)
+  .option("--stdin", "Read text from stdin")
+  .option("--file <path>", "Read text from a file")
+  .option("--no-insert", "Only stage the pasteboard; don't press Cmd+V")
+  .action((text: string[], opts) =>
+    pasteText(text, { device: opts.device, stdin: opts.stdin, file: opts.file, insert: opts.insert }),
+  );
+
+program
   .command("rotate")
   .description(
     "Set device orientation " +
@@ -2487,7 +2582,7 @@ program
 // Input subcommands can drive a remote preview (e.g. through an
 // authenticated tunnel) instead of the local state file.
 const REMOTE_INPUT_COMMANDS = new Set([
-  "gesture", "tap", "button", "type", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record",
+  "gesture", "tap", "button", "type", "paste", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record",
 ]);
 for (const cmd of program.commands) {
   if (!REMOTE_INPUT_COMMANDS.has(cmd.name())) continue;
