@@ -6,7 +6,9 @@ import SimNativeSupport
 /// replies acknowledge dispatch, so a failed command never switches capture.
 final class DuoHIDBridge {
     private let udid: String
-    private let executable: String
+    /// Settable so JS can swap in a launchable copy once the device is known
+    /// to be a Duo (resolving it costs a `codesign` probe).
+    var executable: String
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
@@ -51,8 +53,12 @@ final class DuoHIDBridge {
             while Date() < deadline && reply.count < 64 {
                 var descriptor = pollfd(fd: output.fileDescriptor, events: Int16(POLLIN), revents: 0)
                 let remaining = max(1, Int32(deadline.timeIntervalSinceNow * 1000))
-                guard poll(&descriptor, 1, remaining) > 0,
-                      let byte = try output.read(upToCount: 1), !byte.isEmpty else { break }
+                guard poll(&descriptor, 1, remaining) > 0 else { break }
+                guard let byte = try output.read(upToCount: 1), !byte.isEmpty else {
+                    // Its own stderr (inherited above) says why, e.g. dyld refusing to start it.
+                    fputs("[hid] Duo guest helper exited without replying to \"\(command)\": \(executable)\n", stderr)
+                    break
+                }
                 if byte[0] == 10 { return String(data: reply, encoding: .utf8) == "OK" }
                 reply.append(byte)
             }

@@ -550,6 +550,8 @@ actor HIDInjector {
 
     func isFoldable() -> Bool { duoBridge != nil }
 
+    func setDuoHelper(_ path: String) { duoBridge?.executable = path }
+
     func close() { duoBridge = nil }
 
     private func updateTouchTarget(width: Int, height: Int) {
