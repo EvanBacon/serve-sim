@@ -128,6 +128,62 @@ describe("waitForSettle", () => {
   });
 });
 
+describe("waitForSettle frame pre-wait", () => {
+  test("waits for the cheap frame counter to go quiet before spending AX samples", async () => {
+    let t = 0;
+    const counts = [1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4];
+    let polls = 0;
+    let firstSampleAt = -1;
+    const result = await waitForSettle({
+      now: () => t,
+      sleep: async (ms) => { t += ms; },
+      frameCounter: async () => counts[Math.min(polls++, counts.length - 1)]!,
+      framePollMs: 50,
+      frameQuietMs: 150,
+      sample: async () => {
+        if (firstSampleAt < 0) firstSampleAt = t;
+        t += 300;
+        return { signature: "a", frames: 4, value: "x" };
+      },
+      intervalMs: 200,
+      timeoutMs: 3000,
+    });
+    // Counter changes until poll 3 (t=150), then is stable for 150 ms (t=300).
+    expect(firstSampleAt).toBe(300);
+    expect(result).toMatchObject({ settled: true, samples: 2 });
+  });
+
+  test("skips the pre-wait when the counter is unavailable", async () => {
+    let t = 0;
+    const result = await waitForSettle({
+      now: () => t,
+      sleep: async (ms) => { t += ms; },
+      frameCounter: async () => null,
+      sample: async () => ({ signature: "a", frames: null, value: "x" }),
+      intervalMs: 200,
+      timeoutMs: 3000,
+    });
+    expect(result).toMatchObject({ settled: true, waitedMs: 200, signals: { frames: false } });
+  });
+
+  test("frames that never go quiet time out without any AX sample", async () => {
+    let t = 0;
+    let f = 0;
+    let sampled = 0;
+    const result = await waitForSettle({
+      now: () => t,
+      sleep: async (ms) => { t += ms; },
+      frameCounter: async () => f++,
+      sample: async () => { sampled++; return { signature: "a", frames: null, value: "x" }; },
+      intervalMs: 200,
+      timeoutMs: 1000,
+    });
+    expect(result).toMatchObject({ settled: false, reason: "timeout", busy: ["frames"], samples: 0 });
+    expect(result.waitedMs).toBeLessThanOrEqual(1000);
+    expect(sampled).toBe(0);
+  });
+});
+
 describe("clampSettleTimeout", () => {
   test("defaults, parses, and clamps to [0, 30000]", () => {
     expect(clampSettleTimeout(undefined)).toBe(3000);

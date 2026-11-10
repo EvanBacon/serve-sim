@@ -138,11 +138,22 @@ export class AxAgent {
       timeoutMs,
       intervalMs: this.deps.settleIntervalMs,
       initialDelayMs,
+      frameCounter: () => this.deps.contentFrames(),
       sample: async () => {
         const [snapshot, frames] = await Promise.all([this.fresh(), this.deps.contentFrames().catch(() => null)]);
         return { signature: signature(snapshot), frames, value: snapshot };
       },
     });
+  }
+
+  /**
+   * The screen to diff against after a settle wait: its last AX sample, or
+   * (when frames never went quiet, so no AX sample was spent) one fresh read.
+   */
+  private async latest(settled: SettleResult<AxSnapshot>): Promise<AxSnapshot | null> {
+    if (settled.last) return settled.last;
+    if (settled.samples > 0) return null;
+    return this.fresh().catch(() => null);
   }
 
   /** `GET /ax/snapshot`: refs for the current screen; becomes the session snapshot. */
@@ -207,7 +218,8 @@ export class AxAgent {
       }
 
       const settled = await this.settleUntilQuiet(timeoutMs, this.deps.actSettleDelayMs ?? 100);
-      const after = settled.last ? assignRefs(before, settled.last, { all: this.all }) : before;
+      const latest = await this.latest(settled);
+      const after = latest ? assignRefs(before, latest, { all: this.all }) : before;
       this.state = after;
       return {
         ok: true,
@@ -215,7 +227,7 @@ export class AxAgent {
         ref: entry.ref,
         target,
         settle: report(settled),
-        diff: settled.last ? diffSnapshots(before, after, { all: this.all }) : null,
+        diff: latest ? diffSnapshots(before, after, { all: this.all }) : null,
       };
     });
   }
@@ -226,11 +238,12 @@ export class AxAgent {
       const timeoutMs = clampSettleTimeout(opts.timeoutMs);
       if (timeoutMs == null) throw new AxAgentError(400, "invalid_request", '"timeoutMs" must be a number of milliseconds.');
       const settled = await this.settleUntilQuiet(timeoutMs, 0);
-      if (!settled.last) {
+      const latest = await this.latest(settled);
+      if (!latest) {
         throw new AxAgentError(503, "ax_unavailable", settled.lastError ?? "Accessibility unavailable on this simulator.");
       }
       const before = this.state;
-      const after = assignRefs(before, settled.last, { all: this.all });
+      const after = assignRefs(before, latest, { all: this.all });
       this.state = after;
       return { settle: report(settled), diff: diffSnapshots(before, after, { all: this.all }) };
     });

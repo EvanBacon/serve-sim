@@ -188,6 +188,8 @@ describe("AxAgent.settle", () => {
     const { deps } = fakeDevice([HOME], { frames: () => f++ });
     const result = await new AxAgent(deps).settle({ timeoutMs: 600 });
     expect(result.settle).toMatchObject({ settled: false, reason: "timeout", busy: ["frames"], signals: { frames: true } });
+    // No AX sample was spent waiting, but the diff still reflects the current screen.
+    expect(result.diff.added.map((n) => n.label)).toEqual(["Settings", "General", "Privacy"]);
   });
 
   test("rejects a bad timeout", async () => {

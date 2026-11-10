@@ -30,6 +30,14 @@ export interface SettleOptions<T> {
   quietSamples?: number;
   /** Wait before the first sample (lets a tap's effect begin). */
   initialDelayMs?: number;
+  /**
+   * Cheap content-frame counter polled before any AX sample: AX reads are
+   * slow, so wait for frames to stop changing (`frameQuietMs`, polled every
+   * `framePollMs`) first. Null/throwing skips this phase.
+   */
+  frameCounter?: () => Promise<number | null>;
+  framePollMs?: number;
+  frameQuietMs?: number;
 }
 
 export interface SettleResult<T> {
@@ -106,6 +114,28 @@ export async function waitForSettle<T>(options: SettleOptions<T>): Promise<Settl
   });
 
   if (options.initialDelayMs) await options.sleep(Math.min(options.initialDelayMs, timeoutMs));
+
+  if (options.frameCounter) {
+    const read = () => options.frameCounter!().catch(() => null);
+    const pollMs = options.framePollMs ?? 50;
+    const quietMs = options.frameQuietMs ?? 250;
+    let count = await read();
+    let quietSince = options.now();
+    while (count != null) {
+      sawFrames = true;
+      if (options.now() - quietSince >= quietMs) break;
+      const remaining = timeoutMs - elapsed();
+      if (remaining <= 0) {
+        busy = ["frames"];
+        return result(false);
+      }
+      await options.sleep(Math.min(pollMs, remaining));
+      const next = await read();
+      if (next != null && next !== count) quietSince = options.now();
+      count = next;
+    }
+  }
+
   await take();
   for (;;) {
     if (streak >= quietSamples) return result(true);
