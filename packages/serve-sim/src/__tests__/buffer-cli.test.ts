@@ -194,6 +194,30 @@ describe("runBufferCommand", () => {
     expect(again.err[0]).toContain("not empty");
   });
 
+  test("dump skips a frame evicted since the view, marks it missing, and still writes buffer.json", async () => {
+    const { d, out, calls } = deps({ "/buffer": json(VIEW), "/buffer/frame": () => {
+      const id = Number(new URL(calls.at(-1)!.url).searchParams.get("id"));
+      return id === 1 ? json({ error: "frame_not_found", message: "No frame 1 in the buffer" }, 404)() : jpegRoute(id)();
+    } });
+    expect(await runBufferCommand("dump", {}, d)).toBe(0);
+    const target = out.at(-1)!.match(/(\/\S+)$/)![1]!;
+    expect(out.at(-1)).toContain("1 evicted before download");
+    expect(readdirSync(target).sort()).toEqual(["buffer.json", "frame-0002.jpg"]);
+    const index = JSON.parse(readFileSync(join(target, "buffer.json"), "utf8"));
+    expect(index.missingFrames).toBe(1);
+    expect(index.frames[0]).toMatchObject({ id: 1, missing: true });
+    expect(index.frames[0].file).toBeUndefined();
+    expect(index.frames[1]).toMatchObject({ id: 2, file: "frame-0002.jpg" });
+  });
+
+  test("dump still fails on other frame errors", async () => {
+    for (const route of [json({ error: "buffer_off", message: "The rolling buffer is off" }, 409), () => new Response("Not Found", { status: 404 })]) {
+      const { d, err } = deps({ "/buffer": json(VIEW), "/buffer/frame": route });
+      expect(await runBufferCommand("dump", {}, d)).toBe(1);
+      expect(err.length).toBe(1);
+    }
+  });
+
   test("dump of an off buffer fails", async () => {
     const { d, err } = deps({ "/buffer": json({ enabled: false }) });
     expect(await runBufferCommand("dump", {}, d)).toBe(1);

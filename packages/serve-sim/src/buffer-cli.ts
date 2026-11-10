@@ -126,6 +126,13 @@ export function formatBufferView(view: ServerView): string {
 
 class CliError extends Error {}
 
+/** A server error response, with its JSON `error` code when it had one. */
+class HttpError extends CliError {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+  }
+}
+
 /** Seconds from `5`, `5s`, `500ms`, or a CliError naming the flag. */
 function seconds(flag: string, raw: string): string {
   const value = parseInspectTime(raw);
@@ -151,7 +158,7 @@ async function request(deps: BufferCliDeps, url: string | null, method = "GET"):
   if (res.status === 404 && !body?.error) {
     throw new CliError("This serve-sim server does not support the rolling buffer; restart it with a newer serve-sim.");
   }
-  throw new CliError(`buffer request failed (HTTP ${res.status}): ${body?.message ?? body?.error ?? res.statusText}`);
+  throw new HttpError(`buffer request failed (HTTP ${res.status}): ${body?.message ?? body?.error ?? res.statusText}`, res.status, body?.error);
 }
 
 async function fetchView(deps: BufferCliDeps, since?: string): Promise<ServerView> {
@@ -275,13 +282,28 @@ export async function runBufferCommand(verb: BufferVerb, opts: BufferCliOptions,
           target = mkdtempSync(join(deps.tmpdir(), "serve-sim-buffer-"));
         }
         const frames = [];
+        let missing = 0;
         for (const frame of view.frames ?? []) {
+          let jpeg: Uint8Array;
+          try {
+            jpeg = await fetchFrame(deps, { id: String(frame.id) });
+          } catch (error) {
+            // Evicted (window or byte cap) since the view was read: keep going.
+            if (!(error instanceof HttpError && error.status === 404 && error.code === "frame_not_found")) throw error;
+            missing++;
+            frames.push({ ...frame, missing: true });
+            continue;
+          }
           const file = `frame-${String(frame.id).padStart(4, "0")}.jpg`;
-          writeFileSync(join(target, file), await fetchFrame(deps, { id: String(frame.id) }));
+          writeFileSync(join(target, file), jpeg);
           frames.push({ ...frame, file });
         }
-        writeFileSync(join(target, "buffer.json"), JSON.stringify({ ...view, frames }, null, 2) + "\n");
-        deps.log(`Wrote ${frames.length} frames + buffer.json to ${target}`);
+        writeFileSync(
+          join(target, "buffer.json"),
+          JSON.stringify({ ...view, frames, ...(missing ? { missingFrames: missing } : {}) }, null, 2) + "\n",
+        );
+        const note = missing ? ` (${missing} evicted before download, marked missing)` : "";
+        deps.log(`Wrote ${frames.length - missing} frames${note} + buffer.json to ${target}`);
         return 0;
       }
     }
