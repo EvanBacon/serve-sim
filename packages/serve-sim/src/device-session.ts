@@ -1682,7 +1682,6 @@ export function closeDeviceSession(udid: string): void {
   }
 }
 
-/** Native summary JSON for the response header, minus the server temp path. */
 /**
  * The summary header: the native JSON (or, for an indexed recording, its
  * already-parsed form with `index` split off) without the server path.

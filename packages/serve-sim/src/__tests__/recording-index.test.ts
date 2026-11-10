@@ -21,7 +21,6 @@ const native: NativeRecordingIndex = {
   slots: [0, 1, 2, 4],
   uptimesUs: [1_000_250_000, 1_000_250_000, 1_000_283_333, 1_000_316_667],
   changed: [1, 0, 1, 0],
-  changedCount: 2,
   truncated: false,
 };
 
@@ -244,12 +243,21 @@ describe("recordingIndexLines", () => {
       slots: Array.from({ length: n }, (_, i) => i),
       uptimesUs: Array.from({ length: n }, (_, i) => 1_000_250_000 + i * 16_667),
       changed: Array.from({ length: n }, (_, i) => (i % 2 ? 0 : 1)),
-      changedCount: n / 2,
     };
     const chunks = [...recordingIndexLines({ file: "a.mp4", summary: { duration: n / 60 }, index: big, events: [] })];
     expect(chunks.length).toBeGreaterThan(3);
     expect(chunks.length).toBeLessThan(10);
     expect(chunks.join("").trimEnd().split("\n")).toHaveLength(n + 2);
+  });
+
+  test("batches event lines into chunks for streaming, like frames", () => {
+    const clock = recordingClock(native)!;
+    const many = Array.from({ length: 2500 }, (_, i) => hidEvent(i + 1, "2026-11-09T12:00:00.283Z"));
+    const chunks = [...recordingIndexLines({ file: "a.mp4", summary: { duration: 5 / 60 }, index: native, events: events(many, clock, 5 / 60) })];
+    const sizes = chunks.map((chunk) => chunk.trimEnd().split("\n").length);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(1000);
+    expect(sizes.reduce((a, b) => a + b, 0)).toBe(1 + native.slots.length + 2500 + 1);
+    expect(JSON.parse(chunks.at(-1)!.trimEnd().split("\n").at(-1)!)).toMatchObject({ type: "footer", events: 2500 });
   });
 });
 

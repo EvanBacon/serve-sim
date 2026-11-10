@@ -6,6 +6,8 @@
  * Lines (JSONL, one JSON object per line, in this order):
  *   {type:"header", version:1, file, fps, codec, width, height, rotation, clock, doc}
  *   {type:"frame", i, pts, uptime, changed}       one per sample in the MP4
+ *     (`i` numbers samples; `pts` = slot / fps, which can skip slots the
+ *     encoder was too busy for, so footer `frames` counts samples, not slots)
  *   {type:"event", t, tEnd?, id, timestamp, kind, action?, summary, x?, y?, …}
  *   {type:"footer", frames, changedFrames, durationSec, events, eventsDropped, truncated}
  *
@@ -54,7 +56,6 @@ export type NativeRecordingIndex = {
   uptimesUs: number[];
   /** Per sample: 1 when its pixels differ from the previous sample's. */
   changed: number[];
-  changedCount: number;
   /** The native collector hit its capacity; later samples are missing. */
   truncated: boolean;
 };
@@ -263,7 +264,7 @@ export class RecordingEventCollector {
   }
 }
 
-/** Lines per yielded chunk: keeps a ~108k-frame index to ~100 writes. */
+/** Lines per yielded chunk (frames and events): keeps a ~108k-frame index to ~100 writes. */
 const LINES_PER_CHUNK = 1000;
 
 /**
@@ -314,7 +315,13 @@ export function* recordingIndexLines({ file, summary, index, events, eventsDropp
       chunk = [];
     }
   }
-  for (const event of events) chunk.push(JSON.stringify(event));
+  for (const event of events) {
+    chunk.push(JSON.stringify(event));
+    if (chunk.length >= LINES_PER_CHUNK) {
+      yield chunk.join("\n") + "\n";
+      chunk = [];
+    }
+  }
   chunk.push(JSON.stringify({
     type: "footer",
     frames: index.slots.length,

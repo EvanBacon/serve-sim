@@ -16,7 +16,6 @@ final class RecordingFrameIndexTests: XCTestCase {
         XCTAssertEqual(index.count, 1)
         XCTAssertEqual(index.slots, [0])
         XCTAssertEqual(index.changed, [true])
-        XCTAssertEqual(index.changedCount, 1)
     }
 
     func testRepeatSlotsOfTheSameSourceAreUnchanged() {
@@ -27,7 +26,6 @@ final class RecordingFrameIndexTests: XCTestCase {
         index.recordWrite(slot: 1, source: first)
         index.recordWrite(slot: 2, source: first)
         XCTAssertEqual(index.changed, [true, false, false])
-        XCTAssertEqual(index.changedCount, 1)
         // Repeats carry the capture time of the frame whose pixels they hold.
         XCTAssertEqual(index.uptimes, [10, 10, 10])
     }
@@ -104,6 +102,7 @@ final class RecordingFrameIndexTests: XCTestCase {
         // Microseconds since boot: exact integers, safe as JS numbers.
         XCTAssertEqual(object["uptimesUs"] as? [Int64], [100_000_001, 100_000_001, 100_050_000])
         XCTAssertEqual(object["truncated"] as? Bool, false)
+        XCTAssertNil(object["changedCount"], "JS counts changed samples itself")
         let clock = object["clock"] as? [String: Double]
         XCTAssertEqual(clock?["originUptime"], 100.000_001)
         XCTAssertEqual(clock?["armedUptime"], 99.9)

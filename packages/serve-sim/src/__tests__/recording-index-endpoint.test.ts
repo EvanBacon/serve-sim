@@ -60,7 +60,6 @@ function fakeCapture(
         slots: [0, 1, 2],
         uptimesUs: [500_000_000, 500_000_000, 500_033_333],
         changed: [1, 0, 1],
-        changedCount: 2,
         truncated: false,
       };
       return JSON.stringify({ path, ...LEGACY_SUMMARY, ...(nativeIndex && wantIndex ? { index } : {}) });

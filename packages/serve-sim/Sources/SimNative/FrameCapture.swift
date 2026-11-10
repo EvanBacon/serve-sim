@@ -384,6 +384,9 @@ actor FrameCapture {
             onFrame?(pb, timestamp, false, stamp)
             return true
         }
+        // `stamp` was read before this copy: a redraw in between leaves the
+        // copied pixels newer than their stamp, so the next sample can show a
+        // false `changed: true` in the recording index (documented as allowed).
         guard let copy = photocopier.copy(pb) else { return true }
         onFrame?(copy, timestamp, true, stamp)
         return true

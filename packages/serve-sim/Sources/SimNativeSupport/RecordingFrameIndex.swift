@@ -42,7 +42,6 @@ public struct RecordingFrameIndex: Sendable {
     public private(set) var slots: [UInt32] = []
     public private(set) var uptimes: [Double] = []
     public private(set) var changed: [Bool] = []
-    public private(set) var changedCount = 0
     public private(set) var truncated = false
     private var lastWritten: Source?
 
@@ -81,7 +80,6 @@ public struct RecordingFrameIndex: Sendable {
         slots.append(UInt32(slot))
         uptimes.append(source.captureTime)
         changed.append(isChanged)
-        if isChanged { changedCount += 1 }
     }
 
     /// JSON-serializable form for the native finish summary. Uptimes are
@@ -100,7 +98,6 @@ public struct RecordingFrameIndex: Sendable {
             "slots": slots.map { Int($0) },
             "uptimesUs": uptimes.map { Int64(($0 * 1_000_000).rounded()) },
             "changed": changed.map { $0 ? 1 : 0 },
-            "changedCount": changedCount,
             "truncated": truncated,
         ]
     }
