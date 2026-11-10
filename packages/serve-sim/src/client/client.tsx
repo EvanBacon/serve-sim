@@ -74,7 +74,7 @@ import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
 import { requestMetroReload } from "./utils/metro-reload-request";
-import { canReloadApp } from "./utils/reload-action";
+import { canReloadApp, reloadAction } from "./utils/reload-action";
 import {
   createSimKeyState,
   isFormControlTarget,
@@ -906,7 +906,8 @@ function AppWithConfig({
     sendKey("up", tap);
     for (const ev of simKeys.restoreEvents()) sendKey(ev.type, ev.usage);
   }, [sendKey, simKeys, reloadEndpoint]);
-  // Apps without a JS bundle to reload are terminated and launched again.
+  // Apps without a JS bundle to reload (or any app on Shift-click) are
+  // terminated and launched again.
   const relaunchApp = useCallback(() => {
     const bundleId = currentAppRef.current?.bundleId;
     if (bundleId) hostAction("relaunchApp", { udid: config.device, bundleId }).catch(() => {});
@@ -1283,9 +1284,10 @@ function AppWithConfig({
               {canReloadApp(currentApp) && (
                 <SimulatorToolbar.Button
                   aria-label={currentApp?.isReactNative ? "Reload React Native bundle" : "Relaunch app"}
-                  title={currentApp?.isReactNative ? "Reload (R, ⌘R)" : "Relaunch app"}
-                  onClick={() => {
-                    if (currentApp?.isReactNative) void sendReactNativeReload();
+                  title={currentApp?.isReactNative ? "Reload (R, ⌘R) · ⇧-click to restart app" : "Relaunch app"}
+                  onClick={(e) => {
+                    const isReactNative = !!currentAppRef.current?.isReactNative;
+                    if (reloadAction({ isReactNative, shiftKey: e.shiftKey }) === "js-reload") void sendReactNativeReload();
                     else relaunchApp();
                   }}
                 >
