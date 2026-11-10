@@ -4,12 +4,17 @@
  *
  * Wire protocol (device-scoped helper routes, `…/helper/<udid>/recording`):
  *   GET  /recording        → { recording, startedAt?, limitReached?, holdExpiresAt? }
- *   POST /recording/start  → ?codec=h264|hevc&fps=1..120&bitrate=<bits/s>
+ *   POST /recording/start  → ?codec=h264|hevc&fps=1..120&bitrate=<bits/s>&index=1
  *                            → { recording, startedAt, token }
  *   POST /recording/stop   → ?token=<start token> (required once limitReached,
  *                            until holdExpiresAt)
  *                            → the finished MP4 (video/mp4, attachment), with the
  *                            native summary JSON in `X-Serve-Sim-Recording`.
+ *   GET  /recording/index  → ?token=<start token>[&file=<mp4 name>] after the
+ *                            stop of a recording started with `index=1`: the
+ *                            `.index.jsonl` sidecar (frames, changed flags,
+ *                            HID events; see recording-index.ts). `file` only
+ *                            labels it (header `file`, download name).
  */
 import type { RecordingCodec, RecordingStartOptions } from "./native";
 import type { SimulatorOrientation } from "./client/types";
@@ -50,7 +55,9 @@ export function parseRecordingQuery(
       return { error: "bitrate must be an integer in bits/s (100000..500000000)" };
     }
   }
-  return { codec: codec as RecordingCodec, fps, ...(bitrate != null ? { bitrate } : {}) };
+  // Opt-in: only `serve-sim record` asks for the index sidecar.
+  const index = params.get("index") === "1";
+  return { codec: codec as RecordingCodec, fps, ...(bitrate != null ? { bitrate } : {}), ...(index ? { index } : {}) };
 }
 
 /**
@@ -95,7 +102,7 @@ export function uniqueRecordingFileName(name: string, exists: (name: string) => 
  * `…/recording[/action]` for an input target, derived from its HID socket URL
  * (`…/helper/<udid>/ws`). Works for local state files and `--url` remotes.
  */
-export function recordingUrlForWsUrl(wsUrl: string, action?: "start" | "stop"): string | null {
+export function recordingUrlForWsUrl(wsUrl: string, action?: "start" | "stop" | "index"): string | null {
   let url: URL;
   try {
     url = new URL(wsUrl);

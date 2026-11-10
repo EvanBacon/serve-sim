@@ -241,15 +241,17 @@ private func u32(_ v: Int) -> UInt32 {
 
     /// Start an MP4 screen recording at `path`. `codec` is "h264" or "hevc";
     /// `rotation` is the clockwise display rotation stored as the track
-    /// transform; `bitrate` <= 0 picks the resolution-scaled default.
+    /// transform; `bitrate` <= 0 picks the resolution-scaled default;
+    /// `index` collects per-sample metadata for the `.index.jsonl` sidecar.
     @NodeMethod func startRecording(
-        _ path: String, _ codec: String, _ fps: Int, _ rotation: Int, _ bitrate: Int
+        _ path: String, _ codec: String, _ fps: Int, _ rotation: Int, _ bitrate: Int, _ index: Bool
     ) async throws {
         var options = ScreenRecorder.Options(path: path)
         options.codec = codec == "hevc" ? .hevc : .h264
         options.fps = min(max(fps, 1), 120)
         options.rotationDegrees = rotation
         options.bitrate = bitrate > 0 ? bitrate : nil
+        options.index = index
         try await engine.startRecording(options)
     }
 

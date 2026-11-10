@@ -2,6 +2,7 @@ import Foundation
 import CoreVideo
 import CoreMedia
 import os
+import SimNativeSupport
 
 // The capture + encode engine, reused verbatim from SimStreamHelper. Replicates
 // main.swift's frameHandler: MJPEG always encodes while clients exist; H.264 runs
@@ -21,6 +22,9 @@ struct Frame: Identifiable {
     /// FrameCapture read the surface; screen recordings are timed from this
     /// rather than from when the frame reached a consumer.
     var captureTime: Double = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+    /// Surface identity + seed capture read for these pixels; nil when
+    /// unknown. Lets the recording index tell new pixels from re-emits.
+    var stamp: SurfaceFrameStamp?
 }
 
 protocol FrameEncoder {
@@ -151,11 +155,12 @@ actor CaptureEngine {
             bufferingPolicy: .bufferingNewest(1)
         )
         do {
-            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { [recorderTap] pixelBuffer, timestamp, isCopy in
+            try await frameCapture.start(deviceUDID: deviceUDID, pixelConsumers: pixelConsumers) { [recorderTap] pixelBuffer, timestamp, isCopy, stamp in
                 let frame = Frame(
                     pixelBuffer: pixelBuffer,
                     isPrivateCopy: isCopy,
-                    captureTime: timestamp.seconds
+                    captureTime: timestamp.seconds,
+                    stamp: stamp
                 )
                 // The recorder needs every frame, so it's fed here rather
                 // than through the newest-only stream the live encoders share.

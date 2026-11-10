@@ -120,7 +120,8 @@ serve-sim doctor [-d udid]            Collect redacted diagnostics for bug repor
                                       (--json, --out <file>)
 serve-sim record [-d udid]            Record the screen to an MP4 (native resolution,
                                       60 fps H.264); Ctrl+C stops. -o <file>,
-                                      -t <duration>, --codec h264|hevc, --fps, --bitrate
+                                      -t <duration>, --codec h264|hevc, --fps, --bitrate,
+                                      --no-index (skip the .index.jsonl sidecar)
 serve-sim ax [-d udid]                Dump the accessibility tree as JSON
 serve-sim ax --refs [--all] [--text]  Compact snapshot with element refs (@e1…)
 serve-sim tap @e2 [--settle] [--timeout <ms>]
@@ -265,6 +266,23 @@ Movies an app records from the injected camera (`AVCaptureMovieFileOutput`, as i
 The record button in the preview toolbar and `serve-sim record` both drive a native recorder in the server: it encodes the simulator framebuffer directly (full native resolution, constant frame rate, hardware H.264/HEVC), independent of the stream codec the viewer uses. Stopping streams the finished MP4 to the client that stopped it (a browser download, or the `-o` file) and deletes the server's temp copy. One recording runs per device; any client may stop it, and a `serve-sim record` whose recording is stopped elsewhere exits with an error instead of saving.
 
 A recording is capped at 30 minutes. At the cap the server finalizes the file and holds it for the client that started it, which collects it automatically. If that client has gone away (tab closed, `serve-sim record` killed), the hold lapses after 5 minutes: then any client may collect it with Stop, and starting a new recording discards it.
+
+`serve-sim record` also writes a recording index next to the MP4, `<name>.index.jsonl` (skip it with `--no-index`), so tools can find what changed when without decoding the video. It is JSON Lines, in this order:
+
+- `header`: file, fps, codec, size, rotation, and the clock join (`clock`; the `doc` field spells out each value).
+- `frame`, one per sample in the MP4: `i` numbers the samples, `pts` (seconds) gives the sample's slot on the fps grid, `uptime` is the host uptime the source frame was captured at, and `changed` says whether its pixels differ from the previous sample by the framebuffer's surface seed. Repeated and idle slots are `false`; an app redrawing identical pixels can still read `true`. When the encoder is busy a slot can be skipped, so `pts` can have gaps that `i` does not.
+- `event`, one per HID input to that device during the recording: `t` in media seconds, `kind`, `action`, `summary`, and normalized `x`/`y` when the input has a point. A drag is one event: `t` when it started and `tEnd` when its last point `x`/`y` arrived, clamped to the recording when it crosses the start or stop.
+- `footer`: `frames` (the number of `frame` lines, which can be lower than the summary header's `frames` slot count when slots were skipped), `changedFrames`, `durationSec`, `events`, `eventsDropped` (more than 50,000 inputs overflowed the event list), and `truncated` (the frame list overflowed).
+
+Event-log times are wall clock. The header's `clock` gives the wall clock minus host uptime offset, sampled once when recording starts, and the uptime of `pts` 0, so an event's media time is:
+
+```
+t = (Date.parse(timestamp) / 1000 - wallMinusUptimeSec) - originUptime
+```
+
+Events are logged when the server handles the input, so the frames they cause follow a frame or more later.
+
+Indexing is opt-in per recording: `serve-sim record` starts with `index=1` (unless `--no-index`), and recordings without it, including the preview toolbar's, collect nothing extra. Any HTTP client can start with `POST …/recording/start?index=1` and fetch the index after `/recording/stop` with `GET …/recording/index?token=<start token>`. The server keeps the last four indexes, each for 30 minutes after its MP4 has finished downloading; an optional `&file=<name>` only relabels the header's `file` and the download name. The stop response itself is unchanged. If the index has expired or been evicted, `serve-sim record` warns and keeps the MP4.
 
 Limitations:
 

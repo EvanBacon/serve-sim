@@ -882,6 +882,7 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
     case "/recording": void session.handleRecording(req, res, "status"); return true;
     case "/recording/start": void session.handleRecording(req, res, "start"); return true;
     case "/recording/stop": void session.handleRecording(req, res, "stop"); return true;
+    case "/recording/index": void session.handleRecording(req, res, "index"); return true;
     default: return false;
   }
 }

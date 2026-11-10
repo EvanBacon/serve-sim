@@ -5,7 +5,7 @@ import { execFile, execFileSync, execSync, spawn as nodeSpawn, type ChildProcess
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createHash, randomBytes } from "crypto";
 import { networkInterfaces } from "os";
-import { dirname, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import {
   STATE_DIR,
@@ -69,6 +69,7 @@ import {
   uniqueRecordingFileName,
 } from "./recording";
 import { saveRecordingBody } from "./record-file";
+import { recordingIndexPath } from "./recording-index";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
 
@@ -1237,7 +1238,7 @@ async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean
  */
 async function record(
   deviceArg: string | undefined,
-  opts: { output?: string; duration?: string; codec?: string; fps?: string; bitrate?: string },
+  opts: { output?: string; duration?: string; codec?: string; fps?: string; bitrate?: string; index?: boolean },
 ) {
   let durationMs: number | undefined;
   if (opts.duration != null) {
@@ -1266,6 +1267,7 @@ async function record(
   const startUrl = recordingUrlForWsUrl(target.wsUrl, "start");
   const stopUrl = recordingUrlForWsUrl(target.wsUrl, "stop");
   const statusUrl = recordingUrlForWsUrl(target.wsUrl);
+  const indexUrl = recordingUrlForWsUrl(target.wsUrl, "index");
   if (!startUrl || !stopUrl || !statusUrl) {
     console.error(`Cannot derive the recording endpoint from ${target.wsUrl}`);
     process.exit(1);
@@ -1274,6 +1276,9 @@ async function record(
   if (opts.codec) query.searchParams.set("codec", opts.codec);
   if (opts.fps) query.searchParams.set("fps", opts.fps);
   if (opts.bitrate) query.searchParams.set("bitrate", opts.bitrate);
+  // Ask for the index sidecar; servers that predate it ignore the param.
+  const wantIndex = opts.index !== false;
+  if (wantIndex) query.searchParams.set("index", "1");
 
   const failed = async (what: string, res: Response): Promise<never> => {
     const body = await res.json().catch(() => null) as { message?: string; error?: string } | null;
@@ -1307,13 +1312,16 @@ async function record(
   process.on("SIGTERM", onSignal);
   let out: string;
   let stopRes: Response;
+  let token: string | undefined;
   try {
     const startRes = await fetch(query, { method: "POST", headers: target.headers }).catch((err) => {
       console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     });
     if (!startRes.ok) await failed("Starting the recording", startRes);
-    const { token, startedAt } = await startRes.json().catch(() => ({})) as { token?: string; startedAt?: string };
+    const started = await startRes.json().catch(() => ({})) as { token?: string; startedAt?: string };
+    token = started.token;
+    const { startedAt } = started;
 
     if (!stopRequested) {
       await new Promise<void>((resolveStop) => {
@@ -1363,7 +1371,12 @@ async function record(
     });
     if (!stopRes.ok) await failed("Stopping the recording", stopRes);
     // Don't clobber a recording saved earlier in the same second.
-    out = outputPath ?? resolve(uniqueRecordingFileName(recordingFileName(), (name) => existsSync(resolve(name))));
+    // With the index, its sidecar name must be free too (a leftover
+    // `<name>.index.jsonl` from a deleted MP4 would fail the exclusive save).
+    out = outputPath ?? resolve(uniqueRecordingFileName(
+      recordingFileName(),
+      (name) => existsSync(resolve(name)) || (wantIndex && existsSync(resolve(recordingIndexPath(name)))),
+    ));
     try {
       if (!stopRes.body) throw new Error("empty response");
       // Streamed, not buffered: a long recording can be several GB.
@@ -1385,6 +1398,57 @@ async function record(
     ? ` (${summary.width}x${summary.height} @ ${summary.fps} fps, ${summary.frames} frames, ${summary.duration?.toFixed(2)}s)`
     : "";
   console.log(`Saved ${out}${detail}`);
+  if (wantIndex) await saveRecordingIndex(indexUrl, token, out, { exclusive: !outputPath, headers: target.headers });
+}
+
+/**
+ * Fetch the `.index.jsonl` sidecar for the recording just saved and write it
+ * next to the MP4. Best effort: the MP4 is already saved. A server that
+ * predates indexes (no token, 404/405 without `index_not_found`) is skipped
+ * silently, so its output is as before; an expired or evicted index and other
+ * failures warn on stderr.
+ */
+async function saveRecordingIndex(
+  indexUrl: string | null,
+  token: string | undefined,
+  mp4Path: string,
+  { exclusive, headers }: { exclusive: boolean; headers: Record<string, string> },
+): Promise<void> {
+  if (!indexUrl || !token) return;
+  const url = new URL(indexUrl);
+  url.searchParams.set("token", token);
+  url.searchParams.set("file", basename(mp4Path));
+  const indexPath = recordingIndexPath(mp4Path);
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok || !res.body) {
+      if (res.status === 404 && await isIndexNotFound(res)) {
+        // A server with indexes that no longer has this one (TTL or eviction).
+        console.error("Could not fetch the recording index (expired or evicted); saved the MP4 only.");
+        return;
+      }
+      await res.body?.cancel().catch(() => {});
+      if (res.status !== 404 && res.status !== 405) {
+        console.error(`Could not fetch the recording index (HTTP ${res.status}); saved the MP4 only.`);
+      }
+      return;
+    }
+    await saveRecordingBody(res.body, indexPath, { exclusive });
+    console.error(`Saved index ${indexPath}`);
+  } catch (err) {
+    const reason = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+    console.error(`Could not save the recording index to ${indexPath} (${reason}).`);
+  }
+}
+
+/** Whether a 404 body is the index route's own `{"error":"index_not_found"}`. */
+async function isIndexNotFound(res: Response): Promise<boolean> {
+  try {
+    const body = await res.json() as { error?: unknown } | null;
+    return body?.error === "index_not_found";
+  } catch {
+    return false;
+  }
 }
 
 async function typeText(
@@ -2614,6 +2678,7 @@ program
   .option("--codec <codec>", "h264 (default) or hevc")
   .option("--fps <fps>", "Constant output frame rate (default 60)")
   .option("--bitrate <bps>", "Average bitrate in bits/s (default scales with resolution)")
+  .option("--no-index", "Skip the <name>.index.jsonl sidecar (per-frame changed flags + input events)")
   .action((opts) => record(opts.device, opts));
 
 program

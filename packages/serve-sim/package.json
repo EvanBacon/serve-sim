@@ -67,6 +67,7 @@
     "src/pasteboard-shared.ts",
     "src/ports.ts",
     "src/preview-initial-state.ts",
+    "src/recording-index.ts",
     "src/recording.ts",
     "src/request-trust.ts",
     "src/runtime.ts",

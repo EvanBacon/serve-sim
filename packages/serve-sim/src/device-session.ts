@@ -34,9 +34,10 @@ import {
   type MjpegFrame,
 } from "./native";
 import { createReadStream } from "fs";
+import type { Readable } from "stream";
 import { mkdir, rm, stat } from "fs/promises";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 import { randomUUID } from "crypto";
 import {
   MAX_RECORDING_MS,
@@ -50,7 +51,26 @@ import { collectAxSnapshot } from "./ax";
 import { AxAgent } from "./ax-agent";
 import { serveAxAgent, type AxAgentEndpoint } from "./ax-agent-http";
 import { cliInputOrientation, displayTouchToRaw } from "./touch-remap";
-import { eventLogEventForHidMessage, formatEventLogPoint, recordEventLogEvent, updateEventLogEvent } from "./event-log";
+import {
+  RECORDING_INDEX_CONTENT_TYPE,
+  RecordingEventCollector,
+  recordingClock,
+  recordingIndexEvents,
+  recordingIndexLines,
+  recordingIndexPath,
+  splitRecordingSummary,
+  type NativeRecordingIndex,
+  type RecordingIndexEvent,
+  type RecordingIndexSummary,
+} from "./recording-index";
+import {
+  eventLogEventForHidMessage,
+  formatEventLogPoint,
+  recordEventLogEvent,
+  subscribeEventLog,
+  updateEventLogEvent,
+  type EventLogEntry,
+} from "./event-log";
 
 /**
  * Minimal WebSocket surface the HID input channel needs. Satisfied by both the
@@ -259,6 +279,15 @@ export interface DeviceSessionDependencies {
   softwareKeyboardVisible?: (udid: string) => Promise<boolean | null>;
   /** Raw axe-shaped AX JSON; defaults to the native bridge (`axDescribeAsync`). */
   axDescribe?: (udid: string) => Promise<string>;
+  /**
+   * How long a finished recording's index is kept after its MP4 has been
+   * sent; defaults to `RECORDING_INDEX_TTL_MS`.
+   */
+  recordingIndexTtlMs?: number;
+  /** Event-log subscription for indexed recordings; defaults to `subscribeEventLog`. */
+  subscribeEventLog?: (subscriber: (entry: EventLogEntry) => void) => () => void;
+  /** Stream the finished MP4 to the client; defaults to `createReadStream`. */
+  openRecordingFile?: (path: string) => Readable;
 }
 
 type ActiveRecording = {
@@ -278,7 +307,28 @@ type ActiveRecording = {
   /** Set once the hold lapses: any client may collect, a new start discards. */
   holdExpired?: boolean;
   holdTimer?: ReturnType<typeof setTimeout>;
+  /** This device's HID events while recording; set only for `index=1` starts. */
+  events?: RecordingEventCollector;
+  unsubscribeEvents?: () => void;
 };
+
+/** A finished recording's index, served by `GET /recording/index?token=`. */
+type StoredRecordingIndex = {
+  fileName: string;
+  summary: RecordingIndexSummary;
+  index: NativeRecordingIndex;
+  events: RecordingIndexEvent[];
+  eventsDropped: number;
+  /**
+   * Deletes this entry once the TTL lapses (unref'd). Armed when the MP4
+   * has finished streaming to the client, so a slow download doesn't eat it.
+   */
+  expiry?: ReturnType<typeof setTimeout>;
+};
+
+/** Finished indexes kept per session, and for how long. */
+const MAX_STORED_RECORDING_INDEXES = 4;
+const RECORDING_INDEX_TTL_MS = 30 * 60_000;
 
 type Unsubscribe = () => void | Promise<void>;
 
@@ -319,6 +369,8 @@ export class DeviceSession {
   private deviceHubShadowed?: boolean;
   /** Active screen recording (one per session), or a start/stop in flight. */
   private recording?: ActiveRecording;
+  /** Indexes of collected recordings, by start token (oldest first). */
+  private readonly recordingIndexes = new Map<string, StoredRecordingIndex>();
   private rendererFailureEvent?: { id: number; key: string; count: number };
   /** Ref session for `/ax/snapshot|act|settle`; created on first use. */
   private axAgent?: AxAgent;
@@ -430,11 +482,14 @@ export class DeviceSession {
       this.recording = undefined;
       if (active.limitTimer) clearTimeout(active.limitTimer);
       if (active.holdTimer) clearTimeout(active.holdTimer);
+      stopCollectingEvents(active);
       if (active.phase !== "stopping") {
         const finalized = active.finalizing?.catch(() => {}) ?? Promise.resolve();
         this.runCleanup("recording cleanup", () => finalized.then(() => rm(active.path, { force: true })));
       }
     }
+    for (const stored of this.recordingIndexes.values()) clearTimeout(stored.expiry);
+    this.recordingIndexes.clear();
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
   }
@@ -767,10 +822,19 @@ export class DeviceSession {
    * Stop streams the finished MP4 back as an attachment and deletes the temp
    * file, so the browser (or `serve-sim record`) decides where it's saved.
    */
-  async handleRecording(req: IncomingMessage, res: ServerResponse, action: "status" | "start" | "stop"): Promise<void> {
+  async handleRecording(req: IncomingMessage, res: ServerResponse, action: "status" | "start" | "stop" | "index"): Promise<void> {
     const method = (req.method ?? "GET").toUpperCase();
     if (action === "status") {
       this.sendJson(res, 200, this.recordingStatus());
+      return;
+    }
+    if (action === "index") {
+      if (method !== "GET" && method !== "HEAD") {
+        res.setHeader("Allow", "GET, HEAD");
+        this.sendJson(res, 405, { error: "method_not_allowed" });
+        return;
+      }
+      await this.sendRecordingIndex(req, res);
       return;
     }
     if (method !== "POST") {
@@ -814,7 +878,16 @@ export class DeviceSession {
     const token = randomUUID();
     const active: ActiveRecording = { path, startedAt, token, phase: "starting" };
     this.recording = active;
+    if (parsed.index) {
+      // Collect from before the native start: its first frame (pts 0) can be
+      // captured before startRecording resolves. The window filter drops
+      // anything earlier.
+      const events = new RecordingEventCollector(this.udid);
+      active.events = events;
+      active.unsubscribeEvents = (this.dependencies?.subscribeEventLog ?? subscribeEventLog)((entry) => events.add(entry));
+    }
     const closedMeanwhile = () => {
+      stopCollectingEvents(active);
       // close() ran during the start: capture stop cancelled the recorder.
       this.runCleanup("recording cleanup", () => rm(path, { force: true }));
       this.sendJson(res, 409, { error: "session_closed", message: "The device session closed while the recording was starting" });
@@ -826,6 +899,7 @@ export class DeviceSession {
     } catch (error) {
       if (this.recording !== active) return closedMeanwhile();
       this.recording = undefined;
+      stopCollectingEvents(active);
       await rm(path, { force: true }).catch(() => {});
       throw error;
     }
@@ -866,6 +940,7 @@ export class DeviceSession {
   private finalizeRecording(active: ActiveRecording): Promise<string> {
     if (active.limitTimer) clearTimeout(active.limitTimer);
     active.limitTimer = undefined;
+    stopCollectingEvents(active);
     active.finalizing ??= this.capture.stopRecording!();
     return active.finalizing;
   }
@@ -922,23 +997,120 @@ export class DeviceSession {
       await rm(active.path, { force: true }).catch(() => {});
       return;
     }
+    const fileName = recordingFileName();
+    let publicSummary: string;
+    if (active.events) {
+      // Indexed: parse the (large) summary once for both the index and the header.
+      const split = splitRecordingSummary(summary);
+      publicSummary = publicRecordingSummary(split.summary);
+      // The index is a side-channel: it must never cost the MP4.
+      try { this.storeRecordingIndex(active, active.events, split, fileName); }
+      catch (error) { console.error(`[record] ${this.udid}: could not keep the recording index:`, error); }
+    } else {
+      publicSummary = publicRecordingSummary(summary);
+    }
     res.writeHead(200, {
       "Content-Type": "video/mp4",
       "Content-Length": String(size),
-      "Content-Disposition": `attachment; filename="${recordingFileName()}"`,
+      "Content-Disposition": `attachment; filename="${fileName}"`,
       "Cache-Control": "no-store",
-      [RECORDING_SUMMARY_HEADER]: publicRecordingSummary(summary),
+      [RECORDING_SUMMARY_HEADER]: publicSummary,
     });
-    await new Promise<void>((resolve) => {
-      const file = createReadStream(active.path);
-      const done = () => {
-        file.destroy();
-        void rm(active.path, { force: true }).finally(resolve);
-      };
-      file.once("error", () => { res.destroy(); done(); });
-      res.once("close", done);
-      file.pipe(res);
+    try {
+      await new Promise<void>((resolve) => {
+        const file = (this.dependencies?.openRecordingFile ?? createReadStream)(active.path);
+        const done = () => {
+          file.destroy();
+          void rm(active.path, { force: true }).finally(resolve);
+        };
+        file.once("error", () => { res.destroy(); done(); });
+        res.once("close", done);
+        file.pipe(res);
+      });
+    } finally {
+      // The index's TTL counts from the end of the MP4 transfer.
+      if (active.events) this.armRecordingIndexExpiry(active.token);
+    }
+  }
+
+  /**
+   * Keep a collected recording's index (native per-sample metadata plus the
+   * HID events in its window) for `GET /recording/index?token=`. The stop
+   * response itself is unchanged; the index is fetched separately.
+   */
+  private storeRecordingIndex(
+    active: ActiveRecording,
+    collector: RecordingEventCollector,
+    { summary, index }: ReturnType<typeof splitRecordingSummary>,
+    fileName: string,
+  ): void {
+    if (!index) return;
+    const clock = recordingClock(index);
+    const durationSec = typeof summary.duration === "number" ? summary.duration : 0;
+    const events = clock ? recordingIndexEvents(collector.entries(), clock, { durationSec }) : [];
+    this.recordingIndexes.set(active.token, {
+      fileName,
+      summary: summary as RecordingIndexSummary,
+      index,
+      events,
+      eventsDropped: collector.dropped,
     });
+    while (this.recordingIndexes.size > MAX_STORED_RECORDING_INDEXES) {
+      const [oldest, stored] = this.recordingIndexes.entries().next().value!;
+      clearTimeout(stored.expiry);
+      this.recordingIndexes.delete(oldest);
+    }
+  }
+
+  /** Start the TTL for a kept index (once its MP4 has been sent). */
+  private armRecordingIndexExpiry(token: string): void {
+    const stored = this.recordingIndexes.get(token);
+    if (!stored || stored.expiry) return;
+    const expiry = setTimeout(() => {
+      if (this.recordingIndexes.get(token) === stored) this.recordingIndexes.delete(token);
+    }, this.dependencies?.recordingIndexTtlMs ?? RECORDING_INDEX_TTL_MS);
+    expiry.unref?.();
+    stored.expiry = expiry;
+  }
+
+  /** `GET /recording/index?token=<start token>[&file=<mp4 name>]` → JSONL. */
+  private async sendRecordingIndex(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const params = new URL(req.url ?? "", "http://x").searchParams;
+    const token = params.get("token");
+    if (!token) {
+      this.sendJson(res, 400, { error: "missing_token", message: "Pass the token /recording/start returned" });
+      return;
+    }
+    const stored = this.recordingIndexes.get(token);
+    if (!stored) {
+      this.sendJson(res, 404, {
+        error: "index_not_found",
+        message: "No index for this token (not collected yet, expired, or recorded by a build without indexes)",
+      });
+      return;
+    }
+    const file = sanitizeFileName(params.get("file")) ?? stored.fileName;
+    res.writeHead(200, {
+      "Content-Type": RECORDING_INDEX_CONTENT_TYPE,
+      "Content-Disposition": `attachment; filename="${basename(recordingIndexPath(file))}"`,
+      "Cache-Control": "no-store",
+    });
+    if ((req.method ?? "GET").toUpperCase() === "HEAD") {
+      res.end();
+      return;
+    }
+    const { summary, index, events, eventsDropped } = stored;
+    for (const chunk of recordingIndexLines({ file, summary, index, events, eventsDropped })) {
+      if (res.destroyed) return;
+      if (!res.write(chunk)) {
+        await new Promise<void>((resolve) => {
+          const done = () => { res.off("drain", done); res.off("close", done); resolve(); };
+          res.once("drain", done);
+          res.once("close", done);
+        });
+      }
+    }
+    res.end();
   }
 
   // ── HID WebSocket ────────────────────────────────────────────────────────
@@ -1189,16 +1361,18 @@ export class DeviceSession {
           gesture.eventId = entry.id;
         } else {
           // Keep the stored drag current without streaming every touchmove to the browser.
-          updateEventLogEvent(
-            gesture.eventId,
-            {
-              kind: "drag",
-              action: "drag",
-              summary: touchGestureSummary(gesture),
-              details: this.touchGestureDetails(gesture, "drag", "move"),
-            },
-            { notify: false },
-          );
+          const patch = {
+            kind: "drag",
+            action: "drag",
+            summary: touchGestureSummary(gesture),
+            details: this.touchGestureDetails(gesture, "drag", "move"),
+          };
+          const updated = updateEventLogEvent(gesture.eventId, patch, { notify: false });
+          // Silent updates skip subscribers; an indexed recording still
+          // wants the drag's latest point (and when it arrived), even once
+          // the drag has fallen out of the global log.
+          if (updated) this.recording?.events?.add(updated);
+          else this.recording?.events?.update(gesture.eventId, patch);
         }
       }
       return;
@@ -1221,12 +1395,15 @@ export class DeviceSession {
               details: this.touchGestureDetails(gesture, "drag", "end"),
             });
           } else {
-            updateEventLogEvent(gesture.eventId, {
+            const patch = {
               kind: "drag",
               action: "drag",
               summary: touchGestureSummary(gesture),
               details: this.touchGestureDetails(gesture, "drag", "end"),
-            });
+            };
+            // A notified update reaches the collector via its subscription;
+            // one the global log already evicted has to be patched directly.
+            if (!updateEventLogEvent(gesture.eventId, patch)) this.recording?.events?.update(gesture.eventId, patch);
           }
         } else {
           recordEventLogEvent({
@@ -1508,15 +1685,35 @@ export function closeDeviceSession(udid: string): void {
   }
 }
 
-/** Native summary JSON for the response header, minus the server temp path. */
-function publicRecordingSummary(summary: string): string {
+/**
+ * The summary header: the native JSON (or, for an indexed recording, its
+ * already-parsed form with `index` split off) without the server path.
+ */
+function publicRecordingSummary(summary: string | Record<string, unknown>): string {
   let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(summary) as Record<string, unknown>;
-  } catch {
-    return "{}";
+  if (typeof summary === "string") {
+    try {
+      parsed = JSON.parse(summary) as Record<string, unknown>;
+    } catch {
+      return "{}";
+    }
+  } else {
+    parsed = { ...summary };
   }
   delete parsed.path;
   // Header-safe: JSON.stringify escapes control chars; drop anything non-ASCII.
   return JSON.stringify(parsed).replace(/[^\x20-\x7e]/g, "");
+}
+
+function stopCollectingEvents(active: ActiveRecording): void {
+  active.unsubscribeEvents?.();
+  active.unsubscribeEvents = undefined;
+  active.events?.stop();
+}
+
+/** A header-safe bare file name from a `file=` query param, or null. */
+function sanitizeFileName(raw: string | null): string | null {
+  if (!raw) return null;
+  const name = basename(raw).replace(/[^\x20-\x7e]|["\\]/g, "").trim();
+  return name && name !== "." && name !== ".." ? name.slice(0, 200) : null;
 }

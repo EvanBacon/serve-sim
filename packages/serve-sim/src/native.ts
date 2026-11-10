@@ -57,7 +57,7 @@ interface SimCaptureHandle {
   contentChangeCount?(): number;
   snapshotJpeg(): Promise<Uint8Array | null>;
   /** Absent in addons built before screen recording existed. */
-  startRecording?(path: string, codec: string, fps: number, rotation: number, bitrate: number): Promise<void>;
+  startRecording?(path: string, codec: string, fps: number, rotation: number, bitrate: number, index: boolean): Promise<void>;
   stopRecording?(): Promise<string>;
 }
 
@@ -114,6 +114,11 @@ export type RecordingStartOptions = {
   rotation: number;
   /** Average bits/s; omitted picks the resolution-scaled default. */
   bitrate?: number;
+  /**
+   * Collect per-sample metadata for the `.index.jsonl` sidecar (added to the
+   * finish summary as `index`). Off unless requested.
+   */
+  index?: boolean;
 };
 
 /** JSON summary the native recorder returns when a recording is finalized. */
@@ -440,7 +445,7 @@ export class NativeCapture {
    */
   startRecording(path: string, options: RecordingStartOptions): Promise<void> {
     if (!this.handle.startRecording) return Promise.reject(new Error("screen recording unavailable in this native build"));
-    return this.handle.startRecording(path, options.codec, options.fps, options.rotation, options.bitrate ?? 0);
+    return this.handle.startRecording(path, options.codec, options.fps, options.rotation, options.bitrate ?? 0, options.index === true);
   }
 
   /** Finalize the active recording; resolves with its JSON summary string. */

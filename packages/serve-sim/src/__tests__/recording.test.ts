@@ -24,6 +24,12 @@ describe("parseRecordingQuery", () => {
     });
   });
 
+  test("index=1 opts in to the index sidecar; anything else leaves it off", () => {
+    expect(parseRecordingQuery(new URLSearchParams("index=1"))).toEqual({ codec: "h264", fps: 60, index: true });
+    expect(parseRecordingQuery(new URLSearchParams("index=0"))).toEqual({ codec: "h264", fps: 60 });
+    expect(parseRecordingQuery(new URLSearchParams("index=true"))).toEqual({ codec: "h264", fps: 60 });
+  });
+
   test.each(["codec=vp9", "fps=0", "fps=121", "fps=29.97", "bitrate=1e3", "bitrate=abc"])("rejects %s", (query) => {
     expect(parseRecordingQuery(new URLSearchParams(query))).toHaveProperty("error");
   });
@@ -67,6 +73,7 @@ describe("recordingUrlForWsUrl", () => {
     expect(recordingUrlForWsUrl(ws, "start")).toBe("http://127.0.0.1:3400/helper/ABC/recording/start");
     expect(recordingUrlForWsUrl("wss://x.example/base/helper/ABC/ws", "stop"))
       .toBe("https://x.example/base/helper/ABC/recording/stop");
+    expect(recordingUrlForWsUrl(ws, "index")).toBe("http://127.0.0.1:3400/helper/ABC/recording/index");
   });
 
   test("rejects non-socket URLs", () => {
