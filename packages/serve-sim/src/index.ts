@@ -969,7 +969,8 @@ async function touchInputOrientation(
 // #136 (they advertise `inputAck` in their state / `/api`) for frames carrying
 // an `ack` id. Older servers never reply, so input to them stays
 // fire-and-forget. INPUT_ACK_TIMEOUT_MS covers HID setup plus the new-client
-// settle delay on a session's first input; a missing ack within it exits 0.
+// settle delay on a session's first input; a missing ack within it warns on
+// stderr and exits 0.
 const WS_MSG_INPUT_ACK = 0x84;
 const INPUT_ACK_TIMEOUT_MS = 4_000;
 
@@ -1053,7 +1054,11 @@ function sendAckedInput(
           return;
         }
         timer = setTimeout(() => {
-          debugCli("no input ack from %s after %dms; assuming an older server", target.wsUrl, INPUT_ACK_TIMEOUT_MS);
+          debugCli("no input ack from %s after %dms", target.wsUrl, INPUT_ACK_TIMEOUT_MS);
+          console.error(
+            `serve-sim: no delivery confirmation within ${INPUT_ACK_TIMEOUT_MS / 1000}s; ` +
+              `input may not have reached ${target.device}`,
+          );
           finish();
         }, INPUT_ACK_TIMEOUT_MS);
       };

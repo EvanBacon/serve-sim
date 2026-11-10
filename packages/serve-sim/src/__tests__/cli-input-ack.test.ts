@@ -123,9 +123,11 @@ describe("input commands propagate HID delivery failures (#136)", () => {
     }, 25_000);
   }
 
-  test("an advertising server that never acks still exits 0 after the timeout", async () => {
+  test("an advertising server that never acks exits 0 with a warning after the timeout", async () => {
     const r = await runCli(["button", "lock", "-d", "ACK-HUNG"]);
     expect(r.status).toBe(0);
+    expect(r.stderr).toContain("serve-sim: no delivery confirmation within 4s; input may not have reached ACK-HUNG");
+    expect(r.stderr.trim().split("\n")).toHaveLength(1);
   }, 25_000);
 
   test("tap tags begin and end with distinct ack ids", async () => {
