@@ -184,6 +184,15 @@ describe("waitForSettle: continuous animation", () => {
     }
   });
 
+  test("frames that stop during a paced gap are noticed within a poll, not at the end of the gap", async () => {
+    // Busy past the fallback, then quiet at 1500 ms, early in a 1000 ms gap.
+    const w = world({ frames: animating(1500), screen: (t) => String(Math.min(Math.floor(t / 100), 15)) });
+    const result = await w.run(waitForSettle({ ...w.base, timeoutMs: 5000, axIntervalMs: 1000 }));
+    expect(result).toMatchObject({ settled: true, reason: "frames-quiet" });
+    // Quiet at 1500 + 250 (+ one poll), then the 200 ms confirming read.
+    expect(result.waitedMs).toBeLessThanOrEqual(2050);
+  });
+
   test("a moving tree under continuous frames is not ax-quiet", async () => {
     const w = world({ frames: (t) => t, screen: (t) => String(Math.floor(t / 100)) });
     const result = await w.run(waitForSettle({ ...w.base, timeoutMs: 2500 }));

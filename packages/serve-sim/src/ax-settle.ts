@@ -255,12 +255,14 @@ export async function waitForSettle<T>(options: SettleOptions<T>): Promise<Settl
       } else if (framesBusyTooLong) {
         // Frames still busy and the tree still moving: pace AX reads as
         // settleOnAxAlone does instead of reading back to back until the
-        // timeout, and keep watching frames across the gap.
-        const gap = Math.min(axIntervalMs, remaining() - readCostMs);
-        if (gap > 0) {
-          await options.sleep(gap);
+        // timeout. Poll frames through the gap like the main loop, and end
+        // it early once they go quiet.
+        const gapEnd = options.now() + Math.min(axIntervalMs, remaining() - readCostMs);
+        while (options.now() < gapEnd && options.now() - lastChange < quietMs) {
+          await options.sleep(Math.min(pollMs, gapEnd - options.now()));
           const next = await readFrames();
           if (next != null && next !== count) {
+            trace("frames", { count: next });
             count = next;
             lastChange = options.now();
           }
