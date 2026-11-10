@@ -173,6 +173,17 @@ describe("waitForSettle: continuous animation", () => {
     expect(result.waitedMs).toBeLessThan(2000);
   });
 
+  test("busy frames and a moving tree pace AX reads by axIntervalMs instead of reading back to back", async () => {
+    const w = world({ frames: (t) => Math.floor(t / 16), screen: (t) => String(Math.floor(t / 100)) });
+    const result = await w.run(waitForSettle({ ...w.base, timeoutMs: 3000, axIntervalMs: 100 }));
+    expect(result).toMatchObject({ settled: false, reason: "timeout" });
+    expect(w.reads.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < w.reads.length; i++) {
+      // 200 ms read + at least the 100 ms gap between reads.
+      expect(w.reads[i]! - w.reads[i - 1]!).toBeGreaterThanOrEqual(300);
+    }
+  });
+
   test("a moving tree under continuous frames is not ax-quiet", async () => {
     const w = world({ frames: (t) => t, screen: (t) => String(Math.floor(t / 100)) });
     const result = await w.run(waitForSettle({ ...w.base, timeoutMs: 2500 }));
