@@ -109,7 +109,8 @@ interface ExecChannelOptions {
   /**
    * Port of the plain-HTTP server this channel is mounted on, for SSE
    * loopback requests. Preferred over the upgrade socket's local port; the
-   * client's Host header is never used.
+   * client's Host header never picks the port (it is only replayed as the
+   * loopback request's Host header).
    */
   serverPort?: () => number | undefined;
 }
@@ -121,6 +122,25 @@ function tokenMatches(presented: unknown, expected: string | undefined): boolean
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * Viewer headers replayed on SSE loopback requests so the proxied route
+ * answers as it would a direct GET from this viewer: the Host (and, behind an
+ * HTTPS tunnel, `x-forwarded-proto`), so /api/events builds helper URLs this
+ * viewer can reach on its own scheme (#92), and — because a non-loopback Host
+ * or a forwarding header makes the loopback request remote to the auth gate —
+ * the credentials the upgrade itself was authenticated with. Each header is
+ * replayed only when the upgrade carried it. Only the request's headers
+ * change; the connection target is still 127.0.0.1:serverPort.
+ */
+function sseViewerHeaders(req: IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const name of ["host", "x-forwarded-proto", "authorization", "cookie"] as const) {
+    const value = req.headers[name];
+    if (typeof value === "string" && value) headers[name] = value;
+  }
+  return headers;
+}
+
 function defaultAllowShell(req: IncomingMessage): boolean {
   return isTrustedLoopback(req) && isLoopbackSameOrigin(req);
 }
@@ -128,6 +148,7 @@ function defaultAllowShell(req: IncomingMessage): boolean {
 function wireExecSocket(
   ws: WebSocket,
   serverPort: number | undefined,
+  viewerHeaders: Record<string, string>,
   opts: ExecChannelOptions,
   shellAllowed: boolean,
   rpcAllowed: boolean,
@@ -175,7 +196,7 @@ function wireExecSocket(
           host: "127.0.0.1",
           port: serverPort,
           path,
-          headers: { accept: "text/event-stream" },
+          headers: { ...viewerHeaders, accept: "text/event-stream" },
         },
         (res) => {
           res.on("data", (chunk: Buffer) => send({ sub, data: chunk.toString("utf-8") }));
@@ -326,7 +347,7 @@ export function createExecUpgradeHandler(opts: ExecChannelOptions) {
     const serverPort = opts.serverPort?.() || (socket as Socket).localPort || undefined;
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      wireExecSocket(ws, serverPort, opts, shellAllowed, rpcAllowed);
+      wireExecSocket(ws, serverPort, sseViewerHeaders(req), opts, shellAllowed, rpcAllowed);
     });
     return true;
   };

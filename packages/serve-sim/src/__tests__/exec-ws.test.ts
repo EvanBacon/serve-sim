@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { createServer, type Server } from "http";
 import type { AddressInfo, Socket } from "net";
 import { clearEventLogForTests, recordEventLogEvent } from "../event-log";
-import { simMiddleware } from "../middleware";
+import { createExecUpgradeHandler } from "../exec-ws";
+import { simMiddleware, type ServeSimState } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
+import { STATE_DIR, stateFileForDevice } from "../state";
 
 // The control channel is the ONLY transport the preview page uses for execs,
 // simulator settings, and SSE side-channels — there is deliberately no HTTP
@@ -46,7 +49,12 @@ interface Reply {
   data?: string;
 }
 
-function connect(port = PORT, first: Record<string, unknown> = {}, host = `127.0.0.1:${port}`): Promise<{
+function connect(
+  port = PORT,
+  first: Record<string, unknown> = {},
+  host = `127.0.0.1:${port}`,
+  extraHeaders: Record<string, string> = {},
+): Promise<{
   next: () => Promise<Reply>;
   send: (body: Record<string, unknown>) => void;
   close: () => void;
@@ -56,7 +64,7 @@ function connect(port = PORT, first: Record<string, unknown> = {}, host = `127.0
     // Browsers always send Origin on WebSocket upgrades, and the control
     // channel requires it (loopback same-origin for shell access).
     const ws = new WebSocket(`ws://127.0.0.1:${port}/exec-ws`, {
-      headers: { Host: host, Origin: `http://${host}` },
+      headers: { Host: host, Origin: `http://${host}`, ...extraHeaders },
     } as never);
     const queue: Reply[] = [];
     const waiters: Array<(r: Reply) => void> = [];
@@ -98,6 +106,18 @@ function connect(port = PORT, first: Record<string, unknown> = {}, host = `127.0
     };
     ws.onclose = () => closeResolve();
   });
+}
+
+/** Reads a subscription's chunks until the first complete SSE `data:` frame. */
+async function readFirstSseData(channel: { next: () => Promise<Reply> }): Promise<string> {
+  let buffered = "";
+  for (;;) {
+    const reply = await channel.next();
+    buffered += reply.data ?? "";
+    const frame = /^data: (.*)\n\n/m.exec(buffered);
+    if (frame) return frame[1]!;
+    if (reply.end) throw new Error(`stream ended before a data frame: ${reply.error ?? buffered}`);
+  }
 }
 
 describe("exec-ws control channel", () => {
@@ -329,6 +349,120 @@ describe("exec-ws control channel", () => {
         server.closeAllConnections();
         server.close();
       }
+    }
+  });
+  test("sse loopback forwards the viewer's Host so LAN viewers get LAN helper URLs (#92)", async () => {
+    // /api/events builds helper URLs from the request's Host
+    // (rewriteStateForRequestHost): a loopback Host keeps 127.0.0.1, any other
+    // Host swaps it in. The loopback SSE request must carry the viewer's Host,
+    // or a LAN viewer is handed 127.0.0.1 stream/ws URLs it cannot reach.
+    const seenHosts: Array<string | undefined> = [];
+    const handler = createExecUpgradeHandler({
+      path: "/exec-ws",
+      ssePrefixes: ["/host-echo"],
+      serverPort: () => (echo.address() as AddressInfo).port,
+    });
+    const echo = createServer((req, res) => {
+      seenHosts.push(req.headers.host);
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end(`data: ${req.headers.host ?? ""}\n\n`);
+    });
+    echo.on("upgrade", (req, socket, head) => {
+      if (!handler(req, socket, head)) socket.destroy();
+    });
+    await new Promise<void>((r) => echo.listen(0, "127.0.0.1", r));
+    const port = (echo.address() as AddressInfo).port;
+    const hostEcho = async (host: string, sub: number) => {
+      const channel = await connect(port, {}, host);
+      await channel.next(); // ready
+      channel.send({ sub, path: "/host-echo" });
+      let data = "";
+      for (let reply = await channel.next(); !reply.end; reply = await channel.next()) {
+        data += reply.data ?? "";
+      }
+      channel.close();
+      return /^data: (.*)$/m.exec(data)?.[1];
+    };
+    try {
+      expect(await hostEcho(`192.168.1.50:${port}`, 1)).toBe(`192.168.1.50:${port}`);
+      expect(await hostEcho(`127.0.0.1:${port}`, 2)).toBe(`127.0.0.1:${port}`);
+      expect(await hostEcho(`localhost:${port}`, 3)).toBe(`localhost:${port}`);
+      expect(seenHosts).toEqual([`192.168.1.50:${port}`, `127.0.0.1:${port}`, `localhost:${port}`]);
+    } finally {
+      echo.closeAllConnections();
+      echo.close();
+    }
+  });
+
+  test("an authenticated LAN or tunnel viewer's /api/events config uses its own host and scheme, without local-only fields (#92)", async () => {
+    // A non-loopback Host makes the loopback SSE request "remote" to the auth
+    // gate, so it must present the same credentials the upgrade did — and the
+    // config it streams must match what a direct GET from that viewer gets:
+    // helper URLs on the viewer's host/scheme, no local CLI path, no allowExec.
+    const authToken = "exec-ws-lan-token";
+    const device = `EXEC-WS-LAN-${process.pid}`;
+    const stateFile = stateFileForDevice(device);
+    mkdirSync(STATE_DIR, { recursive: true });
+    const state: ServeSimState = {
+      pid: process.pid,
+      port: 3100,
+      device,
+      url: "http://127.0.0.1:3100",
+      streamUrl: `http://127.0.0.1:3100/helper/${device}/stream.mjpeg`,
+      wsUrl: `ws://127.0.0.1:3100/helper/${device}/ws`,
+    };
+    writeFileSync(stateFile, JSON.stringify(state));
+    const middleware = simMiddleware({
+      basePath: "/",
+      authToken,
+      device,
+      allowExec: true,
+      serveSimBin: "/local/only/serve-sim",
+    });
+    const lan = createServer((req, res) => void middleware(req, res));
+    lan.on("upgrade", (req, socket, head) => middleware.handleUpgrade(req, socket as Socket, head));
+    await new Promise<void>((r) => lan.listen(0, "127.0.0.1", r));
+    const port = (lan.address() as AddressInfo).port;
+    middleware.setServerPort(port);
+    const eventsConfig = async (host: string, headers: Record<string, string>) => {
+      const channel = await connect(port, {}, host, headers);
+      try {
+        expect((await channel.next()).ready).toBe(true);
+        channel.send({ sub: 12, path: "/api/events" });
+        return JSON.parse(await readFirstSseData(channel)) as Record<string, unknown>;
+      } finally {
+        channel.close();
+      }
+    };
+    const bearer = { Authorization: `Bearer ${authToken}` };
+    const devicePath = `/helper/${device}`;
+    try {
+      const lanHost = `192.168.1.50:${port}`;
+      const lanConfig = await eventsConfig(lanHost, bearer);
+      expect(lanConfig.streamUrl).toBe(`http://${lanHost}${devicePath}/stream.mjpeg`);
+      expect(lanConfig.wsUrl).toBe(`ws://${lanHost}${devicePath}/ws`);
+      expect(lanConfig.serveSimBin).toBe("");
+      expect(lanConfig.allowExec).toBeUndefined();
+
+      // HTTPS tunnel (ngrok / cloudflared / Tailscale Serve) preserving Host:
+      // the replayed x-forwarded-proto keeps the helper URLs https/wss so the
+      // https page doesn't block them as mixed content.
+      const tunnelHost = "sim.example.ts.net";
+      const tunnelConfig = await eventsConfig(tunnelHost, { ...bearer, "X-Forwarded-Proto": "https" });
+      expect(tunnelConfig.streamUrl).toBe(`https://${tunnelHost}${devicePath}/stream.mjpeg`);
+      expect(tunnelConfig.wsUrl).toBe(`wss://${tunnelHost}${devicePath}/ws`);
+      expect(tunnelConfig.serveSimBin).toBe("");
+      expect(tunnelConfig.allowExec).toBeUndefined();
+
+      // The trusted local viewer is unchanged: loopback URLs and local fields.
+      const localConfig = await eventsConfig(`127.0.0.1:${port}`, {});
+      expect(localConfig.streamUrl).toBe(`http://127.0.0.1:${port}${devicePath}/stream.mjpeg`);
+      expect(localConfig.serveSimBin).toBe("/local/only/serve-sim");
+      expect(localConfig.allowExec).toBe(true);
+    } finally {
+      rmSync(stateFile, { force: true });
+      lan.closeAllConnections();
+      lan.close();
     }
   });
 });
