@@ -8,6 +8,7 @@ import {
   recordingIndexPath,
   splitRecordingSummary,
   type NativeRecordingIndex,
+  type RecordingClock,
 } from "../recording-index";
 
 // Recorder armed at uptime 1000 s == 2026-11-09T12:00:00.000Z; first frame
@@ -38,6 +39,11 @@ function hidEvent(id: number, timestamp: string, overrides: Partial<EventLogEntr
     ...overrides,
   };
 }
+
+/** As the collector stores it: received when logged unless given. */
+const collected = (entry: EventLogEntry, receivedAt = entry.timestamp) => ({ entry, receivedAtMs: Date.parse(receivedAt) });
+const events = (entries: EventLogEntry[], clock: RecordingClock, durationSec: number) =>
+  recordingIndexEvents(entries.map((entry) => collected(entry)), clock, { durationSec });
 
 describe("splitRecordingSummary", () => {
   test("separates the native index from the summary without touching other fields", () => {
@@ -84,7 +90,7 @@ describe("recordingClock", () => {
 describe("event media time", () => {
   test("maps an ISO wall time onto the media timeline: t = wall - offset - originUptime", () => {
     const clock = recordingClock(native)!;
-    const t = (timestamp: string) => recordingIndexEvents([hidEvent(1, timestamp)], clock, { durationSec: 10 })[0]?.t;
+    const t = (timestamp: string) => events([hidEvent(1, timestamp)], clock, 10)[0]?.t;
     expect(t("2026-11-09T12:00:00.250Z")).toBe(0);
     expect(t("2026-11-09T12:00:01.750Z")).toBe(1.5);
     expect(t("2026-11-09T12:00:00.249Z")).toBeUndefined(); // before pts 0
@@ -95,37 +101,57 @@ describe("event media time", () => {
   test("uses the offset sampled at start, not origin", () => {
     // Same wall time, origin captured later -> the event is earlier in media time.
     const later = recordingClock({ ...native, clock: { ...native.clock, originUptime: 1001 } })!;
-    expect(recordingIndexEvents([hidEvent(1, "2026-11-09T12:00:01.750Z")], later, { durationSec: 10 })[0]?.t).toBe(0.75);
+    expect(events([hidEvent(1, "2026-11-09T12:00:01.750Z")], later, 10)[0]?.t).toBe(0.75);
   });
 });
 
 describe("recordingIndexEvents", () => {
   const clock = recordingClock(native)!;
 
-  test("keeps HID events for the device inside [0, duration], sorted by t", () => {
-    const events = recordingIndexEvents([
+  test("keeps events inside [0, duration], sorted by t", () => {
+    const kept = events([
       hidEvent(3, "2026-11-09T12:00:02.250Z"),
       hidEvent(1, "2026-11-09T12:00:00.100Z"), // before pts 0
       hidEvent(2, "2026-11-09T12:00:00.750Z", { kind: "button", action: "home", summary: "Button home", details: { button: "home", phase: "press" } }),
       hidEvent(4, "2026-11-09T12:00:09.000Z"), // after the end
-      hidEvent(5, "2026-11-09T12:00:01.000Z", { device: "OTHER" }),
-      hidEvent(6, "2026-11-09T12:00:01.000Z", { source: "exec", kind: "command" }),
-    ], clock, { durationSec: 5, device: "UDID" });
-    expect(events.map((e) => e.id)).toEqual([2, 3]);
-    expect(events[0]).toEqual({ type: "event", t: 0.5, id: 2, timestamp: "2026-11-09T12:00:00.750Z", kind: "button", action: "home", summary: "Button home" });
-    expect(events[1]).toMatchObject({ t: 2, kind: "tap", x: 0.5, y: 0.5 });
+    ], clock, 5);
+    expect(kept.map((e) => e.id)).toEqual([2, 3]);
+    expect(kept[0]).toEqual({ type: "event", t: 0.5, id: 2, timestamp: "2026-11-09T12:00:00.750Z", kind: "button", action: "home", summary: "Button home" });
+    expect(kept[1]).toMatchObject({ t: 2, kind: "tap", x: 0.5, y: 0.5 });
+    expect(kept[1]).not.toHaveProperty("tEnd");
   });
 
   test("carries normalized coordinates for touches, drags and scrolls", () => {
-    const [touch, drag, scroll] = recordingIndexEvents([
+    const [touch, drag, scroll] = events([
       hidEvent(1, "2026-11-09T12:00:01.000Z", { kind: "touch", action: "begin", details: { type: "begin", x: 0.1, y: 0.2, screen: { width: 1, height: 1 } } }),
       hidEvent(2, "2026-11-09T12:00:01.100Z", { kind: "drag", action: "drag", details: { start: { x: 0.1, y: 0.2 }, current: { x: 0.3, y: 0.9 }, moveCount: 4, edge: 1 } }),
       hidEvent(3, "2026-11-09T12:00:01.200Z", { kind: "scroll", action: "wheel", details: { dx: 0, dy: -3, x: 0.4, y: 0.6 } }),
-    ], clock, { durationSec: 5 });
+    ], clock, 5);
     expect(touch).toMatchObject({ x: 0.1, y: 0.2 });
     expect(touch).not.toHaveProperty("screen");
     expect(drag).toMatchObject({ x: 0.3, y: 0.9, start: { x: 0.1, y: 0.2 }, edge: 1 });
     expect(scroll).toMatchObject({ x: 0.4, y: 0.6, dx: 0, dy: -3 });
+  });
+
+  const drag = (timestamp: string) => hidEvent(7, timestamp, {
+    kind: "drag", action: "drag", summary: "Drag", details: { start: { x: 0.1, y: 0.1 }, current: { x: 0.9, y: 0.9 } },
+  });
+
+  test("a drag spans [t, tEnd]: start to when its last point was received", () => {
+    const [d] = recordingIndexEvents([collected(drag("2026-11-09T12:00:01.250Z"), "2026-11-09T12:00:02.000Z")], clock, { durationSec: 5 });
+    expect(d).toMatchObject({ t: 1, tEnd: 1.75, x: 0.9, y: 0.9, start: { x: 0.1, y: 0.1 } });
+  });
+
+  test("a drag that began before the recording is kept, with t clamped to 0", () => {
+    const [d] = recordingIndexEvents([collected(drag("2026-11-09T12:00:00.000Z"), "2026-11-09T12:00:01.250Z")], clock, { durationSec: 5 });
+    expect(d).toMatchObject({ t: 0, tEnd: 1, timestamp: "2026-11-09T12:00:00.000Z" });
+    // Entirely before pts 0: dropped.
+    expect(recordingIndexEvents([collected(drag("2026-11-09T12:00:00.000Z"), "2026-11-09T12:00:00.200Z")], clock, { durationSec: 5 })).toEqual([]);
+  });
+
+  test("a drag still going at stop is clamped to the duration", () => {
+    const [d] = recordingIndexEvents([collected(drag("2026-11-09T12:00:04.250Z"), "2026-11-09T12:00:09.000Z")], clock, { durationSec: 5 });
+    expect(d).toMatchObject({ t: 4, tEnd: 5 });
   });
 });
 
@@ -138,20 +164,31 @@ describe("RecordingEventCollector", () => {
     collector.add(hidEvent(3, "t3", { source: "ui" }));
     collector.add(hidEvent(4, "t4"));
     collector.add(hidEvent(5, "t5"));
-    expect(collector.entries().map((e) => [e.id, e.summary])).toEqual([[1, "Drag b"], [4, "Tap (0.5, 0.5)"]]);
+    expect(collector.entries().map(({ entry }) => [entry.id, entry.summary])).toEqual([[1, "Drag b"], [4, "Tap (0.5, 0.5)"]]);
     expect(collector.dropped).toBe(1);
+  });
+
+  test("stamps when each version arrived, and ignores entries once stopped", () => {
+    let now = 1_000;
+    const collector = new RecordingEventCollector("UDID", 10, () => now);
+    collector.add(hidEvent(1, "t1", { summary: "Drag a" }));
+    now = 2_500;
+    collector.add(hidEvent(1, "t1", { summary: "Drag b" }));
+    collector.stop();
+    collector.add(hidEvent(1, "t1", { summary: "Drag c" }));
+    collector.add(hidEvent(2, "t2"));
+    expect(collector.entries().map(({ entry, receivedAtMs }) => [entry.summary, receivedAtMs])).toEqual([["Drag b", 2_500]]);
   });
 });
 
 describe("recordingIndexLines", () => {
   test("serialises header, frames, events and footer as JSONL", () => {
     const clock = recordingClock(native)!;
-    const events = recordingIndexEvents([hidEvent(9, "2026-11-09T12:00:00.283Z")], clock, { durationSec: 5 / 60 });
     const text = [...recordingIndexLines({
       file: "rec.mp4",
       summary: { width: 1206, height: 2622, fps: 60, codec: "h264", rotation: 90, duration: 5 / 60 },
       index: native,
-      events,
+      events: events([hidEvent(9, "2026-11-09T12:00:00.283Z")], clock, 5 / 60),
     })].join("");
     expect(text.endsWith("\n")).toBe(true);
     const lines = text.trimEnd().split("\n").map((line) => JSON.parse(line));
@@ -167,7 +204,9 @@ describe("recordingIndexLines", () => {
       rotation: 90,
       clock: { startUptime: 1000, originUptime: 1000.25, originWall: "2026-11-09T12:00:00.250Z" },
     });
-    expect(typeof lines[0].clock.eventMapping).toBe("string");
+    // `clock` is data only; the prose lives in `doc`.
+    expect(Object.values(lines[0].clock).every((v) => typeof v === "number" || /^\d{4}-\d\d-\d\dT/.test(v as string))).toBe(true);
+    expect(typeof lines[0].doc.eventMapping).toBe("string");
     expect(lines.slice(1, 5)).toEqual([
       { type: "frame", i: 0, pts: 0, uptime: 1000.25, changed: true },
       { type: "frame", i: 1, pts: 0.016667, uptime: 1000.25, changed: false },
@@ -175,7 +214,12 @@ describe("recordingIndexLines", () => {
       { type: "frame", i: 3, pts: 0.066667, uptime: 1000.316667, changed: false },
     ]);
     expect(lines[5]).toMatchObject({ type: "event", id: 9, t: 0.033 });
-    expect(lines[6]).toEqual({ type: "footer", frames: 4, changedFrames: 2, durationSec: 0.083333, events: 1, truncated: false });
+    expect(lines[6]).toEqual({ type: "footer", frames: 4, changedFrames: 2, durationSec: 0.083333, events: 1, eventsDropped: 0, truncated: false });
+  });
+
+  test("the footer reports events dropped at the collector's limit", () => {
+    const lines = [...recordingIndexLines({ file: "a.mp4", summary: {}, index: native, events: [], eventsDropped: 3 })];
+    expect(JSON.parse(lines.join("").trimEnd().split("\n").at(-1)!)).toMatchObject({ events: 0, eventsDropped: 3 });
   });
 
   test("batches frame lines into chunks for streaming", () => {

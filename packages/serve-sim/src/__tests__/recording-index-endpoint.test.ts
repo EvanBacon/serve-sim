@@ -3,7 +3,8 @@ import { createServer, type Server } from "http";
 import { writeFileSync } from "fs";
 import type { AddressInfo } from "net";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
-import { clearEventLogForTests, recordEventLogEvent } from "../event-log";
+import { clearEventLogForTests, recordEventLogEvent, subscribeEventLog } from "../event-log";
+import type { RecordingStartOptions } from "../native";
 import type { NativeRecordingIndex } from "../recording-index";
 
 const servers: Server[] = [];
@@ -20,9 +21,20 @@ afterEach(async () => {
 
 const LEGACY_SUMMARY = { width: 1206, height: 2622, fps: 60, codec: "h264", rotation: 0, frames: 600, duration: 10 };
 
-/** Fake native recorder: armed at uptime 500 s == the wall time of start. */
-function fakeCapture(withIndex = true): DeviceSessionDependencies["capture"] {
-  let active: { path: string; armedWallMs: number } | undefined;
+/**
+ * Fake native recorder: armed at uptime 500 s == the wall time of start. Like
+ * the addon, it adds `index` to the summary only when the start asked for it
+ * (`nativeIndex: false` models an addon without frame metadata). `starts`
+ * records the options each start passed.
+ */
+function fakeCapture(
+  { nativeIndex = true, starts = [], startRecording }: {
+    nativeIndex?: boolean;
+    starts?: RecordingStartOptions[];
+    startRecording?: () => Promise<void>;
+  } = {},
+): DeviceSessionDependencies["capture"] {
+  let active: { path: string; armedWallMs: number; index: boolean } | undefined;
   return {
     start: async () => {},
     stop: async () => {},
@@ -31,11 +43,13 @@ function fakeCapture(withIndex = true): DeviceSessionDependencies["capture"] {
     subscribeSize: async () => () => {},
     snapshotJpeg: async () => null,
     setPreferredScreenSize: async () => {},
-    startRecording: async (path) => {
-      active = { path, armedWallMs: Date.now() };
+    startRecording: async (path, options) => {
+      starts.push(options);
+      await startRecording?.();
+      active = { path, armedWallMs: Date.now(), index: options.index === true };
     },
     stopRecording: async () => {
-      const { path, armedWallMs } = active!;
+      const { path, armedWallMs, index: wantIndex } = active!;
       active = undefined;
       writeFileSync(path, Buffer.from("fake-mp4"));
       const index: NativeRecordingIndex = {
@@ -48,7 +62,7 @@ function fakeCapture(withIndex = true): DeviceSessionDependencies["capture"] {
         changedCount: 2,
         truncated: false,
       };
-      return JSON.stringify({ path, ...LEGACY_SUMMARY, ...(withIndex ? { index } : {}) });
+      return JSON.stringify({ path, ...LEGACY_SUMMARY, ...(nativeIndex && wantIndex ? { index } : {}) });
     },
   };
 }
@@ -87,9 +101,30 @@ async function serve(session: DeviceSession): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-async function recordOnce(base: string, during?: () => void): Promise<{ token: string; stop: Response }> {
-  const { token } = await (await fetch(`${base}/recording/start`, { method: "POST" })).json() as { token: string };
-  during?.();
+/** Event-log subscription that counts live subscribers (for leak checks). */
+function countingSubscribe() {
+  const counter = { live: 0, subscribe: (subscriber: Parameters<typeof subscribeEventLog>[0]) => {
+    const unsubscribe = subscribeEventLog(subscriber);
+    counter.live++;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      counter.live--;
+      unsubscribe();
+    };
+  } };
+  return counter;
+}
+
+async function recordOnce(
+  base: string,
+  during?: () => void | Promise<void>,
+  { index = true }: { index?: boolean } = {},
+): Promise<{ token: string; stop: Response }> {
+  const start = `${base}/recording/start${index ? "?index=1" : ""}`;
+  const { token } = await (await fetch(start, { method: "POST" })).json() as { token: string };
+  await during?.();
   const stop = await fetch(`${base}/recording/stop?token=${token}`, { method: "POST" });
   return { token, stop };
 }
@@ -97,11 +132,11 @@ async function recordOnce(base: string, during?: () => void): Promise<{ token: s
 const parseLines = (text: string) => text.trimEnd().split("\n").map((line) => JSON.parse(line));
 
 describe("GET /recording/index", () => {
-  test("the stop response is unchanged by the native index", async () => {
+  test("the stop response is the same with and without index=1", async () => {
     const results: Array<{ headers: Record<string, string | null>; body: string }> = [];
-    for (const withIndex of [false, true]) {
-      const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(withIndex), hid: hid() }));
-      const { stop } = await recordOnce(base);
+    for (const index of [false, true]) {
+      const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid() }));
+      const { stop } = await recordOnce(base, undefined, { index });
       results.push({
         headers: {
           type: stop.headers.get("content-type"),
@@ -139,7 +174,7 @@ describe("GET /recording/index", () => {
     expect(events[0]).toMatchObject({ kind: "tap", x: 0.5, y: 0.25 });
     expect(events[0].t).toBeGreaterThanOrEqual(0);
     expect(events[0].t).toBeLessThan(5);
-    expect(lines.at(-1)).toEqual({ type: "footer", frames: 3, changedFrames: 2, durationSec: 10, events: 1, truncated: false });
+    expect(lines.at(-1)).toEqual({ type: "footer", frames: 3, changedFrames: 2, durationSec: 10, events: 1, eventsDropped: 0, truncated: false });
     expect(before.id).toBeGreaterThan(0);
 
     // Still there for a second reader (e.g. the toolbar and the CLI).
@@ -169,7 +204,7 @@ describe("GET /recording/index", () => {
   });
 
   test("an addon without frame metadata has no index", async () => {
-    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(false), hid: hid() }));
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture({ nativeIndex: false }), hid: hid() }));
     const { token, stop } = await recordOnce(base);
     await stop.arrayBuffer();
     const res = await fetch(`${base}/recording/index?token=${token}`);
@@ -188,4 +223,143 @@ describe("GET /recording/index", () => {
     expect((await fetch(`${base}/recording/index?token=${tokens[0]}`)).status).toBe(404);
     expect((await fetch(`${base}/recording/index?token=${tokens[4]}`)).status).toBe(200);
   });
+
+  test("without index=1 nothing is collected natively or in JS, and there is no index", async () => {
+    const starts: RecordingStartOptions[] = [];
+    const counter = countingSubscribe();
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture({ starts }), hid: hid(), subscribeEventLog: counter.subscribe }));
+    const { token, stop } = await recordOnce(base, () => {
+      expect(counter.live).toBe(0);
+      recordEventLogEvent({ device: "TEST-UDID", source: "hid", kind: "tap", summary: "Tap" });
+    }, { index: false });
+    expect(stop.headers.get("x-serve-sim-recording")).toBe(JSON.stringify(LEGACY_SUMMARY));
+    await stop.arrayBuffer();
+    expect(starts).toEqual([{ codec: "h264", fps: 60, rotation: 0 }]);
+    expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(404);
+  });
+
+  test("index=1 is passed to the native recorder", async () => {
+    const starts: RecordingStartOptions[] = [];
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture({ starts }), hid: hid() }));
+    await (await recordOnce(base)).stop.arrayBuffer();
+    expect(starts).toEqual([{ codec: "h264", fps: 60, index: true, rotation: 0 }]);
+  });
+
+  test("HEAD returns the headers without a body", async () => {
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid() }));
+    const { token, stop } = await recordOnce(base);
+    await stop.arrayBuffer();
+    const res = await fetch(`${base}/recording/index?token=${token}`, { method: "HEAD" });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(res.headers.get("content-disposition")).toMatch(/\.index\.jsonl"$/);
+    expect(await res.text()).toBe("");
+  });
+
+  test("an index expires after its TTL", async () => {
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid(), recordingIndexTtlMs: 40 }));
+    const { token, stop } = await recordOnce(base);
+    await stop.arrayBuffer();
+    expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
+    await Bun.sleep(80);
+    expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(404);
+  });
+
+  test("close() drops kept indexes", async () => {
+    const session = new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid() });
+    const base = await serve(session);
+    const { token, stop } = await recordOnce(base);
+    await stop.arrayBuffer();
+    session.close();
+    expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(404);
+  });
+
+  test("events logged after the duration cap are left out", async () => {
+    const counter = countingSubscribe();
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid(), maxRecordingMs: 30, subscribeEventLog: counter.subscribe }));
+    const { token, stop } = await recordOnce(base, async () => {
+      recordEventLogEvent({ device: "TEST-UDID", source: "hid", kind: "tap", summary: "Before cap" });
+      await waitFor(async () => ((await (await fetch(`${base}/recording`)).json()) as { limitReached?: boolean }).limitReached === true);
+      expect(counter.live).toBe(0);
+      recordEventLogEvent({ device: "TEST-UDID", source: "hid", kind: "tap", summary: "After cap" });
+    });
+    expect(stop.status).toBe(200);
+    await stop.arrayBuffer();
+    const lines = parseLines(await (await fetch(`${base}/recording/index?token=${token}`)).text());
+    expect(lines.filter((l) => l.type === "event").map((l) => l.summary)).toEqual(["Before cap"]);
+  });
+
+  test("a drag still in progress at stop keeps its latest point", async () => {
+    const session = new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid() });
+    const base = await serve(session);
+    let receive!: (data: Buffer) => void;
+    session.attachHidSocket({ send() {}, close() {}, on(event, cb) { if (event === "message") receive = cb as (data: Buffer) => void; } });
+    const touch = (type: string, x: number, y: number) =>
+      receive(Buffer.concat([Buffer.from([0x03]), Buffer.from(JSON.stringify({ type, x, y }))]));
+    const { token, stop } = await recordOnce(base, async () => {
+      touch("begin", 0.1, 0.1);
+      touch("move", 0.3, 0.3); // first move: logged (and notified)
+      await Bun.sleep(20);
+      touch("move", 0.6, 0.7); // silent update
+    });
+    await stop.arrayBuffer();
+    const lines = parseLines(await (await fetch(`${base}/recording/index?token=${token}`)).text());
+    const [drag] = lines.filter((l) => l.type === "event");
+    expect(drag).toMatchObject({ kind: "drag", x: 0.6, y: 0.7, start: { x: 0.1, y: 0.1 } });
+    expect(drag.tEnd).toBeGreaterThan(drag.t);
+  });
 });
+
+describe("event-log subscription lifecycle", () => {
+  test("unsubscribes after a normal stop", async () => {
+    const counter = countingSubscribe();
+    const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid(), subscribeEventLog: counter.subscribe }));
+    const { stop } = await recordOnce(base, () => { expect(counter.live).toBe(1); });
+    await stop.arrayBuffer();
+    expect(counter.live).toBe(0);
+  });
+
+  test("unsubscribes when the native start throws", async () => {
+    const counter = countingSubscribe();
+    const capture = fakeCapture({ startRecording: async () => { throw new Error("boom"); } });
+    const session = new DeviceSession("TEST-UDID", { capture, hid: hid(), subscribeEventLog: counter.subscribe });
+    const base = await serve(session);
+    const res = await fetch(`${base}/recording/start?index=1`, { method: "POST" });
+    await res.arrayBuffer();
+    expect(res.ok).toBe(false);
+    expect(counter.live).toBe(0);
+  });
+
+  test("unsubscribes when the session closes during the start", async () => {
+    const counter = countingSubscribe();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const session = new DeviceSession("TEST-UDID", { capture: fakeCapture({ startRecording: () => gate }), hid: hid(), subscribeEventLog: counter.subscribe });
+    const base = await serve(session);
+    const pending = fetch(`${base}/recording/start?index=1`, { method: "POST" });
+    await waitFor(() => counter.live === 1);
+    session.close();
+    release();
+    const res = await pending;
+    expect(res.status).toBe(409);
+    expect(counter.live).toBe(0);
+  });
+
+  test("unsubscribes when the session closes while recording", async () => {
+    const counter = countingSubscribe();
+    const session = new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid(), subscribeEventLog: counter.subscribe });
+    const base = await serve(session);
+    await (await fetch(`${base}/recording/start?index=1`, { method: "POST" })).arrayBuffer();
+    expect(counter.live).toBe(1);
+    session.close();
+    expect(counter.live).toBe(0);
+  });
+});
+
+async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await Bun.sleep(5);
+  }
+}

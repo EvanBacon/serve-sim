@@ -4,10 +4,13 @@
  * decoding video.
  *
  * Lines (JSONL, one JSON object per line, in this order):
- *   {type:"header", version:1, file, fps, codec, width, height, rotation, clock}
+ *   {type:"header", version:1, file, fps, codec, width, height, rotation, clock, doc}
  *   {type:"frame", i, pts, uptime, changed}       one per sample in the MP4
- *   {type:"event", t, id, timestamp, kind, action?, summary, x?, y?, …}
- *   {type:"footer", frames, changedFrames, durationSec, events, truncated}
+ *   {type:"event", t, tEnd?, id, timestamp, kind, action?, summary, x?, y?, …}
+ *   {type:"footer", frames, changedFrames, durationSec, events, eventsDropped, truncated}
+ *
+ * `clock` holds only numbers and ISO times; the prose explaining them is in
+ * `doc`. `file` is a label (the MP4's name as the client saved it).
  *
  * JSONL rather than one JSON document: a 30 min 60 fps recording has ~108k
  * frame lines, which can be streamed by the server, appended to, and read with
@@ -26,6 +29,11 @@
  * is handled, so their media time is
  *   t = (Date.parse(timestamp) / 1000 − wallMinusUptimeSec) − originUptime.
  * Events land before the frames they cause: the guest still has to render.
+ *
+ * Drags are one event from first move to end. `t` is when the drag started
+ * (clamped to 0 when it began before the recording), `tEnd` when its last
+ * point (`x`/`y`) was received (clamped to the duration when it was still
+ * going at stop). A drag is kept when `[t, tEnd]` overlaps the recording.
  */
 import type { EventLogEntry } from "./event-log";
 import type { RecordingCodec } from "./native";
@@ -74,6 +82,8 @@ export type RecordingIndexEvent = {
   type: "event";
   /** Media seconds (same timeline as frame `pts`). */
   t: number;
+  /** Drags: media seconds of the last point (`x`/`y`). */
+  tEnd?: number;
   /** Event-log id (a drag keeps one id from first move to end). */
   id: number;
   /** Original event-log wall-clock timestamp. */
@@ -155,24 +165,31 @@ function pointValue(value: unknown): Point | undefined {
   return isFiniteNumber(x) && isFiniteNumber(y) ? { x, y } : undefined;
 }
 
+/** A collected event-log entry and when its latest version was received. */
+type CollectedEvent = { entry: EventLogEntry; receivedAtMs: number };
+
 /**
- * Event-log entries → index event lines: HID input for `device` (when given)
- * whose media time falls in `[0, durationSec]`, sorted by time.
+ * Collected events → index event lines whose media time overlaps
+ * `[0, durationSec]`, sorted by time. Input comes from
+ * `RecordingEventCollector`, which already keeps only the device's HID input.
  */
 export function recordingIndexEvents(
-  entries: Iterable<EventLogEntry>,
+  collected: Iterable<CollectedEvent>,
   clock: RecordingClock,
-  { durationSec, device }: { durationSec: number; device?: string },
+  { durationSec }: { durationSec: number },
 ): RecordingIndexEvent[] {
   const events: RecordingIndexEvent[] = [];
-  for (const entry of entries) {
-    if (entry.source !== "hid") continue;
-    if (device && entry.device !== device) continue;
-    const t = eventMediaTime(entry.timestamp, clock);
-    if (t == null || t < 0 || t > durationSec) continue;
+  for (const { entry, receivedAtMs } of collected) {
+    const start = eventMediaTime(entry.timestamp, clock);
+    if (start == null) continue;
+    const isDrag = entry.kind === "drag";
+    // A drag spans first move → last update received; anything else is a point.
+    const end = isDrag ? Math.max(start, receivedAtMs / 1000 - clock.wallMinusUptimeSec - clock.originUptime) : start;
+    if (end < 0 || start > durationSec) continue;
     const event: RecordingIndexEvent = {
       type: "event",
-      t: round6(t),
+      t: round6(Math.max(0, start)),
+      ...(isDrag ? { tEnd: round6(Math.min(durationSec, end)) } : {}),
       id: entry.id,
       timestamp: entry.timestamp,
       kind: entry.kind,
@@ -182,8 +199,8 @@ export function recordingIndexEvents(
     const details = entry.details ?? {};
     const point = pointValue(details) ?? pointValue(details.current);
     if (point) Object.assign(event, point);
-    const start = entry.kind === "drag" ? pointValue(details.start) : undefined;
-    if (start) event.start = start;
+    const startPoint = isDrag ? pointValue(details.start) : undefined;
+    if (startPoint) event.start = startPoint;
     if (isFiniteNumber(details.dx)) event.dx = details.dx;
     if (isFiniteNumber(details.dy)) event.dy = details.dy;
     if (isFiniteNumber(details.edge)) event.edge = details.edge;
@@ -195,24 +212,36 @@ export function recordingIndexEvents(
 /**
  * Collects a device's HID event-log entries while it records. The global
  * event log is a 500-entry ring, too small for a long recording, so the
- * session keeps its own copy. Updates (a drag growing) replace by id.
+ * session keeps its own copy. Updates (a drag growing) replace by id and
+ * refresh the receive time. Once stopped it ignores further entries.
  */
 export class RecordingEventCollector {
-  private readonly byId = new Map<number, EventLogEntry>();
+  private readonly byId = new Map<number, CollectedEvent>();
+  private stopped = false;
+  /** New events refused at the limit (reported as footer `eventsDropped`). */
   dropped = 0;
 
-  constructor(private readonly device: string, private readonly limit = MAX_RECORDING_INDEX_EVENTS) {}
+  constructor(
+    private readonly device: string,
+    private readonly limit = MAX_RECORDING_INDEX_EVENTS,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   add(entry: EventLogEntry): void {
-    if (entry.source !== "hid" || entry.device !== this.device) return;
+    if (this.stopped || entry.source !== "hid" || entry.device !== this.device) return;
     if (!this.byId.has(entry.id) && this.byId.size >= this.limit) {
       this.dropped++;
       return;
     }
-    this.byId.set(entry.id, entry);
+    this.byId.set(entry.id, { entry, receivedAtMs: this.now() });
   }
 
-  entries(): EventLogEntry[] {
+  /** Stop collecting (the recording finalized). */
+  stop(): void {
+    this.stopped = true;
+  }
+
+  entries(): CollectedEvent[] {
     return [...this.byId.values()];
   }
 }
@@ -224,11 +253,13 @@ const LINES_PER_CHUNK = 1000;
  * The sidecar as JSONL text chunks (each ends in "\n"), generated lazily so
  * the server can stream a long recording's index with backpressure.
  */
-export function* recordingIndexLines({ file, summary, index, events }: {
+export function* recordingIndexLines({ file, summary, index, events, eventsDropped = 0 }: {
   file: string;
   summary: RecordingIndexSummary;
   index: NativeRecordingIndex;
   events: RecordingIndexEvent[];
+  /** Events the collector refused at its limit: the event list is incomplete. */
+  eventsDropped?: number;
 }): Generator<string> {
   const clock = recordingClock(index);
   const fps = index.fps;
@@ -241,11 +272,12 @@ export function* recordingIndexLines({ file, summary, index, events }: {
     width: summary.width ?? null,
     height: summary.height ?? null,
     rotation: summary.rotation ?? 0,
-    clock: clock && {
+    clock,
+    doc: {
       uptimeClock: "host uptime seconds (DispatchTime.uptimeNanoseconds / mach_absolute_time; excludes sleep)",
-      ...clock,
-      mediaTime: "pts = slot / fps; pts 0 is the frame captured at originUptime",
-      eventMapping: "t = (Date.parse(event.timestamp) / 1000 - wallMinusUptimeSec) - originUptime",
+      mediaTime: "pts = slot / fps; pts 0 is the frame captured at clock.originUptime",
+      eventMapping: "t = (Date.parse(event.timestamp) / 1000 - clock.wallMinusUptimeSec) - clock.originUptime",
+      drags: "t = drag start (clamped to 0), tEnd = when its last point x/y was received (clamped to the duration)",
     },
   }) + "\n";
   let chunk: string[] = [];
@@ -272,6 +304,7 @@ export function* recordingIndexLines({ file, summary, index, events }: {
     changedFrames,
     durationSec: round6(summary.duration ?? 0),
     events: events.length,
+    eventsDropped,
     truncated: index.truncated,
   }));
   yield chunk.join("\n") + "\n";
