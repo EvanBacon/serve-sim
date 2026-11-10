@@ -74,6 +74,7 @@ import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
 import { requestMetroReload } from "./utils/metro-reload-request";
+import { PASTE_EVENT_GRACE_MS, PASTE_KEY_EVENTS, isPasteShortcut, stageGuestPasteboard } from "./utils/paste-bridge";
 import {
   createSimKeyState,
   isFormControlTarget,
@@ -956,6 +957,41 @@ function AppWithConfig({
     return () => window.removeEventListener("blur", onBlur);
   }, [sendWs, simKeys]);
 
+  // Browser paste → guest (#174). Cmd/Ctrl+V is left to the browser so it
+  // fires `paste` with the host clipboard; that text is staged on the guest
+  // pasteboard (server-verified readback), then Cmd+V is tapped in the guest.
+  // A browser that fires no paste event (nothing editable focused, non-text
+  // clipboard) gets the plain guest Cmd+V it always did.
+  const pasteboardEndpoint = `${simEndpoint("pasteboard")}?device=${encodeURIComponent(config.device)}`;
+  const pendingPasteRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tapGuestPaste = useCallback(() => {
+    // Lift whatever the user holds (e.g. Ctrl from Ctrl+V) so the guest sees a clean Cmd+V.
+    for (const ev of simKeys.releaseAll()) sendKey(ev.type, ev.usage);
+    for (const ev of PASTE_KEY_EVENTS) sendKey(ev.type, ev.usage);
+  }, [sendKey, simKeys]);
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (!simFocusedRef.current || isFormControlTarget(e.target)) return;
+      if (pendingPasteRef.current) clearTimeout(pendingPasteRef.current);
+      pendingPasteRef.current = null;
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      e.preventDefault();
+      if (!text) {
+        tapGuestPaste();
+        return;
+      }
+      void stageGuestPasteboard(pasteboardEndpoint, text).then((outcome) => {
+        if (outcome.ok) tapGuestPaste();
+        else toast.error(`Could not paste into the simulator (${outcome.error}).`);
+      });
+    };
+    window.addEventListener("paste", onPaste);
+    return () => {
+      window.removeEventListener("paste", onPaste);
+      if (pendingPasteRef.current) clearTimeout(pendingPasteRef.current);
+    };
+  }, [pasteboardEndpoint, tapGuestPaste]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
       if (!simFocusedRef.current) return;
@@ -992,6 +1028,17 @@ function AppWithConfig({
         if (type === "down" && !e.repeat) void sendReactNativeReload();
         return;
       }
+      if (isPasteShortcut(e)) {
+        // No preventDefault: the browser's paste event carries the text.
+        if (type === "down" && !e.repeat) {
+          if (pendingPasteRef.current) clearTimeout(pendingPasteRef.current);
+          pendingPasteRef.current = setTimeout(() => {
+            pendingPasteRef.current = null;
+            tapGuestPaste();
+          }, PASTE_EVENT_GRACE_MS);
+        }
+        return;
+      }
       const usage = hidUsageForCode(e.code);
       if (usage == null) return;
       e.preventDefault();
@@ -1005,7 +1052,7 @@ function AppWithConfig({
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [sendWs, config.device, rotateBy, sendReactNativeReload, simKeys]);
+  }, [sendWs, config.device, rotateBy, sendReactNativeReload, simKeys, tapGuestPaste]);
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));

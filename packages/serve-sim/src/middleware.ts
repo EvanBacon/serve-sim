@@ -50,6 +50,7 @@ import {
 } from "./devicekit-chrome";
 import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler } from "./exec-ws";
 import { createHostRpcHandler } from "./host-rpc";
+import { createPasteboardRoute, type DevicectlRunner } from "./pasteboard";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
@@ -1456,6 +1457,13 @@ export interface SimMiddlewareOptions {
   isKnownDevice?: (udid: string) => Promise<boolean>;
   /** Test hook: `/api/diagnostics` collectors. Default: live host probes and sessions. */
   diagnostics?: DiagnosticsOptions;
+  /** Test hook: runs `xcrun devicectl …` for `POST /pasteboard`. */
+  pasteboardRunner?: DevicectlRunner;
+  /**
+   * Test hook: whether this server streams `udid` (gates `POST /pasteboard`).
+   * Default: a live serve-sim state for that UDID, and the pinned device if any.
+   */
+  servesDevice?: (udid: string) => Promise<boolean>;
 }
 
 function safeEqualString(a: string, b: string): boolean {
@@ -1616,6 +1624,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     allowExec,
     isKnownDevice: options?.isKnownDevice ?? (async (udid) => (await getBootedUdids())?.has(udid) ?? false),
     onCommandResult: (command, result) => recordCommandEvent(command, result),
+  });
+
+  // Unicode text → guest pasteboard via CoreDevice, verified by readback.
+  const handlePasteboardRequest = createPasteboardRoute({
+    run: options?.pasteboardRunner,
+    servesDevice: options?.servesDevice ?? (async (udid) => {
+      if (options?.device && options.device !== udid) return false;
+      return selectServeSimState(await readServeSimStates(), udid) !== null;
+    }),
   });
 
   // Simulator-settings requests run in-process (just the underlying simctl /
@@ -2428,6 +2445,16 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           }));
         }
       });
+      return;
+    }
+
+    // POST /pasteboard?device=<udid> — stage `{text}` (any Unicode, up to
+    // 256 KiB UTF-8) on the guest pasteboard through `devicectl`, answering
+    // ok only after exact readback. Same auth as every other route (gated
+    // above); the text travels on stdin, never through a shell. See
+    // pasteboard.ts. Inserting it is the client's follow-up Cmd+V.
+    if (url === base + "/pasteboard" && req.method === "POST") {
+      handlePasteboardRequest(req, res, requestedDevice ?? options?.device ?? null);
       return;
     }
 

@@ -18,6 +18,8 @@ let server: Server;
 const apiHeaders: IncomingHttpHeaders[] = [];
 const wsHeaders: IncomingHttpHeaders[] = [];
 const wsFrames: Buffer[] = [];
+const pasteRequests: { url: string; headers: IncomingHttpHeaders; body: string }[] = [];
+let pasteReply: { status: number; body: Record<string, unknown> } = { status: 200, body: { ok: true, verified: true, bytes: 0 } };
 
 beforeAll(async () => {
   const wss = new WebSocketServer({ noServer: true });
@@ -29,6 +31,15 @@ beforeAll(async () => {
         return;
       }
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ device: DEVICE }));
+      return;
+    }
+    if (req.url?.startsWith("/pasteboard") && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        pasteRequests.push({ url: req.url!, headers: req.headers, body: Buffer.concat(chunks).toString("utf8") });
+        res.writeHead(pasteReply.status, { "Content-Type": "application/json" }).end(JSON.stringify(pasteReply.body));
+      });
       return;
     }
     res.writeHead(404).end();
@@ -53,13 +64,18 @@ afterAll(async () => {
 
 // Async spawn: the fake server lives in this process, so a sync spawn would
 // block the event loop it needs to answer the CLI.
-function runCli(args: string[], env: Record<string, string> = {}): Promise<{ status: number | null; stderr: string }> {
+function runCli(
+  args: string[],
+  env: Record<string, string> = {},
+  stdin?: string,
+): Promise<{ status: number | null; stderr: string }> {
   const cleanEnv = { ...process.env };
   delete cleanEnv.SERVE_SIM_URL;
   delete cleanEnv.SERVE_SIM_AUTH_TOKEN;
   return new Promise((resolve) => {
     const child = spawn("bun", ["run", cli, ...args], { env: { ...cleanEnv, ...env } });
     let stderr = "";
+    child.stdin.end(stdin);
     child.stderr.on("data", (d) => (stderr += d));
     const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
     child.on("close", (status) => {
@@ -93,5 +109,48 @@ describe("remote input commands", () => {
     });
     expect(wsHeaders.length).toBe(before + 1);
     expect(wsHeaders.at(-1)?.authorization).toBe(`Bearer ${TOKEN}`);
+  }, 25_000);
+});
+
+describe("serve-sim paste (#174)", () => {
+  const PAYLOAD = "Bridge123 \u0451\u0436 \u0435\u0308\u0436 \u{1F469}\u200D\u{1F373} $(id) `x`";
+
+  test("POSTs the exact text as JSON with the bearer token, then sends Cmd+V", async () => {
+    pasteRequests.length = 0;
+    wsFrames.length = 0;
+    pasteReply = { status: 200, body: { ok: true, verified: true, bytes: Buffer.byteLength(PAYLOAD) } };
+    const r = await runCli(["paste", "--stdin", "--url", `http://127.0.0.1:${PORT}`, "--auth-token", TOKEN, "-d", DEVICE], {}, PAYLOAD);
+    expect(r.status).toBe(0);
+    expect(pasteRequests).toHaveLength(1);
+    expect(pasteRequests[0]!.url).toBe(`/pasteboard?device=${DEVICE}`);
+    expect(pasteRequests[0]!.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    expect(pasteRequests[0]!.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(pasteRequests[0]!.body)).toEqual({ text: PAYLOAD });
+    const keys = wsFrames.filter((f) => f[0] === 0x06).map((f) => JSON.parse(f.subarray(1).toString()));
+    expect(keys).toEqual([
+      { type: "down", usage: 0xe3 },
+      { type: "down", usage: 0x19 },
+      { type: "up", usage: 0x19 },
+      { type: "up", usage: 0xe3 },
+    ]);
+  }, 25_000);
+
+  test("--no-insert stages only", async () => {
+    pasteRequests.length = 0;
+    wsFrames.length = 0;
+    pasteReply = { status: 200, body: { ok: true, verified: true, bytes: 2 } };
+    const r = await runCli(["paste", "hi", "--no-insert", "--url", `http://127.0.0.1:${PORT}`, "--auth-token", TOKEN, "-d", DEVICE]);
+    expect(r.status).toBe(0);
+    expect(pasteRequests).toHaveLength(1);
+    expect(wsFrames).toHaveLength(0);
+  }, 25_000);
+
+  test("a server-side readback mismatch fails the command and sends no Cmd+V", async () => {
+    wsFrames.length = 0;
+    pasteReply = { status: 502, body: { ok: false, error: "readback_mismatch" } };
+    const r = await runCli(["paste", "hi", "--url", `http://127.0.0.1:${PORT}`, "--auth-token", TOKEN, "-d", DEVICE]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("readback_mismatch");
+    expect(wsFrames).toHaveLength(0);
   }, 25_000);
 });
