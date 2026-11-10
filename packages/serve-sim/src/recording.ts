@@ -10,6 +10,9 @@
  *                            until holdExpiresAt)
  *                            → the finished MP4 (video/mp4, attachment), with the
  *                            native summary JSON in `X-Serve-Sim-Recording`.
+ *   GET  /recording/index  → ?token=<start token>[&file=<mp4 name>] after the
+ *                            stop: the `.index.jsonl` sidecar (frames,
+ *                            changed flags, HID events; see recording-index.ts).
  */
 import type { RecordingCodec, RecordingStartOptions } from "./native";
 import type { SimulatorOrientation } from "./client/types";
@@ -95,7 +98,7 @@ export function uniqueRecordingFileName(name: string, exists: (name: string) => 
  * `…/recording[/action]` for an input target, derived from its HID socket URL
  * (`…/helper/<udid>/ws`). Works for local state files and `--url` remotes.
  */
-export function recordingUrlForWsUrl(wsUrl: string, action?: "start" | "stop"): string | null {
+export function recordingUrlForWsUrl(wsUrl: string, action?: "start" | "stop" | "index"): string | null {
   let url: URL;
   try {
     url = new URL(wsUrl);

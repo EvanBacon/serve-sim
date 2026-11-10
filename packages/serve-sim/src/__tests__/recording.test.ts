@@ -67,6 +67,7 @@ describe("recordingUrlForWsUrl", () => {
     expect(recordingUrlForWsUrl(ws, "start")).toBe("http://127.0.0.1:3400/helper/ABC/recording/start");
     expect(recordingUrlForWsUrl("wss://x.example/base/helper/ABC/ws", "stop"))
       .toBe("https://x.example/base/helper/ABC/recording/stop");
+    expect(recordingUrlForWsUrl(ws, "index")).toBe("http://127.0.0.1:3400/helper/ABC/recording/index");
   });
 
   test("rejects non-socket URLs", () => {
