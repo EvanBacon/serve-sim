@@ -12,6 +12,7 @@ import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { KeySequencer, type KeyType } from "./key-sequencer";
+import { launchableHelper } from "./launchable-helper";
 import { maxBitrateFromEnv } from "./max-bitrate";
 import { resolveDeviceSet } from "./simctl";
 
@@ -164,9 +165,13 @@ function resolveAddon(): string {
   );
 }
 
-/** The guest-side Duo helper (`simctl spawn`): HID commands and the hinge reader. */
+let duoHidHelper: string | undefined;
+/**
+ * The guest-side Duo helper (`simctl spawn`): HID commands and the hinge reader.
+ * A hardened-runtime re-signed bundle resolves to a copy dyld can launch.
+ */
 export function duoHidHelperPath(): string {
-  return join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid");
+  return duoHidHelper ??= launchableHelper(join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid"));
 }
 
 let addon: NativeAddon | undefined;
