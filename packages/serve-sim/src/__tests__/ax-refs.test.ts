@@ -1311,3 +1311,84 @@ describe("chains, recentred names and identified name holders retire every ref (
     expect(resolveRef(after, refWhere(before, (n) => n.label === "Block this Caller")!).ok).toBe(true);
   });
 });
+
+describe("related records without a relation of their own, and overlapping labels (review 203h)", () => {
+  type State = ReturnType<typeof assignRefs>;
+  type Node = ReturnType<typeof agentSnapshot>["nodes"][number];
+  const text = (label: string) => ({ type: "StaticText", role: "text", label });
+  const refWhere = (state: State, pred: (n: Node) => boolean) => agentSnapshot(state, { all: true }).nodes.find(pred)?.ref;
+  const carried = (before: State, after: State) =>
+    agentSnapshot(before, { all: true }).nodes.filter((n) => resolveRef(after, n.ref).ok).map((n) => `${n.ref} ${n.label ?? n.type}`);
+  const swapped = (a: AxSnapshot, b: AxSnapshot, label = "Block this Caller") => {
+    const before = assignRefs(null, a);
+    const after = assignRefs(before, b);
+    expect(carried(before, after)).toEqual([]);
+    const ref = refWhere(before, (n) => n.label === label);
+    expect(ref).toBeDefined();
+    expect(resolveRef(after, ref!)).toMatchObject({ ok: false, code: "stale_ref" });
+  };
+  const unchanged = (screen: AxSnapshot) => {
+    const before = assignRefs(null, screen);
+    const after = assignRefs(before, screen);
+    expect(carried(before, after)).toHaveLength(before.entries.size);
+    expect(agentSnapshot(after, { all: true })).toEqual(agentSnapshot(before, { all: true }));
+  };
+  const buttons = (base: string) => [
+    el({ path: `${base}.6`, label: "Send Message", frame: { x: 0, y: 420, width: 402, height: 44 } }),
+    el({ path: `${base}.7`, label: "Share Contact", frame: { x: 0, y: 464, width: 402, height: 44 } }),
+    el({ path: `${base}.8`, label: "Block this Caller", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+  ];
+  const back = el({ path: "0.0", label: "Contacts", frame: { x: 0, y: 50, width: 90, height: 44 } });
+
+  // P1: Alice's card names her manager Bob; Bob's card has no manager row.
+  const card = (name: string, manager: string | null) => snap([
+    back,
+    el({ path: "0.2.0", ...text(name), frame: { x: 201 - name.length * 5, y: 200, width: name.length * 10, height: 30 } }),
+    ...buttons("0.2"),
+    ...(manager ? [
+      el({ path: "0.2.10", ...text("manager"), frame: { x: 16, y: 700, width: 80, height: 20 } }),
+      el({ path: "0.2.11", ...text(manager), frame: { x: 16, y: 722, width: manager.length * 10, height: 22 } }),
+    ] : []),
+  ]);
+
+  test("P1: opening the manager whose card names no manager is a swap", () => swapped(card("Alice", "Bob"), card("Bob", null)));
+  test("P1: re-reading either card keeps every ref", () => {
+    unchanged(card("Alice", "Bob"));
+    unchanged(card("Bob", null));
+  });
+
+  // P6: Alice's card lists related people [Bob, Dave]; Bob's lists [Dave].
+  const related = (name: string, rows: string[]) => snap([
+    back,
+    el({ path: "0.2.0", ...text(name), frame: { x: 150, y: 200, width: 100, height: 30 } }),
+    ...buttons("0.2"),
+    ...rows.map((r, i) => el({ path: `0.2.${20 + i}`, ...text(r), frame: { x: 16, y: 700 + i * 30, width: 100, height: 22 } })),
+  ]);
+
+  test("P6: opening a related person whose list is the rest of this one is a swap", () =>
+    swapped(related("Alice", ["Bob", "Dave"]), related("Bob", ["Dave"])));
+  test("P6: re-reading the card keeps every ref", () => unchanged(related("Alice", ["Bob", "Dave"])));
+  test("P6: deleting the first related row (the rest reflow up) keeps the other refs", () => {
+    const before = assignRefs(null, related("Alice", ["Bob", "Dave"]));
+    const after = assignRefs(before, related("Alice", ["Dave"]));
+    for (const label of ["Alice", "Send Message", "Block this Caller"]) {
+      expect(refWhere(after, (n) => n.label === label)).toBe(refWhere(before, (n) => n.label === label));
+    }
+  });
+
+  // K1: a labelled Other ("Profile") containing a labelled Other ("Alice, mobile").
+  test("K1: an unchanged screen with nested labelled groups keeps every ref", () => unchanged(snap([
+    back,
+    el({ path: "0.2", type: "Other", role: "group", label: "Profile", frame: { x: 0, y: 100, width: 402, height: 600 } }),
+    el({ path: "0.2.0", type: "Other", role: "group", label: "Alice, mobile", frame: { x: 16, y: 200, width: 370, height: 60 } }),
+    ...buttons("0.2"),
+  ])));
+
+  // K2: two StaticTexts whose frames overlap by 2pt.
+  test("K2: an unchanged screen with overlapping texts keeps every ref", () => unchanged(snap([
+    back,
+    el({ path: "0.2.0", ...text("Alice"), frame: { x: 16, y: 200, width: 200, height: 24 } }),
+    el({ path: "0.2.1", ...text("Engineer"), frame: { x: 16, y: 222, width: 200, height: 20 } }),
+    ...buttons("0.2"),
+  ])));
+});

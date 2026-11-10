@@ -328,6 +328,11 @@ interface Anchor {
   offset: Offset;
 }
 
+/** An {@link Anchor} that also remembers its previous frame. */
+interface PlacedAnchor extends Anchor {
+  rect: AxRect;
+}
+
 /** Deepest path shared by every member (a lone member's parent). */
 function containerPath(members: AxElement[]): string {
   const split = members.map((member) => member.path.split("."));
@@ -584,7 +589,14 @@ const CHAIN_HOPS = 4;
  *   the same type whose name occurs more times than before (Alice 2 → 1 and
  *   Bob 1 → 2 in a split view); or
  * - two names traded places (counts unchanged): Alice now where Bob was and
- *   Bob where Alice was; or
+ *   Bob where Alice was, and not still where she was (two overlapping
+ *   labels that didn't move are not a trade); or
+ * - its name occurs fewer times, and the name now in its place didn't move
+ *   with its container but jumped past an anchor that stayed put: Alice's
+ *   card naming her manager Bob becoming Bob's card with no manager (Bob
+ *   jumped from below the action buttons to above them). A row deleted
+ *   with the rest reflowing up never moves a survivor past an unmoved
+ *   anchor; or
  * - a chain: the name in its place only moved there from elsewhere on
  *   screen, and following it back to its old place (up to
  *   {@link CHAIN_HOPS} places) ends at new content or back where it started.
@@ -600,7 +612,7 @@ const CHAIN_HOPS = 4;
  * its container's anchors below move, and each extra offset can only add a
  * reason to retire.
  */
-function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor[]): boolean {
+function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: PlacedAnchor[]): boolean {
   const prevCounts = countValues(prevTexts.map((t) => t.key));
   const currentCounts = countValues(texts.map((t) => t.key));
   const grew = (key: string) => currentCounts.get(key)! > (prevCounts.get(key) ?? 0);
@@ -637,6 +649,11 @@ function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor
     return [{ dx: 0, dy: 0 }, ...offsetsAround(anchors, ancestorPath(old.path, 1), old.path)].some((o) =>
       Math.abs(o.dx - dx) <= FRAME_TOLERANCE && Math.abs(o.dy - dy) <= FRAME_TOLERANCE);
   });
+  // `now` jumped past an anchor that stayed put (from below the action
+  // buttons to above them): a reflow never reorders the survivors.
+  const crossed = (now: NamedText) => (prevByKey.get(now.key) ?? []).some((old) => anchors.some((a) =>
+    Math.abs(a.offset.dx) <= FRAME_TOLERANCE && Math.abs(a.offset.dy) <= FRAME_TOLERANCE
+    && Math.min(old.rect.y, now.rect.y) < a.rect.y && a.rect.y < Math.max(old.rect.y, now.rect.y)));
   // `now` moved into `start`'s place: does the place it left now hold new
   // content, or (through more moved names) `start` itself?
   const chainEnds = (now: NamedText, start: string, hops: number, seen: Set<string>): boolean => {
@@ -659,10 +676,11 @@ function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor
       for (const now of currentByBand.at(before.rect, before.type, offset)) {
         if (now.key === before.key) continue;
         if (fewer && grew(now.key)) return true;
+        if (fewer && !stayed(now) && crossed(now)) return true;
         // Did `before`'s name take the old place of a copy of `now`'s name?
         const mine = currentByKey.get(before.key) ?? [];
         for (const t of prevByKey.get(now.key) ?? []) {
-          if (mine.some((c) => c.type === t.type && inPlace(t.rect, c.rect, offset))) return true;
+          if (mine.some((c) => c.type === t.type && inPlace(t.rect, c.rect, offset) && !framesClose(before.rect, c.rect, offset))) return true;
         }
         if (chainEnds(now, before.key, CHAIN_HOPS, new Set([before.key]))) return true;
       }
@@ -710,12 +728,12 @@ function screenReplaced(
   const currentByKey = new Map<string, KeyedElement>();
   for (const k of keyed) if (k.fact === k.key) currentByKey.set(k.key, k);
 
-  const anchors: Array<{ path: string; offset: Offset }> = [];
+  const anchors: PlacedAnchor[] = [];
   for (const [key, before] of prevByKey) {
     const after = currentByKey.get(key);
     if (!after) continue;
     if (after.content !== before.content) return true;
-    anchors.push({ path: before.path, offset: { dx: after.rect.x - before.rect.x, dy: after.rect.y - before.rect.y } });
+    anchors.push({ path: before.path, rect: before.rect, offset: { dx: after.rect.x - before.rect.x, dy: after.rect.y - before.rect.y } });
   }
 
   if (textSwapped(prev.texts, texts, anchors)) return true;
