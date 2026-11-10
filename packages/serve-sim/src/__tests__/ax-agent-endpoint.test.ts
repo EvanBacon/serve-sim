@@ -137,6 +137,24 @@ describe("GET /ax/snapshot", () => {
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("GET");
   });
+
+  test("HEAD on /ax/snapshot and /ax/settle does no work and leaves the ref session alone", async () => {
+    const deps = fakeDeps({ current: HOME }, []);
+    let describes = 0;
+    const original = deps.axDescribe!;
+    deps.axDescribe = async (udid) => { describes++; return original(udid); };
+    const base = await serve(new DeviceSession("UDID-AX", deps));
+    for (const path of ["/ax/snapshot", "/ax/settle"]) {
+      const res = await fetch(`${base}${path}`, { method: "HEAD" });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("");
+    }
+    expect(describes).toBe(0);
+    // No snapshot was recorded, so a ref is still unknown to the session.
+    const act = await fetch(`${base}/ax/act`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ref: "@e1" }) });
+    expect(act.status).toBe(409);
+    expect(await act.json()).toMatchObject({ error: "no_snapshot" });
+  });
 });
 
 describe("POST /ax/act", () => {

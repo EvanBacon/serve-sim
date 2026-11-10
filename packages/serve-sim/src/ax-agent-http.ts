@@ -7,6 +7,9 @@
  *                                   tap / long-press a ref; with settle, the diff
  *   GET  /ax/settle[?timeoutMs=]    wait for quiet; diff vs the last snapshot
  *
+ * HEAD on the GET routes answers 200 without doing any work. More than a few
+ * requests in flight per device get 429 (see AxAgent).
+ *
  * The middleware's auth gate (token for remote callers, same-origin for
  * non-GET) runs before these, as for every helper route. `act` also requires
  * a JSON body so a cross-site `text/plain` form post can never reach it.
@@ -67,6 +70,14 @@ export async function serveAxAgent(
   const allowed = endpoint === "act" ? "POST" : "GET";
   if (method !== allowed && !(allowed === "GET" && method === "HEAD")) {
     send(res, 405, { error: "method_not_allowed", message: `Use ${allowed} for /ax/${endpoint}.` }, { Allow: allowed });
+    return;
+  }
+  if (method === "HEAD") {
+    // A probe: never read the tree, wait for settle, or touch the ref session.
+    if (!res.writableEnded && !res.destroyed) {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end();
+    }
     return;
   }
   try {
