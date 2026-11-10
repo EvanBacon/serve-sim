@@ -342,4 +342,25 @@ private func axQuery(
             return String(decoding: data, as: UTF8.self)
         }
     },
+    // videoInfo(path): Promise<string> — JSON `{ duration, width, height,
+    // sampleTimes }` for a local movie, read compressed (no decode). Used by
+    // `serve-sim record frame|diff`; errors reject with their description.
+    "videoInfo": try NodeFunction { (path: String) async throws -> String in
+        let info = try await RecordingFrameReader.info(path: path)
+        let data = try JSONSerialization.data(withJSONObject: info.jsonObject())
+        return String(decoding: data, as: UTF8.self)
+    },
+    // videoFrame(path, seconds): Promise<{ width, height, time, rgba }> — the
+    // sample shown at `seconds`, decoded to RGBA (alpha 255).
+    "videoFrame": try NodeFunction { (path: String, seconds: Double) async throws -> NodeValueConvertible in
+        let frame = try await RecordingFrameReader.frame(path: path, seconds: seconds)
+        let buffer = try NodeArrayBuffer(capacity: frame.rgba.count)
+        _ = try buffer.withUnsafeMutableBytes { frame.rgba.copyBytes(to: $0) }
+        return try NodeObject([
+            "width": frame.width,
+            "height": frame.height,
+            "time": frame.time,
+            "rgba": try NodeTypedArray<UInt8>(for: buffer, count: frame.rgba.count),
+        ])
+    },
 ])
