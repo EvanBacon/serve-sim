@@ -970,6 +970,14 @@ function AppWithConfig({
     for (const ev of PASTE_KEY_EVENTS) sendKey(ev.type, ev.usage);
   }, [sendKey, simKeys]);
   useEffect(() => {
+    if (simFocused) return;
+    if (pendingPasteRef.current) {
+      clearTimeout(pendingPasteRef.current);
+      pendingPasteRef.current = null;
+    }
+  }, [simFocused]);
+  useEffect(() => {
+    let cancelled = false;
     const onPaste = (e: ClipboardEvent) => {
       if (!simFocusedRef.current || isFormControlTarget(e.target)) return;
       if (pendingPasteRef.current) clearTimeout(pendingPasteRef.current);
@@ -981,12 +989,14 @@ function AppWithConfig({
         return;
       }
       void stageGuestPasteboard(pasteboardEndpoint, text).then((outcome) => {
+        if (cancelled || !simFocusedRef.current) return;
         if (outcome.ok) tapGuestPaste();
         else toast.error(`Could not paste into the simulator (${outcome.error}).`);
       });
     };
     window.addEventListener("paste", onPaste);
     return () => {
+      cancelled = true;
       window.removeEventListener("paste", onPaste);
       if (pendingPasteRef.current) clearTimeout(pendingPasteRef.current);
     };

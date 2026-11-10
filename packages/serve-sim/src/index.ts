@@ -1254,7 +1254,12 @@ async function pasteText(
 
   let text: string;
   if (opts.stdin) {
-    text = readFileSync(0, "utf8");
+    try {
+      text = readFileSync(0, "utf8");
+    } catch (err) {
+      console.error(`Failed to read stdin: ${(err as Error).message}`);
+      process.exit(1);
+    }
   } else if (opts.file) {
     try {
       text = readFileSync(opts.file, "utf8");
@@ -1300,7 +1305,12 @@ async function pasteText(
     console.log(`Copied ${body.bytes} bytes to the simulator pasteboard (verified). Paste in the guest to insert it.`);
     return;
   }
-  await sendKeyEventsToWs(state.wsUrl, PASTE_KEY_EVENTS, 20, state.headers);
+  try {
+    await sendKeyEventsToWs(state.wsUrl, PASTE_KEY_EVENTS, 20, state.headers);
+  } catch (err) {
+    console.error(`Pasteboard staged, but Cmd+V failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
   console.log(`Pasted ${body.bytes} bytes (pasteboard verified, Cmd+V sent).`);
 }
 
