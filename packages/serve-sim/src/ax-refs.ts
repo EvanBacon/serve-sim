@@ -13,14 +13,15 @@
  * - Later snapshots keep the ref of every element that is unambiguously the
  *   same one (a unique id or label, or for duplicates and unlabelled
  *   elements a matching frame), and give new elements the next unused
- *   number. A ref is never reused for a different element, so a stale ref
- *   fails instead of silently pointing at whatever now occupies its slot.
+ *   number. When identity is in doubt the ref retires: a stale ref fails
+ *   loudly, which beats a tap on whatever now occupies its slot.
  * - "Unique" is judged against the whole previous tree, offscreen elements
  *   included, not just the elements that got a ref.
- * - Position and a repeated label are never enough on their own: the
- *   uniquely labelled content around an element (its row, its container,
- *   the screen) must have survived too, see {@link contextSurvived}. A
- *   unique AXUniqueId is authoritative and skips that check.
+ * - Neither a unique id/label nor position is enough on its own: the
+ *   uniquely labelled content around an element must have survived too (no
+ *   heading or navigation-bar title replaced around it, most of its nearest
+ *   context and of its own row's neighbours still there, read-only values
+ *   included), see {@link contextSurvived}. That applies to AXUniqueIds too.
  */
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
@@ -74,8 +75,20 @@ interface GroupMember {
 
 /** An element whose labelled or identified key occurs once in its tree: context that can survive or not. */
 interface KeyedElement {
+  /** Identity group key. */
   key: string;
+  /**
+   * What must reappear for this to count as surviving context: the key, or
+   * (a second entry for the same element) key plus value for read-only
+   * types, so Alice's "Phone" cell is not Bob's. Editable values (text
+   * fields) and on/off state are left out so typing or flipping a switch
+   * doesn't read as a new screen.
+   */
+  fact: string;
   path: string;
+  rect: AxRect;
+  /** A heading or navigation-bar title: replacing it means another screen. */
+  title: boolean;
 }
 
 export interface RefState {
@@ -89,7 +102,7 @@ export interface RefState {
    * mistaken for a sole survivor.
    */
   groups: Map<string, GroupMember[]>;
-  /** The latest tree's uniquely keyed elements, for judging whether an element's context survived. */
+  /** The latest tree's uniquely keyed elements in tree order, for judging whether an element's context survived. */
   keyed: KeyedElement[];
   /** Refs of elements that vanished, newest last (bounded), for stale-ref messages. */
   retired: Array<{ ref: string; role: string; label: string }>;
@@ -133,6 +146,24 @@ const INTERACTIVE_TYPES = new Set([
   "TextField",
   "Toggle",
 ]);
+
+/** Types whose value is content (a field's contents on a detail screen), not state the user edits in place. */
+const CONTENT_VALUE_TYPES = new Set(["StaticText", "Heading", "Cell", "Row", "Image", "Group", "Other"]);
+
+/** Values that are a control's state ("1", "Off"), not content that names a record. */
+const STATE_VALUE = /^(0|1|on|off|true|false|yes|no|selected|not selected|checked|unchecked)$/i;
+
+function isContentValue(element: AxElement): boolean {
+  return element.value !== "" && CONTENT_VALUE_TYPES.has(element.type) && !STATE_VALUE.test(element.value.trim());
+}
+
+function isNavigationBar(element: AxElement): boolean {
+  return /navigation ?bar|nav ?bar/i.test(element.type) || /^(navigation|nav) ?bar$/i.test(element.role);
+}
+
+function isHeading(element: AxElement): boolean {
+  return element.type === "Heading" || element.role.toLowerCase() === "heading";
+}
 
 export function isVisibleFrame(frame: AxRect, screen: { width: number; height: number }): boolean {
   if (!(frame.width > 0) || !(frame.height > 0)) return false;
@@ -223,6 +254,18 @@ function containerPath(members: AxElement[]): string {
   return prefix.join(".");
 }
 
+/** Tree order of two dotted paths ("0.2" before "0.10"). */
+function comparePaths(a: string, b: string): number {
+  const x = a.split(".");
+  const y = b.split(".");
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    const d = Number(x[i]) - Number(y[i]);
+    return Number.isNaN(d) ? x[i]!.localeCompare(y[i]!) : d;
+  }
+  return x.length - y.length;
+}
+
 function inSubtree(path: string, root: string): boolean {
   return root === "" || path === root || path.startsWith(`${root}.`);
 }
@@ -269,48 +312,120 @@ function ancestorPath(path: string, levels: number): string {
 }
 
 /**
- * Keys of the uniquely keyed elements around `path`: level 0 is its own
+ * The uniquely keyed elements around `path`: level 0 is its own
  * descendants, level n the subtree of its n-th ancestor. The element itself
  * never counts.
  */
-function contextKeys(keyed: KeyedElement[], path: string, level: number): Set<string> {
+function contextAt(keyed: KeyedElement[], path: string, level: number): KeyedElement[] {
   const root = level === 0 ? path : ancestorPath(path, level);
-  const keys = new Set<string>();
-  for (const k of keyed) {
-    if (k.path === path) continue;
-    if (level === 0 ? k.path.startsWith(`${path}.`) : inSubtree(k.path, root)) keys.add(k.key);
+  if (root === "") return keyed.filter((k) => k.path !== path);
+  // `keyed` is in tree order, so a subtree is one contiguous run.
+  let lo = 0;
+  let hi = keyed.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (comparePaths(keyed[mid]!.path, root) < 0) lo = mid + 1;
+    else hi = mid;
   }
-  return keys;
+  const out: KeyedElement[] = [];
+  for (let i = lo; i < keyed.length && inSubtree(keyed[i]!.path, root); i++) {
+    if (keyed[i]!.path !== path) out.push(keyed[i]!);
+  }
+  return out;
+}
+
+/** Points between two rects' edges (0 when they touch or overlap). */
+function rectGap(a: AxRect, b: AxRect): number {
+  const dx = Math.max(0, a.x - (b.x + b.width), b.x - (a.x + a.width));
+  const dy = Math.max(0, a.y - (b.y + b.height), b.y - (a.y + a.height));
+  return Math.hypot(dx, dy);
+}
+
+/** On the same row: the two rects overlap vertically. */
+function sameRow(a: AxRect, b: AxRect): boolean {
+  return a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
+/** The `count` elements of `list` nearest to `rect` (ties keep tree order). */
+function nearestTo(list: KeyedElement[], rect: AxRect, count: number): KeyedElement[] {
+  const best: Array<{ k: KeyedElement; gap: number }> = [];
+  for (const k of list) {
+    const gap = rectGap(k.rect, rect);
+    if (best.length === count && gap >= best[count - 1]!.gap) continue;
+    let i = best.length;
+    while (i > 0 && best[i - 1]!.gap > gap) i--;
+    best.splice(i, 0, { k, gap });
+    if (best.length > count) best.pop();
+  }
+  return best.map((b) => b.k);
+}
+
+/** How many neighbours nearest by frame must mostly survive. */
+const NEIGHBOURS = 3;
+
+function mostSurvived(before: KeyedElement[], after: Set<string>): boolean {
+  let survived = 0;
+  for (const k of before) if (after.has(k.fact)) survived++;
+  return survived * 2 > before.length;
 }
 
 /**
- * Whether the labelled content around an element is still there, judged at
- * the nearest level (own subtree, then each ancestor's) that has any:
- * - `frame` (an element matched by position: a duplicate or unlabelled one):
- *   that level must hold keyed elements on neither side, or most of the
- *   previous ones must have survived. A reused cell showing another row has
- *   other labels in it; a toolbar button on another screen has another title
- *   above it.
- * - `label` (a lone labelled match): retired only when the level had keyed
- *   elements before and none survived, so "Delete" next to Alice doesn't
- *   become "Delete" next to Bob after a push, but an inserted sibling
- *   doesn't retire it.
+ * The first title (tree order) of a scope was replaced: the old one is gone
+ * and the new one wasn't there before. A section header scrolling away while
+ * the next one stays is not a replacement; Alice's heading becoming Bob's is.
+ */
+function titleReplaced(before: KeyedElement[], after: KeyedElement[]): boolean {
+  const first = (list: KeyedElement[]) => list.find((k) => k.title);
+  const a = first(before);
+  const b = first(after);
+  if (!a || !b) return false;
+  return !after.some((k) => k.title && k.fact === a.fact) && !before.some((k) => k.title && k.fact === b.fact);
+}
+
+/**
+ * Whether the labelled content around an element is still there. All of:
+ * - No enclosing scope (own subtree up to the whole screen) had its first
+ *   heading or navigation-bar title replaced: refs never carry onto another
+ *   record's or another screen's copy of a control, however much shared
+ *   chrome (field headers, tab bars) survived.
+ * - At the nearest level that holds keyed context, most of the previous
+ *   keyed elements survived (a strict majority, with read-only values part
+ *   of the fingerprint). For `frame` matches (duplicates, unlabelled
+ *   elements) the level counts as soon as either side has context, so a
+ *   label that appeared next to an unlabelled button is not proof; for
+ *   `label` matches (one labelled or identified element on both sides) only
+ *   previous context counts, so an inserted sibling doesn't retire it.
+ * - At that level the element's own neighbours survived: most of the
+ *   previous keyed elements on the same row, and most of its
+ *   {@link NEIGHBOURS} nearest by frame. Sticky chrome sharing a flat
+ *   container with replaced rows can't outvote the row the element sits in.
  */
 function contextSurvived(
   prevKeyed: KeyedElement[],
   prevPath: string,
+  prevRect: AxRect,
   currentKeyed: KeyedElement[],
   currentPath: string,
   mode: "frame" | "label",
 ): boolean {
   const levels = Math.max(prevPath.split(".").length, currentPath.split(".").length);
+  const prevTitles = prevKeyed.filter((k) => k.title);
+  const currentTitles = currentKeyed.filter((k) => k.title);
+  if (prevTitles.length > 0 && currentTitles.length > 0) {
+    for (let level = 0; level <= levels; level++) {
+      if (titleReplaced(contextAt(prevTitles, prevPath, level), contextAt(currentTitles, currentPath, level))) return false;
+    }
+  }
   for (let level = 0; level <= levels; level++) {
-    const before = contextKeys(prevKeyed, prevPath, level);
-    const after = contextKeys(currentKeyed, currentPath, level);
-    if (before.size === 0 && (mode === "label" || after.size === 0)) continue;
-    let survived = 0;
-    for (const key of before) if (after.has(key)) survived++;
-    return mode === "label" ? survived > 0 : survived > 0 && survived * 2 > before.size;
+    const before = contextAt(prevKeyed, prevPath, level);
+    const after = contextAt(currentKeyed, currentPath, level);
+    if (before.length === 0 && (mode === "label" || after.length === 0)) continue;
+    if (before.length === 0) return false;
+    const facts = new Set(after.map((k) => k.fact));
+    if (!mostSurvived(before, facts)) return false;
+    const row = before.filter((k) => sameRow(k.rect, prevRect));
+    if (row.length > 0 && !mostSurvived(row, facts)) return false;
+    return mostSurvived(nearestTo(before, prevRect, NEIGHBOURS), facts);
   }
   return true;
 }
@@ -320,7 +435,9 @@ function contextSurvived(
  * whole previous tree) each current member continues, or -1 for a new
  * element. Only unambiguous matches carry a ref:
  * - one labelled/identified member on both sides: the same element, wherever
- *   it is, unless its context was replaced (`loneOk`, decided by the caller);
+ *   it is, unless its context was replaced (`loneOk`, decided by the caller
+ *   with {@link contextSurvived}). Lone matches never use the container
+ *   offset (`measured` is null for them): their frame doesn't matter;
  * - one unlabelled member on both sides with a close frame;
  * - same count of duplicates, in order, with equal values and every frame close;
  * - when the count changed: a member whose value is unique on both sides
@@ -410,21 +527,32 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   });
 
   const prevKeyed = prev?.keyed ?? [];
+  const navigationBars = snapshot.elements.filter(isNavigationBar).map((element) => element.path);
+  const isTitle = (element: AxElement) => isHeading(element) || isNavigationBar(element)
+    || (element.type === "StaticText" && navigationBars.some((bar) => element.path.startsWith(`${bar}.`)));
   const keyed: KeyedElement[] = [];
   for (const [key, indexes] of currentByGroup) {
-    if (indexes.length === 1 && groups[indexes[0]!]!.unique) keyed.push({ key, path: interesting[indexes[0]!]!.path });
+    if (indexes.length !== 1 || !groups[indexes[0]!]!.unique) continue;
+    const element = interesting[indexes[0]!]!;
+    keyed.push({ key, fact: key, path: element.path, rect: element.frame, title: isTitle(element) });
+    // A read-only value is a second fact of its own: Alice's "Phone" value is
+    // lost on Bob's screen while the shared "Phone" header survives.
+    if (isContentValue(element)) keyed.push({ key, fact: `${key}=${element.value}`, path: element.path, rect: element.frame, title: false });
   }
+  // Tree order, so "first title of a scope" means the topmost in the tree.
+  keyed.sort((a, b) => comparePaths(a.path, b.path));
 
   // Unique keys present once on both sides say how their content moved,
-  // unless what surrounded them was replaced (then they aren't the same element).
-  // A unique AXUniqueId is authoritative.
+  // unless what surrounded them was replaced (then they aren't the same
+  // element). AXUniqueIds get the same check: a React Native testID reused
+  // on every detail screen names a different button on each.
   const anchors: Anchor[] = [];
   const loneOk = new Set<string>();
   for (const [key, indexes] of currentByGroup) {
     const previous = previousGroups.get(key);
     if (indexes.length !== 1 || previous?.length !== 1 || !groups[indexes[0]!]!.unique) continue;
     const element = interesting[indexes[0]!]!;
-    if (!key.startsWith("id:") && !contextSurvived(prevKeyed, previous[0]!.path, keyed, element.path, "label")) continue;
+    if (!contextSurvived(prevKeyed, previous[0]!.path, previous[0]!.rect, keyed, element.path, "label")) continue;
     loneOk.add(key);
     const rect = previous[0]!.rect;
     anchors.push({ path: element.path, offset: { dx: element.frame.x - rect.x, dy: element.frame.y - rect.y } });
@@ -437,7 +565,7 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
     const unique = groups[indexes[0]!]!.unique;
     const lone = unique && previous.length === 1 && members.length === 1;
     const measured = lone ? null : containerOffset(key, members, anchors, prevKeyed, keyed);
-    const contextOk = (p: number, c: number) => contextSurvived(prevKeyed, previous[p]!.path, keyed, members[c]!.path, "frame");
+    const contextOk = (p: number, c: number) => contextSurvived(prevKeyed, previous[p]!.path, previous[p]!.rect, keyed, members[c]!.path, "frame");
     matchGroup(previous, members, unique, measured, loneOk.has(key), contextOk).forEach((p, i) => {
       const ref = p >= 0 ? previous[p]!.ref : null;
       if (ref) carried.set(indexes[i]!, ref);
