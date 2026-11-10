@@ -211,17 +211,36 @@ final class SpringBoardLauncherTests: XCTestCase {
     }
 
     func testRunToExitKillsProcessThatIgnoresSIGTERM() {
-        let recorder = Recorder()
-        // The loop is bounded (~30s) so the shell can't outlive a crashed test run.
-        let process = Self.shell(
-            "trap '' TERM; i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done"
-        )
-        // Only reached with a live child if the escalation regresses.
-        defer { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+        // `Process` resets signal dispositions and the signal mask in the child,
+        // so the shell can't ignore SIGTERM from its first instruction, and
+        // `runToExit` starts its timeout as soon as `run()` returns. The shell
+        // creates `trapped` only after installing its trap. If it died without
+        // `trapped`, the timeout won the startup race (no fault of runToExit),
+        // so retry. Once `trapped` exists, the SIGKILL assertions must hold.
+        let trapped = FileManager.default.temporaryDirectory
+            .appendingPathComponent("springboard-launcher-trap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: trapped) }
 
-        // Long enough for the shell to install its trap before SIGTERM arrives.
-        XCTAssertFalse(SpringBoardLauncher.runToExit(process, timeout: 2, log: { recorder.record($0) }))
+        for _ in 0..<5 {
+            let recorder = Recorder()
+            // The loop is bounded (~30s) so the shell can't outlive a crashed test run.
+            let process = Self.shell(
+                "trap '' TERM; : > '\(trapped.path)'; i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done"
+            )
+            // Only reached with a live child if the escalation regresses.
+            defer { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
 
+            XCTAssertFalse(SpringBoardLauncher.runToExit(process, timeout: 1, log: { recorder.record($0) }))
+
+            if !process.isRunning, !FileManager.default.fileExists(atPath: trapped.path) {
+                continue
+            }
+            return Self.assertKilledDespiteSIGTERMTrap(process, log: recorder.all)
+        }
+        XCTFail("shell never installed its SIGTERM trap before the timeout")
+    }
+
+    private static func assertKilledDespiteSIGTERMTrap(_ process: Process, log: [String]) {
         // `terminationStatus` raises if read while the process is still running.
         guard !process.isRunning else {
             return XCTFail("process that ignored SIGTERM was left running")
@@ -234,7 +253,7 @@ final class SpringBoardLauncherTests: XCTestCase {
         let probeErrno = errno
         XCTAssertEqual(probe, -1, "process still exists")
         XCTAssertEqual(probeErrno, ESRCH)
-        XCTAssertEqual(recorder.all.count, 1, "unexpected log: \(recorder.all)")
+        XCTAssertEqual(log.count, 1, "unexpected log: \(log)")
     }
 
     func testRunToExitReturnsWhenProcessCannotStart() {
