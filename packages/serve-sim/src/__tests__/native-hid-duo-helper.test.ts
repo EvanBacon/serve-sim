@@ -31,6 +31,7 @@ function setup(foldable: boolean) {
     setDuoHelper = async (path: string) => { native.push(`setDuoHelper ${path}`); };
     pose = async () => { native.push("pose"); return true; };
     orientation = async () => { native.push("orientation"); return true; };
+    touch = async () => { native.push("touch"); };
   }
   const deps: NativeHidDeps = {
     SimHID: FakeSimHID as unknown as NativeHidDeps["SimHID"],
@@ -59,5 +60,16 @@ describe("NativeHid Duo helper", () => {
     expect(resolved).not.toBe(bundled);
     expect(resolved.endsWith("/serve-sim-duo-hid")).toBe(true);
     expect(native).toEqual([`new ${bundled}`, `setDuoHelper ${resolved}`, "pose"]);
+  });
+
+  test("once resolved, guest commands keep their order with touches sent in the same tick", async () => {
+    for (const foldable of [false, true]) {
+      const { native, deps } = setup(foldable);
+      const hid = new NativeHid("UDID", deps);
+      await hid.orientation(1);
+      native.length = 0;
+      await Promise.all([hid.orientation(2), hid.touch("begin", 0.5, 0.5, 100, 100)]);
+      expect(native).toEqual(["orientation", "touch"]);
+    }
   });
 });

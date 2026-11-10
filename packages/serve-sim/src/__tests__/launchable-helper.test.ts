@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync, type execFile, type spawn } from "child_process";
 import { EventEmitter } from "events";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { PassThrough } from "stream";
 import { DuoStateMonitor } from "../duo-state";
 import { launchableHelper } from "../launchable-helper";
@@ -68,6 +68,58 @@ describe("launchableHelper", () => {
     const second = launchableHelper(helper, { codesign, cacheDir });
     expect(second).not.toBe(first);
     expect(readFileSync(second, "utf8")).toBe("updated-helper-bytes");
+  });
+
+  test("a different helper with the same size and mtime gets its own copy", () => {
+    const { helper, codesign, cacheDir } = fixture({ status: 0, output: HARDENED });
+    const { mtime } = statSync(helper);
+    const first = launchableHelper(helper, { codesign, cacheDir });
+    writeFileSync(helper, "HELPER-BYTES"); // same length as "helper-bytes"
+    utimesSync(helper, mtime, mtime);
+    const second = launchableHelper(helper, { codesign, cacheDir });
+    expect(second).not.toBe(first);
+    expect(readFileSync(second, "utf8")).toBe("HELPER-BYTES");
+  });
+
+  test("never runs a cached copy that others could have planted", () => {
+    // A cache dir, version dir or copy that is group/world-writable, or a
+    // symlinked cache root, falls back to the bundled helper instead.
+    const cases: Array<(copy: string, cacheDir: string) => void> = [
+      (_copy, cacheDir) => chmodSync(cacheDir, 0o777),
+      (copy) => chmodSync(dirname(copy), 0o777),
+      (copy) => chmodSync(copy, 0o777),
+      (copy) => {
+        rmSync(copy);
+        symlinkSync("/usr/bin/true", copy);
+      },
+    ];
+    for (const plant of cases) {
+      const { helper, codesign, cacheDir } = fixture({ status: 0, output: HARDENED });
+      const copy = launchableHelper(helper, { codesign, cacheDir });
+      expect(copy).not.toBe(helper);
+      writeFileSync(copy, "planted");
+      plant(copy, cacheDir);
+      expect(launchableHelper(helper, { codesign, cacheDir })).toBe(helper);
+    }
+
+    // A group-writable bundled helper still yields a reusable private copy.
+    const loose = fixture({ status: 0, output: HARDENED });
+    chmodSync(loose.helper, 0o775);
+    const looseCopy = launchableHelper(loose.helper, loose);
+    expect(looseCopy).not.toBe(loose.helper);
+    expect(launchableHelper(loose.helper, loose)).toBe(looseCopy);
+
+    const { helper, codesign } = fixture({ status: 0, output: HARDENED });
+    const real = scratch();
+    const linked = join(scratch(), "cache");
+    symlinkSync(real, linked);
+    expect(launchableHelper(helper, { codesign, cacheDir: linked })).toBe(helper);
+
+    // A pre-existing world-writable cache dir is not used, even when empty.
+    const shared = fixture({ status: 0, output: HARDENED });
+    mkdirSync(shared.cacheDir, { mode: 0o777 });
+    chmodSync(shared.cacheDir, 0o777);
+    expect(launchableHelper(shared.helper, shared)).toBe(shared.helper);
   });
 
   test("keeps the bundled helper when it already launches", () => {

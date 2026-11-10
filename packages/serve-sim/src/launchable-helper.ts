@@ -4,9 +4,14 @@
  * (as Electron/notarization packaging does) has dyld drop DYLD_* variables, so
  * it aborts with "DYLD_ROOT_PATH not set for simulator program". Such a helper
  * is copied to a per-user cache and ad-hoc re-signed without the runtime flag.
+ *
+ * The cache may sit in a shared `/tmp` (when TMPDIR is unset), and its copy is
+ * executed, so every directory on the way and the copy itself must be owned by
+ * this user and writable by nobody else; otherwise the bundled helper is used.
  */
 import { spawnSync } from "child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync } from "fs";
+import { createHash } from "crypto";
+import { chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, type Stats } from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
 
@@ -42,6 +47,35 @@ function dropsDyldEnvironment(codesignOutput: string): boolean {
   return flags.includes("runtime") && !allowsDyldEnvironment(codesignOutput);
 }
 
+/** True when only this user could have written the entry at `stats`. */
+function privateTo(stats: Stats, isType: (s: Stats) => boolean): boolean {
+  const uid = process.getuid?.();
+  return isType(stats) && (uid === undefined || stats.uid === uid) && (stats.mode & 0o022) === 0;
+}
+
+/** Creates `dir` if missing; throws unless it is a private, non-symlinked directory. */
+function ensurePrivateDir(dir: string): void {
+  try {
+    mkdirSync(dir, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  if (!privateTo(lstatSync(dir), (s) => s.isDirectory())) throw new Error(`Refusing to use ${dir}`);
+}
+
+/** The private cached copy at `copy`, `undefined` when absent; throws when not private. */
+function existingCopy(copy: string): string | undefined {
+  let stats: Stats;
+  try {
+    stats = lstatSync(copy);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!privateTo(stats, (s) => s.isFile())) throw new Error(`Refusing to run ${copy}`);
+  return copy;
+}
+
 /** `helper`, or a re-signed copy of it that `simctl spawn` can launch. Never throws. */
 export function launchableHelper(helper: string, deps: LaunchableHelperDeps = {}): string {
   const codesign = deps.codesign ?? runCodesign;
@@ -49,19 +83,23 @@ export function launchableHelper(helper: string, deps: LaunchableHelperDeps = {}
     const probe = codesign(["-d", "--verbose=2", "--entitlements", "-", helper]);
     if (probe.status !== 0 || !dropsDyldEnvironment(probe.output)) return helper;
 
-    const { size, mtimeMs } = statSync(helper);
-    const uid = process.getuid?.() ?? "user";
-    const dir = join(deps.cacheDir ?? join(tmpdir(), `serve-sim-${uid}`, "helpers"), `${size}-${Math.trunc(mtimeMs)}`);
+    // Keyed by content, so a different build never reuses another's copy.
+    const digest = createHash("sha256").update(readFileSync(helper)).digest("hex").slice(0, 32);
+    const userRoot = join(tmpdir(), `serve-sim-${process.getuid?.() ?? "user"}`);
+    const dirs = deps.cacheDir ? [deps.cacheDir] : [userRoot, join(userRoot, "helpers")];
+    const dir = join(dirs[dirs.length - 1]!, digest);
+    for (const d of [...dirs, dir]) ensurePrivateDir(d);
     const copy = join(dir, basename(helper));
-    if (existsSync(copy)) return copy;
+    const cached = existingCopy(copy);
+    if (cached) return cached;
 
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
     // Sign in a private scratch dir and rename into place, so a concurrent
     // process never launches a half-written copy.
     const scratch = mkdtempSync(join(dir, ".tmp-"));
     try {
       const staged = join(scratch, basename(helper));
       copyFileSync(helper, staged);
+      chmodSync(staged, 0o755); // the source's mode may be group-writable
       if (codesign(["-f", "-s", "-", staged]).status !== 0) return helper;
       renameSync(staged, copy);
     } finally {

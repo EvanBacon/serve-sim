@@ -210,6 +210,7 @@ export class NativeHid {
   private readonly keys: KeySequencer;
   /** Settles once a Duo's bridge points at the launchable helper. */
   private readonly duoHelperReady: Promise<void>;
+  private duoHelperSettled = false;
 
   constructor(udid: string, deps: NativeHidDeps = {}) {
     const bundled = (deps.bundledDuoHelper ?? bundledDuoHidHelperPath)();
@@ -220,12 +221,16 @@ export class NativeHid {
       if (!foldable) return;
       const helper = resolve();
       if (helper !== bundled) await this.handle.setDuoHelper(helper);
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => { this.duoHelperSettled = true; });
   }
 
-  /** Commands a Duo routes through its guest helper wait for it to be resolved. */
-  private viaDuoHelper<T>(fn: () => PromiseLike<T>): () => Promise<T> {
-    return () => this.duoHelperReady.then(fn);
+  /**
+   * Commands a Duo routes through its guest helper wait for it to be resolved.
+   * Once it has been, they run immediately so they keep their order relative
+   * to touches and keys sent in the same tick.
+   */
+  private viaDuoHelper<T>(fn: () => PromiseLike<T>): () => PromiseLike<T> {
+    return () => (this.duoHelperSettled ? fn() : this.duoHelperReady.then(fn));
   }
 
   // The N-API bindings throw synchronously when a JS value can't be coerced to
