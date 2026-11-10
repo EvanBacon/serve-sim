@@ -74,6 +74,7 @@ import { fileExtension } from "./utils/drop";
 import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
 import { requestMetroReload } from "./utils/metro-reload-request";
+import { canReloadApp } from "./utils/reload-action";
 import {
   createSimKeyState,
   isFormControlTarget,
@@ -905,6 +906,11 @@ function AppWithConfig({
     sendKey("up", tap);
     for (const ev of simKeys.restoreEvents()) sendKey(ev.type, ev.usage);
   }, [sendKey, simKeys, reloadEndpoint]);
+  // Apps without a JS bundle to reload are terminated and launched again.
+  const relaunchApp = useCallback(() => {
+    const bundleId = currentAppRef.current?.bundleId;
+    if (bundleId) hostAction("relaunchApp", { udid: config.device, bundleId }).catch(() => {});
+  }, [config.device]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
   // The action toolbar under the device (reload, home, ...) is sim chrome:
@@ -1274,11 +1280,14 @@ function AppWithConfig({
             }}
           >
             <SimulatorToolbar.Actions>
-              {currentApp?.isReactNative && (
+              {canReloadApp(currentApp) && (
                 <SimulatorToolbar.Button
-                  aria-label="Reload React Native bundle"
-                  title="Reload (R, ⌘R)"
-                  onClick={() => void sendReactNativeReload()}
+                  aria-label={currentApp?.isReactNative ? "Reload React Native bundle" : "Relaunch app"}
+                  title={currentApp?.isReactNative ? "Reload (R, ⌘R)" : "Relaunch app"}
+                  onClick={() => {
+                    if (currentApp?.isReactNative) void sendReactNativeReload();
+                    else relaunchApp();
+                  }}
                 >
                   <ReloadIcon />
                 </SimulatorToolbar.Button>

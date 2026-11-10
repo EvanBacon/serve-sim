@@ -380,6 +380,7 @@ describe("(b) host actions validate params and never reach a shell", () => {
       { method: "toggleAppearance", params: { udid: `${VALID_UDID}\`touch ${file}\`` }, error: /invalid udid/ },
       { method: "appDetails", params: { udid: VALID_UDID, bundleId: `com.x;touch ${file}` }, error: /invalid bundle id/ },
       { method: "revealApp", params: { udid: VALID_UDID, bundleId: `com.x$(touch ${file})` }, error: /invalid bundle id/ },
+      { method: "relaunchApp", params: { udid: VALID_UDID, bundleId: `com.x;touch ${file}` }, error: /invalid bundle id/ },
       { method: "permissions", params: { udid: VALID_UDID, bundleId: `com.x|touch ${file}`, action: "grant", service: "camera" }, error: /invalid bundle id/ },
       { method: "permissions", params: { udid: VALID_UDID, bundleId: "com.x", action: "grant", service: `camera; touch ${file}` }, error: /invalid service/ },
       { method: "permissions", params: { udid: VALID_UDID, bundleId: "com.x", action: `grant && touch ${file}`, service: "camera" }, error: /invalid action/ },
