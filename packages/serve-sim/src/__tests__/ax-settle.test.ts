@@ -73,19 +73,32 @@ describe("waitForSettle", () => {
     expect(result).toMatchObject({ settled: false, busy: ["frames"] });
   });
 
-  test("never overshoots the hard timeout, accounting for slow samples", async () => {
+  test("never overshoots the hard timeout: a sample predicted to end past it is not started", async () => {
     let n = 0;
     let t = 0;
     const result = await waitForSettle({
       now: () => t,
       sleep: async (ms) => { t += ms; },
-      sample: async () => { t += 120; return { signature: String(n++), frames: null, value: "x" }; },
+      sample: async () => { t += 650; return { signature: String(n++), frames: null, value: "x" }; },
       intervalMs: 200,
-      timeoutMs: 700,
+      timeoutMs: 3000,
     });
     expect(result.settled).toBe(false);
-    // The last sample may start before the deadline; it is never followed by another sleep.
-    expect(result.waitedMs).toBeLessThanOrEqual(700 + 120);
+    expect(result.waitedMs).toBeLessThanOrEqual(3000);
+    // 650 + (200 + 650) * 2 = 2350; a third interval + sample would end at 3200.
+    expect(result.samples).toBe(3);
+  });
+
+  test("slow samples can still settle within the timeout", async () => {
+    let t = 0;
+    const result = await waitForSettle({
+      now: () => t,
+      sleep: async (ms) => { t += ms; },
+      sample: async () => { t += 650; return { signature: "same", frames: 1, value: "x" }; },
+      intervalMs: 200,
+      timeoutMs: 3000,
+    });
+    expect(result).toMatchObject({ settled: true, waitedMs: 1500, samples: 2 });
   });
 
   test("waits initialDelayMs before the first sample so the action can start", async () => {

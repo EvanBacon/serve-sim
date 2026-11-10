@@ -164,6 +164,25 @@ describe("AxAgent.settle", () => {
     expect(again.diff).toEqual({ added: [], removed: [], changed: [] });
   });
 
+  test("an unchanged tree settles even when the bridge reorders frame keys between reads", async () => {
+    // The native bridge serializes Swift dictionaries, so {x,y,width,height}
+    // arrive in a different key order on each read of the same screen.
+    const reordered = (s: AxSnapshot, flip: boolean): AxSnapshot => ({
+      ...s,
+      elements: s.elements.map((e) => ({
+        ...e,
+        frame: flip
+          ? { height: e.frame.height, width: e.frame.width, y: e.frame.y, x: e.frame.x }
+          : { x: e.frame.x, y: e.frame.y, width: e.frame.width, height: e.frame.height },
+      })),
+    });
+    let n = 0;
+    const { deps } = fakeDevice([HOME]);
+    deps.collect = async () => reordered(HOME, n++ % 2 === 1);
+    const result = await new AxAgent(deps).settle({ timeoutMs: 3000 });
+    expect(result.settle).toMatchObject({ settled: true, reason: "quiet" });
+  });
+
   test("uses the frame counter when available and reports a timeout when frames keep changing", async () => {
     let f = 0;
     const { deps } = fakeDevice([HOME], { frames: () => f++ });

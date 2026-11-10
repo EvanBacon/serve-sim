@@ -283,7 +283,7 @@ serve-sim settle             # after any other action: wait for quiet, diff vs t
 
 The server remembers the last snapshot per device, so a ref always means the element you saw. Before tapping, it looks the element up in the live tree and taps it where it is now. If the element has gone or scrolled offscreen, or the ref was never issued, the tap is refused (exit code 1, `stale_ref` / `unknown_ref` / `offscreen` on stderr) and nothing is tapped. Take a new snapshot and retry. A ref stays the same while its element stays on screen, and is never reused for a different element. Elements that appear in a diff come with refs you can tap right away.
 
-The screen counts as settled when two AX snapshots ~200 ms apart are identical and the captured framebuffer hasn't changed in between. The wait gives up after `--timeout` (default 3000 ms, max 30000) and reports `settled: false` with what was still busy; the command still exits 0. Coordinate taps (`serve-sim tap <x> <y>`) are unchanged.
+The screen counts as settled when two consecutive AX snapshots (taken ~200 ms apart, plus the AX read itself, often several hundred ms) are identical and the captured framebuffer hasn't changed in between. The wait gives up before `--timeout` (default 3000 ms, max 30000) and reports `settled: false` with what was still busy; the command still exits 0. Coordinate taps (`serve-sim tap <x> <y>`) are unchanged.
 
 ## Connectors
 

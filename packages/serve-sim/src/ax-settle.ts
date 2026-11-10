@@ -4,7 +4,8 @@
  * "Quiet" means `quietSamples` consecutive samples, `intervalMs` apart, with
  * the same AX signature and (when the capture path reports it) the same
  * content-change counter (IOSurface seed changes, so idle-floor re-emits do
- * not count). A hard `timeoutMs` bounds the wait. Pure: the clock, sleep and
+ * not count). A hard `timeoutMs` bounds the wait: no sample starts unless the
+ * previous one's duration says it can finish in time. Pure: the clock, sleep and
  * sampler are injected so the logic is tested without a simulator.
  */
 
@@ -68,8 +69,10 @@ export async function waitForSettle<T>(options: SettleOptions<T>): Promise<Settl
   let busy: Array<"ax" | "frames"> = [];
   let sawFrames = false;
 
+  let sampleCostMs = 0;
   const take = async () => {
     samples++;
+    const began = options.now();
     try {
       const current = await options.sample();
       last = current;
@@ -88,6 +91,7 @@ export async function waitForSettle<T>(options: SettleOptions<T>): Promise<Settl
       previous = null;
       streak = 0;
     }
+    sampleCostMs = Math.max(0, options.now() - began);
   };
 
   const result = (settled: boolean): SettleResult<T> => ({
@@ -105,9 +109,13 @@ export async function waitForSettle<T>(options: SettleOptions<T>): Promise<Settl
   await take();
   for (;;) {
     if (streak >= quietSamples) return result(true);
+    // Hard deadline: don't start a sample predicted (from the last one's
+    // cost) to finish past it. AX reads can take hundreds of ms.
     const remaining = timeoutMs - elapsed();
     if (remaining <= 0) return result(false);
-    await options.sleep(Math.min(intervalMs, remaining));
+    const wait = Math.min(intervalMs, remaining);
+    if (wait + sampleCostMs > remaining) return result(false);
+    await options.sleep(wait);
     await take();
   }
 }

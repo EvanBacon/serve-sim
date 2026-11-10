@@ -74,8 +74,16 @@ const REF_ERROR_STATUS: Record<string, number> = {
   stale_ref: 409,
 };
 
+/**
+ * Canonical tree signature. Built field by field: the native bridge emits
+ * frame keys in a different order on every read, so serializing the
+ * elements as-is never compares equal for an unchanged screen.
+ */
 function signature(snapshot: AxSnapshot): string {
-  return JSON.stringify(snapshot.elements);
+  return JSON.stringify(snapshot.elements.map((e) => [
+    e.id, e.path, e.label, e.value, e.role, e.type, e.enabled,
+    e.frame.x, e.frame.y, e.frame.width, e.frame.height,
+  ]));
 }
 
 function report(result: SettleResult<unknown>): SettleReport {
