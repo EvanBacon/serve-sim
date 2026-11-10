@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "http";
 import type { AddressInfo, Socket } from "net";
 import { clearEventLogForTests, recordEventLogEvent } from "../event-log";
+import { createExecUpgradeHandler } from "../exec-ws";
 import { simMiddleware } from "../middleware";
 import { servePreview, type PreviewServer } from "../runtime";
 
@@ -46,7 +47,12 @@ interface Reply {
   data?: string;
 }
 
-function connect(port = PORT, first: Record<string, unknown> = {}, host = `127.0.0.1:${port}`): Promise<{
+function connect(
+  port = PORT,
+  first: Record<string, unknown> = {},
+  host = `127.0.0.1:${port}`,
+  extraHeaders: Record<string, string> = {},
+): Promise<{
   next: () => Promise<Reply>;
   send: (body: Record<string, unknown>) => void;
   close: () => void;
@@ -56,7 +62,7 @@ function connect(port = PORT, first: Record<string, unknown> = {}, host = `127.0
     // Browsers always send Origin on WebSocket upgrades, and the control
     // channel requires it (loopback same-origin for shell access).
     const ws = new WebSocket(`ws://127.0.0.1:${port}/exec-ws`, {
-      headers: { Host: host, Origin: `http://${host}` },
+      headers: { Host: host, Origin: `http://${host}`, ...extraHeaders },
     } as never);
     const queue: Reply[] = [];
     const waiters: Array<(r: Reply) => void> = [];
@@ -329,6 +335,78 @@ describe("exec-ws control channel", () => {
         server.closeAllConnections();
         server.close();
       }
+    }
+  });
+  test("sse loopback forwards the viewer's Host so LAN viewers get LAN helper URLs (#92)", async () => {
+    // /api/events builds helper URLs from the request's Host
+    // (rewriteStateForRequestHost): a loopback Host keeps 127.0.0.1, any other
+    // Host swaps it in. The loopback SSE request must carry the viewer's Host,
+    // or a LAN viewer is handed 127.0.0.1 stream/ws URLs it cannot reach.
+    const seenHosts: Array<string | undefined> = [];
+    const handler = createExecUpgradeHandler({
+      path: "/exec-ws",
+      ssePrefixes: ["/host-echo"],
+      serverPort: () => (echo.address() as AddressInfo).port,
+    });
+    const echo = createServer((req, res) => {
+      seenHosts.push(req.headers.host);
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end(`data: ${req.headers.host ?? ""}\n\n`);
+    });
+    echo.on("upgrade", (req, socket, head) => {
+      if (!handler(req, socket, head)) socket.destroy();
+    });
+    await new Promise<void>((r) => echo.listen(0, "127.0.0.1", r));
+    const port = (echo.address() as AddressInfo).port;
+    const hostEcho = async (host: string, sub: number) => {
+      const channel = await connect(port, {}, host);
+      await channel.next(); // ready
+      channel.send({ sub, path: "/host-echo" });
+      let data = "";
+      for (let reply = await channel.next(); !reply.end; reply = await channel.next()) {
+        data += reply.data ?? "";
+      }
+      channel.close();
+      return /^data: (.*)$/m.exec(data)?.[1];
+    };
+    try {
+      expect(await hostEcho(`192.168.1.50:${port}`, 1)).toBe(`192.168.1.50:${port}`);
+      expect(await hostEcho(`127.0.0.1:${port}`, 2)).toBe(`127.0.0.1:${port}`);
+      expect(await hostEcho(`localhost:${port}`, 3)).toBe(`localhost:${port}`);
+      expect(seenHosts).toEqual([`192.168.1.50:${port}`, `127.0.0.1:${port}`, `localhost:${port}`]);
+    } finally {
+      echo.closeAllConnections();
+      echo.close();
+    }
+  });
+
+  test("an authenticated LAN viewer's /api/events subscription still streams with its Host forwarded (#92)", async () => {
+    // A LAN Host makes the loopback SSE request "remote" to the auth gate, so
+    // it must present the same credentials the upgrade did.
+    const authToken = "exec-ws-lan-token";
+    const middleware = simMiddleware({ basePath: "/", authToken, device: "DEVICE-A" });
+    const lan = createServer((req, res) => void middleware(req, res));
+    lan.on("upgrade", (req, socket, head) => middleware.handleUpgrade(req, socket as Socket, head));
+    await new Promise<void>((r) => lan.listen(0, "127.0.0.1", r));
+    const port = (lan.address() as AddressInfo).port;
+    middleware.setServerPort(port);
+    try {
+      const channel = await connect(port, {}, `192.168.1.50:${port}`, { Authorization: `Bearer ${authToken}` });
+      expect((await channel.next()).ready).toBe(true);
+      channel.send({ sub: 12, path: "/api/events" });
+      let data = "";
+      let reply = await channel.next();
+      for (let attempts = 0; !/^data: /m.test(data) && !reply.end && attempts < 5; attempts++) {
+        data += reply.data ?? "";
+        if (/^data: /m.test(data)) break;
+        reply = await channel.next();
+      }
+      expect(reply.end).not.toBe(true);
+      expect(data).toMatch(/^data: /m);
+      channel.close();
+    } finally {
+      lan.closeAllConnections();
+      lan.close();
     }
   });
 });
