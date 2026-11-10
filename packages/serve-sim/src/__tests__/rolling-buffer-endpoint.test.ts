@@ -199,6 +199,48 @@ describe("rolling buffer endpoints", () => {
     expect(await other.json()).toMatchObject({ error: "buffer_running", options: { fps: 10 } });
   });
 
+  test("a start racing the session's own start never returns other options", async () => {
+    // Gate capture.start so the request's check-then-await window is open.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fake = fakeCapture({ start: () => gate });
+    // The session's default (`serve-sim --buffer`) is 20 s.
+    const session = new DeviceSession("DEV", { capture: fake.capture, hid: hid(), rollingBuffer: { seconds: 20, fps: 4, maxDimension: 640, quality: 0.6, maxBytes: 24 << 20 } });
+    const base = await serve(session);
+    void session.start().catch(() => {});
+    const pending = fetch(`${base}/buffer/start?seconds=10`, { method: "POST" });
+    const same = fetch(`${base}/buffer/start?seconds=20`, { method: "POST" });
+    await wait(50);
+    release();
+    const res = await pending;
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "buffer_running", options: { seconds: 20 } });
+    const sameRes = await same;
+    expect(sameRes.status).toBe(200);
+    expect(await sameRes.json()).toMatchObject({ enabled: true, alreadyRunning: true, options: { seconds: 20 } });
+  });
+
+  test("two concurrent starts with different options: one wins, the other is a 409", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fake = fakeCapture({ start: () => gate });
+    const base = await serve(new DeviceSession("DEV", { capture: fake.capture, hid: hid(), rollingBuffer: null }));
+    const a = fetch(`${base}/buffer/start?seconds=10`, { method: "POST" });
+    const b = fetch(`${base}/buffer/start?seconds=30`, { method: "POST" });
+    await wait(50);
+    release();
+    const results = await Promise.all([a, b].map(async (p, i) => {
+      const res = await p;
+      return { asked: i === 0 ? 10 : 30, status: res.status, body: await res.json() as { options: { seconds: number } } };
+    }));
+    const ok = results.filter((r) => r.status === 200);
+    const conflict = results.filter((r) => r.status === 409);
+    expect(ok.length).toBe(1);
+    expect(conflict.length).toBe(1);
+    expect(ok[0]!.body.options.seconds).toBe(ok[0]!.asked);
+    expect(conflict[0]!.body).toMatchObject({ error: "buffer_running", options: { seconds: ok[0]!.asked } });
+  });
+
   test("method checks", async () => {
     const base = await serve(new DeviceSession("DEV", { capture: fakeCapture().capture, hid: hid(), rollingBuffer: null }));
     expect((await fetch(`${base}/buffer/start`)).status).toBe(405);

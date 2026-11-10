@@ -866,21 +866,28 @@ export class DeviceSession {
       this.sendJson(res, 400, { error: "invalid_buffer_options", message: options.error });
       return;
     }
-    const state = this.bufferState();
-    if (state.enabled) {
-      const same = (Object.keys(options) as Array<keyof RollingBufferOptions>).every((k) => options[k] === state.options[k]);
-      if (same) this.sendJson(res, 200, { ...state, alreadyRunning: true });
-      else this.sendJson(res, 409, { error: "buffer_running", message: "The buffer is already running with other options; stop it first", ...state });
-      return;
-    }
+    if (this.respondIfBufferRunning(options, res)) return;
     await this.start();
     if (this.isStopped()) {
       this.sendJson(res, 409, { error: "session_closed", message: "The device session closed" });
       return;
     }
-    // start() may have auto-started it from the environment meanwhile.
-    if (!this.bufferState().enabled) this.startBuffer(options);
+    // While start() was pending, the session's env default or another
+    // request may have started it: compare again so a caller never gets
+    // other options than it asked for.
+    if (this.respondIfBufferRunning(options, res)) return;
+    this.startBuffer(options);
     this.sendJson(res, 200, this.bufferState());
+  }
+
+  /** If the buffer is on, answer 200 `alreadyRunning` for the same options or 409 for others; false when off. */
+  private respondIfBufferRunning(options: RollingBufferOptions, res: ServerResponse): boolean {
+    const state = this.bufferState();
+    if (!state.enabled) return false;
+    const same = (Object.keys(options) as Array<keyof RollingBufferOptions>).every((k) => options[k] === state.options[k]);
+    if (same) this.sendJson(res, 200, { ...state, alreadyRunning: true });
+    else this.sendJson(res, 409, { error: "buffer_running", message: "The buffer is already running with other options; stop it first", ...state });
+    return true;
   }
 
   private sendBufferView(params: URLSearchParams, res: ServerResponse): void {
