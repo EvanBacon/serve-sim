@@ -36,7 +36,7 @@ beforeAll(async () => {
       const path = (req.url ?? "").split("?")[0];
       if (path === "/api") return json(200, { device: DEVICE });
       if (path === `/helper/${DEVICE}/ax/snapshot`) return json(200, SNAPSHOT);
-      if (path === `/helper/${DEVICE}/ax/settle`) return json(200, { settle: { settled: true, waitedMs: 210, reason: "quiet" }, diff: { added: [], removed: [], changed: [] } });
+      if (path === `/helper/${DEVICE}/ax/settle`) return json(200, { settle: { settled: true, waitedMs: 210, reason: "frames-quiet" }, diff: { added: [], removed: [], changed: [] } });
       if (path === `/helper/${DEVICE}/ax/act`) {
         const ref = (JSON.parse(body) as { ref: string }).ref;
         if (ref === "@e9") return json(409, { error: "stale_ref", message: "@e9 is stale: the element it named (cell \"Old\") is no longer on screen. Run `serve-sim ax --refs` to take a fresh snapshot, then retry with a current ref." });

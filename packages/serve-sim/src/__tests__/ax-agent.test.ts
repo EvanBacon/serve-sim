@@ -91,12 +91,69 @@ describe("AxAgent.act", () => {
     const agent = new AxAgent(device.deps);
     await agent.snapshot();
     const result = await agent.act({ ref: "@e2", settle: true, timeoutMs: 2000 });
-    expect(result.settle).toMatchObject({ settled: true, reason: "quiet" });
+    expect(result.settle).toMatchObject({ settled: true, reason: "ax-quiet" });
     expect(result.diff!.removed.map((n) => n.label)).toEqual(["Settings", "General", "Privacy"]);
     expect(result.diff!.added.map((n) => `${n.ref} ${n.label}`)).toEqual(["@e4 Back", "@e5 About", "@e6 Software Update"]);
     // The settled screen is now the session snapshot: new refs resolve, old ones are stale.
     await agent.act({ ref: "@e5" });
     await expectAgentError(agent.act({ ref: "@e2" }), 409, "stale_ref");
+  });
+
+  test("skips the pre-tap AX read when the frame counter proves the screen is the snapshot's", async () => {
+    const device = fakeDevice([HOME], { frames: () => 42 });
+    const agent = new AxAgent(device.deps);
+    await agent.snapshot();
+    expect(device.reads()).toBe(1);
+    await agent.act({ ref: "@e2" });
+    expect(device.reads()).toBe(1);
+    expect(device.taps).toHaveLength(1);
+    // The tap may have changed the screen: the next act re-reads.
+    await agent.act({ ref: "@e2" });
+    expect(device.reads()).toBe(2);
+  });
+
+  test("re-reads before tapping when frames changed since the snapshot", async () => {
+    const moved: AxSnapshot = { ...HOME, elements: [el("Settings", 50, { type: "Heading", role: "heading" }), el("Banner", 100), el("General", 400), el("Privacy", 500)] };
+    let frames = 1;
+    const device = fakeDevice([HOME, moved], { frames: () => frames });
+    const agent = new AxAgent(device.deps);
+    await agent.snapshot();
+    frames = 2;
+    await agent.act({ ref: "@e2" });
+    expect(device.reads()).toBe(2);
+    expect(device.taps[0]!.y).toBeCloseTo(425 / 800);
+  });
+
+  test("a snapshot whose read overlapped a frame is not trusted for the next act", async () => {
+    let polls = 0;
+    // Counter moves between the before/after polls around the snapshot read.
+    const device = fakeDevice([HOME], { frames: () => (polls++ === 0 ? 1 : 2) });
+    const agent = new AxAgent(device.deps);
+    await agent.snapshot();
+    await agent.act({ ref: "@e2" });
+    expect(device.reads()).toBe(2);
+  });
+
+  test("with settle and a frame counter, a navigation settles frames-quiet on one read", async () => {
+    let tapped = false;
+    let t0 = 0;
+    const device = fakeDevice([HOME], {
+      onTap: () => { tapped = true; t0 = device.deps.now!(); },
+      // 800 ms of transition frames after the tap, then still.
+      frames: () => (tapped ? 100 + Math.floor(Math.min(device.deps.now!() - t0, 800) / 16) : 100),
+    });
+    const collect = device.deps.collect;
+    device.deps.collect = async () => (tapped ? structuredClone(GENERAL) : collect());
+    const agent = new AxAgent(device.deps);
+    await agent.snapshot();
+    const result = await agent.act({ ref: "@e2", settle: true });
+    expect(result.settle).toMatchObject({ settled: true, reason: "frames-quiet", samples: 1, signals: { frames: true } });
+    expect(result.settle!.waitedMs).toBeLessThan(1500);
+    expect(result.diff!.added.map((n) => n.label)).toEqual(["Back", "About", "Software Update"]);
+    // Settled frames-quiet: the next act taps from that read without another.
+    const reads = device.reads();
+    await agent.act({ ref: "@e5" });
+    expect(device.reads()).toBe(reads);
   });
 
   test("an element that persists keeps its ref across act and is re-resolved at its new position", async () => {
@@ -180,7 +237,7 @@ describe("AxAgent.settle", () => {
     const { deps } = fakeDevice([HOME]);
     deps.collect = async () => reordered(HOME, n++ % 2 === 1);
     const result = await new AxAgent(deps).settle({ timeoutMs: 3000 });
-    expect(result.settle).toMatchObject({ settled: true, reason: "quiet" });
+    expect(result.settle).toMatchObject({ settled: true, reason: "ax-quiet" });
   });
 
   test("uses the frame counter when available and reports a timeout when frames keep changing", async () => {

@@ -23,6 +23,7 @@ import {
   type RefState,
 } from "./ax-refs";
 import { clampSettleTimeout, waitForSettle, type SettleResult } from "./ax-settle";
+import { debugAx } from "./debug";
 
 export interface AxAgentDeps {
   /** One normalized snapshot (failures reported in `errors`, as collectAxSnapshot does). */
@@ -33,9 +34,6 @@ export interface AxAgentDeps {
   tap(point: { x: number; y: number }, holdMs: number): Promise<void>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  /** Defaults: 200 ms between settle samples, 100 ms before the first after an act. */
-  settleIntervalMs?: number;
-  actSettleDelayMs?: number;
 }
 
 export class AxAgentError extends Error {
@@ -53,7 +51,7 @@ export class AxAgentError extends Error {
   }
 }
 
-export type SettleReport = Omit<SettleResult<unknown>, "last">;
+export type SettleReport = Omit<SettleResult<unknown>, "last" | "lastFrames">;
 
 export interface ActResult {
   ok: true;
@@ -87,7 +85,7 @@ function signature(snapshot: AxSnapshot): string {
 }
 
 function report(result: SettleResult<unknown>): SettleReport {
-  const { last: _last, ...rest } = result;
+  const { last: _last, lastFrames: _lastFrames, ...rest } = result;
   return rest;
 }
 
@@ -107,6 +105,12 @@ function describeEntry(entry: RefEntry): string {
 
 export class AxAgent {
   private state: RefState | null = null;
+  /**
+   * Content-frame count the session snapshot is known to match (null when
+   * unknown). While the live counter still equals it, nothing on screen has
+   * changed, so `act` can tap from the snapshot without another ~200 ms read.
+   */
+  private stateFrames: number | null = null;
   private all = false;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly now: () => number;
@@ -131,37 +135,39 @@ export class AxAgent {
     return snapshot;
   }
 
-  private settleUntilQuiet(timeoutMs: number, initialDelayMs: number) {
+  private frames(): Promise<number | null> {
+    return this.deps.contentFrames().catch(() => null);
+  }
+
+  /** A fresh read plus the frame count it matches (null if frames moved during it). */
+  private async freshWithFrames(): Promise<{ snapshot: AxSnapshot; frames: number | null }> {
+    const before = await this.frames();
+    const snapshot = await this.fresh();
+    const after = before == null ? null : await this.frames();
+    return { snapshot, frames: before != null && before === after ? before : null };
+  }
+
+  private settleUntilQuiet(timeoutMs: number) {
     return waitForSettle<AxSnapshot>({
       now: this.now,
       sleep: this.sleep,
       timeoutMs,
-      intervalMs: this.deps.settleIntervalMs,
-      initialDelayMs,
-      frameCounter: () => this.deps.contentFrames(),
-      sample: async () => {
-        const [snapshot, frames] = await Promise.all([this.fresh(), this.deps.contentFrames().catch(() => null)]);
-        return { signature: signature(snapshot), frames, value: snapshot };
+      frames: () => this.deps.contentFrames(),
+      ...(debugAx.enabled ? { trace: (event: string, at: number, detail?: Record<string, unknown>) => debugAx("settle +%dms %s %o", at, event, detail ?? {}) } : {}),
+      read: async () => {
+        const snapshot = await this.fresh();
+        return { signature: signature(snapshot), value: snapshot };
       },
     });
-  }
-
-  /**
-   * The screen to diff against after a settle wait: its last AX sample, or
-   * (when frames never went quiet, so no AX sample was spent) one fresh read.
-   */
-  private async latest(settled: SettleResult<AxSnapshot>): Promise<AxSnapshot | null> {
-    if (settled.last) return settled.last;
-    if (settled.samples > 0) return null;
-    return this.fresh().catch(() => null);
   }
 
   /** `GET /ax/snapshot`: refs for the current screen; becomes the session snapshot. */
   snapshot(opts: { all?: boolean } = {}): Promise<AgentSnapshot> {
     return this.serialize(async () => {
-      const snapshot = await this.fresh();
+      const { snapshot, frames } = await this.freshWithFrames();
       this.all = opts.all === true;
       this.state = assignRefs(this.state, snapshot, { all: this.all });
+      this.stateFrames = frames;
       return agentSnapshot(this.state, { all: this.all });
     });
   }
@@ -187,8 +193,10 @@ export class AxAgent {
       if (!lookup.ok) throw new AxAgentError(REF_ERROR_STATUS[lookup.code] ?? 409, lookup.code, lookup.message);
 
       // Re-resolve against the live tree: tap where the element is now, or
-      // refuse if it is gone. Never tap a guess.
-      const before = assignRefs(this.state, await this.fresh(), { all: this.all });
+      // refuse if it is gone. Never tap a guess. An unchanged frame counter
+      // proves the screen is the snapshot's, so that read can be skipped.
+      const live = this.stateFrames != null && (await this.frames()) === this.stateFrames;
+      const before = live && this.state ? this.state : assignRefs(this.state, await this.fresh(), { all: this.all });
       const entry = before.entries.get(lookup.entry.ref);
       if (!entry) {
         throw new AxAgentError(
@@ -212,15 +220,18 @@ export class AxAgent {
         ...(entry.node.label ? { label: entry.node.label } : {}),
         center: entry.node.center,
       };
+      // The tap changes the screen (or may), so the snapshot is no longer proven current.
+      this.stateFrames = null;
       if (request.settle !== true) {
         this.state = before;
         return { ok: true, action, ref: entry.ref, target, settle: null, diff: null };
       }
 
-      const settled = await this.settleUntilQuiet(timeoutMs, this.deps.actSettleDelayMs ?? 100);
-      const latest = await this.latest(settled);
+      const settled = await this.settleUntilQuiet(timeoutMs);
+      const latest = settled.last ?? null;
       const after = latest ? assignRefs(before, latest, { all: this.all }) : before;
       this.state = after;
+      this.stateFrames = latest ? (settled.lastFrames ?? null) : null;
       return {
         ok: true,
         action,
@@ -237,14 +248,15 @@ export class AxAgent {
     return this.serialize(async () => {
       const timeoutMs = clampSettleTimeout(opts.timeoutMs);
       if (timeoutMs == null) throw new AxAgentError(400, "invalid_request", '"timeoutMs" must be a number of milliseconds.');
-      const settled = await this.settleUntilQuiet(timeoutMs, 0);
-      const latest = await this.latest(settled);
+      const settled = await this.settleUntilQuiet(timeoutMs);
+      const latest = settled.last ?? null;
       if (!latest) {
         throw new AxAgentError(503, "ax_unavailable", settled.lastError ?? "Accessibility unavailable on this simulator.");
       }
       const before = this.state;
       const after = assignRefs(before, latest, { all: this.all });
       this.state = after;
+      this.stateFrames = settled.lastFrames ?? null;
       return { settle: report(settled), diff: diffSnapshots(before, after, { all: this.all }) };
     });
   }
