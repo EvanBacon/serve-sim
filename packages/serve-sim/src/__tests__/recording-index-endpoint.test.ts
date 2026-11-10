@@ -271,12 +271,17 @@ describe("GET /recording/index", () => {
       capture: fakeCapture({ mp4Bytes: 64 * 1024 * 1024 }), hid: hid(), recordingIndexTtlMs: 300,
     }));
     const { token } = await (await fetch(`${base}/recording/start?index=1`, { method: "POST" })).json() as { token: string };
+    // Pause in the response callback, before the body can drain into the
+    // socket buffer. Pausing after await is too late on a fast runner: the
+    // 64 MB MP4 can finish (and arm the TTL) before stop.pause() runs.
     const stop = await new Promise<IncomingMessage>((resolve, reject) => {
-      const req = request(`${base}/recording/stop?token=${token}`, { method: "POST" }, resolve);
+      const req = request(`${base}/recording/stop?token=${token}`, { method: "POST" }, (res) => {
+        res.pause();
+        resolve(res);
+      });
       req.once("error", reject);
       req.end();
     });
-    stop.pause();
     expect(stop.statusCode).toBe(200);
     await Bun.sleep(500); // past the TTL, download still in flight
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
