@@ -314,11 +314,14 @@ private func axQuery(
     },
     "SimHID": SimHID.deferredConstructor,
     "SimCapture": SimCapture.deferredConstructor,
-    // axDescribe(udid): Promise<string> — axe-shaped accessibility JSON.
-    "axDescribe": try NodeFunction { (udid: String) async throws -> String in
-        try await axQuery(udid) { udid in
+    // axDescribe(udid, discovery?): Promise<string> — axe-shaped accessibility
+    // JSON. discovery "agent" trades exhaustive grid probing for speed (the
+    // /ax/snapshot path); omitted keeps the /ax output.
+    "axDescribe": try NodeFunction { (udid: String, discovery: String?) async throws -> String in
+        let mode = AccessibilityDiscoveryMode(argument: discovery)
+        return try await axQuery(udid) { udid in
             SimFrameworks.load()  // /ax may be hit before capture/HID load them
-            let data = try AccessibilityBridge.shared.describeUI(udid: udid)
+            let data = try AccessibilityBridge.shared.describeUI(udid: udid, mode: mode)
             return String(decoding: data, as: UTF8.self)
         }
     },

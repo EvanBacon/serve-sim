@@ -667,7 +667,7 @@ export class DeviceSession {
   /** `/ax/snapshot`, `/ax/act`, `/ax/settle` — see ax-agent-http.ts. */
   handleAxAgent(req: IncomingMessage, res: ServerResponse, endpoint: AxAgentEndpoint): Promise<void> {
     this.axAgent ??= new AxAgent({
-      collect: () => collectAxSnapshot(this.udid, this.dependencies?.axDescribe),
+      collect: () => collectAxSnapshot(this.udid, this.dependencies?.axDescribe ?? ((udid) => axDescribeAsync(udid, "agent"))),
       contentFrames: () => this.contentFrameCount(),
       tap: (point, holdMs) => this.injectTap(point, holdMs),
     });
