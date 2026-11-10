@@ -233,6 +233,12 @@ private func u32(_ v: Int) -> UInt32 {
         await engine.diagnostics()
     }
 
+    /// Captured frames whose content changed (idle re-emits excluded). A
+    /// cheap counter read for the AX settle poll; `diagnostics()` is for doctor.
+    @NodeMethod func contentChangeCount() -> Int {
+        engine.contentChangeCount
+    }
+
     /// Start an MP4 screen recording at `path`. `codec` is "h264" or "hevc";
     /// `rotation` is the clockwise display rotation stored as the track
     /// transform; `bitrate` <= 0 picks the resolution-scaled default.

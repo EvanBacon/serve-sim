@@ -53,6 +53,8 @@ interface SimCaptureHandle {
   subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void | Promise<void>>;
   /** Absent in addons built before diagnostics existed. */
   diagnostics?(): Promise<string>;
+  /** Content-changed frame count (a lock read). Absent in older addons. */
+  contentChangeCount?(): number;
   snapshotJpeg(): Promise<Uint8Array | null>;
   /** Absent in addons built before screen recording existed. */
   startRecording?(path: string, codec: string, fps: number, rotation: number, bitrate: number): Promise<void>;
@@ -399,6 +401,15 @@ export class NativeCapture {
   diagnostics(): Promise<string> {
     if (!this.handle.diagnostics) return Promise.reject(new Error("native capture diagnostics unavailable in this build"));
     return this.handle.diagnostics();
+  }
+
+  /**
+   * Captured frames whose IOSurface content changed (idle re-emits excluded),
+   * or null with an addon that predates the counter. Cheap enough to poll:
+   * it reads one locked integer, unlike `diagnostics()`.
+   */
+  contentChangeCount(): number | null {
+    return this.handle.contentChangeCount ? this.handle.contentChangeCount() : null;
   }
 
   /**

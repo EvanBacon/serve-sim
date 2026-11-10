@@ -203,7 +203,7 @@ async function writeAndDrain(
 type CaptureTransport = Pick<
   NativeCapture,
   "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "subscribeSize" | "snapshotJpeg" | "setPreferredScreenSize"
-> & Partial<Pick<NativeCapture, "diagnostics" | "startRecording" | "stopRecording" | "supportsRecording">>;
+> & Partial<Pick<NativeCapture, "diagnostics" | "contentChangeCount" | "startRecording" | "stopRecording" | "supportsRecording">>;
 
 export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
 
@@ -677,12 +677,13 @@ export class DeviceSession {
   /**
    * Native count of captured frames whose IOSurface content changed (idle
    * re-emits excluded); null when the addon predates it or capture is down.
+   * Polled every 20-50 ms while settling, so it reads only the counter,
+   * never the doctor diagnostics payload.
    */
   private async contentFrameCount(): Promise<number | null> {
-    if (!this.capture.diagnostics || this.phase !== "running") return null;
+    if (!this.capture.contentChangeCount || this.phase !== "running") return null;
     try {
-      const native = JSON.parse(await this.capture.diagnostics()) as { capture?: { content_change_count?: unknown } };
-      const count = native.capture?.content_change_count;
+      const count = this.capture.contentChangeCount();
       return typeof count === "number" ? count : null;
     } catch {
       return null;

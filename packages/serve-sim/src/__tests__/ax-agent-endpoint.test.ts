@@ -57,7 +57,9 @@ function fakeDeps(screens: { current: RawAxeNode[] }, touches: Touch[], contentF
       subscribeSize: async (cb) => { void cb({ width: 1206, height: 2622 }); return () => {}; },
       snapshotJpeg: async () => null,
       setPreferredScreenSize: async () => {},
-      diagnostics: async () => JSON.stringify({ capture: { frame_count: 99, content_change_count: contentFrames } }),
+      contentChangeCount: () => contentFrames,
+      // Settle must poll the counter, never the doctor payload.
+      diagnostics: async () => { throw new Error("settle polled diagnostics()"); },
     },
     hid: {
       touch: async (type, x, y, w, h) => {

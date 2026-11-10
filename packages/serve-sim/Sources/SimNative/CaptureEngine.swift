@@ -123,6 +123,9 @@ actor CaptureEngine {
         await frameCapture.setPreferredScreenSize(width: width, height: height)
     }
 
+    /// Content-changed frame count only; a lock read, no actor hop or JSON.
+    nonisolated var contentChangeCount: Int { frameCapture.contentChanges.value }
+
     /// JSON snapshot for `serve-sim doctor`: display selection + encoder state.
     func diagnostics() async -> String {
         let capture = await frameCapture.diagnosticsJSON()
