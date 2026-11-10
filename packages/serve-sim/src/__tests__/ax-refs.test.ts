@@ -157,9 +157,16 @@ describe("identity keys (observed through ref carry-over)", () => {
   });
 
   test("sibling of another type inserted before an unlabelled button: the button keeps its ref", () => {
+    const title = el({ path: "0.9", type: "Heading", label: "Title", frame: { x: 0, y: 40, width: 200, height: 30 } });
+    const before = assignRefs(null, snap([button("0.0", 200), title]));
+    const after = assignRefs(before, snap([el({ path: "0.0", type: "StaticText", label: "Hint", frame: { x: 0, y: 100, width: 100, height: 20 } }), button("0.1", 200), title]));
+    expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.label ?? n.type}`)).toEqual(["@e3=Hint", "@e1=Button", "@e2=Title"]);
+  });
+
+  test("an inserted label is not proof for an unlabelled element when nothing labelled survived around it", () => {
     const before = assignRefs(null, snap([button("0.0", 200)]));
     const after = assignRefs(before, snap([el({ path: "0.0", type: "StaticText", label: "Hint", frame: { x: 0, y: 100, width: 100, height: 20 } }), button("0.1", 200)]));
-    expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.label ?? n.type}`)).toEqual(["@e2=Hint", "@e1=Button"]);
+    expect(resolveRef(after, "@e1")).toMatchObject({ ok: false, code: "stale_ref" });
   });
 
   test("duplicates that all moved by one offset with nothing to measure the scroll by: refs retire", () => {
@@ -223,6 +230,7 @@ describe("assignRefs + agentSnapshot", () => {
     const next = assignRefs(first, snap([
       el({ path: "0.0", label: "New", type: "Button" }),
       el({ path: "0.1", label: "General", type: "Cell", role: "cell", frame: { x: 0, y: 300, width: 402, height: 52 } }),
+      el({ path: "0.3", label: "Privacy", type: "Cell", role: "cell", value: "On", enabled: false, frame: { x: 0, y: 1200, width: 402, height: 52 } }),
     ]));
     const nodes = agentSnapshot(next).nodes;
     expect(nodes.find((n) => n.label === "General")?.ref).toBe("@e2");
@@ -360,7 +368,7 @@ describe("ref identity is judged against the whole previous tree", () => {
 
   test("a group that really had one member keeps the ref wherever it moves", () => {
     const before = assignRefs(null, snap([item("0.0", 100), el({ path: "0.1", label: "Other", type: "Cell", frame: { x: 0, y: 2000, width: 402, height: 44 } })]));
-    const after = assignRefs(before, snap([item("0.0", 300)]));
+    const after = assignRefs(before, snap([item("0.0", 300), el({ path: "0.1", label: "Other", type: "Cell", frame: { x: 0, y: 2000, width: 402, height: 44 } })]));
     expect(agentSnapshot(after).nodes.map((n) => n.ref)).toEqual(["@e1"]);
   });
 });
@@ -403,7 +411,7 @@ describe("scrolled lists of duplicates", () => {
 
   test("a scrolled window of same-label cells does not carry refs to other rows", () => {
     const before = assignRefs(null, table([0, 1, 2, 3, 4], 100));
-    const after = assignRefs(before, table([2, 3, 4, 5, 6], 100 - 100));
+    const after = assignRefs(before, table([2, 3, 4, 5, 6], 0));
     expectNoRepointing(before, after);
     const deleteRefs = [...deleteRows(after).keys()];
     for (const ref of deleteRows(before).keys()) expect(deleteRefs).not.toContain(ref);
@@ -437,5 +445,122 @@ describe("scrolled lists of duplicates", () => {
     const before = assignRefs(null, rows(300));
     expect(agentSnapshot(assignRefs(before, rows(120))).nodes.map((n) => `${n.ref}=${n.label}${n.value ?? ""}`))
       .toEqual(["@e1=Fruits", "@e2=Rowa", "@e3=Rowb"]);
+  });
+  /** Refs of every node of `type` (all of them, offscreen included). */
+  const refsOf = (state: ReturnType<typeof assignRefs>, type: string) =>
+    agentSnapshot(state, { all: true }).nodes.filter((n) => n.type === type).map((n) => n.ref);
+  const expectNoCarry = (before: ReturnType<typeof assignRefs>, after: ReturnType<typeof assignRefs>, type: string) => {
+    const old = new Set(refsOf(before, type));
+    expect(refsOf(after, type).filter((ref) => old.has(ref))).toEqual([]);
+  };
+
+  test("re-snapshotting an unchanged list keeps every ref", () => {
+    const before = assignRefs(null, table([0, 1, 2], 100));
+    const after = assignRefs(before, table([0, 1, 2], 100));
+    expect(agentSnapshot(after, { all: true })).toEqual(agentSnapshot(before, { all: true }));
+  });
+
+  test("a list wholly replaced at the same frames retires the duplicate buttons' refs", () => {
+    // Alice/Bob/Carol -> Dave/Erin/Frank in the same cells, nothing left to measure a scroll by.
+    const before = assignRefs(null, table([0, 1, 2], 100));
+    const after = assignRefs(before, table([3, 4, 5], 100 - 3 * ROW));
+    expectNoRepointing(before, after);
+    expectNoCarry(before, after, "Button");
+  });
+
+  test("unlabelled cells named by a child label: an entirely new list at the same frames retires the cell refs", () => {
+    const before = assignRefs(null, table([0, 1, 2], 100));
+    const after = assignRefs(before, table([3, 4, 5], 100 - 3 * ROW));
+    expectNoCarry(before, after, "Cell");
+  });
+
+  test("a sticky header inside the list is not enough to keep refs across a full-page scroll", () => {
+    const header = el({ path: "0.1.9", type: "StaticText", label: "Friends", frame: { x: 0, y: 90, width: 402, height: 10 } });
+    const withHeader = (state: AxSnapshot) => snap([...state.elements, header]);
+    const before = assignRefs(null, withHeader(table([0, 1, 2], 100)));
+    // The header stays put (offset 0) while every row underneath changed.
+    const after = assignRefs(before, withHeader(table([3, 4, 5], 100 - 3 * ROW)));
+    expectNoRepointing(before, after);
+    expectNoCarry(before, after, "Button");
+    expectNoCarry(before, after, "Cell");
+  });
+
+  test("duplicate accessibilityIdentifiers are told apart by their row and follow it", () => {
+    const rows = (names: string[], top: number) => snap(names.flatMap((name, slot) => {
+      const y = top + slot * ROW;
+      return [
+        el({ path: `0.1.${slot}`, type: "Cell", role: "cell", label: name, frame: { x: 0, y, width: 402, height: ROW } }),
+        el({ path: `0.1.${slot}.0`, id: "delete", label: "Delete", frame: { x: 320, y: y + 4, width: 70, height: 36 } }),
+      ];
+    }));
+    const before = assignRefs(null, rows(["Alice", "Bob", "Carol"], 100));
+    const after = assignRefs(before, rows(["Bob", "Carol", "Dave"], 100));
+    const deleteIn = (state: ReturnType<typeof assignRefs>, name: string) => {
+      const nodes = agentSnapshot(state).nodes;
+      const cell = nodes.find((n) => n.label === name)!;
+      return nodes.find((n) => n.id === "delete" && n.frame.y === cell.frame.y + 4)!.ref;
+    };
+    expect(deleteIn(after, "Bob")).toBe(deleteIn(before, "Bob"));
+    expect(resolveRef(after, deleteIn(before, "Alice"))).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  test("look-alike rows with nothing at all to tell them apart retire instead of keeping refs", () => {
+    // A scroll by exactly one row looks identical to no change, so neither keeps refs.
+    const grid = () => snap([
+      el({ path: "0.0", type: "Heading", label: "Photos", frame: { x: 0, y: 40, width: 402, height: 40 } }),
+      ...[0, 1, 2].map((i) => el({ path: `0.1.${i}`, type: "Button", frame: { x: 0, y: 100 + i * 100, width: 100, height: 100 } })),
+    ]);
+    const before = assignRefs(null, grid());
+    const after = assignRefs(before, grid());
+    expectNoCarry(before, after, "Button");
+    expect(refsOf(after, "Heading")).toEqual(refsOf(before, "Heading"));
+  });
+});
+
+describe("lone matches need their context to survive", () => {
+  const detail = (name: string, opts: { deleteId?: string } = {}) => snap([
+    el({ path: "0.0", label: "Back", frame: { x: 0, y: 50, width: 60, height: 44 } }),
+    el({ path: "0.1.0", type: "Heading", role: "heading", label: name, frame: { x: 16, y: 100, width: 300, height: 40 } }),
+    el({ path: "0.1.1", label: "Delete", ...(opts.deleteId ? { id: opts.deleteId } : {}), frame: { x: 16, y: 600, width: 370, height: 44 } }),
+  ]);
+  const refOf = (state: ReturnType<typeof assignRefs>, label: string) =>
+    agentSnapshot(state).nodes.find((n) => n.label === label)?.ref;
+
+  test("a lone 'Delete' next to Alice is not the 'Delete' next to Bob after a push", () => {
+    const before = assignRefs(null, detail("Alice"));
+    const after = assignRefs(before, detail("Bob"));
+    expect(refOf(after, "Delete")).not.toBe(refOf(before, "Delete"));
+    expect(resolveRef(after, refOf(before, "Delete")!)).toMatchObject({ ok: false, code: "stale_ref" });
+    // Chrome outside the replaced container still carries over.
+    expect(refOf(after, "Back")).toBe(refOf(before, "Back"));
+  });
+
+  test("the same lone 'Delete' keeps its ref while its context stays", () => {
+    const before = assignRefs(null, detail("Alice"));
+    expect(refOf(assignRefs(before, detail("Alice")), "Delete")).toBe(refOf(before, "Delete"));
+  });
+
+  test("a unique AXUniqueId is authoritative even when its context changed", () => {
+    const before = assignRefs(null, detail("Alice", { deleteId: "delete-contact" }));
+    const after = assignRefs(before, detail("Bob", { deleteId: "delete-contact" }));
+    expect(refOf(after, "Delete")).toBe(refOf(before, "Delete"));
+  });
+
+  const toolbarScreen = (title: string) => snap([
+    el({ path: "0.0", type: "Heading", role: "heading", label: title, frame: { x: 16, y: 50, width: 300, height: 40 } }),
+    el({ path: "0.1.0", type: "Button", frame: { x: 350, y: 800, width: 44, height: 44 } }),
+  ]);
+
+  test("an icon-only toolbar button replaced by another screen's in the same spot retires its ref", () => {
+    const before = assignRefs(null, toolbarScreen("Inbox"));
+    const button = agentSnapshot(before).nodes.find((n) => n.type === "Button")!.ref;
+    const after = assignRefs(before, toolbarScreen("Settings"));
+    expect(resolveRef(after, button)).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  test("the icon-only toolbar button keeps its ref on the same screen", () => {
+    const before = assignRefs(null, toolbarScreen("Inbox"));
+    const button = agentSnapshot(before).nodes.find((n) => n.type === "Button")!.ref;
+    expect(resolveRef(assignRefs(before, toolbarScreen("Inbox")), button)).toMatchObject({ ok: true });
   });
 });

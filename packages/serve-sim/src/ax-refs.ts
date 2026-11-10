@@ -17,6 +17,10 @@
  *   fails instead of silently pointing at whatever now occupies its slot.
  * - "Unique" is judged against the whole previous tree, offscreen elements
  *   included, not just the elements that got a ref.
+ * - Position and a repeated label are never enough on their own: the
+ *   uniquely labelled content around an element (its row, its container,
+ *   the screen) must have survived too, see {@link contextSurvived}. A
+ *   unique AXUniqueId is authoritative and skips that check.
  */
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
@@ -68,6 +72,12 @@ interface GroupMember {
   rect: AxRect;
 }
 
+/** An element whose labelled or identified key occurs once in its tree: context that can survive or not. */
+interface KeyedElement {
+  key: string;
+  path: string;
+}
+
 export interface RefState {
   screen: { width: number; height: number };
   /** Ref'd elements present in the latest tree, in tree order. */
@@ -79,6 +89,8 @@ export interface RefState {
    * mistaken for a sole survivor.
    */
   groups: Map<string, GroupMember[]>;
+  /** The latest tree's uniquely keyed elements, for judging whether an element's context survived. */
+  keyed: KeyedElement[];
   /** Refs of elements that vanished, newest last (bounded), for stale-ref messages. */
   retired: Array<{ ref: string; role: string; label: string }>;
   nextRef: number;
@@ -141,15 +153,16 @@ function isInterestingElement(element: AxElement): boolean {
  * Identity group per element: `id:<AXUniqueId>`, else `<type>|<label>`, else
  * `<type>@` (all unlabelled elements of a type). Values are deliberately
  * excluded so typing into a field reads as a change, not a replacement.
- * A key shared by several elements in one tree is qualified with the nearest
- * labelled (or identified) ancestor, so "Delete" in Alice's row and "Delete"
- * in Bob's row are separate groups. A group with one member on both sides
+ * A key shared by several elements in one tree (a repeated label or a
+ * per-row accessibilityIdentifier) is qualified with the nearest labelled
+ * (or identified) ancestor, so "Delete" in Alice's row and "Delete" in Bob's
+ * row are separate groups. A group with one member on both sides
  * is the same element; anything else (duplicates, unlabelled elements) is
  * matched by frame, see {@link matchGroup}.
  */
 function identityGroups(elements: AxElement[]): Array<{ key: string; unique: boolean }> {
   const base = elements.map((element) => {
-    if (hasUniqueId(element)) return { key: `id:${element.id}`, unique: true, qualify: false };
+    if (hasUniqueId(element)) return { key: `id:${element.id}`, unique: true, qualify: true };
     if (element.label !== "") return { key: `${element.type}|${element.label}`, unique: true, qualify: true };
     return { key: `${element.type}@`, unique: false, qualify: true };
   });
@@ -210,55 +223,144 @@ function containerPath(members: AxElement[]): string {
   return prefix.join(".");
 }
 
+function inSubtree(path: string, root: string): boolean {
+  return root === "" || path === root || path.startsWith(`${root}.`);
+}
+
+interface MeasuredOffset {
+  offset: Offset;
+  /** False when the container holds no uniquely keyed element on either side. */
+  evidence: boolean;
+}
+
 /**
  * How far the content holding `members` scrolled, measured from the anchors
- * inside the same container: zero when there are none (nothing says it
- * moved), null when they disagree (no frame can be trusted).
+ * inside the same container. Null when they disagree, or when the container
+ * holds uniquely keyed elements (in either tree) and none of them survived:
+ * absent anchors are not proof that nothing moved, a page-sized scroll or a
+ * replaced list shows other rows in the same cells. Zero (without evidence)
+ * only when the container has no such elements on either side.
  */
-function containerOffset(members: AxElement[], anchors: Anchor[]): Offset | null {
+function containerOffset(
+  key: string,
+  members: AxElement[],
+  anchors: Anchor[],
+  prevKeyed: KeyedElement[],
+  currentKeyed: KeyedElement[],
+): MeasuredOffset | null {
   const container = containerPath(members);
   const inside = anchors.filter((anchor) => container === "" || anchor.path.startsWith(`${container}.`));
-  if (inside.length === 0) return { dx: 0, dy: 0 };
+  if (inside.length === 0) {
+    // The group's own key doesn't count: a sole survivor of duplicates is keyed in the new tree.
+    const keyedInside = (keyed: KeyedElement[]) =>
+      keyed.some((k) => k.key !== key && (container === "" || k.path.startsWith(`${container}.`)));
+    return keyedInside(prevKeyed) || keyedInside(currentKeyed) ? null : { offset: { dx: 0, dy: 0 }, evidence: false };
+  }
   const { offset } = inside[0]!;
   const agree = inside.every((anchor) =>
     Math.abs(anchor.offset.dx - offset.dx) <= OFFSET_TOLERANCE && Math.abs(anchor.offset.dy - offset.dy) <= OFFSET_TOLERANCE);
-  return agree ? offset : null;
+  return agree ? { offset, evidence: true } : null;
+}
+
+/** Ancestor `levels` up from `path` ("" once past the root). */
+function ancestorPath(path: string, levels: number): string {
+  const parts = path.split(".");
+  return parts.slice(0, Math.max(0, parts.length - levels)).join(".");
+}
+
+/**
+ * Keys of the uniquely keyed elements around `path`: level 0 is its own
+ * descendants, level n the subtree of its n-th ancestor. The element itself
+ * never counts.
+ */
+function contextKeys(keyed: KeyedElement[], path: string, level: number): Set<string> {
+  const root = level === 0 ? path : ancestorPath(path, level);
+  const keys = new Set<string>();
+  for (const k of keyed) {
+    if (k.path === path) continue;
+    if (level === 0 ? k.path.startsWith(`${path}.`) : inSubtree(k.path, root)) keys.add(k.key);
+  }
+  return keys;
+}
+
+/**
+ * Whether the labelled content around an element is still there, judged at
+ * the nearest level (own subtree, then each ancestor's) that has any:
+ * - `frame` (an element matched by position: a duplicate or unlabelled one):
+ *   that level must hold keyed elements on neither side, or most of the
+ *   previous ones must have survived. A reused cell showing another row has
+ *   other labels in it; a toolbar button on another screen has another title
+ *   above it.
+ * - `label` (a lone labelled match): retired only when the level had keyed
+ *   elements before and none survived, so "Delete" next to Alice doesn't
+ *   become "Delete" next to Bob after a push, but an inserted sibling
+ *   doesn't retire it.
+ */
+function contextSurvived(
+  prevKeyed: KeyedElement[],
+  prevPath: string,
+  currentKeyed: KeyedElement[],
+  currentPath: string,
+  mode: "frame" | "label",
+): boolean {
+  const levels = Math.max(prevPath.split(".").length, currentPath.split(".").length);
+  for (let level = 0; level <= levels; level++) {
+    const before = contextKeys(prevKeyed, prevPath, level);
+    const after = contextKeys(currentKeyed, currentPath, level);
+    if (before.size === 0 && (mode === "label" || after.size === 0)) continue;
+    let survived = 0;
+    for (const key of before) if (after.has(key)) survived++;
+    return mode === "label" ? survived > 0 : survived > 0 && survived * 2 > before.size;
+  }
+  return true;
 }
 
 /**
  * Which previous member (index into `prev`, the group's members in the
  * whole previous tree) each current member continues, or -1 for a new
  * element. Only unambiguous matches carry a ref:
- * - one labelled/identified member on both sides: the same element, wherever it is;
+ * - one labelled/identified member on both sides: the same element, wherever
+ *   it is, unless its context was replaced (`loneOk`, decided by the caller);
  * - one unlabelled member on both sides with a close frame;
  * - same count of duplicates, in order, with equal values and every frame close;
  * - when the count changed: a member whose value is unique on both sides
  *   and whose frame is still close.
  * Frames are compared after the scroll measured by anchors in the same
- * container ({@link containerOffset}). A uniform shift on its own proves
- * nothing: a reused-cell list that scrolled shows other rows in the same
- * cells. Deleting a row makes its siblings reflow into its slot, so position
- * alone can't say which one survived either; a stale ref is better than a
- * tap on the wrong element. Rows with nothing unique in them that scroll by
- * exactly one row height are indistinguishable and keep their refs.
+ * container ({@link containerOffset}), and every frame match also needs its
+ * surrounding labels to have survived ({@link contextSurvived}). A uniform
+ * shift on its own proves nothing: a reused-cell list that scrolled shows
+ * other rows in the same cells. Deleting a row makes its siblings reflow into
+ * its slot, so position alone can't say which one survived either. Duplicates
+ * with nothing at all to tell them apart (equal values, no keyed element in
+ * their container) retire: a scroll by exactly one row would look the same.
+ * A stale ref is better than a tap on the wrong element.
  */
-function matchGroup(prev: GroupMember[], current: AxElement[], unique: boolean, offset: Offset | null): number[] {
+function matchGroup(
+  prev: GroupMember[],
+  current: AxElement[],
+  unique: boolean,
+  measured: MeasuredOffset | null,
+  loneOk: boolean,
+  contextOk: (p: number, c: number) => boolean,
+): number[] {
   const result = current.map(() => -1);
   if (prev.length === 0) return result;
-  if (prev.length === 1 && current.length === 1) {
-    return unique || (offset && framesClose(prev[0]!.rect, current[0]!.frame, offset)) ? [0] : result;
-  }
-  if (!offset) return result;
+  if (unique && prev.length === 1 && current.length === 1) return loneOk ? [0] : result;
+  if (!measured) return result;
+  const { offset } = measured;
+  const close = (p: number, c: number) => framesClose(prev[p]!.rect, current[c]!.frame, offset) && contextOk(p, c);
+  if (prev.length === 1 && current.length === 1) return close(0, 0) ? [0] : result;
   if (prev.length === current.length
-    && prev.every((member, i) => member.value === current[i]!.value && framesClose(member.rect, current[i]!.frame, offset))) {
-    return current.map((_, i) => i);
+    && prev.every((member, i) => member.value === current[i]!.value && close(i, i))) {
+    const indistinguishable = !measured.evidence && new Set(prev.map((member) => member.value)).size === 1;
+    return indistinguishable ? result : current.map((_, i) => i);
   }
   const prevValues = countValues(prev.map((member) => member.value));
   const currentValues = countValues(current.map((element) => element.value));
   current.forEach((element, c) => {
     if (prevValues.get(element.value) !== 1 || currentValues.get(element.value) !== 1) return;
     const p = prev.findIndex((member) => member.value === element.value);
-    if (framesClose(prev[p]!.rect, element.frame, offset)) result[c] = p;
+    if (close(p, c)) result[c] = p;
   });
   return result;
 }
@@ -307,12 +409,23 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
     else currentByGroup.set(group.key, [index]);
   });
 
-  // Unique keys present once on both sides say how their content moved.
+  const prevKeyed = prev?.keyed ?? [];
+  const keyed: KeyedElement[] = [];
+  for (const [key, indexes] of currentByGroup) {
+    if (indexes.length === 1 && groups[indexes[0]!]!.unique) keyed.push({ key, path: interesting[indexes[0]!]!.path });
+  }
+
+  // Unique keys present once on both sides say how their content moved,
+  // unless what surrounded them was replaced (then they aren't the same element).
+  // A unique AXUniqueId is authoritative.
   const anchors: Anchor[] = [];
+  const loneOk = new Set<string>();
   for (const [key, indexes] of currentByGroup) {
     const previous = previousGroups.get(key);
     if (indexes.length !== 1 || previous?.length !== 1 || !groups[indexes[0]!]!.unique) continue;
     const element = interesting[indexes[0]!]!;
+    if (!key.startsWith("id:") && !contextSurvived(prevKeyed, previous[0]!.path, keyed, element.path, "label")) continue;
+    loneOk.add(key);
     const rect = previous[0]!.rect;
     anchors.push({ path: element.path, offset: { dx: element.frame.x - rect.x, dy: element.frame.y - rect.y } });
   }
@@ -322,9 +435,10 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
     const previous = previousGroups.get(key) ?? [];
     const members = indexes.map((i) => interesting[i]!);
     const unique = groups[indexes[0]!]!.unique;
-    const needsOffset = !(unique && previous.length === 1 && members.length === 1);
-    const offset = needsOffset ? containerOffset(members, anchors) : { dx: 0, dy: 0 };
-    matchGroup(previous, members, unique, offset).forEach((p, i) => {
+    const lone = unique && previous.length === 1 && members.length === 1;
+    const measured = lone ? null : containerOffset(key, members, anchors, prevKeyed, keyed);
+    const contextOk = (p: number, c: number) => contextSurvived(prevKeyed, previous[p]!.path, keyed, members[c]!.path, "frame");
+    matchGroup(previous, members, unique, measured, loneOk.has(key), contextOk).forEach((p, i) => {
       const ref = p >= 0 ? previous[p]!.ref : null;
       if (ref) carried.set(indexes[i]!, ref);
     });
@@ -354,7 +468,7 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   }
   if (retired.length > MAX_RETIRED) retired.splice(0, retired.length - MAX_RETIRED);
 
-  return { screen, entries, groups: nextGroups, retired, nextRef };
+  return { screen, entries, groups: nextGroups, keyed, retired, nextRef };
 }
 
 /** The JSON an agent sees: visible nodes only unless `all`. */
