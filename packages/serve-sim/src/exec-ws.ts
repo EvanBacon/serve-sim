@@ -124,15 +124,17 @@ function tokenMatches(presented: unknown, expected: string | undefined): boolean
 
 /**
  * Viewer headers replayed on SSE loopback requests so the proxied route
- * answers as it would a direct GET from this viewer: the Host, so
- * /api/events builds helper URLs this viewer can reach (#92), and — because a
- * non-loopback Host makes the loopback request remote to the auth gate — the
- * credentials the upgrade itself was authenticated with. Only the request's
- * headers change; the connection target is still 127.0.0.1:serverPort.
+ * answers as it would a direct GET from this viewer: the Host (and, behind an
+ * HTTPS tunnel, `x-forwarded-proto`), so /api/events builds helper URLs this
+ * viewer can reach on its own scheme (#92), and — because a non-loopback Host
+ * or a forwarding header makes the loopback request remote to the auth gate —
+ * the credentials the upgrade itself was authenticated with. Each header is
+ * replayed only when the upgrade carried it. Only the request's headers
+ * change; the connection target is still 127.0.0.1:serverPort.
  */
 function sseViewerHeaders(req: IncomingMessage): Record<string, string> {
   const headers: Record<string, string> = {};
-  for (const name of ["host", "authorization", "cookie"] as const) {
+  for (const name of ["host", "x-forwarded-proto", "authorization", "cookie"] as const) {
     const value = req.headers[name];
     if (typeof value === "string" && value) headers[name] = value;
   }
