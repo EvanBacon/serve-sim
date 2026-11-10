@@ -161,16 +161,25 @@ export type RecordingChanges = {
   durationSec: number;
   clock: RecordingClock | null;
   window: { from: number; to: number };
+  /** The sidecar ended with its footer (false: the file was cut short). */
+  complete: boolean;
+  /** The writer hit its frame cap: frames after the last listed one are missing. */
+  truncated: boolean;
+  /** HID events the writer dropped (over its cap). */
+  eventsDropped: number;
   changedFrames: number;
   frames: { i: number; pts: number }[];
   events: ChangeEvent[];
+  /** Events in the window with no changed frame within `near` (e.g. a missed tap). */
+  unmatchedEvents: RecordingIndexEvent[];
 };
 
 /**
  * Changed frames in `[from, to]` and the HID events near them: an event is
  * kept when it overlaps `[from − near, to]` (an input just before the window
  * can cause its changes) and some changed frame in the window lies within
- * `near` seconds of `[t, tEnd ?? t]`.
+ * `near` seconds of `[t, tEnd ?? t]`. Events in the window that fail the
+ * second test go to `unmatchedEvents`.
  */
 export function recordingChanges(
   index: ParsedRecordingIndex,
@@ -183,13 +192,17 @@ export function recordingChanges(
   const changed = index.frames.filter((f) => f.changed && f.pts >= start && f.pts <= end);
   const times = changed.map((f) => f.pts);
   const events: ChangeEvent[] = [];
+  const unmatchedEvents: RecordingIndexEvent[] = [];
   for (const event of index.events) {
     const t = event.t;
     const tEnd = event.tEnd ?? t;
     if (tEnd < start - near || t > end) continue;
     // The first changed frame at or after t − near must be within near of tEnd.
     const k = lowerBound(times, t - near);
-    if (k >= times.length || times[k]! > tEnd + near) continue;
+    if (k >= times.length || times[k]! > tEnd + near) {
+      unmatchedEvents.push(event);
+      continue;
+    }
     const firstAfter = lowerBound(times, t);
     const next = firstAfter < times.length && times[firstAfter]! <= tEnd + near ? changed[firstAfter]! : null;
     events.push({ ...event, nextChange: next ? { i: next.i, pts: next.pts } : null });
@@ -200,9 +213,13 @@ export function recordingChanges(
     durationSec,
     clock: index.header.clock ?? null,
     window: { from: start, to: end },
+    complete: index.footer !== null,
+    truncated: index.footer?.truncated === true,
+    eventsDropped: index.footer?.eventsDropped ?? 0,
     changedFrames: changed.length,
     frames: changed.map(({ i, pts }) => ({ i, pts })),
     events,
+    unmatchedEvents,
   };
 }
 

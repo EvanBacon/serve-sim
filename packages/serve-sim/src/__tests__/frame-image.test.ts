@@ -81,6 +81,7 @@ describe("diffFrames", () => {
     const result = diffFrames(a, solid(8, 6, [50, 60, 70]));
     expect(result.changedPixels).toBe(0);
     expect(result.bbox).toBeNull();
+    expect(result.maxDelta).toBe(0);
   });
 
   test("a changed rectangle gives its bbox and pixel count", () => {
@@ -101,6 +102,9 @@ describe("diffFrames", () => {
     expect(diffFrames(a, b, { threshold: 10 }).bbox).toEqual({ x: 3, y: 3, w: 1, h: 1 });
     expect(diffFrames(a, b, { threshold: 9 }).changedPixels).toBe(2);
     expect(diffFrames(a, b, { threshold: 60 }).changedPixels).toBe(0);
+    // maxDelta is the largest difference whatever the threshold.
+    expect(diffFrames(a, b, { threshold: 60 }).maxDelta).toBe(60);
+    expect(diffFrames(a, b, { threshold: 10 }).maxDelta).toBe(60);
   });
 
   test("mismatched sizes are an error", () => {

@@ -81,6 +81,8 @@ describe("parseRecordInspectArgs", () => {
   test("-h / --help", () => {
     expect(parseRecordInspectArgs("diff", ["--help"])).toEqual({ verb: "diff", help: true });
     expect(parseRecordInspectArgs("frame", ["a.mp4", "-h"])).toEqual({ verb: "frame", help: true });
+    // As an option's value it's just a value.
+    expect(parseRecordInspectArgs("frame", ["a.mp4", "-t", "1", "-o", "-h"])).toEqual({ verb: "frame", mp4: "a.mp4", t: 1, output: "-h" });
   });
 });
 
@@ -217,6 +219,8 @@ describe("runRecordInspect diff", () => {
     expect(result.from).toEqual({ i: 3, pts: 0.3, decodedPts: 0.3 });
     expect(result.to).toEqual({ i: 4, pts: 0.4, decodedPts: 0.4 });
     expect(result.changedPixels).toBe(1);
+    expect(result.threshold).toBe(40);
+    expect(result.maxDelta).toBe(135);
     expect(result.bbox).toEqual({ x: 2, y: 1, w: 1, h: 1 });
     expect(result.path).toBe(join(mp4, "..", "rec-diff-0.3-0.4.png"));
     expect(existsSync(result.path)).toBe(true);
@@ -228,6 +232,20 @@ describe("runRecordInspect diff", () => {
     const result = JSON.parse(out[0]!);
     expect(result.changedPixels).toBe(0);
     expect(result.bbox).toBeNull();
+    expect(result.maxDelta).toBe(0);
+  });
+
+  test("--threshold is echoed; maxDelta shows how close a change came", async () => {
+    const { deps, out, mp4 } = fakeDeps(tmp());
+    expect(await runRecordInspect({ verb: "diff", mp4, from: 0.3, to: 0.4, threshold: 200, output: join(tmp(), "d.png") }, deps)).toBe(0);
+    expect(JSON.parse(out[0]!)).toMatchObject({ changedPixels: 0, bbox: null, threshold: 200, maxDelta: 135 });
+  });
+
+  test("--from after --to is rejected like `changes` does", async () => {
+    const { deps, err, decoded, mp4 } = fakeDeps(tmp());
+    expect(await runRecordInspect({ verb: "diff", mp4, from: 0.5, to: 0.2 }, deps)).toBe(1);
+    expect(err.join("\n")).toMatch(/record diff: --from 0\.5 is after --to 0\.2/);
+    expect(decoded).toEqual([]);
   });
 
   test("a decoder that returns a different sample fails loudly", async () => {
@@ -256,7 +274,27 @@ describe("runRecordInspect changes", () => {
     expect(result.durationSec).toBe(0.6);
     expect(result.frames).toEqual([{ i: 3, pts: 0.3 }, { i: 4, pts: 0.4 }]);
     expect(result.events.map((e: { id: number; nextChange: unknown }) => [e.id, e.nextChange])).toEqual([[7, { i: 3, pts: 0.3 }]]);
+    expect(result).toMatchObject({ complete: true, truncated: false, eventsDropped: 0, unmatchedEvents: [] });
     expect(decoded).toEqual([]);
+  });
+
+  test("a truncated or cut-short sidecar is flagged in the JSON and warned on stderr", async () => {
+    const { deps, out, err, mp4 } = fakeDeps(tmp());
+    const header = { type: "header", version: 1, fps: 10, clock: null };
+    const frame = { type: "frame", i: 0, pts: 0, uptime: 0, changed: true };
+    const write = (lines: object[]) => writeFileSync(recordingIndexPath(mp4), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    write([header, frame, { type: "footer", frames: 1, durationSec: 0.6, eventsDropped: 3, truncated: true }]);
+    expect(await runRecordInspect({ verb: "changes", mp4 }, deps)).toBe(0);
+    expect(JSON.parse(out.pop()!)).toMatchObject({ complete: true, truncated: true, eventsDropped: 3 });
+    expect(err.join("\n")).toMatch(/warning: .*truncated/);
+    expect(err.join("\n")).toMatch(/dropped 3 input event/);
+
+    err.length = 0;
+    write([header, frame]);
+    expect(await runRecordInspect({ verb: "changes", mp4 }, deps)).toBe(0);
+    expect(JSON.parse(out.pop()!)).toMatchObject({ complete: false, truncated: false, eventsDropped: 0 });
+    expect(err.join("\n")).toMatch(/warning: .*no footer/);
   });
 
   test("missing sidecar: exit 1 telling the user to re-record without --no-index", async () => {

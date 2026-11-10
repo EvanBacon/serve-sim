@@ -236,6 +236,7 @@ describe.skipIf(!shouldRun)("record inspect decodes the sample it reports", () =
     expect(diff.to).toMatchObject({ i: 3, pts: 0.05 });
     expect(frames.slice(-2).map((f) => Math.round(centerGray(f) / GRAY_STEP))).toEqual([2, 3]);
     // Adjacent grays differ by 20, under the default threshold of 40.
-    expect(diff.changedPixels).toBe(0);
+    expect(diff).toMatchObject({ changedPixels: 0, threshold: 40 });
+    expect(Math.abs(diff.maxDelta - GRAY_STEP)).toBeLessThanOrEqual(6);
   });
 });

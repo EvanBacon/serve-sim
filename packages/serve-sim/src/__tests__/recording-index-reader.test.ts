@@ -159,6 +159,23 @@ describe("recordingChanges", () => {
     expect(result.changedFrames).toBe(4);
     // Each kept event names the first changed frame at/after it.
     expect(result.events.map((e) => [e.id, e.nextChange?.i ?? null])).toEqual([[1, 3], [2, 7], [3, null]]);
+    expect(result.unmatchedEvents).toEqual([]);
+    expect(result).toMatchObject({ complete: true, truncated: false, eventsDropped: 0 });
+  });
+
+  test("events with no changed frame within near go to unmatchedEvents (a missed tap)", () => {
+    const result = recordingChanges(index, { near: 0.06 });
+    expect(result.events.map((e) => e.id)).toEqual([1, 2]);
+    expect(result.unmatchedEvents.map((e) => e.id)).toEqual([3]);
+    // Only events in the window are listed.
+    expect(recordingChanges(index, { from: 0, to: 0.9, near: 0.04 }).unmatchedEvents.map((e) => e.id)).toEqual([1, 2]);
+  });
+
+  test("surfaces an incomplete sidecar: truncated, eventsDropped, missing footer", () => {
+    const truncated = parseRecordingIndex(jsonl([header, ...frames, { ...footer, truncated: true, eventsDropped: 4 }]), "x");
+    expect(recordingChanges(truncated, {})).toMatchObject({ complete: true, truncated: true, eventsDropped: 4 });
+    const cut = parseRecordingIndex(jsonl([header, ...frames, ...events]), "x");
+    expect(recordingChanges(cut, {})).toMatchObject({ complete: false, truncated: false, eventsDropped: 0 });
   });
 
   test("a window keeps only its changed frames and nearby events", () => {

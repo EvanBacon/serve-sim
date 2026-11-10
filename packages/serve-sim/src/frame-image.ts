@@ -16,6 +16,8 @@ export type FrameDiff = {
   changedPixels: number;
   /** Smallest box holding every changed pixel; null when none changed. */
   bbox: PixelBox | null;
+  /** Largest per-channel difference over all pixels (0 for identical frames). */
+  maxDelta: number;
   /** 1 per changed pixel (row-major), for rendering. */
   mask: Uint8Array;
 };
@@ -113,10 +115,12 @@ export function diffFrames(before: RgbaFrame, after: RgbaFrame, { threshold = DE
   let minY = height;
   let maxX = -1;
   let maxY = -1;
+  let maxDelta = 0;
   for (let y = 0, p = 0; y < height; y++) {
     for (let x = 0; x < width; x++, p++) {
       const o = p * 4;
       const delta = Math.max(Math.abs(a[o]! - b[o]!), Math.abs(a[o + 1]! - b[o + 1]!), Math.abs(a[o + 2]! - b[o + 2]!));
+      if (delta > maxDelta) maxDelta = delta;
       if (delta <= threshold) continue;
       mask[p] = 1;
       changedPixels++;
@@ -127,7 +131,7 @@ export function diffFrames(before: RgbaFrame, after: RgbaFrame, { threshold = DE
     }
   }
   const bbox = changedPixels > 0 ? { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 } : null;
-  return { width, height, changedPixels, bbox, mask };
+  return { width, height, changedPixels, bbox, maxDelta, mask };
 }
 
 /**

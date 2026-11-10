@@ -44,15 +44,18 @@ when <mp4-stem>.index.jsonl (or --index) exists, else the MP4's own.`,
 
 Diff the samples nearest --from and --to. Writes the --to frame dimmed, with
 changed pixels in magenta and their bounding box outlined (default
-<mp4-stem>-diff-<from>-<to>.png). Prints {"from","to","changedPixels","bbox","path",…}.
-A pixel counts as changed when a channel differs by more than --threshold
-(default ${DEFAULT_DIFF_THRESHOLD}, above H.264 noise; lower it for subtle changes).`,
+<mp4-stem>-diff-<from>-<to>.png). Prints {"from","to","changedPixels","bbox",
+"threshold","maxDelta","path",…}. A pixel counts as changed when a channel
+differs by more than --threshold (default ${DEFAULT_DIFF_THRESHOLD}, above H.264 noise); maxDelta
+is the largest difference seen, so lower --threshold below it for subtle changes.`,
   changes: `Usage: serve-sim record changes <mp4> [--from <seconds>] [--to <seconds>]
                                [--near <seconds>] [--index <sidecar>]
 
 List frames whose pixels changed in the window and the HID events within --near
-(default 0.5) seconds of them, from the sidecar only (no decoding). Prints JSON
-with the header's fps, clock and duration.`,
+(default 0.5) seconds of them, from the sidecar only (no decoding). Events with
+no changed frame that near are listed in unmatchedEvents. Prints JSON with the
+header's fps, clock and duration, and complete/truncated/eventsDropped so a
+partial sidecar is visible (also warned on stderr).`,
 };
 
 class UsageError extends Error {}
@@ -106,11 +109,12 @@ const FLAGS: Record<RecordInspectVerb, FlagSpec[]> = {
 
 /** @lintignore Exported for tests. */
 export function parseRecordInspectArgs(verb: RecordInspectVerb, args: string[]): RecordInspectArgs {
-  if (args.includes("-h") || args.includes("--help")) return { verb, help: true };
   const values: Record<string, string | number> = {};
   const positionals: string[] = [];
   for (let k = 0; k < args.length; k++) {
     const arg = args[k]!;
+    // Only as a flag: `-o -h` is a value (handled below), not a help request.
+    if (arg === "-h" || arg === "--help") return { verb, help: true };
     if (arg === "-" || !arg.startsWith("-") || /^-\d/.test(arg)) {
       positionals.push(arg);
       continue;
@@ -308,13 +312,15 @@ async function runFrame(args: FrameArgs, deps: RecordInspectDeps): Promise<void>
 }
 
 async function runDiff(args: DiffArgs, deps: RecordInspectDeps): Promise<void> {
+  if (args.from > args.to) throw new InspectError(`--from ${args.from} is after --to ${args.to}`);
   checkOutput(args.output, deps);
   const source = await frameSource(args.mp4, loadIndex(args.mp4, args.index, false), deps);
   const from = locate(source, args.from, "--from");
   const to = locate(source, args.to, "--to");
   const before = await decodeSample(args.mp4, from, deps);
   const after = to.k === from.k ? before : await decodeSample(args.mp4, to, deps);
-  const diff = diffFrames(before, after, args.threshold !== undefined ? { threshold: args.threshold } : {});
+  const threshold = args.threshold ?? DEFAULT_DIFF_THRESHOLD;
+  const diff = diffFrames(before, after, { threshold });
   const output = args.output ?? defaultDiffOutput(args.mp4, args.from, args.to);
   const path = emitPng(encodePng(renderDiffImage(after, diff)), output, deps);
   const line = JSON.stringify({
@@ -322,6 +328,10 @@ async function runDiff(args: DiffArgs, deps: RecordInspectDeps): Promise<void> {
     to: { i: to.i, pts: to.pts, decodedPts: round6(after.time) },
     changedPixels: diff.changedPixels,
     bbox: diff.bbox,
+    threshold,
+    // Largest channel difference anywhere: when it's just under threshold,
+    // a lower --threshold may reveal a subtle change.
+    maxDelta: diff.maxDelta,
     path,
     width: diff.width,
     height: diff.height,
@@ -342,7 +352,16 @@ function runChanges(args: ChangesArgs, deps: RecordInspectDeps): void {
     }
     throw error;
   }
-  deps.log(JSON.stringify(recordingChanges(index, { from: args.from, to: args.to, near: args.near })));
+  const changes = recordingChanges(index, { from: args.from, to: args.to, near: args.near });
+  if (changes.truncated) {
+    deps.error("record changes: warning: the sidecar hit its frame cap (truncated); frames after the last listed one are missing");
+  } else if (!changes.complete) {
+    deps.error("record changes: warning: the sidecar has no footer (cut short); later frames and events may be missing");
+  }
+  if (changes.eventsDropped > 0) {
+    deps.error(`record changes: warning: the sidecar dropped ${changes.eventsDropped} input event(s)`);
+  }
+  deps.log(JSON.stringify(changes));
 }
 
 /**
