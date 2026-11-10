@@ -19,6 +19,7 @@ export const SIM_E2E_TEST_FILES = [
 export const DARWIN_INTEGRATION_TEST_FILES = [
   "packages/serve-sim/src/__tests__/shm-probe.integration.test.ts",
   "packages/serve-sim/src/__tests__/duo-renderer.integration.test.ts",
+  "packages/serve-sim/src/__tests__/record-inspect.integration.test.ts",
 ] as const;
 
 const DARWIN_TEST_FILE_SET = new Set<string>([

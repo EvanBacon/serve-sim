@@ -69,7 +69,24 @@ interface NativeAddon {
   axDescribe(udid: string, discovery?: AxDiscovery): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
   setDeviceSet(path: string | null): void;
+  /** Absent in addons built before `record frame|diff` existed. */
+  videoInfo?(path: string): Promise<string>;
+  videoFrame?(path: string, seconds: number): Promise<VideoFrame>;
 }
+
+/** A local movie's video track, read without decoding. */
+export type VideoInfo = {
+  /** Container duration, seconds. */
+  duration: number;
+  /** Displayed size (track transform applied). */
+  width: number;
+  height: number;
+  /** Presentation time of every sample, ascending, seconds. */
+  sampleTimes: number[];
+};
+
+/** One decoded sample: tightly packed RGBA (alpha 255), top row first. */
+export type VideoFrame = { width: number; height: number; time: number; rgba: Uint8Array };
 
 // (data, width, height, flags) — codec 0=MJPEG 1=AVCC 2=size-only; flags bit0=desc bit1=keyframe.
 type RawFrameCallback = (
@@ -481,4 +498,24 @@ export function axDescribeAsync(udid: string, discovery: AxDiscovery = "exhausti
 /** Async frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */
 export function axFrontmostAsync(udid: string): Promise<string> {
   return load().axFrontmost(udid);
+}
+
+const NO_VIDEO_READS = "reading recordings is unavailable in this native build; rebuild serve-sim (bun run build.ts)";
+
+/** Sample times, duration and size of a local MP4/MOV (AVFoundation, off the JS thread). */
+export async function readVideoInfo(path: string): Promise<VideoInfo> {
+  const native = load();
+  if (!native.videoInfo) throw new Error(NO_VIDEO_READS);
+  return JSON.parse(await native.videoInfo(path)) as VideoInfo;
+}
+
+/**
+ * Decode the sample shown at `seconds` (zero tolerance, track transform
+ * applied). A time exactly on a sample boundary can resolve to the previous
+ * sample, so callers ask for the middle of the sample they want.
+ */
+export async function readVideoFrame(path: string, seconds: number): Promise<VideoFrame> {
+  const native = load();
+  if (!native.videoFrame) throw new Error(NO_VIDEO_READS);
+  return native.videoFrame(path, seconds);
 }

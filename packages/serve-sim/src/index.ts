@@ -70,6 +70,7 @@ import {
 } from "./recording";
 import { saveRecordingBody } from "./record-file";
 import { recordingIndexPath } from "./recording-index";
+import { RECORD_INSPECT_VERBS, recordInspect, recordInspectArgv } from "./record-inspect";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
 
@@ -2669,7 +2670,7 @@ program
   .option("--timeout <ms>", "Give up after this many ms (default 3000)")
   .action((opts) => settleCmd(opts.device, opts.timeout));
 
-program
+const recordCommand = program
   .command("record")
   .description("Record the simulator screen to an MP4 (native resolution, 60 fps H.264); Ctrl+C stops")
   .option(...deviceOpt)
@@ -2680,6 +2681,34 @@ program
   .option("--bitrate <bps>", "Average bitrate in bits/s (default scales with resolution)")
   .option("--no-index", "Skip the <name>.index.jsonl sidecar (per-frame changed flags + input events)")
   .action((opts) => record(opts.device, opts));
+
+// Offline inspection of a finished recording. Passthrough like `camera`: the
+// verb parses its own arguments from argv, since commander hands `record`
+// the -o/-t meant for the verb before dispatching (see recordInspectArgv).
+const RECORD_INSPECT_DESCRIPTIONS: Record<(typeof RECORD_INSPECT_VERBS)[number], string> = {
+  frame: "Write the frame nearest a time as a PNG: frame <mp4> -t <seconds> [-o out.png]",
+  diff: "Highlight what changed between two times: diff <mp4> --from <s> --to <s> [-o out.png]",
+  changes: "List changed frames and nearby input from the sidecar: changes <mp4> [--from <s>] [--to <s>]",
+};
+for (const verb of RECORD_INSPECT_VERBS) {
+  recordCommand
+    .command(verb)
+    .description(RECORD_INSPECT_DESCRIPTIONS[verb])
+    .allowUnknownOption(true)
+    .helpOption(false)
+    .argument("[args...]")
+    .action(async () => {
+      const { readVideoFrame, readVideoInfo } = await import("./native");
+      process.exitCode = await recordInspect(verb, recordInspectArgv(process.argv, verb), {
+        videoInfo: readVideoInfo,
+        videoFrame: readVideoFrame,
+        log: (line) => console.log(line),
+        error: (line) => console.error(line),
+        writeStdout: (bytes) => process.stdout.write(bytes),
+        stdoutIsTTY: process.stdout.isTTY === true,
+      });
+    });
+}
 
 program
   .command("button")
