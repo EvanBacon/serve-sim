@@ -81,6 +81,7 @@ function hid(): DeviceSessionDependencies["hid"] {
     memoryWarning: async () => {},
     softwareKeyboard: async () => {},
     caDebug: async () => false,
+    hardwareKeyboard: async () => false,
     pose: async () => false,
     hinge: async () => false,
   };
