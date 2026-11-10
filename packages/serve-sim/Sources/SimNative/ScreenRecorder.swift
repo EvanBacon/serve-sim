@@ -31,6 +31,10 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
         var rotationDegrees: Int = 0
         /// Average bitrate (bits/s); nil scales with the pixel rate.
         var bitrate: Int?
+        /// Collect per-sample metadata for the `.index.jsonl` sidecar and add
+        /// it to the finish summary. Off by default: only `serve-sim record`
+        /// asks for it, so other recordings pay nothing.
+        var index = false
     }
 
     enum Errors: Error, CustomStringConvertible {
@@ -64,10 +68,12 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
     private var scheduler: RecordingFrameScheduler
     private var dimensions: Dimensions?
     private var lastBuffer: CVPixelBuffer?
-    /// The captured frame behind `lastBuffer` (what a repeat slot holds).
+    /// The captured frame behind `lastBuffer` (what a repeat slot holds);
+    /// nil unless indexing.
     private var lastSource: RecordingFrameIndex.Source?
-    /// Per-appended-sample metadata for the `.index.jsonl` sidecar.
-    private var frameIndex = RecordingFrameIndex()
+    /// Per-appended-sample metadata for the `.index.jsonl` sidecar; nil
+    /// unless `options.index`.
+    private var frameIndex: RecordingFrameIndex?
     private var fillTimer: DispatchSourceTimer?
     private var bitrate = 0
     private var finished = false
@@ -83,6 +89,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
         self.armedUptime = Self.now()
         self.startedAt = Date()
         self.scheduler = RecordingFrameScheduler(fps: options.fps)
+        if options.index { self.frameIndex = RecordingFrameIndex() }
     }
 
     func handleFrame(_ frame: Frame) {
@@ -137,10 +144,10 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
             return
         }
         // Normally empty: the fill timer already covered the static stretch.
-        if let lastBuffer, let lastSource {
+        if let lastBuffer {
             for slot in placement.repeats where write(lastBuffer, slot: slot, source: lastSource) { repeated += 1 }
         }
-        let source = RecordingFrameIndex.Source(
+        let source = frameIndex == nil ? nil : RecordingFrameIndex.Source(
             sequence: UInt64(captured), captureTime: frame.captureTime, stamp: frame.stamp
         )
         if write(frame.pixelBuffer, slot: placement.slot, source: source) { encoded += 1 }
@@ -230,7 +237,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
     /// placement), so the queue stays free for captured frames. Skipped while
     /// frames wait behind a slow encoder: their slots must stay open.
     private func fillStaticSlots() {
-        guard !finished, failure == nil, let lastBuffer, let lastSource else { return }
+        guard !finished, failure == nil, let lastBuffer else { return }
         for slot in scheduler.repeatsDue(at: Self.now(), framesPending: pendingFrames.pending) {
             guard write(lastBuffer, slot: slot, source: lastSource, waitForEncoder: false) else { break }
             scheduler.didFill(through: slot)
@@ -240,7 +247,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
 
     @discardableResult
     private func write(
-        _ buffer: CVPixelBuffer, slot: Int64, source: RecordingFrameIndex.Source, waitForEncoder: Bool = true
+        _ buffer: CVPixelBuffer, slot: Int64, source: RecordingFrameIndex.Source?, waitForEncoder: Bool = true
     ) -> Bool {
         guard let writer, let input, let adaptor, failure == nil else { return false }
         // We're on the recorder's own queue, so waiting here only delays the
@@ -260,7 +267,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
             failure = writer.error.map { String(describing: $0) } ?? "append failed"
             return false
         }
-        frameIndex.recordWrite(slot: slot, source: source)
+        if let source { frameIndex?.recordWrite(slot: slot, source: source) }
         return true
     }
 
@@ -268,7 +275,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
         guard !finished else { return completion(.failure(Errors.writerFailed("already finished"))) }
         finished = true
         stopFillTimer()
-        guard let writer, let input, let lastBuffer, let lastSource, let end = scheduler.finish(at: stopTime) else {
+        guard let writer, let input, let lastBuffer, let end = scheduler.finish(at: stopTime) else {
             if let writer, writer.status == .writing { writer.cancelWriting() }
             try? FileManager.default.removeItem(atPath: options.path)
             return completion(.failure(failure.map(Errors.writerFailed) ?? Errors.noFrames))
@@ -277,7 +284,7 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
         input.markAsFinished()
         let fps = options.fps
         writer.endSession(atSourceTime: CMTime(value: end.endSlot, timescale: CMTimeScale(fps)))
-        let summary: [String: Any] = [
+        var summary: [String: Any] = [
             "path": options.path,
             "width": dimensions?.width ?? 0,
             "height": dimensions?.height ?? 0,
@@ -294,15 +301,18 @@ final class ScreenRecorder: CaptureConsuming, @unchecked Sendable {
             "backlogDropped": pendingFrames.dropped,
             "encoderBusy": encoderBusy,
             "startedAt": isoTimestamp(startedAt),
-            // Per-sample metadata for the `.index.jsonl` sidecar. The JS side
-            // strips it before the summary goes out as a response header.
-            "index": frameIndex.jsonObject(
+        ]
+        // Per-sample metadata for the `.index.jsonl` sidecar, only when the
+        // start asked for it. The JS side strips it before the summary goes
+        // out as a response header.
+        if let frameIndex {
+            summary["index"] = frameIndex.jsonObject(
                 fps: fps,
                 originUptime: scheduler.originTime,
                 armedUptime: armedUptime,
                 armedWallMs: startedAt.timeIntervalSince1970 * 1000
-            ),
-        ]
+            )
+        }
         writer.finishWriting {
             if writer.status == .completed {
                 print("[record] Saved \(self.options.path) (\(summary["frames"] ?? 0) frames, \(self.captured) captured, \(self.repeated) repeated, \(self.dropped + self.pendingFrames.dropped) dropped)")

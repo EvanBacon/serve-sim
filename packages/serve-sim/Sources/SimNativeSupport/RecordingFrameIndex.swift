@@ -5,10 +5,19 @@
 /// One entry per sample actually appended to the writer, in order: its slot
 /// (pts = slot / fps), the capture uptime of the frame whose pixels it holds
 /// (repeats carry their source frame's time), and whether its pixels differ
-/// from the previously appended sample. Storage is three flat arrays (~13
-/// bytes per entry, ~1.4 MB for 30 min at 60 fps) and appending is O(1), so
-/// it doesn't slow the recorder queue. `capacity` bounds memory; past it
-/// entries are dropped and `truncated` is set (the MP4 is unaffected).
+/// from the previously appended sample. Only collected when the recording
+/// was started with `index` (`serve-sim record` without `--no-index`).
+///
+/// Memory: three flat arrays, 13 bytes of payload per entry (~1.4 MB for
+/// 30 min at 60 fps), but they grow by doubling without `reserveCapacity`,
+/// so the resident size can reach about twice that just after a growth.
+/// Appending is amortised O(1), so it doesn't slow the recorder queue. The
+/// bigger cost is at finish: `jsonObject` builds `[Int]` copies that are
+/// bridged to `NSNumber`s for serialisation (tens of bytes each, so tens of
+/// MB transiently for a 30 min recording) plus the JSON text itself (a few
+/// MB). That's once per indexed recording, on the recorder queue.
+/// `capacity` bounds all of it; past it entries are dropped and `truncated`
+/// is set (the MP4 is unaffected).
 public struct RecordingFrameIndex: Sendable {
     /// The captured frame behind a sample.
     public struct Source: Equatable, Sendable {
