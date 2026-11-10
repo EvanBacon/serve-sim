@@ -509,9 +509,13 @@ export async function readVideoInfo(path: string): Promise<VideoInfo> {
   return JSON.parse(await native.videoInfo(path)) as VideoInfo;
 }
 
-/** Decode the sample shown at `seconds` (zero tolerance, track transform applied). */
-export function readVideoFrame(path: string, seconds: number): Promise<VideoFrame> {
+/**
+ * Decode the sample shown at `seconds` (zero tolerance, track transform
+ * applied). A time exactly on a sample boundary can resolve to the previous
+ * sample, so callers ask for the middle of the sample they want.
+ */
+export async function readVideoFrame(path: string, seconds: number): Promise<VideoFrame> {
   const native = load();
-  if (!native.videoFrame) return Promise.reject(new Error(NO_VIDEO_READS));
+  if (!native.videoFrame) throw new Error(NO_VIDEO_READS);
   return native.videoFrame(path, seconds);
 }

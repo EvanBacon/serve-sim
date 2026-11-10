@@ -98,7 +98,11 @@ describe("default output paths", () => {
 
 const W = 4;
 const H = 2;
-/** Fake video: 10 fps, 6 samples; sample k is solid gray k*40, sample 4 has one white pixel. */
+/**
+ * Fake video: 10 fps, 6 samples; samples 3-5 are gray 120 (others black),
+ * sample 4 has one white pixel. Like AVFoundation at zero tolerance, a
+ * request decodes the sample whose window [k/10, (k+1)/10) holds it.
+ */
 function fakeDeps(dir: string, overrides: Partial<RecordInspectDeps> = {}) {
   const out: string[] = [];
   const err: string[] = [];
@@ -108,11 +112,11 @@ function fakeDeps(dir: string, overrides: Partial<RecordInspectDeps> = {}) {
     videoInfo: async () => ({ duration: 0.6, width: W, height: H, sampleTimes: [0, 0.1, 0.2, 0.3, 0.4, 0.5] }),
     videoFrame: async (_path, seconds) => {
       decoded.push(seconds);
-      const k = Math.round(seconds * 10);
+      const k = Math.min(5, Math.floor(seconds * 10 + 1e-9));
       const rgba = new Uint8Array(W * H * 4).fill(k === 5 ? 120 : k >= 3 ? 120 : 0);
       for (let p = 3; p < rgba.length; p += 4) rgba[p] = 255;
       if (k === 4) rgba.set([255, 255, 255, 255], (1 * W + 2) * 4);
-      return { width: W, height: H, time: seconds, rgba };
+      return { width: W, height: H, time: k / 10, rgba };
     },
     log: (line) => out.push(line),
     error: (line) => err.push(line),
@@ -142,8 +146,9 @@ describe("runRecordInspect frame", () => {
     const { deps, out, decoded, mp4 } = fakeDeps(tmp());
     expect(await runRecordInspect({ verb: "frame", mp4, t: 0.32 }, deps)).toBe(0);
     const path = join(mp4, "..", "rec-t0.32.png");
-    expect(decoded).toEqual([0.3]);
-    expect(JSON.parse(out[0]!)).toEqual({ i: 3, pts: 0.3, path, width: W, height: H });
+    // The middle of the sample, so rounding can't land in the previous one.
+    expect(decoded.map((s) => Math.round(s * 1e6) / 1e6)).toEqual([0.35]);
+    expect(JSON.parse(out[0]!)).toEqual({ i: 3, pts: 0.3, decodedPts: 0.3, path, width: W, height: H });
     expect([...readFileSync(path).subarray(1, 4)].map((c) => String.fromCharCode(c)).join("")).toBe("PNG");
   });
 
@@ -152,7 +157,7 @@ describe("runRecordInspect frame", () => {
     writeSidecar(mp4);
     const output = join(mp4, "..", "custom.png");
     expect(await runRecordInspect({ verb: "frame", mp4, t: 0.41, output }, deps)).toBe(0);
-    expect(JSON.parse(out[0]!)).toEqual({ i: 4, pts: 0.4, changed: true, path: output, width: W, height: H });
+    expect(JSON.parse(out[0]!)).toEqual({ i: 4, pts: 0.4, decodedPts: 0.4, changed: true, path: output, width: W, height: H });
     expect(existsSync(output)).toBe(true);
   });
 
@@ -209,8 +214,8 @@ describe("runRecordInspect diff", () => {
     const { deps, out, mp4 } = fakeDeps(tmp());
     expect(await runRecordInspect({ verb: "diff", mp4, from: 0.3, to: 0.4 }, deps)).toBe(0);
     const result = JSON.parse(out[0]!);
-    expect(result.from).toEqual({ i: 3, pts: 0.3 });
-    expect(result.to).toEqual({ i: 4, pts: 0.4 });
+    expect(result.from).toEqual({ i: 3, pts: 0.3, decodedPts: 0.3 });
+    expect(result.to).toEqual({ i: 4, pts: 0.4, decodedPts: 0.4 });
     expect(result.changedPixels).toBe(1);
     expect(result.bbox).toEqual({ x: 2, y: 1, w: 1, h: 1 });
     expect(result.path).toBe(join(mp4, "..", "rec-diff-0.3-0.4.png"));
@@ -223,6 +228,15 @@ describe("runRecordInspect diff", () => {
     const result = JSON.parse(out[0]!);
     expect(result.changedPixels).toBe(0);
     expect(result.bbox).toBeNull();
+  });
+
+  test("a decoder that returns a different sample fails loudly", async () => {
+    const base = fakeDeps(tmp());
+    const { deps, err, mp4 } = fakeDeps(tmp(), {
+      videoFrame: async (path, seconds) => ({ ...(await base.deps.videoFrame(path, seconds)), time: 0.2 }),
+    });
+    expect(await runRecordInspect({ verb: "frame", mp4, t: 0.3, output: join(tmp(), "x.png") }, deps)).toBe(1);
+    expect(err.join("\n")).toMatch(/asked for sample i=3 at 0\.3 s but decoded the one at 0\.2 s/);
   });
 
   test("out-of-range --to is an error", async () => {

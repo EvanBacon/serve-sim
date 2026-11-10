@@ -37,7 +37,7 @@ const RECORD_INSPECT_USAGE: Record<RecordInspectVerb, string> = {
 
 Write the sample nearest <seconds> as a PNG (default <mp4-stem>-t<seconds>.png
 next to the MP4; -o - writes the PNG to stdout and the JSON to stderr). Prints
-{"i","pts","changed"?,"path","width","height"}. Uses the sidecar's frame times
+{"i","pts","decodedPts","changed"?,"path","width","height"}. Uses the sidecar's frame times
 when <mp4-stem>.index.jsonl (or --index) exists, else the MP4's own.`,
   diff: `Usage: serve-sim record diff <mp4> --from <seconds> --to <seconds> [-o out.png|-]
                             [--index <sidecar>] [--threshold <0-255>]
@@ -191,6 +191,9 @@ type FrameSource = {
   sample(k: number): { i: number; changed?: boolean };
 };
 
+/** A located sample: what's reported, plus the half-duration used to decode it. */
+type LocatedSample = { i: number; pts: number; changed?: boolean; k: number; half: number };
+
 class InspectError extends Error {}
 
 /**
@@ -227,13 +230,43 @@ async function frameSource(mp4: string, index: ParsedRecordingIndex | null, deps
   };
 }
 
-function locate(source: FrameSource, t: number, flag: string): { i: number; pts: number; changed?: boolean } {
+/**
+ * How long sample k is shown: up to the next sample, else to the end of the
+ * recording, else the previous gap.
+ */
+function sampleDuration(source: FrameSource, k: number): number {
+  const { times } = source;
+  if (k + 1 < times.length) return times[k + 1]! - times[k]!;
+  const toEnd = source.duration - times[k]!;
+  if (toEnd > 1e-6) return toEnd;
+  return k > 0 ? times[k]! - times[k - 1]! : 1 / 60;
+}
+
+function locate(source: FrameSource, t: number, flag: string): LocatedSample {
   if (t < 0 || t > source.duration + 1e-6) {
     throw new InspectError(`${flag} ${t} is outside the recording (0–${source.duration} s)`);
   }
   const k = nearestIndex(source.times, t);
   if (k < 0) throw new InspectError("the recording has no video frames");
-  return { pts: source.times[k]!, ...source.sample(k) };
+  return { pts: source.times[k]!, ...source.sample(k), k, half: sampleDuration(source, k) / 2 };
+}
+
+/**
+ * Decode the located sample. The reported pts is rounded (and a sidecar's
+ * slot/fps can differ from the MP4's 600-timescale time), so asking for it
+ * exactly can land a hair before the sample starts and decode the previous
+ * one. Ask for the middle of the sample instead, then check the decoder
+ * returned a sample within half a frame of the expected pts.
+ */
+async function decodeSample(mp4: string, at: LocatedSample, deps: RecordInspectDeps): Promise<VideoFrame> {
+  const frame = await deps.videoFrame(mp4, at.pts + at.half);
+  if (!(Math.abs(frame.time - at.pts) < at.half)) {
+    throw new InspectError(
+      `asked for sample i=${at.i} at ${at.pts} s but decoded the one at ${round6(frame.time)} s; ` +
+        "the sidecar may not match this MP4 (pass --index, or move the stale <name>.index.jsonl aside)",
+    );
+  }
+  return frame;
 }
 
 /** Write a PNG to `output` (or stdout for `-`); returns the path to report. */
@@ -259,10 +292,18 @@ async function runFrame(args: FrameArgs, deps: RecordInspectDeps): Promise<void>
   checkOutput(args.output, deps);
   const source = await frameSource(args.mp4, loadIndex(args.mp4, args.index, false), deps);
   const at = locate(source, args.t, "-t");
-  const frame = await deps.videoFrame(args.mp4, at.pts);
+  const frame = await decodeSample(args.mp4, at, deps);
   const output = args.output ?? defaultFrameOutput(args.mp4, args.t);
   const path = emitPng(encodePng(frame), output, deps);
-  const line = JSON.stringify({ i: at.i, pts: at.pts, ...(at.changed !== undefined ? { changed: at.changed } : {}), path, width: frame.width, height: frame.height });
+  const line = JSON.stringify({
+    i: at.i,
+    pts: at.pts,
+    decodedPts: round6(frame.time),
+    ...(at.changed !== undefined ? { changed: at.changed } : {}),
+    path,
+    width: frame.width,
+    height: frame.height,
+  });
   (output === "-" ? deps.error : deps.log)(line);
 }
 
@@ -271,14 +312,14 @@ async function runDiff(args: DiffArgs, deps: RecordInspectDeps): Promise<void> {
   const source = await frameSource(args.mp4, loadIndex(args.mp4, args.index, false), deps);
   const from = locate(source, args.from, "--from");
   const to = locate(source, args.to, "--to");
-  const before = await deps.videoFrame(args.mp4, from.pts);
-  const after = to.pts === from.pts ? before : await deps.videoFrame(args.mp4, to.pts);
+  const before = await decodeSample(args.mp4, from, deps);
+  const after = to.k === from.k ? before : await decodeSample(args.mp4, to, deps);
   const diff = diffFrames(before, after, args.threshold !== undefined ? { threshold: args.threshold } : {});
   const output = args.output ?? defaultDiffOutput(args.mp4, args.from, args.to);
   const path = emitPng(encodePng(renderDiffImage(after, diff)), output, deps);
   const line = JSON.stringify({
-    from: { i: from.i, pts: from.pts },
-    to: { i: to.i, pts: to.pts },
+    from: { i: from.i, pts: from.pts, decodedPts: round6(before.time) },
+    to: { i: to.i, pts: to.pts, decodedPts: round6(after.time) },
     changedPixels: diff.changedPixels,
     bbox: diff.bbox,
     path,

@@ -1,6 +1,6 @@
 // Test fixture generator: writes a tiny synthetic H.264 MP4 so the
 // `serve-sim record frame|diff` tests never check media into the repo.
-// Compiled at test time with `xcrun swiftc` (see recording-video.test.ts).
+// Compiled at test time with `xcrun swiftc` (see record-inspect.integration.test.ts).
 //
 //   make-test-video <out.mp4> <width> <height> <fps> <spec.json>
 //
