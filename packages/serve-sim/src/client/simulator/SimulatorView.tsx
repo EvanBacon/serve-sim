@@ -190,8 +190,12 @@ export function SimulatorView({
 
   const streamUrl = `${url}/stream.mjpeg`;
   // Direct MJPEG mode: called when the visible <img> decodes a part, so the
-  // startup watchdog trusts the stream the user actually sees (#128).
-  const directImageFrameRef = useRef<(() => void) | null>(null);
+  // startup watchdog trusts the stream the user actually sees (#128). Keyed
+  // by stream URL: the <img> can load after commit but before the passive
+  // effect registers the new stream's watchdog, so a load for a stream with no
+  // watchdog yet is parked in `earlyImageLoadRef` and applied on registration.
+  const directImageFrameRef = useRef<{ streamUrl: string; noteFrame: () => void } | null>(null);
+  const earlyImageLoadRef = useRef<string | null>(null);
 
   useEffect(() => {
     screenSizeRef.current = null;
@@ -507,7 +511,9 @@ export function SimulatorView({
       // A frame after the timeout disproves the stall; leave other errors.
       setError((prev) => (prev === STREAM_STALL_ERROR ? null : prev));
     };
-    directImageFrameRef.current = useAvcc ? null : noteFrame;
+    directImageFrameRef.current = useAvcc ? null : { streamUrl, noteFrame };
+    if (!useAvcc && earlyImageLoadRef.current === streamUrl) noteFrame();
+    earlyImageLoadRef.current = null;
 
     if (!useAvcc) (async () => {
       try {
@@ -875,7 +881,11 @@ export function SimulatorView({
             onLoad={(e) => {
               const el = e.currentTarget;
               if (el.naturalWidth > 0 && el.naturalHeight > 0) {
-                if (!relayMode) directImageFrameRef.current?.();
+                if (!relayMode) {
+                  const watchdog = directImageFrameRef.current;
+                  if (watchdog?.streamUrl === streamUrl) watchdog.noteFrame();
+                  else earlyImageLoadRef.current = streamUrl;
+                }
                 updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
               }
             }}

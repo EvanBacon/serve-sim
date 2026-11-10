@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { SimulatorView } from "../client/simulator/SimulatorView";
 
@@ -94,16 +94,29 @@ async function render() {
   });
 }
 
-/** Simulate the visible <img> decoding an MJPEG part. */
-async function paintImageFrame() {
+/** Fire the visible <img>'s load event as if it decoded an MJPEG part. */
+function dispatchImageLoad(expectedSrc = "http://sim.test/helper/ABC/stream.mjpeg") {
   const img = container.querySelector("img") as unknown as HTMLImageElement & { naturalWidth: number; naturalHeight: number };
   expect(img).toBeTruthy();
-  expect(img.getAttribute("src")).toBe("http://sim.test/helper/ABC/stream.mjpeg");
+  expect(img.getAttribute("src")).toBe(expectedSrc);
   Object.defineProperty(img, "naturalWidth", { configurable: true, value: 1640 });
   Object.defineProperty(img, "naturalHeight", { configurable: true, value: 2360 });
-  await act(async () => {
-    img.dispatchEvent(new dom.Event("load") as unknown as Event);
-  });
+  img.dispatchEvent(new dom.Event("load") as unknown as Event);
+}
+
+/** Simulate the visible <img> decoding an MJPEG part. */
+async function paintImageFrame() {
+  await act(async () => { dispatchImageLoad(); });
+}
+
+/**
+ * Fires the <img> load during the commit phase (layout effect), i.e. before
+ * SimulatorView's passive effect has started the watchdog — the ordering a
+ * fast first part (or a busy main thread delaying passive effects) produces.
+ */
+function LoadsDuringCommit({ url }: { url: string }) {
+  useLayoutEffect(() => { dispatchImageLoad(`${url}/stream.mjpeg`); }, [url]);
+  return <SimulatorView url={url} codec="mjpeg" hideControls />;
 }
 
 async function advance(ms: number) {
@@ -161,5 +174,37 @@ describe("SimulatorView direct MJPEG startup watchdog", () => {
     await render();
     await advance(6500);
     expect(text()).not.toContain(STALL_TEXT);
+  });
+
+  test("an image load that lands before the watchdog effect still counts", async () => {
+    fetchImpl = pendingFetch;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<LoadsDuringCommit url="http://sim.test/helper/ABC" />);
+    });
+    await advance(6500);
+    expect(text()).not.toContain(STALL_TEXT);
+  });
+
+  test("an early image load after a stream change counts for the new stream only", async () => {
+    fetchImpl = pendingFetch;
+    await render();
+    await paintImageFrame();
+    await act(async () => {
+      root!.render(<LoadsDuringCommit url="http://sim.test/helper/DEF" />);
+    });
+    await advance(6500);
+    expect(text()).not.toContain(STALL_TEXT);
+  });
+
+  test("a load from the previous stream does not satisfy the next stream's watchdog", async () => {
+    fetchImpl = pendingFetch;
+    await render();
+    await paintImageFrame();
+    await act(async () => {
+      root!.render(<SimulatorView url="http://sim.test/helper/DEF" codec="mjpeg" hideControls />);
+    });
+    await advance(6500);
+    expect(text()).toContain(STALL_TEXT);
   });
 });
