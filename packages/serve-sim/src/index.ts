@@ -5,7 +5,7 @@ import { execFile, execFileSync, execSync, spawn as nodeSpawn, type ChildProcess
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createHash, randomBytes } from "crypto";
 import { networkInterfaces } from "os";
-import { dirname, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import {
   STATE_DIR,
@@ -69,6 +69,7 @@ import {
   uniqueRecordingFileName,
 } from "./recording";
 import { saveRecordingBody } from "./record-file";
+import { recordingIndexPath } from "./recording-index";
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
 
@@ -1237,7 +1238,7 @@ async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean
  */
 async function record(
   deviceArg: string | undefined,
-  opts: { output?: string; duration?: string; codec?: string; fps?: string; bitrate?: string },
+  opts: { output?: string; duration?: string; codec?: string; fps?: string; bitrate?: string; index?: boolean },
 ) {
   let durationMs: number | undefined;
   if (opts.duration != null) {
@@ -1266,6 +1267,7 @@ async function record(
   const startUrl = recordingUrlForWsUrl(target.wsUrl, "start");
   const stopUrl = recordingUrlForWsUrl(target.wsUrl, "stop");
   const statusUrl = recordingUrlForWsUrl(target.wsUrl);
+  const indexUrl = recordingUrlForWsUrl(target.wsUrl, "index");
   if (!startUrl || !stopUrl || !statusUrl) {
     console.error(`Cannot derive the recording endpoint from ${target.wsUrl}`);
     process.exit(1);
@@ -1307,13 +1309,16 @@ async function record(
   process.on("SIGTERM", onSignal);
   let out: string;
   let stopRes: Response;
+  let token: string | undefined;
   try {
     const startRes = await fetch(query, { method: "POST", headers: target.headers }).catch((err) => {
       console.error(`Failed to reach serve-sim: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     });
     if (!startRes.ok) await failed("Starting the recording", startRes);
-    const { token, startedAt } = await startRes.json().catch(() => ({})) as { token?: string; startedAt?: string };
+    const started = await startRes.json().catch(() => ({})) as { token?: string; startedAt?: string };
+    token = started.token;
+    const { startedAt } = started;
 
     if (!stopRequested) {
       await new Promise<void>((resolveStop) => {
@@ -1385,6 +1390,41 @@ async function record(
     ? ` (${summary.width}x${summary.height} @ ${summary.fps} fps, ${summary.frames} frames, ${summary.duration?.toFixed(2)}s)`
     : "";
   console.log(`Saved ${out}${detail}`);
+  if (opts.index !== false) await saveRecordingIndex(indexUrl, token, out, { exclusive: !outputPath, headers: target.headers });
+}
+
+/**
+ * Fetch the `.index.jsonl` sidecar for the recording just saved and write it
+ * next to the MP4. Best effort: the MP4 is already saved, so a missing index
+ * (older server, addon without frame metadata) only warns on stderr.
+ */
+async function saveRecordingIndex(
+  indexUrl: string | null,
+  token: string | undefined,
+  mp4Path: string,
+  { exclusive, headers }: { exclusive: boolean; headers: Record<string, string> },
+): Promise<void> {
+  if (!indexUrl || !token) {
+    console.error("No recording index: the server did not return a recording token.");
+    return;
+  }
+  const url = new URL(indexUrl);
+  url.searchParams.set("token", token);
+  url.searchParams.set("file", basename(mp4Path));
+  const indexPath = recordingIndexPath(mp4Path);
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok || !res.body) {
+      await res.body?.cancel().catch(() => {});
+      console.error(`No recording index (HTTP ${res.status}); the server may predate indexes. Saved the MP4 only.`);
+      return;
+    }
+    await saveRecordingBody(res.body, indexPath, { exclusive });
+    console.error(`Saved index ${indexPath}`);
+  } catch (err) {
+    const reason = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err));
+    console.error(`Could not save the recording index to ${indexPath} (${reason}).`);
+  }
 }
 
 async function typeText(
@@ -2614,6 +2654,7 @@ program
   .option("--codec <codec>", "h264 (default) or hevc")
   .option("--fps <fps>", "Constant output frame rate (default 60)")
   .option("--bitrate <bps>", "Average bitrate in bits/s (default scales with resolution)")
+  .option("--no-index", "Skip the <name>.index.jsonl sidecar (per-frame changed flags + input events)")
   .action((opts) => record(opts.device, opts));
 
 program
