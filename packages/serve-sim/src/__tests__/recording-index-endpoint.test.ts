@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createServer, request, type IncomingMessage, type Server } from "http";
+import { createServer, type Server } from "http";
 import { writeFileSync } from "fs";
 import { PassThrough } from "stream";
 import type { AddressInfo } from "net";
