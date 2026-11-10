@@ -21,6 +21,11 @@ actor FrameCapture {
     private var onFrame: ((CVPixelBuffer, CMTime, Bool) -> Void)?
     private var pixelConsumers: PixelConsumerCount?
     private var frameCount: UInt64 = 0
+    /// Captures whose IOSurface seed (or surface) changed. Unlike `frameCount`
+    /// this does not advance on idle-floor re-emits, so a stable value means
+    /// the simulator rendered nothing new (the AX settle detector reads it
+    /// through `CaptureEngine.contentChangeCount`, off the actor).
+    nonisolated let contentChanges = ContentChangeCounter()
     private(set) var capturedWidth: Int = 0
     private(set) var capturedHeight: Int = 0
     private var idleTimer: Task<Void, Never>?
@@ -340,6 +345,7 @@ actor FrameCapture {
         let contentChanged = lastStamps[key] != stamp
         if frameCount > 0, !contentChanged, !force { return false }
         lastStamps[key] = stamp
+        if contentChanged { contentChanges.increment() }
 
         let w = IOSurfaceGetWidth(surface)
         let h = IOSurfaceGetHeight(surface)
@@ -494,6 +500,7 @@ actor FrameCapture {
             "selection_reason": lastSelectionReason,
             "captured": ["width": capturedWidth, "height": capturedHeight],
             "frame_count": Int(frameCount),
+            "content_change_count": contentChanges.value,
             "size_changes": sizeChanges,
         ]
         if frameCount > 0 { object["last_frame_age_ms"] = ageMs }

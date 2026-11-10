@@ -14,6 +14,7 @@ import type { Socket } from "net";
 // importing the dependency keeps the proxy working regardless of runtime.
 import { WebSocket } from "ws";
 import { createAxStreamerCache } from "./ax";
+import { AX_AGENT_ENDPOINTS } from "./ax-agent-http";
 import { readCameraStatus } from "./camera-helper";
 import { getDeviceSession, closeDeviceSession, liveDeviceSessions, type HidSocket } from "./device-session";
 import {
@@ -873,6 +874,10 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
     case "/config": session.handleConfig(req, res); return true;
     case "/health": session.handleHealth(req, res); return true;
     case "/ax": session.handleAx(req, res); return true;
+    case "/ax/snapshot":
+    case "/ax/act":
+    case "/ax/settle":
+      void session.handleAxAgent(req, res, AX_AGENT_ENDPOINTS[endpoint]!); return true;
     case "/foreground": session.handleForeground(req, res); return true;
     case "/recording": void session.handleRecording(req, res, "status"); return true;
     case "/recording/start": void session.handleRecording(req, res, "start"); return true;

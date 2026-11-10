@@ -53,6 +53,8 @@ interface SimCaptureHandle {
   subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void | Promise<void>>;
   /** Absent in addons built before diagnostics existed. */
   diagnostics?(): Promise<string>;
+  /** Content-changed frame count (a lock read). Absent in older addons. */
+  contentChangeCount?(): number;
   snapshotJpeg(): Promise<Uint8Array | null>;
   /** Absent in addons built before screen recording existed. */
   startRecording?(path: string, codec: string, fps: number, rotation: number, bitrate: number): Promise<void>;
@@ -63,7 +65,8 @@ interface NativeAddon {
   SimHID: new (udid: string, duoHelper: string) => SimHIDHandle;
   /** maxBitrate: H.264 cap in bits/s, or null for the resolution-scaled default. */
   SimCapture: new (udid: string, maxBitrate: number | null) => SimCaptureHandle;
-  axDescribe(udid: string): Promise<string>;
+  /** discovery "agent": faster grid discovery for /ax/snapshot; omitted keeps /ax output. */
+  axDescribe(udid: string, discovery?: AxDiscovery): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
   setDeviceSet(path: string | null): void;
 }
@@ -401,6 +404,15 @@ export class NativeCapture {
   }
 
   /**
+   * Captured frames whose IOSurface content changed (idle re-emits excluded),
+   * or null with an addon that predates the counter. Cheap enough to poll:
+   * it reads one locked integer, unlike `diagnostics()`.
+   */
+  contentChangeCount(): number | null {
+    return this.handle.contentChangeCount ? this.handle.contentChangeCount() : null;
+  }
+
+  /**
    * Screen size with the first frame after subscribing and on every change. Encodes
    * nothing, so a session can track dimensions without paying for JPEG or
    * H.264 work while nobody is watching.
@@ -444,12 +456,21 @@ export class NativeCapture {
 }
 
 /**
+ * How the native bridge looks for elements its tree walk misses.
+ * "exhaustive" (default) is the `/ax` output the web UI overlay uses; "agent"
+ * skips hit-test probes inside wide childless controls away from the screen
+ * edges and strides over background (~2-4x faster) for the agent snapshot
+ * path. See Sources/SimNativeSupport/AccessibilityDiscovery.swift.
+ */
+export type AxDiscovery = "exhaustive" | "agent";
+
+/**
  * Async accessibility-tree dump for `udid`, as an axe-shaped JSON string (the
  * src/ax.ts normalizer consumes it unchanged). Runs native AX work off the JS
  * event loop. Rejects if the sim's AX service isn't reachable yet.
  */
-export function axDescribeAsync(udid: string): Promise<string> {
-  return load().axDescribe(udid);
+export function axDescribeAsync(udid: string, discovery: AxDiscovery = "exhaustive"): Promise<string> {
+  return discovery === "agent" ? load().axDescribe(udid, discovery) : load().axDescribe(udid);
 }
 
 /** Async frontmost-app probe — JSON string `{ bundleId, pid }` for the visible app. */

@@ -10,3 +10,5 @@ export const debugCli = createDebug("serve-sim:cli");
 export const debugHelper = createDebug("serve-sim:helper");
 export const debugState = createDebug("serve-sim:state");
 export const debugMw = createDebug("serve-sim:mw");
+/** Agent AX: settle phases (frame counter changes, AX reads, verdicts). */
+export const debugAx = createDebug("serve-sim:ax");
