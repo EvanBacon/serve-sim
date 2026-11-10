@@ -219,6 +219,29 @@ private func u32(_ v: Int) -> UInt32 {
         return try NodeTypedArray<UInt8>(for: buffer, count: jpeg.count)
     }
 
+    /// Downscaled JPEG of the latest frame for the opt-in rolling buffer:
+    /// `{ data, width, height, sourceWidth, sourceHeight }`, or null before
+    /// the first frame. `maxDimension` caps the long edge and `quality` is
+    /// the JPEG quality. TypeScript refuses values outside 64...1280 px and
+    /// 0.1...0.95 (ROLLING_BUFFER_LIMITS); the wider clamps here
+    /// (64...2048, 0.1...1) are only a safety net for direct callers.
+    @NodeMethod func thumbnailJpeg(_ maxDimension: Int, _ quality: Double) async throws -> NodeValueConvertible {
+        let maxDimension = min(max(maxDimension, 64), 2048)
+        let quality = min(max(quality.isFinite ? quality : 0.6, 0.1), 1)
+        guard let (source, size, jpeg) = try await engine.thumbnailJPEG(maxDimension: maxDimension, quality: quality) else {
+            return try NodeNull()
+        }
+        let buffer = try NodeArrayBuffer(capacity: jpeg.count)
+        _ = try buffer.withUnsafeMutableBytes { jpeg.copyBytes(to: $0) }
+        return try NodeObject([
+            "data": try NodeTypedArray<UInt8>(for: buffer, count: jpeg.count),
+            "width": size.width,
+            "height": size.height,
+            "sourceWidth": source.width,
+            "sourceHeight": source.height,
+        ])
+    }
+
     @NodeMethod func setPreferredScreenSize(_ width: Int, _ height: Int) async {
         await engine.setPreferredScreenSize(width: width, height: height)
     }

@@ -56,6 +56,8 @@ interface SimCaptureHandle {
   /** Content-changed frame count (a lock read). Absent in older addons. */
   contentChangeCount?(): number;
   snapshotJpeg(): Promise<Uint8Array | null>;
+  /** Downscaled JPEG for the rolling buffer. Absent in older addons. */
+  thumbnailJpeg?(maxDimension: number, quality: number): Promise<ThumbnailJpeg | null>;
   /** Absent in addons built before screen recording existed. */
   startRecording?(path: string, codec: string, fps: number, rotation: number, bitrate: number, index: boolean): Promise<void>;
   stopRecording?(): Promise<string>;
@@ -101,6 +103,16 @@ const CODEC_AVCC = 1;
 const CODEC_SIZE = 2;
 const FLAG_DESCRIPTION = 1 << 0;
 const FLAG_KEYFRAME = 1 << 1;
+
+/** A downscaled still of the current screen (`thumbnailJpeg`). */
+export type ThumbnailJpeg = {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  /** The captured framebuffer's size. */
+  sourceWidth: number;
+  sourceHeight: number;
+};
 
 export type MjpegFrame = {
   data: Uint8Array;
@@ -448,6 +460,21 @@ export class NativeCapture {
   /** JPEG of the latest frame, encoded on demand; null before the first frame. */
   snapshotJpeg(): Promise<Uint8Array | null> {
     return this.handle.snapshotJpeg();
+  }
+
+  /**
+   * JPEG of the latest frame downscaled to fit `maxDimension` on the long
+   * edge (for the opt-in rolling buffer); null before the first frame.
+   * Encodes on its own utility queue, only when called.
+   */
+  thumbnailJpeg(maxDimension: number, quality: number): Promise<ThumbnailJpeg | null> {
+    if (!this.handle.thumbnailJpeg) return Promise.reject(new Error("thumbnails unavailable in this native build; rebuild serve-sim (bun run build.ts)"));
+    return this.handle.thumbnailJpeg(maxDimension, quality);
+  }
+
+  /** False when the addon predates `thumbnailJpeg` (the rolling buffer). */
+  get supportsThumbnails(): boolean {
+    return typeof this.handle.thumbnailJpeg === "function";
   }
 
   /** False for addons built before screen recording existed. */

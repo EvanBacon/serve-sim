@@ -426,6 +426,20 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
     }
   });
 
+  test("rolling buffer routes need the token remotely and a same-origin Origin to start/stop", async () => {
+    for (const path of [`/helper/${DEVICE}/buffer`, `/helper/${DEVICE}/buffer/frame`, `/buffer?device=${DEVICE}`]) {
+      const helperPath = path.startsWith("/buffer") ? `/helper${path}` : path;
+      expect((await send(noToken.port, helperPath, { headers: PROXY })).status).toBe(403);
+      expect((await send(withToken.port, helperPath, { headers: PROXY })).status).toBe(401);
+    }
+    for (const action of ["start", "stop"]) {
+      const path = `/helper/${DEVICE}/buffer/${action}`;
+      expect((await send(noToken.port, path, { method: "POST", headers: PROXY })).status).toBe(403);
+      expect((await send(withToken.port, path, { method: "POST", headers: PROXY })).status).toBe(401);
+      expect((await send(withToken.port, path, { method: "POST", headers: { Origin: "http://evil.example" } })).status).toBe(403);
+    }
+  });
+
   test("AX agent routes (snapshot/settle/act) need the token remotely and a same-origin Origin to act", async () => {
     for (const path of [`/helper/${DEVICE}/ax/snapshot`, `/helper/${DEVICE}/ax/settle`]) {
       expect((await send(noToken.port, path, { headers: PROXY })).status).toBe(403);

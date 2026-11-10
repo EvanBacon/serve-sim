@@ -127,6 +127,9 @@ serve-sim record diff <mp4> --from <s> --to <s>
                                       Highlight PNG + {changedPixels, bbox} between two times
 serve-sim record changes <mp4> [--from <s>] [--to <s>]
                                       Changed frames + nearby input, from the sidecar only
+serve-sim buffer [status|start|stop|list|frame|dump] [-d udid]
+                                      Opt-in rolling buffer of recent small frames
+                                      (off by default; see "Rolling buffer" below)
 serve-sim ax [-d udid]                Dump the accessibility tree as JSON
 serve-sim ax --refs [--all] [--text]  Compact snapshot with element refs (@e1…)
 serve-sim tap @e2 [--settle] [--timeout <ms>]
@@ -318,6 +321,41 @@ serve-sim record changes rec.mp4 --from 2.2 --to 2.4
 - `frame` and `diff` pick the sample whose `pts` is nearest each time. They use the sidecar's frame times (and report `changed`) when it exists. Without one, or when it is `truncated`, they read the MP4's own sample times, and `i` counts the MP4's samples. A time outside `0…duration` is an error. They decode the middle of the chosen sample and check the decoder returned that sample (`decodedPts` is its MP4 time, which can differ from a sidecar `pts` by the MP4's 1/600 s rounding); a mismatch is an error rather than a mislabelled frame.
 - `diff` counts a pixel as changed when a color channel differs by more than `--threshold` (default 40, above the H.264 noise between identical frames). `threshold` echoes the value used and `maxDelta` is the largest channel difference anywhere, so when `changedPixels` is 0 but `maxDelta` is close to `threshold`, retry with a `--threshold` below `maxDelta`. `--from` after `--to` is an error. `bbox` is in pixels of the displayed frame and is `null` when nothing changed.
 - `changes` keeps an event when a changed frame in the window is within `--near` seconds (default 0.5) of it. Each kept event gets `nextChange`, the first changed frame at or after it. Events in the window with no changed frame that near (e.g. a tap the app ignored) are listed in `unmatchedEvents`. `complete` is false when the sidecar has no footer (cut short), `truncated` is true when it hit its frame cap, and `eventsDropped` counts input it didn't record; each also prints a warning on stderr. Without a sidecar `changes` exits 1: re-record without `--no-index`.
+
+### Rolling buffer (what just happened?)
+
+An optional rolling buffer keeps the last few seconds of the screen as small JPEG stills, so an agent can look back at what a tap or a crash did without having started `serve-sim record`. It is **off by default**. While off, nothing extra runs: no timer, no native calls, no event-log subscription, and the stream and recorder are unchanged.
+
+```bash
+serve-sim buffer start               # this device, until stopped (or the server exits)
+serve-sim --buffer 30                # or: every device the server serves, from startup (also SERVE_SIM_BUFFER=30 / on)
+serve-sim tap 0.5 0.35
+serve-sim buffer list --since 5      # changed frames + input, as seconds before now
+#   -2.09s  tap  Tap 0.5,0.35  → frame 89 after 0.25s
+#   -2.09s  frame 88   294x640  26.3 KB
+#   -1.84s  frame 89   294x640  25.1 KB
+serve-sim buffer frame --ago 2 -o before.jpg    # the frame on screen 2 s ago (or --id 89; piped: stdout)
+serve-sim buffer dump                # every frame + buffer.json into a new temp dir (or -o <empty dir>); frames evicted mid-dump are marked missing
+serve-sim buffer stop                # turn it off and free the frames
+```
+
+`buffer start` takes `--seconds` (window, 1-60, default 20), `--fps` (1-10, default 4), `--size` (long edge in px, 64-1280, default 640), `--quality` (JPEG, 0.1-0.95, default 0.6) and `--max-mb` (memory cap, 1-64 MiB, default 24). Out-of-range values are refused, not clamped. A second `start` with the same options is a no-op; with other options it is refused until `buffer stop`. `buffer` alone prints the status as JSON. `--buffer` on the server applies the defaults with that window to every device it serves (pass a device as `serve-sim --buffer=20 <device>`, since `--buffer <device>` reads the device as the seconds); if a server for the device is already running, `--buffer` starts the buffer on it, or warns when it can't.
+
+How it samples: at each tick the server reads the capture's content-change counter (the one `settle` uses). Only when the screen changed does it copy the current frame, downscale it and encode a JPEG, on a low-priority queue separate from the stream encoders. An unchanged tick stores a repeat entry pointing at the previous frame (no bytes), so timestamps stay on a steady grid and events can still be placed. A snapshot identical to the previous frame is stored as a repeat too. Each sample is `{t, at, frame, changed}`, with `t` in seconds from the oldest sample in the view.
+
+Memory is bounded three ways: samples older than the window are dropped, frame bytes are capped at `--max-mb` (oldest frames go first, the newest always stays), and samples and events have fixed caps. A frame is freed as soon as no sample shows it. On an iPhone 17 Pro (1206x2622) a 640 px frame is 294x640 and was 23-29 KB on Settings. If the screen changes on every tick, that is about 2 MB for the default 20 s at 4 fps, 6 MB for 30 s at 8 fps, and 16 MB for the maximum 60 s at 10 fps. Photo-heavy screens are larger, and there the cap applies. A static screen stores one frame.
+
+Overhead measured on that device while scrolling Settings continuously with an H.264 viewer attached: 8.7-9.1% of one core for the server with the buffer off, 9.6-10.1% with it on (defaults, a new frame on every tick), so about one percentage point. A static screen showed no measurable difference (2.5% vs 2.6%).
+
+Events: while the buffer is on it collects this device's HID input from the event log (the same events and shapes as the recording index). Each event in `list --json` / `buffer.json` carries `frame` (on screen when the event arrived) and `nextChange` (`{frame, t, after}`, the first changed frame after it, or after a drag's last point). Times are server wall clock, so no clock join is needed.
+
+HTTP, under the same device helper routes and auth as `/recording` (`--auth-token` remotely; start/stop need a same-origin `Origin` from browsers):
+
+- `GET …/helper/<udid>/buffer[?since=<s>][&events=0]`: `{enabled:false}`, or `{enabled, options, startedAt, stats, origin, now, samples, frames, events}`. `?stats=1` returns only `{enabled, options, startedAt, stats}`.
+- `POST …/buffer/start?seconds=&fps=&size=&quality=&maxMB=` and `POST …/buffer/stop`.
+- `GET …/buffer/frame[?id=<n> | ?ago=<s>]`: one `image/jpeg`, the latest by default, with `X-Serve-Sim-Buffer-Frame: {id, at, width, height, sourceWidth, sourceHeight}`. `409 buffer_off` when off, `404 frame_not_found` when it isn't held.
+
+Limits: sampling at 4 fps can miss a state shown for less than a tick (record for frame-exact history). Frames are the raw framebuffer orientation, like the stream before rotation. When serve-sim is embedded as middleware, `SERVE_SIM_BUFFER` in the dev server's environment starts the buffer when a device's session opens (its first viewer or command), not at startup.
 
 ### Accessibility refs for agents
 
