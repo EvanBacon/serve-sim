@@ -150,6 +150,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     lastActiveAt,
     idleMs: opts.idleMs,
     warm: pool.filter((w) => w.ready).length,
+    warming: pool.filter((w) => !w.ready).length,
     busy,
     served,
     socket: opts.socket,

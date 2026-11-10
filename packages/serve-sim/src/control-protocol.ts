@@ -246,6 +246,7 @@ export interface ControlStatus {
   lastActiveAt: number;
   idleMs: number;
   warm: number;
+  warming: number;
   busy: number;
   served: number;
   socket: string;

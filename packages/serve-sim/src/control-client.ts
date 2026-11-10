@@ -250,7 +250,7 @@ async function waitFor<T>(probe: () => Promise<T | null>, timeoutMs: number): Pr
 function formatStatus(s: ControlStatus): string {
   const idleLeft = Math.max(0, s.idleMs - (Date.now() - s.lastActiveAt));
   return (
-    `control process running (pid ${s.pid}): ${s.warm} warm, ${s.busy} busy, ` +
+    `control process running (pid ${s.pid}): ${s.warm} warm, ${s.warming} warming, ${s.busy} busy, ` +
     `${s.served} served; idle exit in ${Math.ceil(idleLeft / 1000)}s\n  socket ${s.socket}`
   );
 }
