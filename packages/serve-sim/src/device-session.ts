@@ -71,6 +71,12 @@ import {
   updateEventLogEvent,
   type EventLogEntry,
 } from "./event-log";
+import {
+  RollingBufferSampler,
+  parseRollingBufferEnv,
+  parseRollingBufferQuery,
+  type RollingBufferOptions,
+} from "./rolling-buffer";
 
 /**
  * Minimal WebSocket surface the HID input channel needs. Satisfied by both the
@@ -223,7 +229,7 @@ async function writeAndDrain(
 type CaptureTransport = Pick<
   NativeCapture,
   "start" | "stop" | "subscribeMjpeg" | "subscribeAvcc" | "subscribeSize" | "snapshotJpeg" | "setPreferredScreenSize"
-> & Partial<Pick<NativeCapture, "diagnostics" | "contentChangeCount" | "startRecording" | "stopRecording" | "supportsRecording">>;
+> & Partial<Pick<NativeCapture, "diagnostics" | "contentChangeCount" | "startRecording" | "stopRecording" | "supportsRecording" | "thumbnailJpeg" | "supportsThumbnails">>;
 
 export type StreamEndpoint = "mjpeg" | "avcc" | "3d";
 
@@ -288,6 +294,11 @@ export interface DeviceSessionDependencies {
   subscribeEventLog?: (subscriber: (entry: EventLogEntry) => void) => () => void;
   /** Stream the finished MP4 to the client; defaults to `createReadStream`. */
   openRecordingFile?: (path: string) => Readable;
+  /**
+   * Rolling buffer started with the session: options, or null for off.
+   * Defaults to `SERVE_SIM_BUFFER` (`serve-sim --buffer`), which is unset/off.
+   */
+  rollingBuffer?: RollingBufferOptions | null;
 }
 
 type ActiveRecording = {
@@ -374,6 +385,8 @@ export class DeviceSession {
   private rendererFailureEvent?: { id: number; key: string; count: number };
   /** Ref session for `/ax/snapshot|act|settle`; created on first use. */
   private axAgent?: AxAgent;
+  /** Opt-in rolling frame buffer; created only when first started. */
+  private rollingBuffer?: RollingBufferSampler;
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.hid = dependencies?.hid ?? new NativeHid(udid);
@@ -419,6 +432,10 @@ export class DeviceSession {
       }
       this.unsubscribeSize = unsubscribeSize;
       this.phase = "running";
+      const bufferDefault = this.dependencies?.rollingBuffer !== undefined
+        ? this.dependencies.rollingBuffer
+        : parseRollingBufferEnv();
+      if (bufferDefault && this.supportsBuffer()) this.startBuffer(bufferDefault);
       if (await this.hid.isFoldable?.() && !this.isStopped()) {
         const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
         if (this.isStopped()) {
@@ -475,6 +492,7 @@ export class DeviceSession {
       this.runCleanup("size unsubscribe", this.unsubscribeSize);
     }
     this.hidSockets.clear();
+    this.rollingBuffer?.stop();
     // Capture stop cancels the native recorder; drop the partial temp file.
     // A stop in flight owns its file (it's streaming it or cleaning it up).
     if (this.recording) {
@@ -780,6 +798,148 @@ export class DeviceSession {
         message: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // ── Rolling buffer ───────────────────────────────────────────────────────
+
+  private supportsBuffer(): boolean {
+    return typeof this.capture.thumbnailJpeg === "function" && this.capture.supportsThumbnails !== false;
+  }
+
+  private startBuffer(options: RollingBufferOptions): RollingBufferSampler {
+    this.rollingBuffer ??= new RollingBufferSampler({
+      device: this.udid,
+      contentChangeCount: () => {
+        if (!this.capture.contentChangeCount) return null;
+        const count = this.capture.contentChangeCount();
+        return typeof count === "number" ? count : null;
+      },
+      thumbnail: (maxDimension, quality) => this.capture.thumbnailJpeg!(maxDimension, quality),
+      subscribeEventLog: this.dependencies?.subscribeEventLog ?? subscribeEventLog,
+    });
+    this.rollingBuffer.start(options);
+    return this.rollingBuffer;
+  }
+
+  private bufferState(): { enabled: false } | { enabled: true; options: RollingBufferOptions; startedAt: string } {
+    const sampler = this.rollingBuffer;
+    const store = sampler?.store;
+    if (!sampler || !store) return { enabled: false };
+    return { enabled: true, options: store.options, startedAt: new Date(sampler.startedAt!).toISOString() };
+  }
+
+  /**
+   * `GET /buffer` (status + recent frames/events), `POST /buffer/start`,
+   * `POST /buffer/stop`, `GET /buffer/frame` (one JPEG). See rolling-buffer.ts.
+   */
+  async handleBuffer(req: IncomingMessage, res: ServerResponse, action: "status" | "start" | "stop" | "frame"): Promise<void> {
+    const method = (req.method ?? "GET").toUpperCase();
+    const wantsPost = action === "start" || action === "stop";
+    if (wantsPost ? method !== "POST" : method !== "GET" && method !== "HEAD") {
+      res.setHeader("Allow", wantsPost ? "POST" : "GET, HEAD");
+      this.sendJson(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const params = new URL(req.url ?? "", "http://x").searchParams;
+    try {
+      if (action === "start") return await this.startBufferRequest(params, res);
+      if (action === "stop") {
+        this.rollingBuffer?.stop();
+        this.sendJson(res, 200, { enabled: false, stopped: true });
+        return;
+      }
+      if (action === "frame") return this.sendBufferFrame(params, res);
+      return this.sendBufferView(params, res);
+    } catch (error) {
+      if (res.headersSent || res.writableEnded) { res.destroy(); return; }
+      this.sendJson(res, 500, { error: "buffer_failed", message: redactHome(error instanceof Error ? error.message : String(error)) });
+    }
+  }
+
+  private async startBufferRequest(params: URLSearchParams, res: ServerResponse): Promise<void> {
+    if (!this.supportsBuffer()) {
+      this.sendJson(res, 501, { error: "buffer_unsupported", message: "This native build has no thumbnails; rebuild serve-sim" });
+      return;
+    }
+    const options = parseRollingBufferQuery(params);
+    if ("error" in options) {
+      this.sendJson(res, 400, { error: "invalid_buffer_options", message: options.error });
+      return;
+    }
+    const state = this.bufferState();
+    if (state.enabled) {
+      const same = (Object.keys(options) as Array<keyof RollingBufferOptions>).every((k) => options[k] === state.options[k]);
+      if (same) this.sendJson(res, 200, { ...state, alreadyRunning: true });
+      else this.sendJson(res, 409, { error: "buffer_running", message: "The buffer is already running with other options; stop it first", ...state });
+      return;
+    }
+    await this.start();
+    if (this.isStopped()) {
+      this.sendJson(res, 409, { error: "session_closed", message: "The device session closed" });
+      return;
+    }
+    // start() may have auto-started it from the environment meanwhile.
+    if (!this.bufferState().enabled) this.startBuffer(options);
+    this.sendJson(res, 200, this.bufferState());
+  }
+
+  private sendBufferView(params: URLSearchParams, res: ServerResponse): void {
+    const store = this.rollingBuffer?.store;
+    const sinceRaw = params.get("since");
+    const since = sinceRaw == null ? undefined : Number(sinceRaw);
+    if (since !== undefined && (sinceRaw!.trim() === "" || !Number.isFinite(since) || since < 0)) {
+      this.sendJson(res, 400, { error: "invalid_since", message: "since must be a number of seconds >= 0" });
+      return;
+    }
+    if (!store) {
+      this.sendJson(res, 200, { enabled: false });
+      return;
+    }
+    const now = Date.now();
+    const view = store.view(now, since === undefined ? {} : { sinceMs: now - since * 1000 });
+    const { events, ...rest } = view;
+    this.sendJson(res, 200, {
+      ...this.bufferState(),
+      stats: { ...store.stats(), maxBytes: store.options.maxBytes },
+      ...rest,
+      ...(params.get("events") === "0" ? {} : { events }),
+    });
+  }
+
+  private sendBufferFrame(params: URLSearchParams, res: ServerResponse): void {
+    const idRaw = params.get("id");
+    const agoRaw = params.get("ago");
+    const id = idRaw == null ? undefined : Number(idRaw);
+    const ago = agoRaw == null ? undefined : Number(agoRaw);
+    if (
+      (id !== undefined && ago !== undefined) ||
+      (id !== undefined && (!Number.isInteger(id) || id < 1)) ||
+      (ago !== undefined && (agoRaw!.trim() === "" || !Number.isFinite(ago) || ago < 0))
+    ) {
+      this.sendJson(res, 400, { error: "invalid_frame_query", message: "Pass id=<frame id> or ago=<seconds >= 0>, not both" });
+      return;
+    }
+    const store = this.rollingBuffer?.store;
+    if (!store) {
+      this.sendJson(res, 409, { error: "buffer_off", message: "The rolling buffer is off; start it with `serve-sim buffer start`" });
+      return;
+    }
+    const frame = id !== undefined ? store.frame(id) : ago !== undefined ? store.frameAt(Date.now() - ago * 1000) : store.latest();
+    if (!frame) {
+      this.sendJson(res, 404, { error: "frame_not_found", message: id !== undefined ? `No frame ${id} in the buffer` : "No frame in the buffer at that time" });
+      return;
+    }
+    const header = JSON.stringify({
+      id: frame.id, at: new Date(frame.atMs).toISOString(), width: frame.width, height: frame.height,
+      sourceWidth: frame.sourceWidth, sourceHeight: frame.sourceHeight,
+    });
+    res.writeHead(200, {
+      "Content-Type": "image/jpeg",
+      "Content-Length": String(frame.data.length),
+      "Cache-Control": "no-store",
+      "X-Serve-Sim-Buffer-Frame": header,
+    });
+    res.end(frame.data);
   }
 
   // ── Screen recording ─────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ import { createAxStreamerCache } from "./ax";
 import { AX_AGENT_ENDPOINTS } from "./ax-agent-http";
 import { readCameraStatus } from "./camera-helper";
 import { getDeviceSession, closeDeviceSession, liveDeviceSessions, type HidSocket } from "./device-session";
+import { parseRollingBufferEnv } from "./rolling-buffer";
 import {
   buildDiagnosticsBundle,
   collectDeviceDiagnostics,
@@ -549,6 +550,7 @@ function helperProxyTarget(rawUrl: string, prefix: string): { device: string | n
   const segments = rawSuffix.replace(/^\/+/, "").split("/").filter(Boolean);
   const directHelperEndpoints = new Set([
     "ax",
+    "buffer",
     "config",
     "foreground",
     "health",
@@ -883,6 +885,10 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
     case "/recording/start": void session.handleRecording(req, res, "start"); return true;
     case "/recording/stop": void session.handleRecording(req, res, "stop"); return true;
     case "/recording/index": void session.handleRecording(req, res, "index"); return true;
+    case "/buffer": void session.handleBuffer(req, res, "status"); return true;
+    case "/buffer/start": void session.handleBuffer(req, res, "start"); return true;
+    case "/buffer/stop": void session.handleBuffer(req, res, "stop"); return true;
+    case "/buffer/frame": void session.handleBuffer(req, res, "frame"); return true;
     default: return false;
   }
 }
@@ -930,6 +936,11 @@ export async function startDeviceInProcess(
     ...(record.authTokenSha256 ? { authTokenSha256: record.authTokenSha256 } : {}),
     ...(record.allowExec ? { allowExec: true } : {}),
   });
+  // A server-wide rolling buffer (`--buffer`) starts with the session; open
+  // it now rather than at the first viewer or command.
+  if (parseRollingBufferEnv(process.env, () => {})) {
+    try { getDeviceSession(udid); } catch {}
+  }
   return null;
 }
 
