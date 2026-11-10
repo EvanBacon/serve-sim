@@ -76,14 +76,14 @@ async function flush(ms = 5) {
 
 describe("useScrubTimeline", () => {
   let hook: ReturnType<typeof useScrubTimeline>;
-  function Harness(props: { device: string; open: boolean; saved?: SavedRecording | null; pollMs: number }) {
+  function Harness(props: { device: string; open: boolean; saved?: SavedRecording | null; onSavedConsumed?: () => void; pollMs: number }) {
     hook = useScrubTimeline(props);
     return null;
   }
-  async function render(props: { device?: string; open: boolean; saved?: SavedRecording | null; pollMs?: number }) {
+  async function render(props: { device?: string; open: boolean; saved?: SavedRecording | null; onSavedConsumed?: () => void; pollMs?: number }) {
     await act(async () => {
       root ??= createRoot(dom.document.createElement("div") as unknown as HTMLElement);
-      root.render(<Harness device={props.device ?? "A"} open={props.open} saved={props.saved} pollMs={props.pollMs ?? 60_000} />);
+      root.render(<Harness device={props.device ?? "A"} open={props.open} saved={props.saved} onSavedConsumed={props.onSavedConsumed} pollMs={props.pollMs ?? 60_000} />);
     });
     await flush();
   }
@@ -195,6 +195,71 @@ describe("useScrubTimeline", () => {
     expect(hook.sourceKind).toBe("buffer");
   });
 
+  test("closed, a saved recording waits (no index fetch) and loads on reopen, once", async () => {
+    handler = ({ path }) => path.includes("/recording/index")
+      ? new Response(SIDECAR, { status: 200 })
+      : json({ enabled: false });
+    const saved: SavedRecording = { device: "A", token: "tok", fileName: "rec.mp4", blob: new Blob(["x"], { type: "video/mp4" }) };
+    let consumed = 0;
+    const onSavedConsumed = () => { consumed++; };
+    await render({ open: false, saved, onSavedConsumed, pollMs: 10 });
+    await flush(30);
+    expect(calls).toEqual([]);
+    expect(hook.recording).toBeNull();
+    expect(consumed).toBe(0);
+
+    await render({ open: true, saved, onSavedConsumed });
+    const indexFetches = () => calls.filter((c) => c.path.includes("/recording/index")).length;
+    expect(indexFetches()).toBe(1);
+    expect(hook.recording?.fileName).toBe("rec.mp4");
+    expect(consumed).toBe(1);
+
+    // Same token again (owner didn't clear it, or hide/show): not reloaded.
+    await act(async () => { hook.closeRecording(); });
+    await render({ open: false, saved, onSavedConsumed });
+    await render({ open: true, saved, onSavedConsumed });
+    expect(indexFetches()).toBe(1);
+    expect(hook.recording).toBeNull();
+    expect(consumed).toBe(1);
+  });
+
+  test("an expired index (404) is consumed without loading", async () => {
+    handler = ({ path }) => path.includes("/recording/index")
+      ? json({ error: "not_found" }, 404)
+      : json({ enabled: false });
+    const saved: SavedRecording = { device: "A", token: "old", fileName: "rec.mp4", blob: new Blob(["x"]) };
+    let consumed = 0;
+    await render({ open: true, saved, onSavedConsumed: () => { consumed++; } });
+    expect(consumed).toBe(1);
+    expect(hook.recording).toBeNull();
+    expect(hook.sourceKind).toBe("buffer");
+  });
+
+  test("buffer polls never overlap: the next read waits for the previous answer", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    handler = async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      inFlight--;
+      return json(BUFFER_VIEW);
+    };
+    await render({ open: true, pollMs: 2 });
+    await flush(120);
+    expect(calls.length).toBeGreaterThan(1);
+    expect(maxInFlight).toBe(1);
+  });
+
+  test("an unavailable buffer backs off instead of polling every interval", async () => {
+    handler = () => json({ error: "not_found" }, 404);
+    await render({ open: true, pollMs: 5 });
+    await flush(120);
+    expect(hook.bufferStatus).toBe("unavailable");
+    // A fixed 5 ms interval would be ~24 reads; doubling gives ~5.
+    expect(calls.length).toBeLessThanOrEqual(6);
+  });
+
   test("a saved recording for another device is ignored", async () => {
     const saved: SavedRecording = { device: "B", token: "tok", fileName: "rec.mp4", blob: new Blob(["x"]) };
     await render({ open: true, saved });
@@ -223,6 +288,37 @@ describe("useScrubTimeline", () => {
     });
     expect(ok).toBe(false);
     expect(hook.recording).toBeNull();
+  });
+});
+
+describe("createBufferFrameLoader", () => {
+  test("caches a fetch whose frame was scrubbed past, and caps concurrent fetches", async () => {
+    const { createBufferFrameLoader } = await import("../client/hooks/use-scrub-timeline");
+    let inFlight = 0;
+    let maxInFlight = 0;
+    handler = async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight--;
+      return new Response(new Uint8Array([1]), { status: 200, headers: { "content-type": "image/jpeg" } });
+    };
+    const loader = createBufferFrameLoader({ limit: 2 });
+    // Drag over frames 1..6; only the last stays "wanted".
+    const results = [1, 2, 3, 4, 5, 6].map((id) =>
+      loader.load(`A:${id}`, `/f?id=${id}`, () => id <= 2 || id === 6).then((u) => u, () => null));
+    const urls = await Promise.all(results);
+    expect(maxInFlight).toBe(2);
+    // 1 and 2 started immediately; 3..5 were dropped before starting; 6 ran.
+    expect(calls.map((c) => c.path)).toEqual(["/f?id=1", "/f?id=2", "/f?id=6"]);
+    expect(urls[0]).toStartWith("blob:");
+    expect(urls[2]).toBeNull();
+    // A superseded-but-finished fetch is cached: no refetch on the way back.
+    expect(loader.peek("A:1")).toBe(urls[0]!);
+    await loader.load("A:1", "/f?id=1", () => true);
+    expect(calls.length).toBe(3);
+    loader.dispose();
+    expect(loader.peek("A:1")).toBeUndefined();
   });
 });
 

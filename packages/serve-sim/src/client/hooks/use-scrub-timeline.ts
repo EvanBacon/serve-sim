@@ -8,7 +8,7 @@ import {
   timelineFromRecordingIndex,
   type TimelineSource,
 } from "../utils/scrub-timeline";
-import { fetchRecordingIndexText, type SavedRecording } from "./use-screen-recording";
+import { fetchRecordingIndexText, RecordingIndexFetchError, type SavedRecording } from "./use-screen-recording";
 
 /** A finished recording loaded into the timeline: its index + a playable URL. */
 export type LoadedRecording = { source: TimelineSource; videoUrl: string; fileName: string };
@@ -20,6 +20,8 @@ export type TimelineSourceKind = "recording" | "buffer";
 
 /** How often the open timeline re-reads the buffer while following live. */
 const BUFFER_POLL_MS = 1_000;
+/** Slowest re-read while the buffer is unavailable (old server, errors). */
+const BUFFER_POLL_MAX_MS = 30_000;
 
 function bufferEndpoint(device: string, action?: "start" | "frame", query = ""): string {
   return simEndpoint(`helper/${encodeURIComponent(device)}/buffer${action ? `/${action}` : ""}${query}`);
@@ -49,12 +51,15 @@ export function useScrubTimeline({
   device,
   open,
   saved,
+  onSavedConsumed,
   pollMs = BUFFER_POLL_MS,
 }: {
   device: string | null | undefined;
   open: boolean;
-  /** The latest indexed recording the toolbar saved; loaded when it changes. */
+  /** The latest indexed recording the toolbar saved; loaded once per token, while open. */
   saved?: SavedRecording | null;
+  /** Called once `saved` has been tried (loaded or failed), so its blob can be released. */
+  onSavedConsumed?: () => void;
   pollMs?: number;
 }) {
   const [recording, setRecordingState] = useState<LoadedRecording | null>(null);
@@ -101,34 +106,48 @@ export function useScrubTimeline({
     setPlaying(false);
   }, [open]);
 
-  // Follow the buffer while open and live.
+  // Follow the buffer while open and live. Each read is scheduled after the
+  // previous one answers (never overlapping, so a slow response can't land
+  // after a newer one), and an unavailable buffer backs off to
+  // BUFFER_POLL_MAX_MS instead of being asked every second.
   useEffect(() => {
     if (!open || !device || sourceKind !== "buffer" || scrubbing) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = pollMs;
     const load = async () => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      try {
-        const res = await fetch(bufferEndpoint(device));
-        if (cancelled) return;
-        if (!res.ok) { setBufferStatus("unavailable"); return; }
-        const body = await res.json() as { enabled?: boolean } & Parameters<typeof timelineFromBufferView>[0];
-        if (cancelled) return;
-        if (!body.enabled) {
-          setBufferStatus("off");
-          setBufferSource(null);
-          return;
+      let available = true;
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") {
+        try {
+          const res = await fetch(bufferEndpoint(device));
+          if (cancelled) return;
+          if (!res.ok) {
+            available = false;
+            setBufferStatus("unavailable");
+          } else {
+            const body = await res.json() as { enabled?: boolean } & Parameters<typeof timelineFromBufferView>[0];
+            if (cancelled) return;
+            if (!body.enabled) {
+              setBufferStatus("off");
+              setBufferSource(null);
+            } else {
+              setBufferStatus("on");
+              setBufferSource(timelineFromBufferView(body));
+            }
+          }
+        } catch {
+          if (cancelled) return;
+          available = false;
+          setBufferStatus("unavailable");
         }
-        setBufferStatus("on");
-        setBufferSource(timelineFromBufferView(body));
-      } catch {
-        if (!cancelled) setBufferStatus("unavailable");
       }
+      delay = available ? pollMs : Math.min(Math.max(delay, pollMs) * 2, Math.max(pollMs, BUFFER_POLL_MAX_MS));
+      timer = setTimeout(() => { void load(); }, delay);
     };
     void load();
-    const timer = setInterval(() => { void load(); }, pollMs);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, [open, device, sourceKind, scrubbing, pollMs]);
 
@@ -152,20 +171,37 @@ export function useScrubTimeline({
   }, [setRecording]);
 
   // A recording the toolbar just saved: fetch its sidecar from the server.
+  // Only while open (reopening picks it up, since `saved` stays set), and
+  // once per token: the token is marked handled only after an attempt
+  // finishes, so a StrictMode re-run still loads it. `onSavedConsumed` lets
+  // the owner drop its reference to the MP4 blob.
+  const handledTokenRef = useRef<string | null>(null);
+  const onSavedConsumedRef = useRef(onSavedConsumed);
+  onSavedConsumedRef.current = onSavedConsumed;
   useEffect(() => {
-    if (!saved || saved.device !== device) return;
+    if (!open || !saved || saved.device !== device || handledTokenRef.current === saved.token) return;
     let cancelled = false;
+    const finish = () => {
+      handledTokenRef.current = saved.token;
+      onSavedConsumedRef.current?.();
+    };
     fetchRecordingIndexText(saved)
       .then((text) => {
-        if (!cancelled && loadRecording(text, saved.blob, saved.fileName)) {
-          toast.message(`${saved.fileName} is on the timeline`);
-        }
+        if (cancelled) return;
+        finish();
+        if (loadRecording(text, saved.blob, saved.fileName)) toast.message(`${saved.fileName} is on the timeline`);
       })
       .catch((error) => {
-        if (!cancelled) toast.error(`Could not load the recording index: ${error instanceof Error ? error.message : String(error)}`);
+        if (cancelled) return;
+        finish();
+        if (error instanceof RecordingIndexFetchError && error.status === 404) {
+          toast.message(`${saved.fileName} was saved; its timeline index has expired on the server. Open the .mp4 and .index.jsonl to scrub it.`);
+        } else {
+          toast.error(`Could not load the recording index: ${error instanceof Error ? error.message : String(error)}`);
+        }
       });
     return () => { cancelled = true; };
-  }, [saved, device, loadRecording]);
+  }, [open, saved, device, loadRecording]);
 
   /** An MP4 + its `.index.jsonl` picked from disk (e.g. from `serve-sim record`). */
   const openFiles = useCallback(async (files: Iterable<File>): Promise<boolean> => {
@@ -282,56 +318,141 @@ export function useScrubTimeline({
 }
 
 const FRAME_CACHE_LIMIT = 120;
+/** Buffer JPEGs fetched at once while dragging; later requests queue. */
+const FRAME_FETCH_LIMIT = 3;
 
 /**
- * Blob URL of one buffer JPEG (`GET /buffer/frame?id=`). Frame ids never
- * change content, so fetched frames are cached (LRU) for back-and-forth
- * scrubbing. Keeps the last good URL while the next one loads, and reports
- * `missing` when the buffer already evicted the frame.
+ * Fetches buffer JPEGs into an LRU of blob URLs. Frame ids never change
+ * content, so a fetch whose frame was scrubbed past is still cached (not
+ * thrown away). At most `limit` run at once; a queued request whose caller
+ * gave up before it started is dropped without fetching.
+ * @lintignore Exported for tests.
  */
-export function useBufferFrameUrl(device: string | null | undefined, frameId: number | null) {
-  const cacheRef = useRef(new Map<string, string>());
-  const [shown, setShown] = useState<{ url: string; frame: number } | null>(null);
-  const [missing, setMissing] = useState(false);
+export function createBufferFrameLoader({ limit = FRAME_FETCH_LIMIT, cacheLimit = FRAME_CACHE_LIMIT } = {}) {
+  const cache = new Map<string, string>();
+  const inflight = new Map<string, Promise<string>>();
+  const queue: Array<{ start: () => void; wanted: () => boolean; drop: () => void }> = [];
+  let running = 0;
+  let disposed = false;
 
-  useEffect(() => {
-    const cache = cacheRef.current;
-    return () => {
+  const pump = () => {
+    while (running < limit && queue.length > 0) {
+      const next = queue.shift()!;
+      if (next.wanted()) next.start();
+      else next.drop();
+    }
+  };
+  const store = (key: string, url: string) => {
+    cache.set(key, url);
+    while (cache.size > cacheLimit) {
+      const [oldKey, oldUrl] = cache.entries().next().value!;
+      cache.delete(oldKey);
+      URL.revokeObjectURL(oldUrl);
+    }
+  };
+
+  return {
+    /** Cached URL (marked most recent), if any. */
+    peek(key: string): string | undefined {
+      const hit = cache.get(key);
+      if (hit) {
+        cache.delete(key);
+        cache.set(key, hit);
+      }
+      return hit;
+    },
+    /** Blob URL for `key`; `wanted` is checked again before a queued fetch starts. */
+    load(key: string, url: string, wanted: () => boolean): Promise<string> {
+      const hit = this.peek(key);
+      if (hit) return Promise.resolve(hit);
+      const pending = inflight.get(key);
+      if (pending) return pending;
+      const promise = new Promise<string>((resolve, reject) => {
+        queue.push({
+          wanted,
+          drop: () => {
+            inflight.delete(key);
+            reject(new Error("superseded"));
+          },
+          start: () => {
+            running++;
+            fetch(url)
+              .then(async (res) => {
+                if (!res.ok) throw new Error(String(res.status));
+                const blobUrl = URL.createObjectURL(await res.blob());
+                if (disposed) {
+                  URL.revokeObjectURL(blobUrl);
+                  throw new Error("disposed");
+                }
+                store(key, blobUrl);
+                return blobUrl;
+              })
+              .then(resolve, reject)
+              .finally(() => {
+                inflight.delete(key);
+                running--;
+                pump();
+              });
+          },
+        });
+      });
+      inflight.set(key, promise);
+      pump();
+      return promise;
+    },
+    dispose() {
+      disposed = true;
+      for (const entry of queue.splice(0)) entry.drop();
       for (const url of cache.values()) URL.revokeObjectURL(url);
       cache.clear();
+    },
+  };
+}
+
+/**
+ * Blob URL of one buffer JPEG (`GET /buffer/frame?id=`), via a per-device
+ * {@link createBufferFrameLoader}. Keeps the last good URL while the next
+ * one loads, and reports `missing` when the buffer already evicted the frame.
+ */
+export function useBufferFrameUrl(device: string | null | undefined, frameId: number | null) {
+  const [loader, setLoader] = useState<ReturnType<typeof createBufferFrameLoader> | null>(null);
+  const [shown, setShown] = useState<{ url: string; frame: number } | null>(null);
+  const [missing, setMissing] = useState(false);
+  const wantedRef = useRef(frameId);
+  wantedRef.current = frameId;
+
+  useEffect(() => {
+    if (!device) return;
+    const next = createBufferFrameLoader();
+    setLoader(next);
+    return () => {
+      next.dispose();
+      setShown(null);
     };
   }, [device]);
 
   useEffect(() => {
-    if (!device || frameId === null) return;
+    if (!device || !loader || frameId === null) return;
     const key = `${device}:${frameId}`;
-    const cache = cacheRef.current;
-    const hit = cache.get(key);
+    const hit = loader.peek(key);
     if (hit) {
-      cache.delete(key);
-      cache.set(key, hit);
       setShown({ url: hit, frame: frameId });
       setMissing(false);
       return;
     }
     let cancelled = false;
-    fetch(bufferEndpoint(device, "frame", `?id=${frameId}`))
-      .then(async (res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        const url = URL.createObjectURL(await res.blob());
-        if (cancelled) { URL.revokeObjectURL(url); return; }
-        cache.set(key, url);
-        while (cache.size > FRAME_CACHE_LIMIT) {
-          const [oldKey, oldUrl] = cache.entries().next().value!;
-          cache.delete(oldKey);
-          URL.revokeObjectURL(oldUrl);
-        }
+    loader.load(key, bufferEndpoint(device, "frame", `?id=${frameId}`), () => wantedRef.current === frameId)
+      .then((url) => {
+        if (cancelled) return;
         setShown({ url, frame: frameId });
         setMissing(false);
       })
-      .catch(() => { if (!cancelled) setMissing(true); });
+      .catch((error: unknown) => {
+        if (cancelled || (error instanceof Error && (error.message === "superseded" || error.message === "disposed"))) return;
+        setMissing(true);
+      });
     return () => { cancelled = true; };
-  }, [device, frameId]);
+  }, [device, loader, frameId]);
 
   return { url: frameId === null ? null : shown?.url ?? null, shownFrame: shown?.frame ?? null, missing };
 }

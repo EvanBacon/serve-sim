@@ -26,10 +26,17 @@ export type SavedRecording = {
   blob: Blob;
 };
 
+/** A failed `GET /recording/index`; `status` 404 means the sidecar is gone. */
+export class RecordingIndexFetchError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 /** `GET /recording/index` for a saved recording → sidecar text. */
 export async function fetchRecordingIndexText(saved: Pick<SavedRecording, "device" | "token" | "fileName">): Promise<string> {
   const res = await fetch(recordingEndpoint(saved.device, "index", { token: saved.token, file: saved.fileName }));
-  if (!res.ok) throw new Error(await errorMessage(res));
+  if (!res.ok) throw new RecordingIndexFetchError(await errorMessage(res), res.status);
   return res.text();
 }
 
