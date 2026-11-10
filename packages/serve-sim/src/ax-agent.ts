@@ -14,9 +14,11 @@ import {
   RESNAPSHOT_HINT,
   agentSnapshot,
   assignRefs,
+  describeElement,
   diffSnapshots,
   isVisibleFrame,
   resolveRef,
+  staleRefMessage,
   type AgentDiff,
   type AgentSnapshot,
   type RefEntry,
@@ -99,12 +101,18 @@ function tapPoint(entry: RefEntry, screen: { width: number; height: number }) {
   return { x: (left + right) / 2 / screen.width, y: (top + bottom) / 2 / screen.height };
 }
 
-function describeEntry(entry: RefEntry): string {
-  return [entry.node.role, entry.node.label ? `"${entry.node.label}"` : ""].filter(Boolean).join(" ") || "unlabelled element";
-}
+/** Operations allowed in flight per device (running + queued); more get 429. */
+const MAX_PENDING = 4;
 
 export class AxAgent {
+  /** What refs resolve against: the latest tree read, including pre-tap re-reads. */
   private state: RefState | null = null;
+  /**
+   * The last state actually returned to the agent (a snapshot, or a settle
+   * diff's result). Diffs are taken against this, so elements that showed
+   * up in a pre-tap read the agent never saw still appear as `added`.
+   */
+  private baseline: RefState | null = null;
   /**
    * Content-frame count the session snapshot is known to match (null when
    * unknown). While the live counter still equals it, nothing on screen has
@@ -113,6 +121,7 @@ export class AxAgent {
   private stateFrames: number | null = null;
   private all = false;
   private queue: Promise<unknown> = Promise.resolve();
+  private pending = 0;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
 
@@ -121,8 +130,17 @@ export class AxAgent {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
+  /**
+   * Run one operation at a time. The queue is bounded: a settle can hold it
+   * for up to 30 s, so beyond MAX_PENDING callers get a 429 instead of
+   * piling up behind it.
+   */
   private serialize<T>(run: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(run, run);
+    if (this.pending >= MAX_PENDING) {
+      return Promise.reject(new AxAgentError(429, "busy", `${this.pending} accessibility requests are already running or queued on this device; retry when they finish.`));
+    }
+    this.pending++;
+    const next = this.queue.then(run, run).finally(() => { this.pending--; });
     this.queue = next.catch(() => {});
     return next;
   }
@@ -167,6 +185,7 @@ export class AxAgent {
       const { snapshot, frames } = await this.freshWithFrames();
       this.all = opts.all === true;
       this.state = assignRefs(this.state, snapshot, { all: this.all });
+      this.baseline = this.state;
       this.stateFrames = frames;
       return agentSnapshot(this.state, { all: this.all });
     });
@@ -199,17 +218,13 @@ export class AxAgent {
       const before = live && this.state ? this.state : assignRefs(this.state, await this.fresh(), { all: this.all });
       const entry = before.entries.get(lookup.entry.ref);
       if (!entry) {
-        throw new AxAgentError(
-          409,
-          "stale_ref",
-          `${lookup.entry.ref} is stale: the element it named (${describeEntry(lookup.entry)}) is no longer on screen. ${RESNAPSHOT_HINT}`,
-        );
+        throw new AxAgentError(409, "stale_ref", staleRefMessage(lookup.entry.ref, lookup.entry.node));
       }
       if (!isVisibleFrame(entry.rect, before.screen)) {
         throw new AxAgentError(
           409,
           "offscreen",
-          `${entry.ref} (${describeEntry(entry)}) is offscreen; scroll it into view first. ${RESNAPSHOT_HINT}`,
+          `${entry.ref} (${describeElement(entry.node)}) is offscreen; scroll it into view first. ${RESNAPSHOT_HINT}`,
         );
       }
 
@@ -232,18 +247,13 @@ export class AxAgent {
       const after = latest ? assignRefs(before, latest, { all: this.all }) : before;
       this.state = after;
       this.stateFrames = latest ? (settled.lastFrames ?? null) : null;
-      return {
-        ok: true,
-        action,
-        ref: entry.ref,
-        target,
-        settle: report(settled),
-        diff: latest ? diffSnapshots(before, after, { all: this.all }) : null,
-      };
+      const diff = latest ? diffSnapshots(this.baseline, after, { all: this.all }) : null;
+      if (latest) this.baseline = after;
+      return { ok: true, action, ref: entry.ref, target, settle: report(settled), diff };
     });
   }
 
-  /** `GET /ax/settle`: wait for quiet, then diff against the last snapshot the agent saw. */
+  /** `GET /ax/settle`: wait for quiet, then diff against the last state returned to the agent. */
   settle(opts: { timeoutMs?: unknown } = {}): Promise<{ settle: SettleReport; diff: AgentDiff }> {
     return this.serialize(async () => {
       const timeoutMs = clampSettleTimeout(opts.timeoutMs);
@@ -253,11 +263,12 @@ export class AxAgent {
       if (!latest) {
         throw new AxAgentError(503, "ax_unavailable", settled.lastError ?? "Accessibility unavailable on this simulator.");
       }
-      const before = this.state;
-      const after = assignRefs(before, latest, { all: this.all });
+      const after = assignRefs(this.state, latest, { all: this.all });
+      const diff = diffSnapshots(this.baseline, after, { all: this.all });
       this.state = after;
+      this.baseline = after;
       this.stateFrames = settled.lastFrames ?? null;
-      return { settle: report(settled), diff: diffSnapshots(before, after, { all: this.all }) };
+      return { settle: report(settled), diff };
     });
   }
 }

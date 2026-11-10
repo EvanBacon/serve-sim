@@ -221,6 +221,18 @@ describe("AxAgent.settle", () => {
     expect(again.diff).toEqual({ added: [], removed: [], changed: [] });
   });
 
+  test("diffs against the last snapshot returned, even after an act re-read the tree", async () => {
+    // Between the snapshot and the act, "Banner" appeared; the act's pre-tap
+    // read gives it a ref the agent never saw. The next settle must still list it.
+    const withBanner: AxSnapshot = { ...HOME, elements: [...HOME.elements, el("Banner", 500)] };
+    const { deps } = fakeDevice([HOME, withBanner]);
+    const agent = new AxAgent(deps);
+    await agent.snapshot();
+    await agent.act({ ref: "@e2" });
+    const result = await agent.settle({ timeoutMs: 1000 });
+    expect(result.diff.added.map((n) => n.label)).toEqual(["Banner"]);
+  });
+
   test("an unchanged tree settles even when the bridge reorders frame keys between reads", async () => {
     // The native bridge serializes Swift dictionaries, so {x,y,width,height}
     // arrive in a different key order on each read of the same screen.
@@ -271,5 +283,37 @@ describe("AxAgent serialization", () => {
     const agent = new AxAgent(deps);
     await Promise.all([agent.snapshot(), agent.snapshot(), agent.snapshot()]);
     expect(maxActive).toBe(1);
+  });
+
+  test("the per-device queue is bounded: extra requests get 429 instead of waiting", async () => {
+    const { deps } = fakeDevice([HOME]);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const collect = deps.collect;
+    deps.collect = async () => { await gate; return collect(); };
+    const agent = new AxAgent(deps);
+    const inFlight = [agent.snapshot(), agent.snapshot(), agent.snapshot(), agent.snapshot()];
+    await expectAgentError(agent.snapshot(), 429, "busy");
+    release();
+    await Promise.all(inFlight);
+    // Once drained, requests are accepted again.
+    await agent.snapshot();
+  });
+});
+
+describe("stale-ref messages", () => {
+  test("a ref retired at snapshot time and one that vanished right before the tap read the same", async () => {
+    const { deps, reads } = fakeDevice([HOME, GENERAL]);
+    const agent = new AxAgent(deps);
+    await agent.snapshot();
+    // Vanished between snapshot and act (detected by the pre-tap read).
+    const atTap = await expectAgentError(agent.act({ ref: "@e2" }), 409, "stale_ref");
+    // After a fresh snapshot it is retired in the session state: resolveRef rejects it before any read.
+    await agent.snapshot();
+    const readsBefore = reads();
+    const retired = await expectAgentError(agent.act({ ref: "@e2" }), 409, "stale_ref");
+    expect(reads()).toBe(readsBefore);
+    expect(atTap.message).toBe(retired.message);
+    expect(atTap.message).toBe('@e2 is stale: the element it named (cell "General") is no longer on screen. Run `serve-sim ax --refs` to take a fresh snapshot, then retry with a current ref.');
   });
 });

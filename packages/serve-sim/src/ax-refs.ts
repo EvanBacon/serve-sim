@@ -289,6 +289,16 @@ export function normalizeRef(input: string): string | null {
   return match ? `@e${match[1]}` : null;
 }
 
+/** "cell \"General\"", or "unlabelled element". */
+export function describeElement(element: { role: string; label?: string }): string {
+  return [element.role, element.label ? `"${element.label}"` : ""].filter(Boolean).join(" ") || "unlabelled element";
+}
+
+/** The one stale-ref message, whether the ref retired at snapshot time or right before a tap. */
+export function staleRefMessage(ref: string, element: { role: string; label?: string }): string {
+  return `${ref} is stale: the element it named (${describeElement(element)}) is no longer on screen. ${RESNAPSHOT_HINT}`;
+}
+
 export function resolveRef(state: RefState | null, input: string): RefLookup {
   const ref = normalizeRef(input);
   if (!ref) {
@@ -303,14 +313,7 @@ export function resolveRef(state: RefState | null, input: string): RefLookup {
   for (let i = state.retired.length - 1; i >= 0 && !retired; i--) {
     if (state.retired[i]!.ref === ref) retired = state.retired[i];
   }
-  if (retired) {
-    const what = [retired.role, retired.label ? `"${retired.label}"` : ""].filter(Boolean).join(" ");
-    return {
-      ok: false,
-      code: "stale_ref",
-      message: `${ref} is stale: the element it named (${what || "unlabelled"}) is no longer on screen. ${RESNAPSHOT_HINT}`,
-    };
-  }
+  if (retired) return { ok: false, code: "stale_ref", message: staleRefMessage(ref, retired) };
   return { ok: false, code: "unknown_ref", message: `${ref} is not in the latest snapshot. ${RESNAPSHOT_HINT}` };
 }
 
