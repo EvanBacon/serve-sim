@@ -162,13 +162,15 @@ describe("identity keys (observed through ref carry-over)", () => {
     expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.label ?? n.type}`)).toEqual(["@e2=Hint", "@e1=Button"]);
   });
 
-  test("a scrolled list of duplicates keeps its refs (one shared offset)", () => {
+  test("duplicates that all moved by one offset with nothing to measure the scroll by: refs retire", () => {
+    // A uniform shift alone can't tell a scroll of the same rows from reused
+    // cells now showing other rows, so it is not proof of identity.
     const rows = (y: number) => snap([
       el({ path: "0.0", label: "Row", type: "Cell", value: "a", frame: { x: 0, y, width: 100, height: 40 } }),
       el({ path: "0.1", label: "Row", type: "Cell", value: "b", frame: { x: 0, y: y + 50, width: 100, height: 40 } }),
     ]);
     const before = assignRefs(null, rows(300));
-    expect(agentSnapshot(assignRefs(before, rows(120))).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e1=a", "@e2=b"]);
+    expect(agentSnapshot(assignRefs(before, rows(120))).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e3=a", "@e4=b"]);
   });
 
   test("a value change keeps the ref (values are not part of the key)", () => {
@@ -331,5 +333,109 @@ describe("diffSnapshots", () => {
     const state = assignRefs(null, snap([el({ label: "A" })]));
     expect(diffSnapshots(state, assignRefs(state, snap([el({ label: "A" })])))).toEqual({ added: [], removed: [], changed: [] });
     expect(diffSnapshots(null, state).added.map((n) => n.ref)).toEqual(["@e1"]);
+  });
+});
+
+describe("ref identity is judged against the whole previous tree", () => {
+  const item = (path: string, y: number, value = "") =>
+    el({ path, label: "Item", type: "Cell", value, frame: { x: 0, y, width: 402, height: 44 } });
+
+  test("deleting a visible row with an offscreen duplicate never hands its ref to the duplicate", () => {
+    // A is visible (@e1); B shares its label but is offscreen, so it has no ref.
+    const before = assignRefs(null, snap([item("0.0", 100), item("0.1", 2000)]));
+    expect(agentSnapshot(before).nodes.map((n) => n.ref)).toEqual(["@e1"]);
+    // A is deleted and B reflows into its slot.
+    const after = assignRefs(before, snap([item("0.0", 100)]));
+    expect(agentSnapshot(after).nodes.map((n) => n.ref)).toEqual(["@e2"]);
+    expect(resolveRef(after, "@e1")).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  test("the value fallback also counts offscreen duplicates", () => {
+    const before = assignRefs(null, snap([item("0.0", 100, "a"), item("0.1", 2000, "a"), item("0.2", 2044, "b")]));
+    expect(agentSnapshot(before).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e1=a"]);
+    const after = assignRefs(before, snap([item("0.0", 100, "a"), item("0.1", 144, "b")]));
+    expect(agentSnapshot(after).nodes.map((n) => n.ref)).not.toContain("@e1");
+    expect(resolveRef(after, "@e1")).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  test("a group that really had one member keeps the ref wherever it moves", () => {
+    const before = assignRefs(null, snap([item("0.0", 100), el({ path: "0.1", label: "Other", type: "Cell", frame: { x: 0, y: 2000, width: 402, height: 44 } })]));
+    const after = assignRefs(before, snap([item("0.0", 300)]));
+    expect(agentSnapshot(after).nodes.map((n) => n.ref)).toEqual(["@e1"]);
+  });
+});
+
+describe("scrolled lists of duplicates", () => {
+  const NAMES = ["Alice", "Bob", "Carol", "Dave", "Erin", "Frank", "Grace"];
+  const ROW = 44;
+  /** A reused-cell table at path 0.1: only `rows` are exposed, row i of the window at top + i*ROW. */
+  const table = (rows: number[], top: number, opts: { labelledCells?: boolean } = {}) =>
+    snap([
+      el({ path: "0.0", label: "Contacts", type: "Heading", role: "heading", frame: { x: 0, y: 40, width: 402, height: 40 } }),
+      ...rows.flatMap((row, slot) => {
+        const y = top + row * ROW;
+        const name = NAMES[row]!;
+        return [
+          el({ path: `0.1.${slot}`, type: "Cell", role: "cell", label: opts.labelledCells ? name : "", frame: { x: 0, y, width: 402, height: ROW } }),
+          el({ path: `0.1.${slot}.0`, type: "StaticText", role: "text", label: opts.labelledCells ? "" : name, frame: { x: 16, y: y + 12, width: 200, height: 20 } }),
+          el({ path: `0.1.${slot}.1`, label: "Delete", frame: { x: 320, y: y + 4, width: 70, height: 36 } }),
+        ];
+      }),
+    ]);
+  /** Which named row each Delete ref sits in. */
+  const deleteRows = (state: ReturnType<typeof assignRefs>) => {
+    const nodes = agentSnapshot(state, { all: true }).nodes;
+    const out = new Map<string, string>();
+    for (const node of nodes) {
+      if (node.label !== "Delete") continue;
+      const row = nodes.find((n) => n.type !== "Button" && n.label && n.frame.y <= node.center.y && node.center.y < n.frame.y + n.frame.h && n.frame.x < node.frame.x);
+      out.set(node.ref, row?.label ?? "?");
+    }
+    return out;
+  };
+  /** Every ref present on both sides names a Delete button in the same row. */
+  const expectNoRepointing = (before: ReturnType<typeof assignRefs>, after: ReturnType<typeof assignRefs>) => {
+    const a = deleteRows(before);
+    for (const [ref, row] of deleteRows(after)) {
+      if (a.has(ref)) expect(`${ref} in ${row}`).toBe(`${ref} in ${a.get(ref)}`);
+    }
+  };
+
+  test("a scrolled window of same-label cells does not carry refs to other rows", () => {
+    const before = assignRefs(null, table([0, 1, 2, 3, 4], 100));
+    const after = assignRefs(before, table([2, 3, 4, 5, 6], 100 - 100));
+    expectNoRepointing(before, after);
+    const deleteRefs = [...deleteRows(after).keys()];
+    for (const ref of deleteRows(before).keys()) expect(deleteRefs).not.toContain(ref);
+  });
+
+  test("a scroll by exactly one row height retires the duplicate refs", () => {
+    const before = assignRefs(null, table([0, 1, 2, 3, 4], 100));
+    // Every Delete button lands exactly where the previous row's was.
+    const after = assignRefs(before, table([1, 2, 3, 4, 5], 100 - ROW));
+    expectNoRepointing(before, after);
+    const deleteRefs = [...deleteRows(after).keys()];
+    for (const ref of deleteRows(before).keys()) expect(deleteRefs).not.toContain(ref);
+  });
+
+  test("duplicates inside labelled rows are grouped per row and follow their row", () => {
+    const before = assignRefs(null, table([0, 1, 2, 3, 4], 100, { labelledCells: true }));
+    const after = assignRefs(before, table([1, 2, 3, 4, 5], 100 - ROW, { labelledCells: true }));
+    expectNoRepointing(before, after);
+    // Bob's Delete keeps its ref after the scroll.
+    const bob = [...deleteRows(before)].find(([, row]) => row === "Bob")![0];
+    expect(deleteRows(after).get(bob)).toBe("Bob");
+  });
+
+  test("duplicates scrolled together with a unique anchor in their container keep their refs", () => {
+    // The rows and the section header that scrolls with them share a container.
+    const rows = (y: number) => snap([
+      el({ path: "0.0.0", label: "Fruits", type: "StaticText", role: "text", frame: { x: 0, y: y - 30, width: 100, height: 20 } }),
+      el({ path: "0.0.1", label: "Row", type: "Cell", value: "a", frame: { x: 0, y, width: 100, height: 40 } }),
+      el({ path: "0.0.2", label: "Row", type: "Cell", value: "b", frame: { x: 0, y: y + 50, width: 100, height: 40 } }),
+    ]);
+    const before = assignRefs(null, rows(300));
+    expect(agentSnapshot(assignRefs(before, rows(120))).nodes.map((n) => `${n.ref}=${n.label}${n.value ?? ""}`))
+      .toEqual(["@e1=Fruits", "@e2=Rowa", "@e3=Rowb"]);
   });
 });

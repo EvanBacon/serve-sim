@@ -15,6 +15,8 @@
  *   elements a matching frame), and give new elements the next unused
  *   number. A ref is never reused for a different element, so a stale ref
  *   fails instead of silently pointing at whatever now occupies its slot.
+ * - "Unique" is judged against the whole previous tree, offscreen elements
+ *   included, not just the elements that got a ref.
  */
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
@@ -57,10 +59,26 @@ export interface RefEntry {
   rect: AxRect;
 }
 
+/** One interesting element of the latest tree, ref'd or not, as later matching needs it. */
+interface GroupMember {
+  /** Null for elements that never got a ref (offscreen without `all`). */
+  ref: string | null;
+  path: string;
+  value: string;
+  rect: AxRect;
+}
+
 export interface RefState {
   screen: { width: number; height: number };
   /** Ref'd elements present in the latest tree, in tree order. */
   entries: Map<string, RefEntry>;
+  /**
+   * Every interesting element of the latest tree by identity group, in tree
+   * order, including ones without a ref. Matching judges "one member" and
+   * value uniqueness against this, so an offscreen duplicate is never
+   * mistaken for a sole survivor.
+   */
+  groups: Map<string, GroupMember[]>;
   /** Refs of elements that vanished, newest last (bounded), for stale-ref messages. */
   retired: Array<{ ref: string; role: string; label: string }>;
   nextRef: number;
@@ -123,37 +141,52 @@ function isInterestingElement(element: AxElement): boolean {
  * Identity group per element: `id:<AXUniqueId>`, else `<type>|<label>`, else
  * `<type>@` (all unlabelled elements of a type). Values are deliberately
  * excluded so typing into a field reads as a change, not a replacement.
- * A group with one member on both sides is the same element; anything else
- * (duplicate labels, unlabelled elements) is matched by frame, see
- * {@link matchGroup}.
+ * A key shared by several elements in one tree is qualified with the nearest
+ * labelled (or identified) ancestor, so "Delete" in Alice's row and "Delete"
+ * in Bob's row are separate groups. A group with one member on both sides
+ * is the same element; anything else (duplicates, unlabelled elements) is
+ * matched by frame, see {@link matchGroup}.
  */
-function identityGroup(element: AxElement): { key: string; unique: boolean } {
-  if (hasUniqueId(element)) return { key: `id:${element.id}`, unique: true };
-  if (element.label !== "") return { key: `${element.type}|${element.label}`, unique: true };
-  return { key: `${element.type}@`, unique: false };
+function identityGroups(elements: AxElement[]): Array<{ key: string; unique: boolean }> {
+  const base = elements.map((element) => {
+    if (hasUniqueId(element)) return { key: `id:${element.id}`, unique: true, qualify: false };
+    if (element.label !== "") return { key: `${element.type}|${element.label}`, unique: true, qualify: true };
+    return { key: `${element.type}@`, unique: false, qualify: true };
+  });
+  const counts = countValues(base.map((group) => group.key));
+  const anchorByPath = new Map<string, string>();
+  for (const element of elements) {
+    if (hasUniqueId(element)) anchorByPath.set(element.path, `id:${element.id}`);
+    else if (element.label !== "") anchorByPath.set(element.path, `${element.type}|${element.label}`);
+  }
+  return base.map((group, index) => {
+    if (!group.qualify || counts.get(group.key)! < 2) return { key: group.key, unique: group.unique };
+    let path = elements[index]!.path;
+    for (let dot = path.lastIndexOf("."); dot > 0; dot = path.lastIndexOf(".")) {
+      path = path.slice(0, dot);
+      const anchor = anchorByPath.get(path);
+      if (anchor) return { key: `${group.key}^${anchor}`, unique: group.unique };
+    }
+    return { key: group.key, unique: group.unique };
+  });
 }
 
 /** Points each frame edge may drift and still name the same element. */
 const FRAME_TOLERANCE = 8;
+/** How far apart two anchors' offsets may be and still describe one scroll. */
+const OFFSET_TOLERANCE = 1;
 
-function framesClose(a: AxRect, b: AxRect): boolean {
-  return Math.abs(a.x - b.x) <= FRAME_TOLERANCE
-    && Math.abs(a.y - b.y) <= FRAME_TOLERANCE
-    && Math.abs(a.width - b.width) <= FRAME_TOLERANCE
-    && Math.abs(a.height - b.height) <= FRAME_TOLERANCE;
+interface Offset {
+  dx: number;
+  dy: number;
 }
 
-/** Every member moved by one shared offset, sizes within tolerance: a scrolled list. */
-function uniformlyTranslated(prev: RefEntry[], current: AxElement[]): boolean {
-  const dx = current[0]!.frame.x - prev[0]!.rect.x;
-  const dy = current[0]!.frame.y - prev[0]!.rect.y;
-  return prev.every((entry, i) => {
-    const frame = current[i]!.frame;
-    return Math.abs(frame.x - entry.rect.x - dx) <= 1
-      && Math.abs(frame.y - entry.rect.y - dy) <= 1
-      && Math.abs(frame.width - entry.rect.width) <= FRAME_TOLERANCE
-      && Math.abs(frame.height - entry.rect.height) <= FRAME_TOLERANCE;
-  });
+/** `b` is close to `a` once `a` is moved by the container's measured offset. */
+function framesClose(a: AxRect, b: AxRect, offset: Offset): boolean {
+  return Math.abs(a.x + offset.dx - b.x) <= FRAME_TOLERANCE
+    && Math.abs(a.y + offset.dy - b.y) <= FRAME_TOLERANCE
+    && Math.abs(a.width - b.width) <= FRAME_TOLERANCE
+    && Math.abs(a.height - b.height) <= FRAME_TOLERANCE;
 }
 
 function countValues(values: string[]): Map<string, number> {
@@ -162,37 +195,70 @@ function countValues(values: string[]): Map<string, number> {
   return counts;
 }
 
+/** An element matched by a unique key (one member on both sides): proof of where content moved. */
+interface Anchor {
+  path: string;
+  offset: Offset;
+}
+
+/** Deepest path shared by every member (a lone member's parent). */
+function containerPath(members: AxElement[]): string {
+  const split = members.map((member) => member.path.split("."));
+  const prefix: string[] = [];
+  const depth = Math.min(...split.map((parts) => parts.length - 1));
+  for (let i = 0; i < depth && split.every((parts) => parts[i] === split[0]![i]); i++) prefix.push(split[0]![i]!);
+  return prefix.join(".");
+}
+
 /**
- * Which previous entry (index into `prev`) each current member of one
- * identity group continues, or -1 for a new element. Only unambiguous
- * matches carry a ref:
+ * How far the content holding `members` scrolled, measured from the anchors
+ * inside the same container: zero when there are none (nothing says it
+ * moved), null when they disagree (no frame can be trusted).
+ */
+function containerOffset(members: AxElement[], anchors: Anchor[]): Offset | null {
+  const container = containerPath(members);
+  const inside = anchors.filter((anchor) => container === "" || anchor.path.startsWith(`${container}.`));
+  if (inside.length === 0) return { dx: 0, dy: 0 };
+  const { offset } = inside[0]!;
+  const agree = inside.every((anchor) =>
+    Math.abs(anchor.offset.dx - offset.dx) <= OFFSET_TOLERANCE && Math.abs(anchor.offset.dy - offset.dy) <= OFFSET_TOLERANCE);
+  return agree ? offset : null;
+}
+
+/**
+ * Which previous member (index into `prev`, the group's members in the
+ * whole previous tree) each current member continues, or -1 for a new
+ * element. Only unambiguous matches carry a ref:
  * - one labelled/identified member on both sides: the same element, wherever it is;
  * - one unlabelled member on both sides with a close frame;
- * - same count of duplicates, in order, with equal values and every frame
- *   close (or all shifted by one offset, i.e. scrolled);
+ * - same count of duplicates, in order, with equal values and every frame close;
  * - when the count changed: a member whose value is unique on both sides
  *   and whose frame is still close.
- * Anything else retires the old ref. Deleting a row makes its siblings
- * reflow into its slot, so position alone can't say which one survived;
- * a stale ref is better than a tap on the wrong element.
+ * Frames are compared after the scroll measured by anchors in the same
+ * container ({@link containerOffset}). A uniform shift on its own proves
+ * nothing: a reused-cell list that scrolled shows other rows in the same
+ * cells. Deleting a row makes its siblings reflow into its slot, so position
+ * alone can't say which one survived either; a stale ref is better than a
+ * tap on the wrong element. Rows with nothing unique in them that scroll by
+ * exactly one row height are indistinguishable and keep their refs.
  */
-function matchGroup(prev: RefEntry[], current: AxElement[], unique: boolean): number[] {
+function matchGroup(prev: GroupMember[], current: AxElement[], unique: boolean, offset: Offset | null): number[] {
   const result = current.map(() => -1);
   if (prev.length === 0) return result;
   if (prev.length === 1 && current.length === 1) {
-    return unique || framesClose(prev[0]!.rect, current[0]!.frame) ? [0] : result;
+    return unique || (offset && framesClose(prev[0]!.rect, current[0]!.frame, offset)) ? [0] : result;
   }
+  if (!offset) return result;
   if (prev.length === current.length
-    && prev.every((entry, i) => (entry.node.value ?? "") === current[i]!.value)
-    && (prev.every((entry, i) => framesClose(entry.rect, current[i]!.frame)) || uniformlyTranslated(prev, current))) {
+    && prev.every((member, i) => member.value === current[i]!.value && framesClose(member.rect, current[i]!.frame, offset))) {
     return current.map((_, i) => i);
   }
-  const prevValues = countValues(prev.map((entry) => entry.node.value ?? ""));
+  const prevValues = countValues(prev.map((member) => member.value));
   const currentValues = countValues(current.map((element) => element.value));
   current.forEach((element, c) => {
     if (prevValues.get(element.value) !== 1 || currentValues.get(element.value) !== 1) return;
-    const p = prev.findIndex((entry) => (entry.node.value ?? "") === element.value);
-    if (framesClose(prev[p]!.rect, element.frame)) result[c] = p;
+    const p = prev.findIndex((member) => member.value === element.value);
+    if (framesClose(prev[p]!.rect, element.frame, offset)) result[c] = p;
   });
   return result;
 }
@@ -231,38 +297,55 @@ function summary(entry: RefEntry) {
 export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { all?: boolean } = {}): RefState {
   const screen = { width: snapshot.screen.width, height: snapshot.screen.height };
   const interesting = snapshot.elements.filter(isInterestingElement);
-  const groups = interesting.map(identityGroup);
+  const groups = identityGroups(interesting);
 
-  const previousByGroup = new Map<string, RefEntry[]>();
-  for (const entry of prev?.entries.values() ?? []) {
-    const list = previousByGroup.get(entry.key);
-    if (list) list.push(entry);
-    else previousByGroup.set(entry.key, [entry]);
-  }
+  const previousGroups = prev?.groups ?? new Map<string, GroupMember[]>();
   const currentByGroup = new Map<string, number[]>();
   groups.forEach((group, index) => {
     const list = currentByGroup.get(group.key);
     if (list) list.push(index);
     else currentByGroup.set(group.key, [index]);
   });
-  const carried = new Map<number, RefEntry>();
+
+  // Unique keys present once on both sides say how their content moved.
+  const anchors: Anchor[] = [];
   for (const [key, indexes] of currentByGroup) {
-    const previous = previousByGroup.get(key) ?? [];
-    const matches = matchGroup(previous, indexes.map((i) => interesting[i]!), groups[indexes[0]!]!.unique);
-    matches.forEach((p, i) => {
-      if (p >= 0) carried.set(indexes[i]!, previous[p]!);
+    const previous = previousGroups.get(key);
+    if (indexes.length !== 1 || previous?.length !== 1 || !groups[indexes[0]!]!.unique) continue;
+    const element = interesting[indexes[0]!]!;
+    const rect = previous[0]!.rect;
+    anchors.push({ path: element.path, offset: { dx: element.frame.x - rect.x, dy: element.frame.y - rect.y } });
+  }
+
+  const carried = new Map<number, string>();
+  for (const [key, indexes] of currentByGroup) {
+    const previous = previousGroups.get(key) ?? [];
+    const members = indexes.map((i) => interesting[i]!);
+    const unique = groups[indexes[0]!]!.unique;
+    const needsOffset = !(unique && previous.length === 1 && members.length === 1);
+    const offset = needsOffset ? containerOffset(members, anchors) : { dx: 0, dy: 0 };
+    matchGroup(previous, members, unique, offset).forEach((p, i) => {
+      const ref = p >= 0 ? previous[p]!.ref : null;
+      if (ref) carried.set(indexes[i]!, ref);
     });
   }
 
   let nextRef = prev?.nextRef ?? 1;
   const entries = new Map<string, RefEntry>();
+  const nextGroups = new Map<string, GroupMember[]>();
   interesting.forEach((element, index) => {
     const key = groups[index]!.key;
     const visible = isVisibleFrame(element.frame, screen);
     const existing = carried.get(index);
-    if (!existing && !visible && !opts.all) return;
-    const ref = existing?.ref ?? `@e${nextRef++}`;
-    entries.set(ref, { ref, key, node: compactNode(ref, element, visible), visible, rect: element.frame });
+    let ref: string | null = null;
+    if (existing || visible || opts.all) {
+      ref = existing ?? `@e${nextRef++}`;
+      entries.set(ref, { ref, key, node: compactNode(ref, element, visible), visible, rect: element.frame });
+    }
+    const member: GroupMember = { ref, path: element.path, value: element.value, rect: element.frame };
+    const list = nextGroups.get(key);
+    if (list) list.push(member);
+    else nextGroups.set(key, [member]);
   });
 
   const retired = [...(prev?.retired ?? [])];
@@ -271,7 +354,7 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   }
   if (retired.length > MAX_RETIRED) retired.splice(0, retired.length - MAX_RETIRED);
 
-  return { screen, entries, retired, nextRef };
+  return { screen, entries, groups: nextGroups, retired, nextRef };
 }
 
 /** The JSON an agent sees: visible nodes only unless `all`. */
