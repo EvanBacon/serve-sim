@@ -15,6 +15,7 @@ import {
   SimulatorView,
   digitalCrownDeltaFromWheel,
   displayStreamConfig,
+  streamDisplayGeometry,
   fallbackScreenSize,
   isLandscapeConfig,
   screenBorderRadius,
@@ -60,6 +61,7 @@ import { useScreenshotToast } from "./hooks/use-screenshot-toast";
 import { useScreenRecording, type SavedRecording } from "./hooks/use-screen-recording";
 import { RecordToolbarButton } from "./components/record-toolbar-button";
 import {
+  SCRUB_TIMELINE_MIN_WIDTH,
   SCRUB_TIMELINE_RESERVED_HEIGHT,
   ScrubTimeline,
   ScrubTimelineToolbarButton,
@@ -1453,9 +1455,15 @@ function AppWithConfig({
             device={config.device}
             open={scrubTimelineOpen}
             saved={savedRecording}
+            onSavedConsumed={() => setSavedRecording(null)}
+            streamGeometry={{
+              width: activeStreamConfig.width,
+              height: activeStreamConfig.height,
+              rotationDegrees: streamDisplayGeometry(activeStreamConfig).rotationDegrees,
+            }}
             overlayTarget={scrubOverlayEl}
             overlayBorderRadius={useChrome ? undefined : imgBorderRadius}
-            style={{ width: Math.max(360, deviceWidth), maxWidth: "calc(100vw - 48px)" }}
+            style={{ width: Math.max(SCRUB_TIMELINE_MIN_WIDTH, deviceWidth), maxWidth: "calc(100vw - 48px)" }}
           />
         )}
       </div>

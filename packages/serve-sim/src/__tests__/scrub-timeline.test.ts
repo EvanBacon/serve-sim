@@ -31,6 +31,14 @@ function recording(): TimelineSource {
 }
 
 describe("timelineFromRecordingIndex", () => {
+  test("carries the header's raw size and track rotation for marker placement", () => {
+    expect(recording().frame).toEqual({ width: 100, height: 200, rotation: 0 });
+    const rotated = SIDECAR.replace('"clock":null', '"rotation":90,"clock":null');
+    expect(timelineFromRecordingIndex(parseRecordingIndex(rotated, "test")).frame).toEqual({ width: 100, height: 200, rotation: 90 });
+    const unsized = SIDECAR.replace('"width":100,"height":200,', '"width":null,"height":null,');
+    expect(timelineFromRecordingIndex(parseRecordingIndex(unsized, "test")).frame).toEqual({ rotation: 0 });
+  });
+
   test("uses frame pts, the footer duration, and sorted markers", () => {
     const source = recording();
     expect(source.kind).toBe("recording");

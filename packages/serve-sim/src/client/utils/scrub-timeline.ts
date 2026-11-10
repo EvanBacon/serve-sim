@@ -49,6 +49,12 @@ export type TimelineSource = {
   fps?: number;
   /** Buffer: wall time of t = 0. */
   origin?: string;
+  /**
+   * Recording: encoded (raw framebuffer) size and the clockwise track
+   * rotation from the sidecar header. The MP4 plays upright; event points
+   * are raw, so markers are rotated by this to line up with the video.
+   */
+  frame?: { width?: number; height?: number; rotation: number };
 };
 
 const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
@@ -89,6 +95,11 @@ export function timelineFromRecordingIndex(index: ParsedRecordingIndex): Timelin
     frames,
     markers: byTime(index.events.map(markerFromEvent)),
     fps,
+    frame: {
+      ...(isFiniteNumber(index.header.width) && index.header.width > 0 ? { width: index.header.width } : {}),
+      ...(isFiniteNumber(index.header.height) && index.header.height > 0 ? { height: index.header.height } : {}),
+      rotation: isFiniteNumber(index.header.rotation) ? index.header.rotation : 0,
+    },
   };
 }
 

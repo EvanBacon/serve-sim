@@ -24,6 +24,12 @@ import {
 
 /** Vertical space the open timeline takes under the device (bar + gap). */
 export const SCRUB_TIMELINE_RESERVED_HEIGHT = 104;
+/**
+ * Narrowest bar: fits the fullest header row (play, time, Buffer/Recording,
+ * close, open, Live). Below it (a narrow window) the time drops its
+ * duration and then truncates instead of pushing Live off the bar.
+ */
+export const SCRUB_TIMELINE_MIN_WIDTH = 420;
 
 const TAP_COLOR = "var(--serve-sim-accent)";
 const DRAG_COLOR = "var(--serve-sim-warning)";
@@ -37,7 +43,7 @@ const markerColor = (marker: TimelineMarker) =>
 export function ScrubTimelineToolbarButton({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   return (
     <SimulatorToolbar.Button
-      aria-label={open ? "Hide timeline" : "Show timeline"}
+      aria-label="Timeline"
       aria-pressed={open}
       title="Timeline"
       onClick={(e) => { e.preventDefault(); onToggle(); }}
@@ -51,7 +57,7 @@ export function ScrubTimelineToolbarButton({ open, onToggle }: { open: boolean; 
 const pctOf = (t: number, duration: number) => `${duration > 0 ? Math.min(100, Math.max(0, (t / duration) * 100)) : 0}%`;
 
 const smallButtonClass =
-  "h-[26px] min-w-[26px] px-1.5 inline-flex items-center justify-center gap-1 bg-transparent border-none rounded-md text-icon text-[12px] font-medium cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink disabled:cursor-default disabled:hover:bg-transparent";
+  "shrink-0 h-[26px] min-w-[26px] px-1.5 inline-flex items-center justify-center gap-1 bg-transparent border-none rounded-md text-icon text-[12px] font-medium cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-ink/8 hover:text-ink disabled:cursor-default disabled:hover:bg-transparent";
 
 /** @lintignore Exported for tests. */
 export type ScrubTimelineBarProps = {
@@ -185,7 +191,7 @@ export function ScrubTimelineBar(props: ScrubTimelineBarProps) {
   return (
     <div
       data-scrub-timeline
-      className="flex flex-col gap-1.5 font-system select-none"
+      className="@container flex flex-col gap-1.5 font-system select-none"
       style={{
         padding: "6px 10px 8px",
         borderRadius: 16,
@@ -209,14 +215,20 @@ export function ScrubTimelineBar(props: ScrubTimelineBarProps) {
         </button>
         <span
           data-testid="scrub-time"
-          className="text-[12px] font-mono text-ink-70 whitespace-nowrap"
+          className="min-w-0 shrink text-[12px] font-mono text-ink-70 whitespace-nowrap overflow-hidden text-ellipsis"
           style={{ fontVariantNumeric: "tabular-nums" }}
+          title={source ? `${live ? "live" : formatTimelineTime(shownT)} / ${formatTimelineTime(duration)}` : undefined}
         >
-          {source ? `${live ? "live" : formatTimelineTime(shownT)} / ${formatTimelineTime(duration)}` : "—"}
+          {source ? (
+            <>
+              {live ? "live" : formatTimelineTime(shownT)}
+              <span data-testid="scrub-duration" className="@max-[400px]:hidden"> / {formatTimelineTime(duration)}</span>
+            </>
+          ) : "—"}
         </span>
-        <span className="flex-1" />
+        <span className="flex-1 min-w-0" />
         {(recordingName || hasBuffer || bufferStatus === "on") && (
-          <div role="radiogroup" aria-label="Timeline source" className="inline-flex items-center rounded-md bg-ink/6 p-0.5">
+          <div role="radiogroup" aria-label="Timeline source" className="shrink-0 inline-flex items-center rounded-md bg-ink/6 p-0.5">
             {(["buffer", "recording"] as const).map((kind) => {
               const available = kind === "buffer" ? true : !!recordingName;
               const selected = sourceKind === kind;
@@ -305,7 +317,7 @@ export function ScrubTimelineBar(props: ScrubTimelineBarProps) {
             <span
               key={`f${f.frame}:${f.t}`}
               aria-hidden
-              className="absolute bottom-0 w-px h-[6px] bg-ink/25 pointer-events-none"
+              className="absolute bottom-0 w-px h-[6px] bg-ink/45 pointer-events-none"
               style={{ left: pctOf(f.t, duration) }}
             />
           ))}
@@ -322,7 +334,7 @@ export function ScrubTimelineBar(props: ScrubTimelineBarProps) {
           {hoverT !== null && !draggingRef.current && (
             <span
               aria-hidden
-              className="absolute top-0 bottom-0 w-px bg-ink/30 pointer-events-none"
+              className="absolute top-0 bottom-0 w-px bg-ink/55 pointer-events-none"
               style={{ left: pctOf(hoverT, duration) }}
             />
           )}
@@ -338,7 +350,7 @@ export function ScrubTimelineBar(props: ScrubTimelineBarProps) {
             <span
               role="status"
               data-testid="scrub-marker-detail"
-              className="absolute top-[calc(100%+6px)] -translate-x-1/2 px-2 py-0.5 rounded-md bg-panel border border-ink/10 text-[11px] font-mono text-ink whitespace-nowrap pointer-events-none z-10"
+              className="absolute bottom-[calc(100%+4px)] -translate-x-1/2 px-2 py-0.5 rounded-md bg-panel border border-ink/10 text-[11px] font-mono text-ink whitespace-nowrap pointer-events-none z-10"
               style={{
                 left: `clamp(80px, ${pctOf(focused.t, duration)}, calc(100% - 80px))`,
                 boxShadow: "var(--serve-sim-shadow-popover)",
@@ -349,7 +361,7 @@ export function ScrubTimelineBar(props: ScrubTimelineBarProps) {
           )}
         </div>
       ) : (
-        <div className="h-[30px] flex items-center gap-1.5 px-1 text-[12px] text-ink-55 whitespace-nowrap overflow-hidden">
+        <div className="h-[30px] flex items-center gap-1.5 px-1 text-[12px] text-ink-70 whitespace-nowrap overflow-hidden">
           <span>{emptyMessage(sourceKind, bufferStatus)}</span>
           {sourceKind === "buffer" && bufferStatus === "off" && (
             <button type="button" className={`${smallButtonClass} text-tint`} onClick={onStartBuffer}>
@@ -357,7 +369,7 @@ export function ScrubTimelineBar(props: ScrubTimelineBarProps) {
             </button>
           )}
           {sourceKind === "buffer" && bufferStatus !== "on" && (
-            <span className="text-ink-40 overflow-hidden text-ellipsis">or record while this is open</span>
+            <span className="text-ink-55 overflow-hidden text-ellipsis">or record while this is open</span>
           )}
         </div>
       )}
@@ -450,8 +462,45 @@ function MarkerOnFrame({ marker }: { marker: TimelineMarker }) {
   );
 }
 
+/** Raw framebuffer size + the clockwise CSS rotation that shows it upright. */
+export type RawFrameGeometry = { width: number; height: number; rotationDegrees: number };
+
+/**
+ * Box for a raw-orientation frame inside the overlay (a `container-type:
+ * size` element): fitted like `object-contain` to the overlay, then rotated
+ * the way `SimulatorView` rotates the live stream. Raw-normalized points
+ * placed as % of this box land where they were on the rotated screen.
+ * @lintignore Exported for tests.
+ */
+export function rawFrameBoxStyle(geometry: RawFrameGeometry | null | undefined): CSSProperties {
+  if (!geometry || !(geometry.width > 0) || !(geometry.height > 0)) {
+    return { position: "absolute", inset: 0 };
+  }
+  const rotation = ((Math.round(geometry.rotationDegrees) % 360) + 540) % 360 - 180;
+  const sideways = Math.abs(rotation) === 90;
+  // Aspect (w/h) as shown on screen.
+  const shown = sideways ? geometry.height / geometry.width : geometry.width / geometry.height;
+  const shownWidth = `min(100cqw, ${(100 * shown).toFixed(4)}cqh)`;
+  const shownHeight = `min(100cqh, ${(100 / shown).toFixed(4)}cqw)`;
+  return {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    width: sideways ? shownHeight : shownWidth,
+    height: sideways ? shownWidth : shownHeight,
+    transform: `translate(-50%, -50%)${rotation === 0 ? "" : ` rotate(${rotation}deg)`}`,
+    transformOrigin: "center center",
+  };
+}
+
 type ScrubFrameOverlayProps = {
   kind: TimelineSourceKind;
+  /**
+   * Raw geometry of the frame: buffer JPEGs and event points are raw
+   * framebuffer orientation. Buffer: the live stream's; recording: the
+   * sidecar header's (the MP4 itself plays upright).
+   */
+  geometry?: RawFrameGeometry | null;
   /** Buffer: JPEG URL of the frame at `position`. */
   imageUrl?: string | null;
   /** Recording: MP4 URL. */
@@ -473,7 +522,7 @@ type ScrubFrameOverlayProps = {
  * @lintignore Exported for tests.
  */
 export function ScrubFrameOverlay({
-  kind, imageUrl, videoUrl, seekTime = 0, playing = false, onVideoTime, onVideoEnded, marker, label, missing, borderRadius,
+  kind, geometry, imageUrl, videoUrl, seekTime = 0, playing = false, onVideoTime, onVideoEnded, marker, label, missing, borderRadius,
 }: ScrubFrameOverlayProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const onTimeRef = useRef(onVideoTime);
@@ -514,7 +563,7 @@ export function ScrubFrameOverlay({
     <div
       data-testid="scrub-frame-overlay"
       className="absolute inset-0 z-[15] overflow-hidden bg-black pointer-events-auto cursor-default"
-      style={{ borderRadius }}
+      style={{ borderRadius, containerType: "size" }}
       onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
       onClick={(e) => e.stopPropagation()}
     >
@@ -528,10 +577,14 @@ export function ScrubFrameOverlay({
           className="absolute inset-0 w-full h-full object-contain"
           onEnded={onVideoEnded}
         />
-      ) : imageUrl ? (
-        <img src={imageUrl} alt="" draggable={false} className="absolute inset-0 w-full h-full object-contain" />
       ) : null}
-      {marker && <MarkerOnFrame marker={marker} />}
+      {/* Raw-orientation frame: the buffer JPEG and the input markers rotate together. */}
+      <div data-testid="scrub-frame-box" className="pointer-events-none" style={rawFrameBoxStyle(geometry)}>
+        {kind === "buffer" && imageUrl && (
+          <img src={imageUrl} alt="" draggable={false} className="absolute inset-0 w-full h-full object-fill" />
+        )}
+        {marker && <MarkerOnFrame marker={marker} />}
+      </div>
       <span
         className="absolute bottom-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-ink/75 text-ink-inverse text-[11px] font-mono whitespace-nowrap pointer-events-none"
         style={{ fontVariantNumeric: "tabular-nums" }}
@@ -540,6 +593,15 @@ export function ScrubFrameOverlay({
       </span>
     </div>
   );
+}
+
+/** Wall-clock time of a buffer position (`12:03:04.5`); stays right while the view is frozen. */
+function bufferWallTime(source: TimelineSource, t: number): string {
+  const origin = source.origin ? Date.parse(source.origin) : Number.NaN;
+  if (!Number.isFinite(origin)) return formatTimelineTime(t);
+  const at = new Date(origin + t * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}.${Math.floor(at.getMilliseconds() / 100)}`;
 }
 
 /**
@@ -552,6 +614,8 @@ export function ScrubTimeline({
   device,
   open,
   saved,
+  onSavedConsumed,
+  streamGeometry,
   overlayTarget,
   overlayBorderRadius,
   style,
@@ -559,11 +623,14 @@ export function ScrubTimeline({
   device: string;
   open: boolean;
   saved?: SavedRecording | null;
+  onSavedConsumed?: () => void;
+  /** The live stream's raw size and CSS rotation (buffer frames match it). */
+  streamGeometry?: RawFrameGeometry | null;
   overlayTarget: HTMLElement | null;
   overlayBorderRadius?: CSSProperties["borderRadius"];
   style?: CSSProperties;
 }) {
-  const timeline = useScrubTimeline({ device, open, saved });
+  const timeline = useScrubTimeline({ device, open, saved, onSavedConsumed });
   const { source, sourceKind, position, playing } = timeline;
   const [focusedMarkerId, setFocusedMarkerId] = useState<number | null>(null);
   useEffect(() => setFocusedMarkerId(null), [source?.kind, timeline.recording?.videoUrl]);
@@ -577,11 +644,21 @@ export function ScrubTimeline({
     ? (focusedMarker && Math.abs(focusedMarker.t - position) < 1 ? focusedMarker : activeMarker(source, position))
     : null;
 
+  const recordingFrame = source?.kind === "recording" ? source.frame : undefined;
+  const frameGeometry: RawFrameGeometry | null = sourceKind === "buffer"
+    ? streamGeometry ?? null
+    : recordingFrame?.width && recordingFrame.height
+      ? { width: recordingFrame.width, height: recordingFrame.height, rotationDegrees: recordingFrame.rotation }
+      : null;
+  // A rotated recording without its size can't place points; skip the ring.
+  const markerPlaceable = sourceKind === "buffer" || frameGeometry !== null || !recordingFrame?.rotation;
+
   if (!open) return null;
   const overlay = source && position !== null && overlayTarget
     ? createPortal(
       <ScrubFrameOverlay
         kind={sourceKind}
+        geometry={frameGeometry}
         imageUrl={bufferFrame.url}
         missing={bufferFrame.missing}
         videoUrl={timeline.recording?.videoUrl}
@@ -589,9 +666,9 @@ export function ScrubTimeline({
         playing={playing}
         onVideoTime={(t) => timeline.seek(t)}
         onVideoEnded={() => timeline.setPlaying(false)}
-        marker={frameMarker}
+        marker={markerPlaceable ? frameMarker : null}
         label={sourceKind === "buffer"
-          ? `buffer · −${(source.duration - position).toFixed(1)}s`
+          ? `buffer · ${bufferWallTime(source, position)}`
           : `recording · ${formatTimelineTime(position)}`}
         borderRadius={overlayBorderRadius}
       />,

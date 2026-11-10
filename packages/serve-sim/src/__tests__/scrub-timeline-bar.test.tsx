@@ -3,8 +3,11 @@ import { Window } from "happy-dom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { rawPointForDisplayPoint, streamDisplayGeometry } from "../client/simulator/orientation";
 import {
+  rawFrameBoxStyle,
   ScrubFrameOverlay,
+  SCRUB_TIMELINE_MIN_WIDTH,
   ScrubTimelineBar,
   ScrubTimelineToolbarButton,
   type ScrubTimelineBarProps,
@@ -90,8 +93,33 @@ describe("ScrubTimelineBar (static)", () => {
         <ScrubTimelineToolbarButton open onToggle={() => {}} />
       </SimulatorToolbar>,
     );
-    expect(html).toContain('aria-label="Hide timeline"');
+    // One stable name; the state is aria-pressed only.
+    expect(html).toContain('aria-label="Timeline"');
     expect(html).toContain('aria-pressed="true"');
+  });
+});
+
+describe("ScrubTimelineBar header (narrowest layout)", () => {
+  test("the fullest row only lets the time shrink; Live and the controls never do", () => {
+    const html = renderToStaticMarkup(
+      <ScrubTimelineBar {...propsFor({ position: 0.2, style: { width: SCRUB_TIMELINE_MIN_WIDTH } })} />,
+    );
+    expect(SCRUB_TIMELINE_MIN_WIDTH).toBeGreaterThanOrEqual(420);
+    expect(html).toContain("@container");
+    expect(html).toContain('aria-label="Close recording"');
+    expect(html).toContain('aria-label="Back to live"');
+    const timeAt = html.indexOf('data-testid="scrub-time"');
+    const time = html.slice(timeAt, html.indexOf(">", timeAt));
+    expect(time).toContain("min-w-0");
+    expect(time).toContain("text-ellipsis");
+    // Below 400px of bar the "/ duration" part drops first.
+    expect(html).toMatch(/data-testid="scrub-duration" class="@max-\[400px\]:hidden"/);
+    for (const label of ["Play", "Close recording", "Open recording", "Back to live"]) {
+      const at = html.indexOf(`aria-label="${label}"`);
+      const tag = html.slice(html.lastIndexOf("<button", at), at);
+      expect(tag).toContain("shrink-0");
+    }
+    expect(html).toMatch(/role="radiogroup"[^>]*class="shrink-0/);
   });
 });
 
@@ -114,6 +142,61 @@ describe("ScrubFrameOverlay (static)", () => {
     expect(html).toContain("<line");
     expect(html).toContain("frame evicted");
     expect(html).not.toContain("<img");
+  });
+
+  test("portrait (no rotation): the frame box fills the overlay and the ring is at the raw point", () => {
+    const html = renderToStaticMarkup(
+      <ScrubFrameOverlay kind="buffer" imageUrl="blob:frame" geometry={{ width: 390, height: 844, rotationDegrees: 0 }} marker={SOURCE.markers[0]} label="x" />,
+    );
+    expect(html).toContain("container-type:size");
+    expect(html).not.toContain("rotate(");
+    expect(html).toContain("left:25%");
+  });
+
+  test("landscape: the buffer frame and its ring rotate with the live stream", () => {
+    // iPhone in landscape_left: the raw framebuffer stays portrait and the
+    // stream is CSS-rotated 90° (streamDisplayGeometry).
+    const config = { width: 390, height: 844, orientation: "landscape_left" as const };
+    const { rotationDegrees, needsCssRotation } = streamDisplayGeometry(config);
+    expect(needsCssRotation).toBe(true);
+    const geometry = { width: config.width, height: config.height, rotationDegrees };
+    const style = rawFrameBoxStyle(geometry);
+    expect(style.transform).toBe("translate(-50%, -50%) rotate(90deg)");
+    // Pre-rotation the box is portrait: width = shown height, height = shown width.
+    expect(style.width).toBe(`min(100cqh, ${(100 * 390 / 844).toFixed(4)}cqw)`);
+    expect(style.height).toBe(`min(100cqw, ${(100 * 844 / 390).toFixed(4)}cqh)`);
+
+    // A tap at display point (0.8, 0.3) is sent as a raw point.
+    const display = { x: 0.8, y: 0.3 };
+    const raw = rawPointForDisplayPoint("landscape_left", display.x, display.y);
+    const marker = { id: 7, t: 0.1, kind: "tap" as const, rawKind: "tap", summary: "Tap", ...raw };
+    const html = renderToStaticMarkup(
+      <ScrubFrameOverlay kind="buffer" imageUrl="blob:frame" geometry={geometry} marker={marker} label="x" />,
+    );
+    // The image and the ring share the rotated box.
+    const box = html.slice(html.indexOf('data-testid="scrub-frame-box"'));
+    expect(box).toContain("rotate(90deg)");
+    expect(box).toContain('src="blob:frame"');
+    expect(box).toContain("scrub-frame-marker");
+    expect(box).toContain(`left:${raw.x * 100}%`);
+    expect(box).toContain(`top:${raw.y * 100}%`);
+    // Rotating the raw point by the box's 90° (clockwise, about the center)
+    // lands it back on the display point the user tapped.
+    const rotated = { x: 1 - raw.y, y: raw.x };
+    expect(rotated.x).toBeCloseTo(display.x, 9);
+    expect(rotated.y).toBeCloseTo(display.y, 9);
+  });
+
+  test("a recording's markers use the header rotation; the video itself stays unrotated", () => {
+    const html = renderToStaticMarkup(
+      <ScrubFrameOverlay kind="recording" videoUrl="blob:mp4" geometry={{ width: 390, height: 844, rotationDegrees: -90 }} marker={SOURCE.markers[0]} label="x" />,
+    );
+    const video = html.slice(html.indexOf("<video"), html.indexOf("</video>"));
+    expect(video).not.toContain("rotate(");
+    const box = html.slice(html.indexOf('data-testid="scrub-frame-box"'));
+    expect(box).toContain("rotate(-90deg)");
+    expect(box).toContain("scrub-frame-marker");
+    expect(box).not.toContain("<img");
   });
 
   test("a recording renders a muted video", () => {

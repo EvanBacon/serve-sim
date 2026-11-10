@@ -398,12 +398,40 @@ describe("ScrubTimeline (container)", () => {
     const overlay = screen.querySelector('[data-testid="scrub-frame-overlay"]')!;
     expect(overlay).not.toBeNull();
     expect(overlay.querySelector("img")?.getAttribute("src")).toStartWith("blob:");
-    expect(overlay.textContent).toContain("buffer · −2.0s");
+    // Labelled by the sample's wall time (t = 0 is the origin), not "−Xs" from a frozen end.
+    const origin = new Date(BUFFER_VIEW.origin);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    expect(overlay.textContent).toContain(`buffer · ${pad(origin.getHours())}:${pad(origin.getMinutes())}:${pad(origin.getSeconds())}.0`);
 
     await act(async () => {
       track.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event);
     });
     expect(screen.querySelector('[data-testid="scrub-frame-overlay"]')).toBeNull();
+  });
+
+  test("landscape: the scrubbed buffer frame is rotated like the live stream", async () => {
+    const { ScrubTimeline } = await import("../client/components/scrub-timeline");
+    handler = ({ path }) => path.includes("/buffer/frame")
+      ? new Response(new Uint8Array([0xff, 0xd8, 0xff]), { status: 200, headers: { "content-type": "image/jpeg" } })
+      : json(BUFFER_VIEW);
+    const doc = dom.document;
+    const screen = doc.createElement("div") as unknown as HTMLElement;
+    const bar = doc.createElement("div") as unknown as HTMLElement;
+    doc.body.appendChild(screen as never);
+    doc.body.appendChild(bar as never);
+    await act(async () => {
+      root = createRoot(bar);
+      root.render(<ScrubTimeline device="A" open overlayTarget={screen} streamGeometry={{ width: 390, height: 844, rotationDegrees: 90 }} />);
+    });
+    await flush();
+    const track = bar.querySelector('[role="slider"]')!;
+    await act(async () => {
+      track.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }) as unknown as Event);
+    });
+    await flush();
+    const box = screen.querySelector('[data-testid="scrub-frame-box"]') as unknown as HTMLElement;
+    expect(box.getAttribute("style")).toContain("rotate(90deg)");
+    expect(box.querySelector("img")).not.toBeNull();
   });
 
   test("closed, it renders nothing and fetches nothing", async () => {
