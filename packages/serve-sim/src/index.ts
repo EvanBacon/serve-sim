@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { execFile, execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createHash, randomBytes } from "crypto";
-import { networkInterfaces } from "os";
+import { networkInterfaces, tmpdir } from "os";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import {
@@ -105,6 +105,8 @@ import {
   type DiagnosticsBundle,
 } from "./doctor";
 import { redactHome } from "./diagnostics-redact";
+import { BUFFER_VERBS, runBufferCommand, type BufferCliOptions, type BufferVerb } from "./buffer-cli";
+import { ROLLING_BUFFER_ENV, parseRollingBufferEnv } from "./rolling-buffer";
 
 // `import.meta.dir` is Bun-only; resolve once via fileURLToPath so the bundled
 // CLI works under plain `node` too.
@@ -2424,6 +2426,14 @@ async function serve(
       ...(allowExec ? { allowExec: true } : {}),
     });
   }
+  // `--buffer`: open each device's session now (they're otherwise created by
+  // the first viewer or command), so the buffer covers the time before that.
+  if (parseRollingBufferEnv(process.env, () => {})) {
+    const { getDeviceSession } = await import("./device-session");
+    for (const udid of targetDevices) {
+      try { getDeviceSession(udid); } catch {}
+    }
+  }
   // Drop any token a previous (killed) server left for this port.
   removeExecTokenFile(boundPort);
   const execTokenFile = allowExec ? writeExecTokenFile(boundPort, execToken) : undefined;
@@ -2573,6 +2583,11 @@ program
     },
   )
   .option(
+    "--buffer [seconds]",
+    "Keep a rolling buffer of the last N seconds (default 20, max 60) of small frames for every " +
+      `device (off by default; see \`serve-sim buffer\`). Also read from ${ROLLING_BUFFER_ENV}.`,
+  )
+  .option(
     "--device-set <path>",
     "Use this CoreSimulator device set instead of Xcode's default (simctl --set). " +
       "Applies to subcommands too. Also read from SERVE_SIM_DEVICE_SET.",
@@ -2590,6 +2605,7 @@ Examples:
   serve-sim --panes devices,tools --fit  Open panes and fit the simulator to the viewport
   serve-sim --theme dark                 Start the simulator in Dark Mode
   serve-sim --device-set <path> <udid>   Preview a simulator of another device set
+  serve-sim --buffer 30                  Keep the last 30 s of small frames (serve-sim buffer list)
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --allow-exec                 Enable \`serve-sim exec\` and .ipa drag-to-install
@@ -2604,6 +2620,15 @@ Examples:
       process.env[AUTH_TOKEN_ENV] = opts.authToken.trim();
     }
     applyMaxBitrateOption(opts.maxBitrate);
+    if (opts.buffer !== undefined) {
+      // Same route as --max-bitrate: the env reaches in-process sessions and a --detach child.
+      const value = opts.buffer === true ? "on" : String(opts.buffer);
+      if (!parseRollingBufferEnv({ [ROLLING_BUFFER_ENV]: value }, (message) => console.error(message))) {
+        console.error("--buffer expects a whole number of seconds from 1 to 60, e.g. --buffer 20");
+        process.exit(1);
+      }
+      process.env[ROLLING_BUFFER_ENV] = value;
+    }
     if (opts.list !== undefined) {
       listStreams(typeof opts.list === "string" ? opts.list : undefined);
       return;
@@ -2825,6 +2850,59 @@ program
     }
     return opts.refs ? axRefs(opts.device, { all: opts.all, text: opts.text }) : axDump(opts.device);
   });
+
+const bufferCommand = program
+  .command("buffer")
+  .description("Opt-in rolling buffer of recent small frames: what just happened? (off until `buffer start`)");
+const BUFFER_DESCRIPTIONS: Record<BufferVerb, string> = {
+  status: "Show whether the buffer is on, its options and memory use (JSON)",
+  start: "Start buffering the last N seconds of downscaled JPEG frames",
+  stop: "Stop the buffer and free its frames",
+  list: "List changed frames and input events in the buffer, relative to now",
+  frame: "Write one buffered JPEG (latest, --id, or --ago); stdout when piped",
+  dump: "Write every buffered frame plus buffer.json to a directory (a new temp dir by default)",
+};
+for (const verb of BUFFER_VERBS) {
+  const sub = bufferCommand
+    .command(verb, verb === "status" ? { isDefault: true } : {})
+    .description(BUFFER_DESCRIPTIONS[verb])
+    .option(...deviceOpt)
+    .option("--url <url>", `Remote serve-sim preview URL (or ${REMOTE_URL_ENV}); pass a UDID with -d`)
+    .option("--auth-token <token>", `Auth token for the remote preview (or ${AUTH_TOKEN_ENV})`);
+  if (verb === "start") {
+    sub
+      .option("--seconds <n>", "Window length in seconds, 1-60 (default 20)")
+      .option("--fps <n>", "Frames sampled per second, 1-10 (default 4)")
+      .option("--size <px>", "Long edge of stored frames in px, 64-1280 (default 640)")
+      .option("--quality <q>", "JPEG quality 0.1-0.95 (default 0.6)")
+      .option("--max-mb <n>", "Memory cap for stored frames in MiB, 1-64 (default 24)");
+  }
+  if (verb === "list" || verb === "dump") sub.option("--since <time>", "Only the last N seconds, e.g. 5, 2.5s, 500ms");
+  if (verb === "list") sub.option("-j, --json", "Print the raw JSON view (samples, frames, events)");
+  if (verb === "frame") {
+    sub
+      .option("--id <n>", "Frame id from `buffer list`")
+      .option("--ago <time>", "The frame on screen this long ago, e.g. 2s")
+      .option("-o, --output <file>", "Write the JPEG here (- for stdout)");
+  }
+  if (verb === "dump") sub.option("-o, --output <dir>", "Write into this (new or empty) directory");
+  sub.action(async (opts: BufferCliOptions & { device?: string }, command: Command) => {
+    const o = command.optsWithGlobals() as { url?: string; authToken?: string };
+    remoteInputOptions = { url: o.url, authToken: o.authToken };
+    const remote = remoteInputUrl() !== undefined;
+    const target = await resolveInputTarget(opts.device ? (remote ? opts.device : resolveDevice(opts.device)) : undefined);
+    process.exitCode = await runBufferCommand(verb, opts, {
+      wsUrl: target.wsUrl,
+      headers: target.headers,
+      fetch: (input, init) => fetch(input, init),
+      log: (line) => console.log(line),
+      error: (line) => console.error(line),
+      writeStdout: (bytes) => process.stdout.write(bytes),
+      stdoutIsTTY: process.stdout.isTTY === true,
+      tmpdir,
+    });
+  });
+}
 
 // Input subcommands can drive a remote preview (e.g. through an
 // authenticated tunnel) instead of the local state file.

@@ -62,7 +62,6 @@ class UsageError extends Error {}
 
 /**
  * Seconds: `1.5`, `2s`, or `250ms`. Null when not a non-negative time.
- * @lintignore Exported for tests.
  */
 export function parseInspectTime(raw: string): number | null {
   const m = /^\s*(\d+(?:\.\d+)?|\.\d+)\s*(ms|s)?\s*$/.exec(raw);
