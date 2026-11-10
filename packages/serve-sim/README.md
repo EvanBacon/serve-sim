@@ -120,7 +120,8 @@ serve-sim doctor [-d udid]            Collect redacted diagnostics for bug repor
                                       (--json, --out <file>)
 serve-sim record [-d udid]            Record the screen to an MP4 (native resolution,
                                       60 fps H.264); Ctrl+C stops. -o <file>,
-                                      -t <duration>, --codec h264|hevc, --fps, --bitrate
+                                      -t <duration>, --codec h264|hevc, --fps, --bitrate,
+                                      --no-index (skip the .index.jsonl sidecar)
 serve-sim ax [-d udid]                Dump the accessibility tree as JSON
 serve-sim ax --refs [--all] [--text]  Compact snapshot with element refs (@e1…)
 serve-sim tap @e2 [--settle] [--timeout <ms>]
@@ -265,6 +266,8 @@ Movies an app records from the injected camera (`AVCaptureMovieFileOutput`, as i
 The record button in the preview toolbar and `serve-sim record` both drive a native recorder in the server: it encodes the simulator framebuffer directly (full native resolution, constant frame rate, hardware H.264/HEVC), independent of the stream codec the viewer uses. Stopping streams the finished MP4 to the client that stopped it (a browser download, or the `-o` file) and deletes the server's temp copy. One recording runs per device; any client may stop it, and a `serve-sim record` whose recording is stopped elsewhere exits with an error instead of saving.
 
 A recording is capped at 30 minutes. At the cap the server finalizes the file and holds it for the client that started it, which collects it automatically. If that client has gone away (tab closed, `serve-sim record` killed), the hold lapses after 5 minutes: then any client may collect it with Stop, and starting a new recording discards it.
+
+`serve-sim record` also writes a recording index next to the MP4, `<name>.index.jsonl` (skip it with `--no-index`), so tools can find what changed when without decoding the video. It is JSON Lines: a `header` (file, fps, codec, size, rotation, and the clock join), one `frame` line per sample in the MP4 (`i`, `pts` in seconds, the host `uptime` the source frame was captured at, and `changed`: whether its pixels differ from the previous sample by the framebuffer's surface seed; repeated and idle slots are `false`, and an app redrawing identical pixels can still read `true`), one `event` line per HID input to that device during the recording (`t` in media seconds, `kind`, `action`, `summary`, and normalized `x`/`y` when the input has a point), and a `footer` (`frames`, `changedFrames`, `durationSec`). Event-log times are wall clock; the header's `clock` gives the wall clock minus host uptime offset, sampled once when recording starts, and the uptime of `pts` 0, so `t = (Date.parse(timestamp) / 1000 - wallMinusUptimeSec) - originUptime`. Events are logged when the server handles the input, so the frames they cause follow a frame or more later. Any HTTP client can fetch the index after `/recording/stop` with `GET …/recording/index?token=<start token>` (the server keeps the last four for 30 minutes); the stop response itself is unchanged.
 
 Limitations:
 
