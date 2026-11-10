@@ -1358,19 +1358,18 @@ export class DeviceSession {
           gesture.eventId = entry.id;
         } else {
           // Keep the stored drag current without streaming every touchmove to the browser.
-          const updated = updateEventLogEvent(
-            gesture.eventId,
-            {
-              kind: "drag",
-              action: "drag",
-              summary: touchGestureSummary(gesture),
-              details: this.touchGestureDetails(gesture, "drag", "move"),
-            },
-            { notify: false },
-          );
+          const patch = {
+            kind: "drag",
+            action: "drag",
+            summary: touchGestureSummary(gesture),
+            details: this.touchGestureDetails(gesture, "drag", "move"),
+          };
+          const updated = updateEventLogEvent(gesture.eventId, patch, { notify: false });
           // Silent updates skip subscribers; an indexed recording still
-          // wants the drag's latest point (and when it arrived).
+          // wants the drag's latest point (and when it arrived), even once
+          // the drag has fallen out of the global log.
           if (updated) this.recording?.events?.add(updated);
+          else this.recording?.events?.update(gesture.eventId, patch);
         }
       }
       return;
@@ -1393,12 +1392,15 @@ export class DeviceSession {
               details: this.touchGestureDetails(gesture, "drag", "end"),
             });
           } else {
-            updateEventLogEvent(gesture.eventId, {
+            const patch = {
               kind: "drag",
               action: "drag",
               summary: touchGestureSummary(gesture),
               details: this.touchGestureDetails(gesture, "drag", "end"),
-            });
+            };
+            // A notified update reaches the collector via its subscription;
+            // one the global log already evicted has to be patched directly.
+            if (!updateEventLogEvent(gesture.eventId, patch)) this.recording?.events?.update(gesture.eventId, patch);
           }
         } else {
           recordEventLogEvent({

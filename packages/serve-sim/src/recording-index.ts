@@ -236,6 +236,23 @@ export class RecordingEventCollector {
     this.byId.set(entry.id, { entry, receivedAtMs: this.now() });
   }
 
+  /**
+   * Patch an entry already collected, independent of the global event log
+   * (a long drag can fall out of its 500-entry ring while still going).
+   * Unknown ids and a stopped collector are ignored.
+   */
+  update(id: number, patch: Partial<Omit<EventLogEntry, "id">>): void {
+    const current = this.byId.get(id);
+    if (this.stopped || !current) return;
+    const entry: EventLogEntry = {
+      ...current.entry,
+      ...patch,
+      id,
+      ...(patch.summary != null && patch.msg == null ? { msg: patch.summary } : {}),
+    };
+    this.byId.set(id, { entry, receivedAtMs: this.now() });
+  }
+
   /** Stop collecting (the recording finalized). */
   stop(): void {
     this.stopped = true;

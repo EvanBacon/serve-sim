@@ -179,6 +179,21 @@ describe("RecordingEventCollector", () => {
     collector.add(hidEvent(2, "t2"));
     expect(collector.entries().map(({ entry, receivedAtMs }) => [entry.summary, receivedAtMs])).toEqual([["Drag b", 2_500]]);
   });
+
+  test("update() patches a collected entry without the global log", () => {
+    let now = 1_000;
+    const collector = new RecordingEventCollector("UDID", 10, () => now);
+    collector.add(hidEvent(1, "t1", { summary: "Drag a", details: { x: 0.1, y: 0.1 } }));
+    now = 3_000;
+    collector.update(1, { summary: "Drag b", details: { x: 0.8, y: 0.9 } });
+    collector.update(7, { summary: "never collected" });
+    expect(collector.entries().map(({ entry, receivedAtMs }) => [entry.id, entry.summary, entry.msg, entry.details, receivedAtMs]))
+      .toEqual([[1, "Drag b", "Drag b", { x: 0.8, y: 0.9 }, 3_000]]);
+    collector.stop();
+    now = 4_000;
+    collector.update(1, { summary: "Drag c" });
+    expect(collector.entries()[0]).toMatchObject({ entry: { summary: "Drag b" }, receivedAtMs: 3_000 });
+  });
 });
 
 describe("recordingIndexLines", () => {

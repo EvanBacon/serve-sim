@@ -3,7 +3,7 @@ import { createServer, request, type IncomingMessage, type Server } from "http";
 import { writeFileSync } from "fs";
 import type { AddressInfo } from "net";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
-import { clearEventLogForTests, recordEventLogEvent, subscribeEventLog } from "../event-log";
+import { clearEventLogForTests, EVENT_LOG_MAX_ENTRIES, recordEventLogEvent, subscribeEventLog } from "../event-log";
 import type { RecordingStartOptions } from "../native";
 import type { NativeRecordingIndex } from "../recording-index";
 
@@ -329,6 +329,42 @@ describe("GET /recording/index", () => {
     const [drag] = lines.filter((l) => l.type === "event");
     expect(drag).toMatchObject({ kind: "drag", x: 0.6, y: 0.7, start: { x: 0.1, y: 0.1 } });
     expect(drag.tEnd).toBeGreaterThan(drag.t);
+  });
+
+  test("a long drag evicted from the global event log still gets its later points", async () => {
+    const session = new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid() });
+    const base = await serve(session);
+    let receive!: (data: Buffer) => void;
+    session.attachHidSocket({ send() {}, close() {}, on(event, cb) { if (event === "message") receive = cb as (data: Buffer) => void; } });
+    const touch = (type: string, x: number, y: number) =>
+      receive(Buffer.concat([Buffer.from([0x03]), Buffer.from(JSON.stringify({ type, x, y }))]));
+    const flood = () => {
+      // Busy input on another device pushes the drag out of the 500-entry ring.
+      for (let i = 0; i < EVENT_LOG_MAX_ENTRIES + 10; i++) {
+        recordEventLogEvent({ device: "OTHER-UDID", source: "hid", kind: "tap", summary: `Other ${i}` });
+      }
+    };
+    const run = async (end: boolean) => {
+      const { token, stop } = await recordOnce(base, async () => {
+        touch("begin", 0.1, 0.1);
+        touch("move", 0.3, 0.3); // first move: logged (and notified)
+        flood();
+        await Bun.sleep(20);
+        touch("move", 0.6, 0.7); // silent update, no longer in the global log
+        if (end) {
+          flood();
+          touch("end", 0.8, 0.9); // notified update, also evicted
+        }
+      });
+      await stop.arrayBuffer();
+      const lines = parseLines(await (await fetch(`${base}/recording/index?token=${token}`)).text());
+      return lines.filter((l) => l.type === "event");
+    };
+    const [moving] = await run(false);
+    expect(moving).toMatchObject({ kind: "drag", x: 0.6, y: 0.7, start: { x: 0.1, y: 0.1 } });
+    expect(moving.tEnd).toBeGreaterThan(moving.t);
+    const [ended] = await run(true);
+    expect(ended).toMatchObject({ kind: "drag", x: 0.8, y: 0.9, start: { x: 0.1, y: 0.1 } });
   });
 });
 
