@@ -17,14 +17,14 @@
  */
 import type { AxElement, AxRect, AxSnapshot } from "./ax-shared";
 
-export interface AgentFrame {
+interface AgentFrame {
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
-export interface AgentNode {
+interface AgentNode {
   ref: string;
   role: string;
   type: string;
@@ -112,7 +112,7 @@ function hasUniqueId(element: AxElement): boolean {
   return element.id !== "" && element.id !== element.path;
 }
 
-export function isInterestingElement(element: AxElement): boolean {
+function isInterestingElement(element: AxElement): boolean {
   if (!(element.frame.width > 0) || !(element.frame.height > 0)) return false;
   return element.label !== "" || element.value !== "" || hasUniqueId(element) || INTERACTIVE_TYPES.has(element.type);
 }
@@ -123,7 +123,7 @@ export function isInterestingElement(element: AxElement): boolean {
  * `<type>@<path>`. Values are deliberately excluded so typing into a field
  * reads as a change, not a replacement.
  */
-export function identityKeys(elements: AxElement[]): string[] {
+function identityKeys(elements: AxElement[]): string[] {
   const seen = new Map<string, number>();
   return elements.map((element) => {
     let base: string;

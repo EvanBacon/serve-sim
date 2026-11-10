@@ -4,8 +4,6 @@ import {
   agentSnapshot,
   assignRefs,
   diffSnapshots,
-  identityKeys,
-  isInterestingElement,
   isVisibleFrame,
   normalizeRef,
   resolveRef,
@@ -45,39 +43,76 @@ describe("isVisibleFrame", () => {
   });
 });
 
-describe("isInterestingElement", () => {
+/** Labels of the elements that get a ref (with `all`, so visibility doesn't filter). */
+function refLabels(elements: AxElement[]): string[] {
+  return agentSnapshot(assignRefs(null, snap(elements), { all: true }), { all: true }).nodes.map((n) => n.label ?? `<${n.type}>`);
+}
+
+describe("interesting elements", () => {
   test("keeps labelled, valued, identified, or interactive elements", () => {
-    expect(isInterestingElement(el({ type: "Group", role: "", label: "Title" }))).toBe(true);
-    expect(isInterestingElement(el({ type: "Group", role: "", value: "42" }))).toBe(true);
-    expect(isInterestingElement(el({ type: "Group", role: "", id: "hero", path: "0.3" }))).toBe(true);
-    expect(isInterestingElement(el({ type: "Button", label: "" }))).toBe(true);
-    expect(isInterestingElement(el({ type: "TextField", role: "text field" }))).toBe(true);
+    expect(refLabels([
+      el({ path: "0.0", type: "Group", role: "", label: "Title" }),
+      el({ path: "0.1", type: "Group", role: "", value: "42" }),
+      el({ path: "0.2", type: "Group", role: "", id: "hero" }),
+      el({ path: "0.3", type: "Button" }),
+      el({ path: "0.4", type: "TextField", role: "text field" }),
+    ])).toEqual(["Title", "<Group>", "<Group>", "<Button>", "<TextField>"]);
   });
 
   test("drops unlabelled containers and zero-size elements", () => {
-    expect(isInterestingElement(el({ type: "Group", role: "" }))).toBe(false);
-    expect(isInterestingElement(el({ label: "Hidden", frame: { x: 0, y: 0, width: 0, height: 0 } }))).toBe(false);
+    expect(refLabels([
+      el({ path: "0.0", type: "Group", role: "" }),
+      el({ path: "0.1", label: "Hidden", frame: { x: 0, y: 0, width: 0, height: 0 } }),
+    ])).toEqual([]);
+  });
+
+  test("reports AXUniqueId as id, never the path fallback", () => {
+    const nodes = agentSnapshot(assignRefs(null, snap([el({ id: "login", path: "0.0", label: "Log in" }), el({ path: "0.1", label: "Other" })]))).nodes;
+    expect(nodes[0]!.id).toBe("login");
+    expect("id" in nodes[1]!).toBe(false);
   });
 });
 
-describe("identityKeys", () => {
-  test("prefers AXUniqueId, then type + label (with an occurrence index), then path", () => {
-    const keys = identityKeys([
-      el({ id: "login", path: "0.0", label: "Log in" }),
-      el({ path: "0.1", label: "Row", type: "Cell" }),
-      el({ path: "0.2", label: "Row", type: "Cell" }),
-      el({ path: "0.3", type: "Button" }),
-    ]);
-    expect(keys).toEqual(["id:login", "Cell|Row", "Cell|Row#2", "Button@0.3"]);
+describe("identity keys (observed through ref carry-over)", () => {
+  const refOf = (state: ReturnType<typeof assignRefs>, label: string) =>
+    agentSnapshot(state, { all: true }).nodes.find((n) => n.label === label)?.ref;
+
+  test("AXUniqueId wins: a relabelled element with the same id keeps its ref", () => {
+    const before = assignRefs(null, snap([el({ id: "play", path: "0.0", label: "Play" })]));
+    const after = assignRefs(before, snap([el({ id: "play", path: "0.5", label: "Pause" })]));
+    expect(refOf(after, "Pause")).toBe("@e1");
+    expect(diffSnapshots(before, after).changed).toEqual([{ ref: "@e1", label: "Pause", fields: { label: ["Play", "Pause"] } }]);
   });
 
-  test("label-based keys survive sibling insertion (path changes)", () => {
-    const before = identityKeys([el({ path: "0.0", label: "General", type: "Cell" })]);
-    const after = identityKeys([
+  test("type + label keys survive sibling insertion (path changes)", () => {
+    const before = assignRefs(null, snap([el({ path: "0.0", label: "General", type: "Cell" })]));
+    const after = assignRefs(before, snap([
       el({ path: "0.0", label: "Banner", type: "StaticText" }),
       el({ path: "0.1", label: "General", type: "Cell" }),
+    ]));
+    expect(refOf(after, "General")).toBe("@e1");
+  });
+
+  test("duplicate labels are told apart by occurrence order", () => {
+    const rows = (y: number) => snap([
+      el({ path: "0.0", label: "Row", type: "Cell", value: "a", frame: { x: 0, y, width: 100, height: 40 } }),
+      el({ path: "0.1", label: "Row", type: "Cell", value: "b", frame: { x: 0, y: y + 50, width: 100, height: 40 } }),
     ]);
-    expect(after[1]).toBe(before[0]!);
+    const before = assignRefs(null, rows(100));
+    const after = assignRefs(before, rows(100));
+    expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e1=a", "@e2=b"]);
+  });
+
+  test("unlabelled elements without an id are keyed by type and path", () => {
+    const before = assignRefs(null, snap([el({ path: "0.3", type: "Button" })]));
+    expect(agentSnapshot(assignRefs(before, snap([el({ path: "0.3", type: "Button" })]))).nodes[0]!.ref).toBe("@e1");
+    expect(agentSnapshot(assignRefs(before, snap([el({ path: "0.4", type: "Button" })]))).nodes[0]!.ref).toBe("@e2");
+  });
+
+  test("a value change keeps the ref (values are not part of the key)", () => {
+    const before = assignRefs(null, snap([el({ label: "Name", type: "TextField", value: "" })]));
+    const after = assignRefs(before, snap([el({ label: "Name", type: "TextField", value: "Evan" })]));
+    expect(diffSnapshots(before, after).changed).toEqual([{ ref: "@e1", label: "Name", fields: { value: ["", "Evan"] } }]);
   });
 });
 

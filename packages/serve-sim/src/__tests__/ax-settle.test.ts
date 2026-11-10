@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { clampSettleTimeout, waitForSettle, type SettleSample } from "../ax-settle";
+import { clampSettleTimeout, waitForSettle } from "../ax-settle";
+
+type SettleSample<T> = { signature: string; frames: number | null; value: T };
 
 /** Fake clock: `sleep` advances time instantly; `sample` reads a scripted series. */
 function harness(series: Array<Partial<SettleSample<string>> | Error>, sampleCostMs = 0) {

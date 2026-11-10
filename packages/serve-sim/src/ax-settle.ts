@@ -8,11 +8,11 @@
  * sampler are injected so the logic is tested without a simulator.
  */
 
-export const DEFAULT_SETTLE_TIMEOUT_MS = 3000;
-export const MAX_SETTLE_TIMEOUT_MS = 30_000;
-export const DEFAULT_SETTLE_INTERVAL_MS = 200;
+const DEFAULT_SETTLE_TIMEOUT_MS = 3000;
+const MAX_SETTLE_TIMEOUT_MS = 30_000;
+const DEFAULT_SETTLE_INTERVAL_MS = 200;
 
-export interface SettleSample<T> {
+interface SettleSample<T> {
   /** Equal signatures mean an unchanged AX tree. */
   signature: string;
   /** Monotonic content-frame counter, or null when the capture path can't tell. */
