@@ -73,7 +73,9 @@ export async function serveAxAgent(
     return;
   }
   if (method === "HEAD") {
-    // A probe: never read the tree, wait for settle, or touch the ref session.
+    // A liveness probe: never read the tree, wait for settle, or touch the
+    // ref session. It also doesn't check AX availability (a GET may still
+    // answer 503 ax_unavailable), so don't use it as a readiness probe.
     if (!res.writableEnded && !res.destroyed) {
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end();
