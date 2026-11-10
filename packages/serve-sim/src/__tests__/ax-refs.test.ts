@@ -84,7 +84,7 @@ describe("identity keys (observed through ref carry-over)", () => {
     expect(diffSnapshots(before, after).changed).toEqual([{ ref: "@e1", label: "Pause", fields: { label: ["Play", "Pause"] } }]);
   });
 
-  test("type + label keys survive sibling insertion (path changes)", () => {
+  test("unique type + label keys survive sibling insertion and moves", () => {
     const before = assignRefs(null, snap([el({ path: "0.0", label: "General", type: "Cell" })]));
     const after = assignRefs(before, snap([
       el({ path: "0.0", label: "Banner", type: "StaticText" }),
@@ -103,10 +103,72 @@ describe("identity keys (observed through ref carry-over)", () => {
     expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e1=a", "@e2=b"]);
   });
 
-  test("unlabelled elements without an id are keyed by type and path", () => {
+  test("unlabelled elements keep their ref only while their frame matches", () => {
     const before = assignRefs(null, snap([el({ path: "0.3", type: "Button" })]));
     expect(agentSnapshot(assignRefs(before, snap([el({ path: "0.3", type: "Button" })]))).nodes[0]!.ref).toBe("@e1");
-    expect(agentSnapshot(assignRefs(before, snap([el({ path: "0.4", type: "Button" })]))).nodes[0]!.ref).toBe("@e2");
+    // Same frame under a shifted path (a sibling of another type was inserted): same button.
+    expect(agentSnapshot(assignRefs(before, snap([el({ path: "0.4", type: "Button" })]))).nodes[0]!.ref).toBe("@e1");
+    // Same path, different place: not provably the same button.
+    const moved = assignRefs(before, snap([el({ path: "0.3", type: "Button", frame: { x: 20, y: 400, width: 100, height: 44 } })]));
+    expect(agentSnapshot(moved).nodes[0]!.ref).toBe("@e2");
+    expect(resolveRef(moved, "@e1")).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  const row = (path: string, value: string, y: number) =>
+    el({ path, label: "Row", type: "Cell", value, frame: { x: 0, y, width: 100, height: 40 } });
+  const button = (path: string, y: number) => el({ path, type: "Button", frame: { x: 20, y, width: 44, height: 44 } });
+
+  test("first duplicate removed: the survivor keeps its own ref and the removed ref goes stale", () => {
+    const before = assignRefs(null, snap([row("0.0", "a", 100), row("0.1", "b", 150)]));
+    expect(agentSnapshot(before).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e1=a", "@e2=b"]);
+    const after = assignRefs(before, snap([row("0.0", "b", 150)]));
+    expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e2=b"]);
+    expect(resolveRef(after, "@e1")).toMatchObject({ ok: false, code: "stale_ref" });
+    expect(diffSnapshots(before, after)).toEqual({ added: [], removed: [{ ref: "@e1", role: "button", label: "Row" }], changed: [] });
+  });
+
+  test("first duplicate removed and the survivor reflows into its slot: no ref is re-pointed", () => {
+    const before = assignRefs(null, snap([row("0.0", "a", 100), row("0.1", "b", 150)]));
+    const after = assignRefs(before, snap([row("0.0", "b", 100)]));
+    expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e3=b"]);
+    expect(resolveRef(after, "@e1")).toMatchObject({ ok: false, code: "stale_ref" });
+    expect(resolveRef(after, "@e2")).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  test("first of two indistinguishable duplicates removed: both refs retire", () => {
+    const before = assignRefs(null, snap([row("0.0", "", 100), row("0.1", "", 150)]));
+    const after = assignRefs(before, snap([row("0.0", "", 150)]));
+    expect(agentSnapshot(after).nodes.map((n) => n.ref)).toEqual(["@e3"]);
+    expect(resolveRef(after, "@e2")).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  test("duplicates swapped in place (same count, values moved): refs retire instead of following the slot", () => {
+    const before = assignRefs(null, snap([row("0.0", "a", 100), row("0.1", "b", 150)]));
+    const after = assignRefs(before, snap([row("0.0", "b", 100), row("0.1", "a", 150)]));
+    expect(agentSnapshot(after).nodes.map((n) => n.ref)).toEqual(["@e3", "@e4"]);
+  });
+
+  test("sibling inserted before an unlabelled button: the old ref is retired, never moved to the newcomer", () => {
+    const before = assignRefs(null, snap([button("0.0", 100)]));
+    // The newcomer takes the old slot (and path); the original shifts down.
+    const after = assignRefs(before, snap([button("0.0", 100), button("0.1", 150)]));
+    expect(agentSnapshot(after).nodes.map((n) => n.ref)).toEqual(["@e2", "@e3"]);
+    expect(resolveRef(after, "@e1")).toMatchObject({ ok: false, code: "stale_ref" });
+  });
+
+  test("sibling of another type inserted before an unlabelled button: the button keeps its ref", () => {
+    const before = assignRefs(null, snap([button("0.0", 200)]));
+    const after = assignRefs(before, snap([el({ path: "0.0", type: "StaticText", label: "Hint", frame: { x: 0, y: 100, width: 100, height: 20 } }), button("0.1", 200)]));
+    expect(agentSnapshot(after).nodes.map((n) => `${n.ref}=${n.label ?? n.type}`)).toEqual(["@e2=Hint", "@e1=Button"]);
+  });
+
+  test("a scrolled list of duplicates keeps its refs (one shared offset)", () => {
+    const rows = (y: number) => snap([
+      el({ path: "0.0", label: "Row", type: "Cell", value: "a", frame: { x: 0, y, width: 100, height: 40 } }),
+      el({ path: "0.1", label: "Row", type: "Cell", value: "b", frame: { x: 0, y: y + 50, width: 100, height: 40 } }),
+    ]);
+    const before = assignRefs(null, rows(300));
+    expect(agentSnapshot(assignRefs(before, rows(120))).nodes.map((n) => `${n.ref}=${n.value}`)).toEqual(["@e1=a", "@e2=b"]);
   });
 
   test("a value change keeps the ref (values are not part of the key)", () => {
