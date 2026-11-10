@@ -18,8 +18,10 @@
  * - "Unique" is judged against the whole previous tree, offscreen elements
  *   included, not just the elements that got a ref.
  * - Nothing carries at all when the screen shows other content in the same
- *   place: a keyed text swapped for a new one in its frame, a keyed
- *   element's read-only value changed, a visible title gone without
+ *   place: a named text, button, link, image or group whose name occurs
+ *   fewer times than before, with a name that occurs more times now at its
+ *   top edge (whatever the two widths and heights, and duplicates included),
+ *   a keyed element's read-only value changed, a visible title gone without
  *   scrolling away, or titles reordered (see {@link screenReplaced}).
  * - Otherwise neither a unique id/label nor position is enough on its own:
  *   the uniquely labelled content around an element must have survived too
@@ -104,6 +106,15 @@ interface KeyedElement {
   content: string;
 }
 
+/** A named text-like element, as {@link screenReplaced} compares them. */
+interface NamedText {
+  /** {@link namedKey}, not qualified by a row: Alice in the list and Alice in the detail pane share it. */
+  key: string;
+  type: string;
+  path: string;
+  rect: AxRect;
+}
+
 export interface RefState {
   screen: { width: number; height: number };
   /** Ref'd elements present in the latest tree, in tree order. */
@@ -117,8 +128,12 @@ export interface RefState {
   groups: Map<string, GroupMember[]>;
   /** The latest tree's uniquely keyed elements in tree order, for judging whether an element's context survived. */
   keyed: KeyedElement[];
-  /** Every labelled, identified or value-named key in the latest tree, duplicates included (unqualified). */
-  names: Set<string>;
+  /**
+   * Every named element of a {@link TEXT_TYPES} type in the latest tree,
+   * duplicates and offscreen ones included, keyed unqualified: what an
+   * in-place swap is looked for in (see {@link screenReplaced}).
+   */
+  texts: NamedText[];
   /** Refs of elements that vanished, newest last (bounded), for stale-ref messages. */
   retired: Array<{ ref: string; role: string; label: string }>;
   nextRef: number;
@@ -166,11 +181,21 @@ const INTERACTIVE_TYPES = new Set([
 const CONTENT_VALUE_TYPES = new Set(["StaticText", "Heading", "Cell", "Row", "Image", "Group", "Other", "Button", "Link"]);
 
 /**
- * Types whose label names what is on screen (a contact's name, a row's
- * title). One of these swapped for another in the same place means other
- * content, see {@link screenReplaced}.
+ * Types whose label can name what is on screen: a contact's name as plain
+ * text, a heading, a cell, a tappable name button or link, a labelled avatar
+ * image, a combined SwiftUI element ("Alice, mobile"). One of these swapped
+ * for another in the same place means other content, see
+ * {@link screenReplaced}. Controls whose label is their state (switches,
+ * keyboard keys, text fields) are left out.
  */
-const TEXT_TYPES = new Set(["Heading", "StaticText", "Cell"]);
+const TEXT_TYPES = new Set(["Heading", "StaticText", "Cell", "Other", "Group", "Image", "Button", "Link"]);
+
+/**
+ * Types whose label is content when an AXUniqueId keys them: a text keeps
+ * its identifier while showing another record's name. A control's
+ * identifier names the control, so its label is state ("Play" → "Pause").
+ */
+const ID_LABEL_CONTENT_TYPES = new Set(["Heading", "StaticText", "Cell"]);
 
 /** Types keyed by their value when they have no label (SwiftUI/UIKit text exposed as AXValue only). */
 const VALUE_NAMED_TYPES = new Set(["Heading", "StaticText"]);
@@ -198,7 +223,7 @@ export function isVisibleFrame(frame: AxRect, screen: { width: number; height: n
 /** The element's content beyond its key: see {@link KeyedElement.content}. */
 function contentOf(element: AxElement): string {
   const value = isContentValue(element) ? element.value : "";
-  return hasUniqueId(element) && TEXT_TYPES.has(element.type) ? `${element.label}\u0000${value}` : value;
+  return hasUniqueId(element) && ID_LABEL_CONTENT_TYPES.has(element.type) ? `${element.label}\u0000${value}` : value;
 }
 
 function hasUniqueId(element: AxElement): boolean {
@@ -269,6 +294,18 @@ function framesClose(a: AxRect, b: AxRect, offset: Offset): boolean {
     && Math.abs(a.y + offset.dy - b.y) <= FRAME_TOLERANCE
     && Math.abs(a.width - b.width) <= FRAME_TOLERANCE
     && Math.abs(a.height - b.height) <= FRAME_TOLERANCE;
+}
+
+/**
+ * `b` sits where `a` was once `a` is moved by `offset`: the same top edge
+ * within tolerance, and the two overlap horizontally. Width and height are
+ * ignored, since a label or SwiftUI Text is as wide as its text: "Alice" and
+ * a centred "Bartholomew Jones", or a name that wraps to two lines, take
+ * the same place.
+ */
+function inPlace(a: AxRect, b: AxRect, offset: Offset): boolean {
+  const x = a.x + offset.dx;
+  return Math.abs(a.y + offset.dy - b.y) <= FRAME_TOLERANCE && x < b.x + b.width && b.x < x + a.width;
 }
 
 function countValues(values: string[]): Map<string, number> {
@@ -468,7 +505,12 @@ function contextSurvived(
   return true;
 }
 
-/** Where the content around a vanished element moved: the offsets worth testing for its replacement. */
+/**
+ * Where the content around a vanished element moved: the offsets worth
+ * testing for its replacement. Every candidate can only add a reason to
+ * retire every ref (a swap found at that offset), never make a ref carry,
+ * so trying more of them when the anchors disagree is always safe.
+ */
 function candidateOffsets(anchors: Array<{ path: string; offset: Offset }>, path: string): Offset[] {
   for (let level = 1; ; level++) {
     const root = ancestorPath(path, level);
@@ -485,6 +527,70 @@ function candidateOffsets(anchors: Array<{ path: string; offset: Offset }>, path
   }
 }
 
+/** Texts bucketed by top edge, so "what sits at this top edge" is a lookup, not a scan. */
+class TextsByTop {
+  private readonly buckets = new Map<number, NamedText[]>();
+  constructor(texts: NamedText[]) {
+    for (const t of texts) {
+      const bucket = Math.floor(t.rect.y / FRAME_TOLERANCE);
+      const list = this.buckets.get(bucket);
+      if (list) list.push(t);
+      else this.buckets.set(bucket, [t]);
+    }
+  }
+  /** Texts of `type` in the place of `rect` moved by `offset` (see {@link inPlace}). */
+  at(rect: AxRect, type: string, offset: Offset): NamedText[] {
+    const bucket = Math.floor((rect.y + offset.dy) / FRAME_TOLERANCE);
+    const out: NamedText[] = [];
+    for (let b = bucket - 1; b <= bucket + 1; b++) {
+      for (const t of this.buckets.get(b) ?? []) if (t.type === type && inPlace(rect, t.rect, offset)) out.push(t);
+    }
+    return out;
+  }
+}
+
+/**
+ * A named text was replaced in place by another (see {@link screenReplaced}),
+ * judged over every text, duplicates included:
+ * - its name occurs fewer times than before, and in its place sits a text of
+ *   the same type whose name occurs more times than before (Alice 2 → 1 and
+ *   Bob 1 → 2 in a split view); or
+ * - two names traded places (counts unchanged): Alice now where Bob was and
+ *   Bob where Alice was.
+ * A row deleted with the rest reflowing up is neither: the row that moved
+ * into the gap still occurs as often as before, and nothing took its old
+ * place in exchange.
+ * Offsets tried: staying put, plus where the content around it moved
+ * ({@link candidateOffsets}). Content above an inserted row stays put while
+ * its container's anchors below move, and each extra offset can only add a
+ * reason to retire.
+ */
+function textSwapped(prevTexts: NamedText[], texts: NamedText[], anchors: Anchor[]): boolean {
+  const prevCounts = countValues(prevTexts.map((t) => t.key));
+  const currentCounts = countValues(texts.map((t) => t.key));
+  const prevByKey = new Map<string, NamedText[]>();
+  for (const t of prevTexts) {
+    const list = prevByKey.get(t.key);
+    if (list) list.push(t);
+    else prevByKey.set(t.key, [t]);
+  }
+  const currentByTop = new TextsByTop(texts);
+  for (const before of prevTexts) {
+    const fewer = (currentCounts.get(before.key) ?? 0) < prevCounts.get(before.key)!;
+    const offsets = [{ dx: 0, dy: 0 }, ...candidateOffsets(anchors, before.path)];
+    for (const offset of offsets) {
+      for (const now of currentByTop.at(before.rect, before.type, offset)) {
+        if (now.key === before.key) continue;
+        if (fewer && currentCounts.get(now.key)! > (prevCounts.get(now.key) ?? 0)) return true;
+        // Did `before`'s name take the old place of a copy of `now`'s name?
+        const theirs = prevByKey.get(now.key) ?? [];
+        if (theirs.some((t) => currentByTop.at(t.rect, t.type, offset).some((c) => c.key === before.key))) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * The screen now shows other content in the same place: another record,
  * another page of a list, another screen. Any one of these retires every
@@ -492,10 +598,13 @@ function candidateOffsets(anchors: Array<{ path: string; offset: Offset }>, path
  * tab bars, a generic "Contact" title) can't say whose screen it now is, and
  * however much of it survived, a majority vote can't tell chrome from the
  * one label that names the record. Each check needs only one element:
- * - In-place swap: a uniquely keyed text (Heading, StaticText, Cell) vanished,
- *   and a text of the same type that wasn't in the previous tree now sits in
- *   its frame (after the scroll measured from surviving keys around it).
- *   Alice's name becoming Bob's, or a full-page scroll showing other rows.
+ * - In-place swap ({@link textSwapped}): a named text, heading, cell,
+ *   button, link, image or group was replaced by another of the same type
+ *   at its top edge, whatever their widths and heights, duplicates included.
+ *   Alice's name becoming "Bartholomew Jones" (or wrapping to two lines), a
+ *   split view's detail pane switching from Alice to Bob while both stay in
+ *   the list, a card's name and a linked contact's trading places, or a
+ *   full-page scroll showing other rows.
  * - Content swap: a uniquely keyed element kept its key but shows other
  *   read-only content: a cell, text or button value ("Phone: 555-0001" →
  *   "555-0002"), or an AXUniqueId-keyed text's label. Editable values (text
@@ -504,13 +613,14 @@ function candidateOffsets(anchors: Array<{ path: string; offset: Offset }>, path
  *   the content around it didn't scroll it offscreen.
  * - Reordered titles: the headings both trees share are in another order.
  * The cost is churn: a counter, clock or status line changing in place
- * retires every ref on the screen. A stale ref beats a tap on another
+ * ("9 of 10" → "10 of 10"), or a button relabelling itself ("Follow" →
+ * "Following"), retires every ref on the screen. A stale ref beats a tap on another
  * record's button.
  */
 function screenReplaced(
   prev: RefState,
   keyed: KeyedElement[],
-  names: Set<string>,
+  texts: NamedText[],
   screen: { width: number; height: number },
 ): boolean {
   const prevByKey = new Map<string, KeyedElement>();
@@ -526,20 +636,15 @@ function screenReplaced(
     anchors.push({ path: before.path, offset: { dx: after.rect.x - before.rect.x, dy: after.rect.y - before.rect.y } });
   }
 
-  const arrived = [...currentByKey.values()].filter((k) => TEXT_TYPES.has(k.type) && !prev.names.has(k.key));
+  if (textSwapped(prev.texts, texts, anchors)) return true;
+
+  const names = new Set(texts.map((t) => t.key));
   for (const before of prevByKey.values()) {
-    if (currentByKey.has(before.key)) continue;
-    // Still there as one of several duplicates: not gone.
-    if (names.has(before.key)) continue;
-    const swappable = TEXT_TYPES.has(before.type);
-    const vanishedTitle = before.title && isVisibleFrame(before.rect, prev.screen);
-    if (!swappable && !vanishedTitle) continue;
+    if (currentByKey.has(before.key) || names.has(before.key)) continue;
+    if (!before.title || !isVisibleFrame(before.rect, prev.screen)) continue;
     for (const offset of candidateOffsets(anchors, before.path)) {
-      if (swappable && arrived.some((k) => k.type === before.type && framesClose(before.rect, k.rect, offset))) return true;
-      if (vanishedTitle) {
-        const moved = { ...before.rect, x: before.rect.x + offset.dx, y: before.rect.y + offset.dy };
-        if (isVisibleFrame(moved, screen)) return true;
-      }
+      const moved = { ...before.rect, x: before.rect.x + offset.dx, y: before.rect.y + offset.dy };
+      if (isVisibleFrame(moved, screen)) return true;
     }
   }
 
@@ -662,8 +767,12 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   keyed.sort((a, b) => comparePaths(a.path, b.path));
 
   // Another record or another page in the same place: nothing carries.
-  const names = new Set(interesting.map(namedKey).filter((key): key is string => key !== null));
-  const replaced = prev !== null && screenReplaced(prev, keyed, names, screen);
+  const texts: NamedText[] = [];
+  for (const element of interesting) {
+    const key = TEXT_TYPES.has(element.type) || isTitle(element) ? namedKey(element) : null;
+    if (key) texts.push({ key, type: element.type, path: element.path, rect: element.frame });
+  }
+  const replaced = prev !== null && screenReplaced(prev, keyed, texts, screen);
   const matchable = replaced ? new Map<string, number[]>() : currentByGroup;
 
   // Unique keys present once on both sides say how their content moved,
@@ -720,7 +829,7 @@ export function assignRefs(prev: RefState | null, snapshot: AxSnapshot, opts: { 
   }
   if (retired.length > MAX_RETIRED) retired.splice(0, retired.length - MAX_RETIRED);
 
-  return { screen, entries, groups: nextGroups, keyed, names, retired, nextRef };
+  return { screen, entries, groups: nextGroups, keyed, texts, retired, nextRef };
 }
 
 /** The JSON an agent sees: visible nodes only unless `all`. */

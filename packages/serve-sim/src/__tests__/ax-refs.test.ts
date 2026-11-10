@@ -939,4 +939,234 @@ describe("other content in the same place retires every ref (review 203e)", () =
     const after = assignRefs(before, status("4 of 5"));
     expectStale(after, refWhere(before, (n) => n.label === "Cancel"));
   });
+
+  test("churn (documented): a status line that grows in place ('9 of 10' → '10 of 10') retires every ref too", () => {
+    const status = (line: string, width: number) => snap([
+      el({ path: "0.0", ...heading("Downloads"), frame: { x: 16, y: 50, width: 120, height: 40 } }),
+      el({ path: "0.1", ...text(line), frame: { x: 16, y: 100, width, height: 20 } }),
+      el({ path: "0.2", label: "Pause", frame: { x: 0, y: 500, width: 402, height: 44 } }),
+      el({ path: "0.3", label: "Show in Files", frame: { x: 0, y: 544, width: 402, height: 44 } }),
+      el({ path: "0.4", label: "Cancel", frame: { x: 0, y: 600, width: 402, height: 44 } }),
+    ]);
+    const before = assignRefs(null, status("9 of 10", 52));
+    const after = assignRefs(before, status("10 of 10", 64));
+    expectStale(after, refWhere(before, (n) => n.label === "Cancel"));
+  });
+});
+
+describe("record names of any size, duplicated or not, retire every ref (review 203f)", () => {
+  type State = ReturnType<typeof assignRefs>;
+  type Node = ReturnType<typeof agentSnapshot>["nodes"][number];
+  const text = (label: string) => ({ type: "StaticText", role: "text", label });
+  const refWhere = (state: State, pred: (n: Node) => boolean) => agentSnapshot(state, { all: true }).nodes.find(pred)?.ref;
+  const carried = (before: State, after: State) =>
+    agentSnapshot(before, { all: true }).nodes.filter((n) => resolveRef(after, n.ref).ok).map((n) => `${n.ref} ${n.label ?? n.type}`);
+  /** Nothing carries from `a` to `b`, and "Block this Caller" in particular is stale. */
+  const swapped = (a: AxSnapshot, b: AxSnapshot) => {
+    const before = assignRefs(null, a);
+    const after = assignRefs(before, b);
+    expect(carried(before, after)).toEqual([]);
+    const ref = refWhere(before, (n) => n.label === "Block this Caller");
+    expect(ref).toBeDefined();
+    expect(resolveRef(after, ref!)).toMatchObject({ ok: false, code: "stale_ref" });
+  };
+  const unchanged = (screen: AxSnapshot) => {
+    const before = assignRefs(null, screen);
+    expect(agentSnapshot(assignRefs(before, screen), { all: true })).toEqual(agentSnapshot(before, { all: true }));
+  };
+  const buttons = (base: string, dy = 0, x = 0, width = 402) => [
+    el({ path: `${base}.6`, label: "Send Message", frame: { x, y: 420 + dy, width, height: 44 } }),
+    el({ path: `${base}.7`, label: "Share Contact", frame: { x, y: 464 + dy, width, height: 44 } }),
+    el({ path: `${base}.8`, label: "Add to Favourites", frame: { x, y: 508 + dy, width, height: 44 } }),
+    el({ path: `${base}.9`, label: "Block this Caller", frame: { x, y: 600 + dy, width, height: 44 } }),
+  ];
+  const chrome = [
+    el({ path: "0.0", label: "Contacts", frame: { x: 0, y: 50, width: 90, height: 44 } }),
+    el({ path: "0.1", label: "Edit", frame: { x: 330, y: 50, width: 60, height: 44 } }),
+  ];
+
+  // H1: E1 minimal with a SwiftUI Text name as wide as its text, centred.
+  const centred = (name: string, width: number) => snap([
+    ...chrome,
+    el({ path: "0.2.0", ...text(name), frame: { x: 201 - width / 2, y: 200, width, height: 40 } }),
+    ...buttons("0.2"),
+  ]);
+
+  test("H1: a centred name of another width (50pt → 170pt) is still a swap", () =>
+    swapped(centred("Alice", 50), centred("Bartholomew Jones", 170)));
+  test("H1: a shorter name (170pt → 30pt) is a swap too", () => swapped(centred("Bartholomew Jones", 170), centred("Bo", 30)));
+  test("H1: re-reading the centred card keeps every ref", () => unchanged(centred("Alice", 50)));
+
+  // H1b: a leading-aligned name that wraps onto a second line.
+  const wrapped = (name: string, width: number, height: number) => snap([
+    ...chrome,
+    el({ path: "0.2.0", ...text(name), frame: { x: 16, y: 200, width, height } }),
+    ...buttons("0.2"),
+  ]);
+
+  test("H1b: a longer name that wraps (40pt → 80pt tall) is a swap", () =>
+    swapped(wrapped("Alice", 370, 40), wrapped("Bartholomew Montgomery-Smythe III", 370, 80)));
+  test("H1b: a name of another width and line count is a swap", () =>
+    swapped(wrapped("Alice", 48, 40), wrapped("Bartholomew Montgomery-Smythe III", 370, 80)));
+
+  // H8: the name changes width and Bob's card has an extra row, so the buttons reflow down.
+  const reflow = (name: string, width: number, extra: boolean) => snap([
+    chrome[0]!,
+    el({ path: "0.2.0", ...text(name), frame: { x: 16, y: 200, width, height: 40 } }),
+    ...(extra ? [el({ path: "0.2.1", type: "Cell", label: "Notes", frame: { x: 0, y: 300, width: 402, height: 60 } })] : []),
+    ...buttons("0.2", extra ? 60 : 0),
+  ]);
+
+  test("H8: name width changes and an extra row pushes the buttons down: a swap", () =>
+    swapped(reflow("Alice", 60, false), reflow("Bartholomew", 150, true)));
+
+  // H3, H4, H7: the name sits in a combined element, a button or an avatar image.
+  const holder = (type: string, role: string, name: string, frame: AxElement["frame"]) => snap([
+    chrome[0]!,
+    el({ path: "0.2.0", type, role, label: name, frame }),
+    ...buttons("0.2"),
+  ]);
+
+  test("H3: a combined header (type Other) naming the record is a swap, at any width", () => {
+    swapped(holder("Other", "group", "Alice, mobile", { x: 16, y: 200, width: 370, height: 80 }),
+      holder("Other", "group", "Bob, mobile", { x: 16, y: 200, width: 370, height: 80 }));
+    swapped(holder("Other", "group", "Alice, mobile", { x: 150, y: 200, width: 102, height: 40 }),
+      holder("Other", "group", "Bartholomew Jones, mobile", { x: 60, y: 200, width: 282, height: 40 }));
+  });
+  test("a Group naming the record is a swap", () =>
+    swapped(holder("Group", "group", "Alice", { x: 170, y: 200, width: 60, height: 40 }),
+      holder("Group", "group", "Bartholomew", { x: 125, y: 200, width: 150, height: 40 })));
+  test("H4: a name Button is a swap, at any width", () => {
+    swapped(holder("Button", "button", "Alice", { x: 16, y: 200, width: 370, height: 40 }),
+      holder("Button", "button", "Bob", { x: 16, y: 200, width: 370, height: 40 }));
+    swapped(holder("Button", "button", "Alice", { x: 175, y: 200, width: 52, height: 40 }),
+      holder("Button", "button", "Bartholomew Jones", { x: 116, y: 200, width: 170, height: 40 }));
+  });
+  test("a name Link is a swap", () =>
+    swapped(holder("Link", "link", "alice@example.com", { x: 16, y: 200, width: 140, height: 20 }),
+      holder("Link", "link", "bartholomew.jones@example.com", { x: 16, y: 200, width: 240, height: 20 })));
+  test("H7: a labelled avatar Image is a swap", () => {
+    swapped(holder("Image", "image", "Alice", { x: 150, y: 120, width: 100, height: 100 }),
+      holder("Image", "image", "Bob", { x: 150, y: 120, width: 100, height: 100 }));
+    swapped(holder("Image", "image", "Alice", { x: 150, y: 120, width: 100, height: 100 }),
+      holder("Image", "image", "Bob", { x: 160, y: 120, width: 80, height: 80 }));
+  });
+  test("re-reading a card named by an Other, Button or Image keeps every ref", () => {
+    unchanged(holder("Other", "group", "Alice, mobile", { x: 16, y: 200, width: 370, height: 80 }));
+    unchanged(holder("Button", "button", "Alice", { x: 16, y: 200, width: 370, height: 40 }));
+    unchanged(holder("Image", "image", "Alice", { x: 150, y: 120, width: 100, height: 100 }));
+  });
+
+  // H5: iPad split view. The selected name is in the list and in the detail
+  // pane, so it is never unique on either side.
+  const split = (selected: string, widths: Record<string, number>) => snap([
+    ...["Alice", "Bob", "Carol"].map((name, i) =>
+      el({ path: `0.0.${i}`, ...text(name), frame: { x: 16, y: 100 + i * 44, width: widths[name]!, height: 44 } })),
+    el({ path: "0.1.0", ...text(selected), frame: { x: 320, y: 100, width: widths[selected]! * 1.5, height: 40 } }),
+    ...buttons("0.1", 0, 320, 300),
+  ]);
+  const widths = { Alice: 40, Bob: 30, Carol: 44 };
+
+  test("H5: selecting Bob after Alice in a split view is a swap, though both names stay on screen", () =>
+    swapped(split("Alice", widths), split("Bob", widths)));
+  test("H5: same with full-width rows and detail name", () =>
+    swapped(split("Alice", { Alice: 300, Bob: 300, Carol: 300 }), split("Bob", { Alice: 300, Bob: 300, Carol: 300 })));
+  test("H5: re-reading the split view keeps every ref", () => unchanged(split("Alice", widths)));
+
+  // H6: the card's name and a linked contact's name swap places.
+  const related = (name: string, other: string) => snap([
+    chrome[0]!,
+    el({ path: "0.2.0", ...text(name), frame: { x: 16, y: 200, width: name.length * 10, height: 40 } }),
+    ...buttons("0.2"),
+    el({ path: "0.2.10", ...text("linked"), frame: { x: 16, y: 700, width: 100, height: 30 } }),
+    el({ path: "0.2.11", ...text(other), frame: { x: 120, y: 700, width: other.length * 8, height: 30 } }),
+  ]);
+
+  test("H6: the card's name and a linked contact's StaticText swapping places is a swap", () =>
+    swapped(related("Alice", "Bob"), related("Bob", "Alice")));
+  test("H6: re-reading the linked card keeps every ref", () => unchanged(related("Alice", "Bob")));
+
+  test("churn (documented): a button relabelling itself in place ('Follow' → 'Following') retires every ref", () => {
+    const profile = (follow: string, width: number) => snap([
+      ...chrome,
+      el({ path: "0.2.0", label: follow, frame: { x: 16, y: 200, width, height: 36 } }),
+      ...buttons("0.2"),
+    ]);
+    const before = assignRefs(null, profile("Follow", 70));
+    const after = assignRefs(before, profile("Following", 96));
+    expect(carried(before, after)).toEqual([]);
+  });
+
+  test("a control keyed by an AXUniqueId relabelling itself keeps every ref (the id names the control)", () => {
+    const player = (label: string) => snap([
+      ...chrome,
+      el({ path: "0.2.0", id: "play", label, frame: { x: 16, y: 200, width: label.length * 10, height: 36 } }),
+      ...buttons("0.2"),
+    ]);
+    const before = assignRefs(null, player("Play"));
+    const after = assignRefs(before, player("Pause"));
+    expect(carried(before, after)).toHaveLength(before.entries.size);
+  });
+
+  // Moves that are not a swap must keep refs, whatever the frame sizes.
+  test("a row deleted from a list of names of mixed widths is not a swap: the rest keep their refs", () => {
+    const rows = (names: string[]) => snap([
+      el({ path: "0.0", type: "Heading", role: "heading", label: "Contacts", frame: { x: 16, y: 50, width: 120, height: 40 } }),
+      ...names.map((n, i) => el({ path: `0.${i + 1}`, ...text(n), frame: { x: 16, y: 100 + i * 44, width: n.length * 9, height: 44 } })),
+    ]);
+    const before = assignRefs(null, rows(["Alice", "Bartholomew", "Carol"]));
+    const after = assignRefs(before, rows(["Alice", "Carol"]));
+    for (const name of ["Contacts", "Alice", "Carol"]) {
+      expect(refWhere(after, (n) => n.label === name)).toBe(refWhere(before, (n) => n.label === name));
+    }
+  });
+
+  test("a row inserted at the top of a list of names pushes the rest down without a swap", () => {
+    const rows = (names: string[]) => snap([
+      el({ path: "0.0", type: "Heading", role: "heading", label: "Contacts", frame: { x: 16, y: 50, width: 120, height: 40 } }),
+      ...names.map((n, i) => el({ path: `0.${i + 1}`, ...text(n), frame: { x: 16, y: 100 + i * 44, width: n.length * 9, height: 44 } })),
+    ]);
+    const before = assignRefs(null, rows(["Bob", "Carol"]));
+    const after = assignRefs(before, rows(["Aaron", "Bob", "Carol"]));
+    for (const name of ["Contacts", "Bob", "Carol"]) {
+      expect(refWhere(after, (n) => n.label === name)).toBe(refWhere(before, (n) => n.label === name));
+    }
+  });
+
+  test("scrolling a list of names of mixed widths by a row keeps the rows that stayed", () => {
+    const names = ["Alice", "Bartholomew", "Carol", "Dmitri", "Eve", "Florence"];
+    const rows = (first: number) => snap([
+      el({ path: "0.0", type: "Heading", role: "heading", label: "Contacts", frame: { x: 16, y: 50, width: 120, height: 40 } }),
+      ...names.map((n, i) => el({ path: `0.1.${i}`, ...text(n), frame: { x: 16, y: 100 + (i - first) * 44, width: n.length * 9, height: 44 } })),
+    ], { width: 402, height: 300 });
+    const before = assignRefs(null, rows(0));
+    const after = assignRefs(before, rows(1));
+    for (const name of ["Contacts", "Bartholomew", "Carol"]) {
+      expect(refWhere(after, (n) => n.label === name)).toBe(refWhere(before, (n) => n.label === name));
+    }
+  });
+
+  test("the same one-row scroll with offscreen rows dropped from the tree (reused cells) keeps the rows that stayed", () => {
+    const names = ["Alice", "Bartholomew", "Carol", "Dmitri", "Eve", "Florence"];
+    const rows = (first: number) => snap([
+      el({ path: "0.0", type: "Heading", role: "heading", label: "Contacts", frame: { x: 16, y: 50, width: 120, height: 40 } }),
+      ...names.slice(first, first + 4).map((n, i) => el({ path: `0.1.${i}`, ...text(n), frame: { x: 16, y: 100 + i * 44, width: n.length * 9, height: 44 } })),
+    ]);
+    const before = assignRefs(null, rows(0));
+    const after = assignRefs(before, rows(1));
+    for (const name of ["Contacts", "Bartholomew", "Carol", "Dmitri"]) {
+      expect(refWhere(after, (n) => n.label === name)).toBe(refWhere(before, (n) => n.label === name));
+    }
+  });
+
+  test("a page of names of mixed widths replaced by the next page is a swap", () => {
+    const rows = (names: string[]) => snap([
+      el({ path: "0.0", type: "Heading", role: "heading", label: "Contacts", frame: { x: 16, y: 50, width: 120, height: 40 } }),
+      ...names.map((n, i) => el({ path: `0.1.${i}`, ...text(n), frame: { x: 16, y: 100 + i * 44, width: n.length * 9, height: 44 } })),
+      ...buttons("0.2"),
+    ]);
+    const before = assignRefs(null, rows(["Alice", "Bartholomew"]));
+    const after = assignRefs(before, rows(["Carol", "Dmitri"]));
+    expect(carried(before, after)).toEqual([]);
+  });
 });
