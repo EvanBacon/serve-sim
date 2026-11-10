@@ -46,6 +46,10 @@ import {
   recordingFileName,
   recordingRotation,
 } from "./recording";
+import { collectAxSnapshot } from "./ax";
+import { AxAgent } from "./ax-agent";
+import { serveAxAgent, type AxAgentEndpoint } from "./ax-agent-http";
+import { cliInputOrientation, displayTouchToRaw } from "./touch-remap";
 import { eventLogEventForHidMessage, formatEventLogPoint, recordEventLogEvent, updateEventLogEvent } from "./event-log";
 
 /**
@@ -253,6 +257,8 @@ export interface DeviceSessionDependencies {
   };
   /** Whether the software keyboard is on screen, or null if unknown; defaults to an AX probe. */
   softwareKeyboardVisible?: (udid: string) => Promise<boolean | null>;
+  /** Raw axe-shaped AX JSON; defaults to the native bridge (`axDescribeAsync`). */
+  axDescribe?: (udid: string) => Promise<string>;
 }
 
 type ActiveRecording = {
@@ -314,6 +320,8 @@ export class DeviceSession {
   /** Active screen recording (one per session), or a start/stop in flight. */
   private recording?: ActiveRecording;
   private rendererFailureEvent?: { id: number; key: string; count: number };
+  /** Ref session for `/ax/snapshot|act|settle`; created on first use. */
+  private axAgent?: AxAgent;
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.hid = dependencies?.hid ?? new NativeHid(udid);
@@ -654,6 +662,49 @@ export class DeviceSession {
 
   handleAx(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     return this.serveAxJson(res, () => axDescribeAsync(this.udid), "ax_unavailable");
+  }
+
+  /** `/ax/snapshot`, `/ax/act`, `/ax/settle` — see ax-agent-http.ts. */
+  handleAxAgent(req: IncomingMessage, res: ServerResponse, endpoint: AxAgentEndpoint): Promise<void> {
+    this.axAgent ??= new AxAgent({
+      collect: () => collectAxSnapshot(this.udid, this.dependencies?.axDescribe),
+      contentFrames: () => this.contentFrameCount(),
+      tap: (point, holdMs) => this.injectTap(point, holdMs),
+    });
+    return serveAxAgent(this.axAgent, req, res, endpoint);
+  }
+
+  /**
+   * Native count of captured frames whose IOSurface content changed (idle
+   * re-emits excluded); null when the addon predates it or capture is down.
+   */
+  private async contentFrameCount(): Promise<number | null> {
+    if (!this.capture.diagnostics || this.phase !== "running") return null;
+    try {
+      const native = JSON.parse(await this.capture.diagnostics()) as { capture?: { content_change_count?: unknown } };
+      const count = native.capture?.content_change_count;
+      return typeof count === "number" ? count : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Tap at normalized display coords through the same HID path (and event
+   * log) as a `/ws` touch, remapped like `serve-sim tap` for rotated UIs.
+   */
+  private async injectTap(point: { x: number; y: number }, holdMs: number): Promise<void> {
+    await this.start();
+    if (this.width === 0 || this.height === 0) throw new Error("Screen size is not known yet; retry in a moment.");
+    const orientation = cliInputOrientation(this.screenConfig());
+    const touch = async (type: "begin" | "end") => {
+      const raw = displayTouchToRaw({ type, x: point.x, y: point.y }, orientation);
+      this.recordTouchEvent(raw);
+      await this.hid.touch(type, raw.x, raw.y, this.width, this.height, 0);
+    };
+    await touch("begin");
+    await new Promise((resolve) => setTimeout(resolve, holdMs));
+    await touch("end");
   }
 
   handleForeground(_req: IncomingMessage, res: ServerResponse): Promise<void> {

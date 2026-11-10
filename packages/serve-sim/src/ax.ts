@@ -95,10 +95,13 @@ export function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
   };
 }
 
-async function snapshotFromNative(udid: string): Promise<AxSnapshot> {
+/** Raw axe-shaped tree JSON for a device (the native bridge by default). */
+type AxDescribe = (udid: string) => Promise<string>;
+
+async function snapshotFromNative(udid: string, describe: AxDescribe): Promise<AxSnapshot> {
   let raw: RawAxeNode[];
   try {
-    raw = JSON.parse(await axDescribeAsync(udid)) as RawAxeNode[];
+    raw = JSON.parse(await describe(udid)) as RawAxeNode[];
   } catch {
     // The in-process AX bridge throws when the simulator can't satisfy
     // accessibility right now (framework missing, SpringBoard restarting,
@@ -125,11 +128,15 @@ function isUsableAxSnapshot(snapshot: AxSnapshot) {
   );
 }
 
-async function collectAxSnapshot(udid: string): Promise<AxSnapshot> {
+/**
+ * One normalized snapshot via the same path the SSE streamer polls. Failures
+ * come back as `errors` (never thrown). `describe` is injectable for tests.
+ */
+export async function collectAxSnapshot(udid: string, describe: AxDescribe = axDescribeAsync): Promise<AxSnapshot> {
   const errors: string[] = [];
 
   try {
-    const snapshot = await snapshotFromNative(udid);
+    const snapshot = await snapshotFromNative(udid, describe);
     if (snapshot.errors?.length) return snapshot;
     if (!isUsableAxSnapshot(snapshot)) {
       throw new Error(

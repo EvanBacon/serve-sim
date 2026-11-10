@@ -426,6 +426,19 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
     }
   });
 
+  test("AX agent routes (snapshot/settle/act) need the token remotely and a same-origin Origin to act", async () => {
+    for (const path of [`/helper/${DEVICE}/ax/snapshot`, `/helper/${DEVICE}/ax/settle`]) {
+      expect((await send(noToken.port, path, { headers: PROXY })).status).toBe(403);
+      expect((await send(withToken.port, path, { headers: PROXY })).status).toBe(401);
+    }
+    const act = `/helper/${DEVICE}/ax/act`;
+    const json = { "Content-Type": "application/json" };
+    const body = JSON.stringify({ ref: "@e1" });
+    expect((await send(noToken.port, act, { method: "POST", headers: { ...json, ...PROXY }, body })).status).toBe(403);
+    expect((await send(withToken.port, act, { method: "POST", headers: { ...json, ...PROXY }, body })).status).toBe(401);
+    expect((await send(withToken.port, act, { method: "POST", headers: { ...json, Origin: "http://evil.example" }, body })).status).toBe(403);
+  });
+
   test("HID and DevTools WebSocket upgrades require the token remotely and a same-origin Origin", async () => {
     for (const port of [noToken.port, withToken.port]) {
       for (const path of [`/helper/${DEVICE}/ws`, "/devtools/page/1"]) {

@@ -141,18 +141,21 @@ function roundFrame(frame: AxRect): AgentFrame {
 }
 
 function compactNode(ref: string, element: AxElement, visible: boolean): AgentNode {
-  const node: AgentNode = { ref, role: element.role || element.type, type: element.type };
-  if (element.label) node.label = element.label;
-  if (element.value) node.value = element.value;
-  if (hasUniqueId(element)) node.id = element.id;
-  if (!element.enabled) node.enabled = false;
-  node.frame = roundFrame(element.frame);
-  node.center = {
-    x: Math.round(element.frame.x + element.frame.width / 2),
-    y: Math.round(element.frame.y + element.frame.height / 2),
+  return {
+    ref,
+    role: element.role || element.type,
+    type: element.type,
+    ...(element.label ? { label: element.label } : {}),
+    ...(element.value ? { value: element.value } : {}),
+    ...(hasUniqueId(element) ? { id: element.id } : {}),
+    ...(element.enabled ? {} : { enabled: false as const }),
+    frame: roundFrame(element.frame),
+    center: {
+      x: Math.round(element.frame.x + element.frame.width / 2),
+      y: Math.round(element.frame.y + element.frame.height / 2),
+    },
+    ...(visible ? {} : { offscreen: true as const }),
   };
-  if (!visible) node.offscreen = true;
-  return node;
 }
 
 function summary(entry: RefEntry) {
@@ -216,7 +219,10 @@ export function resolveRef(state: RefState | null, input: string): RefLookup {
   }
   const entry = state.entries.get(ref);
   if (entry) return { ok: true, entry };
-  const retired = state.retired.findLast((r) => r.ref === ref);
+  let retired: RefState["retired"][number] | undefined;
+  for (let i = state.retired.length - 1; i >= 0 && !retired; i--) {
+    if (state.retired[i]!.ref === ref) retired = state.retired[i];
+  }
   if (retired) {
     const what = [retired.role, retired.label ? `"${retired.label}"` : ""].filter(Boolean).join(" ");
     return {
