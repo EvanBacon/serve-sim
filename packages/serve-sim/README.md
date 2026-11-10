@@ -135,6 +135,8 @@ serve-sim ax --refs [--all] [--text]  Compact snapshot with element refs (@e1…
 serve-sim tap @e2 [--settle] [--timeout <ms>]
                                       Tap an element ref; --settle prints the diff
 serve-sim settle [--timeout <ms>]     Wait for the screen to settle; print the diff
+serve-sim control [status|start|stop] Persistent control process that keeps short
+                                      commands fast (automatic; see below)
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
@@ -356,6 +358,48 @@ HTTP, under the same device helper routes and auth as `/recording` (`--auth-toke
 - `GET …/buffer/frame[?id=<n> | ?ago=<s>]`: one `image/jpeg`, the latest by default, with `X-Serve-Sim-Buffer-Frame: {id, at, width, height, sourceWidth, sourceHeight}`. `409 buffer_off` when off, `404 frame_not_found` when it isn't held.
 
 Limits: sampling at 4 fps can miss a state shown for less than a tick (record for frame-exact history). Frames are the raw framebuffer orientation, like the stream before rotation. When serve-sim is embedded as middleware, `SERVE_SIM_BUFFER` in the dev server's environment starts the buffer when a device's session opens (its first viewer or command), not at startup.
+
+### Control process (faster repeated commands)
+
+Each `serve-sim` call is a new Node process, and most of a short command used to be Node compiling and running the ~1 MB CLI bundle. The `serve-sim` bin is now a 14 KB entry that hands short commands to a background control process. That process keeps two workers that have already loaded the CLI. Each worker runs one command in its own process, then exits and is replaced, so exit codes, `process.exit`, and signal handlers behave as in a normal run.
+
+- **Which commands**: `tap`, `gesture`, `settle`, `button`, `type`, `paste`, `rotate`, `fold`, `ca-debug`, `memory-warning`, `event-log`, `ax`, `buffer`, and bare `--help`/`--version`. Everything else runs in-process as before: the preview server, `--detach`, `record`, `camera`, `exec`, `doctor`, `permissions`, `ui`, and anything with `--stdin` (stdin is not forwarded).
+- **What carries over**: argv, cwd, the full environment, stdout/stderr (as separate streams), the exit code or signal, and whether stdout/stderr are TTYs plus their column width. Ctrl+C, SIGTERM and SIGHUP are forwarded to the worker. If the caller dies, its worker is stopped.
+- **Lifecycle**: the first short command starts it in the background and runs in-process itself. It exits after 5 minutes without commands (`SERVE_SIM_CONTROL_IDLE_MS`). It also exits when the dist it came from is rebuilt; that call runs in-process. Callers whose `HOME`, `TMPDIR` or `DEBUG` differ from the daemon's, or that use a different node binary or install, always run in-process.
+- **Fallback**: if the control process is missing, stale, or doesn't accept a command within 1 s, the command runs in-process. Once it has accepted a command, a lost connection fails that call (exit 1) instead of running the command twice.
+- **Off switch**: `SERVE_SIM_CONTROL=0` never uses or starts it. Under `CI` it is only used if already running; `SERVE_SIM_CONTROL=1` auto-starts it there too.
+
+```sh
+serve-sim control status [--json]   # exit 1 when not running
+serve-sim control start             # idempotent; waits until it answers
+serve-sim control stop              # idempotent; also clears stale socket/pid files
+```
+
+It listens on a Unix socket (mode 0600) at `$TMPDIR/serve-sim/control-<id>.sock`, with a pid file next to it. `<id>` is derived from the bin path, the node binary, and `HOME`. A daemon that finds a dead socket replaces it. When several start at once, the extra ones see their socket was taken over and exit.
+
+Measured on an Apple Silicon Mac with Node 24.13: each case was spawned with `spawnSync` from a node script, after 3 warm-up runs. Back-to-back means calls ran one after another. "Before" runs the full CLI bundle directly, which is what the bin was before this change. `tap` ran against a live preview on its own simulator.
+
+| case | p50 ms | p95 ms |
+|---|---|---|
+| `node -e 0` (floor) | 23.1 | 27.1 |
+| `--help`, before | 66.2 | 82.7 |
+| `--help`, warm control process | 31.9 | 32.8 |
+| `--help`, first call with no daemon (starts it) | 76.0 | 81.7 |
+| `--help`, the call right after that | 51.1 | 54.2 |
+| `tap`, before | 113.3 | 119.4 |
+| `tap`, warm control process | 84.8 | 86.6 |
+| `tap`, first call with no daemon (starts it) | 114.0 | 121.2 |
+| `tap`, the call right after that | 86.6 | 89.6 |
+
+With calls spaced 400 ms apart, a more agent-like pace, everything is slower, including bare Node (p50 38 ms). The saving stays about the same: `--help` drops from 72.5 to 44.5 ms and `tap` from 132.1 to 105.9 ms.
+
+Where the warm time goes:
+
+- About 23 ms is Node's own startup, which can't be avoided.
+- About 9 ms is the bin, the socket round trip, the worker running the command, and the worker's exit.
+- For `tap`, about 40 ms more is spent waiting on the preview server for the touch-config fetch, the WebSocket connect, and the HID ack.
+
+The first call with no daemon running costs about 10 ms extra. That is the daemon spawn, plus its workers competing with the command for CPU.
 
 ### Accessibility refs for agents
 
