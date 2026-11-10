@@ -301,21 +301,23 @@ Three offline commands read a finished recording so an agent can check what happ
 ```bash
 # The sample nearest t as a PNG (default rec-t2.3.png next to the MP4; -o - pipes it to stdout)
 serve-sim record frame rec.mp4 -t 2.3
-# {"i":138,"pts":2.3,"changed":true,"path":"rec-t2.3.png","width":1206,"height":2622}
+# {"i":138,"pts":2.3,"decodedPts":2.3,"changed":true,"path":"rec-t2.3.png","width":1206,"height":2622}
 
 # What changed between two times: the later frame dimmed, changed pixels magenta, bbox outlined
 serve-sim record diff rec.mp4 --from 0.9 --to 1.0
-# {"from":{"i":54,"pts":0.9},"to":{"i":60,"pts":1},"changedPixels":124722,"bbox":{"x":79,"y":271,"w":493,"h":493},"path":"rec-diff-0.9-1.png",…}
+# {"from":{"i":54,"pts":0.9,"decodedPts":0.9},"to":{"i":60,"pts":1,"decodedPts":1},"changedPixels":124722,
+#  "bbox":{"x":79,"y":271,"w":493,"h":493},"threshold":40,"maxDelta":255,"path":"rec-diff-0.9-1.png",…}
 
 # Changed frames in a window and the input near them (sidecar only, never decodes)
 serve-sim record changes rec.mp4 --from 2.2 --to 2.4
-# {"fps":60,"durationSec":5.016667,"clock":{…},"window":{"from":2.2,"to":2.4},"changedFrames":9,
-#  "frames":[{"i":136,"pts":2.266667},…],"events":[{"t":2.2811,"kind":"tap",…,"nextChange":{"i":137,"pts":2.283333}}]}
+# {"fps":60,"durationSec":5.016667,"clock":{…},"window":{"from":2.2,"to":2.4},"complete":true,"truncated":false,
+#  "eventsDropped":0,"changedFrames":9,"frames":[{"i":136,"pts":2.266667},…],
+#  "events":[{"t":2.2811,"kind":"tap",…,"nextChange":{"i":137,"pts":2.283333}}],"unmatchedEvents":[]}
 ```
 
-- `frame` and `diff` pick the sample whose `pts` is nearest each time. They use the sidecar's frame times (and report `changed`) when it exists. Without one, or when it is `truncated`, they read the MP4's own sample times, and `i` counts the MP4's samples. A time outside `0…duration` is an error.
-- `diff` counts a pixel as changed when a color channel differs by more than `--threshold` (default 40, above the H.264 noise between identical frames). Use a lower value for subtle changes. `bbox` is in pixels of the displayed frame and is `null` when nothing changed.
-- `changes` keeps an event when a changed frame in the window is within `--near` seconds (default 0.5) of it. Each kept event gets `nextChange`, the first changed frame at or after it. Without a sidecar `changes` exits 1: re-record without `--no-index`.
+- `frame` and `diff` pick the sample whose `pts` is nearest each time. They use the sidecar's frame times (and report `changed`) when it exists. Without one, or when it is `truncated`, they read the MP4's own sample times, and `i` counts the MP4's samples. A time outside `0…duration` is an error. They decode the middle of the chosen sample and check the decoder returned that sample (`decodedPts` is its MP4 time, which can differ from a sidecar `pts` by the MP4's 1/600 s rounding); a mismatch is an error rather than a mislabelled frame.
+- `diff` counts a pixel as changed when a color channel differs by more than `--threshold` (default 40, above the H.264 noise between identical frames). `threshold` echoes the value used and `maxDelta` is the largest channel difference anywhere, so when `changedPixels` is 0 but `maxDelta` is close to `threshold`, retry with a `--threshold` below `maxDelta`. `--from` after `--to` is an error. `bbox` is in pixels of the displayed frame and is `null` when nothing changed.
+- `changes` keeps an event when a changed frame in the window is within `--near` seconds (default 0.5) of it. Each kept event gets `nextChange`, the first changed frame at or after it. Events in the window with no changed frame that near (e.g. a tap the app ignored) are listed in `unmatchedEvents`. `complete` is false when the sidecar has no footer (cut short), `truncated` is true when it hit its frame cap, and `eventsDropped` counts input it didn't record; each also prints a warning on stderr. Without a sidecar `changes` exits 1: re-record without `--no-index`.
 
 ### Accessibility refs for agents
 
