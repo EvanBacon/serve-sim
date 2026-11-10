@@ -49,6 +49,7 @@
     "src/duo-state.ts",
     "src/event-log.ts",
     "src/exec-ws.ts",
+    "src/hardware-keyboard-state.ts",
     "src/helper-lifecycle.ts",
     "src/host-rpc.ts",
     "src/max-bitrate.ts",

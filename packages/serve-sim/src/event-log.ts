@@ -307,6 +307,17 @@ export function eventLogEventForHidMessage(
         action: "toggle",
         summary: "Software keyboard",
       };
+    case 0x0f: {
+      const enabled = booleanValue(details.enabled);
+      if (enabled == null) return null;
+      return {
+        device,
+        source: "hid",
+        kind: "hardware-keyboard",
+        action: enabled ? "connect" : "disconnect",
+        summary: enabled ? "Hardware keyboard connected" : "Hardware keyboard disconnected",
+      };
+    }
     default:
       return null;
   }

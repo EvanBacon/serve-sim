@@ -79,8 +79,10 @@ import { canReloadApp, reloadAction } from "./utils/reload-action";
 import {
   createSimKeyState,
   isFormControlTarget,
+  isHardwareKeyboardShortcut,
   isInteractiveTarget,
   isReloadShortcut,
+  isSoftwareKeyboardShortcut,
   keepsNativeButtonKey,
   releaseFocusToSim,
 } from "./utils/sim-keyboard";
@@ -1039,9 +1041,14 @@ function AppWithConfig({
         }
         return;
       }
-      if (e.code === "KeyK" && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
+      if (isSoftwareKeyboardShortcut(e)) {
         e.preventDefault();
         if (type === "down" && !e.repeat) sendWs(0x0c, {});
+        return;
+      }
+      if (isHardwareKeyboardShortcut(e)) {
+        e.preventDefault();
+        if (type === "down" && !e.repeat) sendWs(0x0f, {});
         return;
       }
       if (isReloadShortcut(e) && currentAppRef.current?.isReactNative) {
