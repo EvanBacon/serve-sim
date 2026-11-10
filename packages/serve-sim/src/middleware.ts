@@ -3,6 +3,7 @@ import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException 
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { promisify } from "util";
 import { createServer as createNetServer } from "net";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
@@ -1288,27 +1289,29 @@ interface MemoryReport {
   estimatedAdditional: number;
 }
 
-function readSystemMemory(): { totalBytes: number; availableBytes: number } {
+// Async on purpose: this route is polled every 5 s by the devices sidebar, and
+// the preview's event loop also delivers the simulator's MJPEG/AVCC frames.
+// `ps` over every process can take seconds on a busy host; run synchronously it
+// froze every stream for that long and viewers fell back to "Connecting…" (#103).
+const execFileAsync = promisify(execFile);
+async function runText(file: string, args: string[], timeout: number): Promise<string> {
+  const { stdout } = await execFileAsync(file, args, {
+    encoding: "utf-8",
+    timeout,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+async function readSystemMemory(): Promise<{ totalBytes: number; availableBytes: number }> {
   try {
-    const totalBytes = Number(
-      execSync("sysctl -n hw.memsize", {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 1500,
-      }).trim(),
-    );
-    const pageSize = Number(
-      execSync("sysctl -n hw.pagesize", {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 1500,
-      }).trim(),
-    );
-    const vmStat = execSync("vm_stat", {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 1500,
-    });
+    const [memsize, pagesize, vmStat] = await Promise.all([
+      runText("sysctl", ["-n", "hw.memsize"], 1500),
+      runText("sysctl", ["-n", "hw.pagesize"], 1500),
+      runText("vm_stat", [], 1500),
+    ]);
+    const totalBytes = Number(memsize.trim());
+    const pageSize = Number(pagesize.trim());
     const pages = (re: RegExp) => {
       const m = vmStat.match(re);
       return m ? Number(m[1]) : 0;
@@ -1331,14 +1334,9 @@ function readSystemMemory(): { totalBytes: number; availableBytes: number } {
 // Sum RSS across every process whose argv path includes a CoreSimulator
 // device directory. Groups by UDID so we get a real per-sim footprint that
 // covers launchd_sim plus all child processes the runtime spawns.
-function readSimulatorMemoryUsage(): { perUdid: Record<string, number>; totalBytes: number } {
+async function readSimulatorMemoryUsage(): Promise<{ perUdid: Record<string, number>; totalBytes: number }> {
   try {
-    const output = execSync("ps -axo rss=,args=", {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 3000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
+    const output = await runText("ps", ["-axo", "rss=,args="], 3000);
     const perUdid: Record<string, number> = {};
     let totalBytes = 0;
     const re = /\/Devices\/([0-9A-F-]{36})\//i;
@@ -1360,9 +1358,11 @@ function readSimulatorMemoryUsage(): { perUdid: Record<string, number>; totalByt
   }
 }
 
-function buildMemoryReport(): MemoryReport {
-  const { totalBytes, availableBytes } = readSystemMemory();
-  const usage = readSimulatorMemoryUsage();
+async function buildMemoryReport(): Promise<MemoryReport> {
+  const [{ totalBytes, availableBytes }, usage] = await Promise.all([
+    readSystemMemory(),
+    readSimulatorMemoryUsage(),
+  ]);
   const runningSimulators = Object.keys(usage.perUdid).length;
   const measuredAvg = runningSimulators > 0
     ? usage.totalBytes / runningSimulators
@@ -1385,6 +1385,15 @@ function buildMemoryReport(): MemoryReport {
     perSimSource,
     estimatedAdditional,
   };
+}
+
+// Several open tabs (or a slow `ps`) must not stack concurrent `ps` runs.
+let memoryReportInFlight: Promise<MemoryReport> | null = null;
+function sharedMemoryReport(): Promise<MemoryReport> {
+  memoryReportInFlight ??= buildMemoryReport().finally(() => {
+    memoryReportInFlight = null;
+  });
+  return memoryReportInFlight;
 }
 
 export interface SimMiddlewareOptions {
@@ -1787,11 +1796,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
 
     // Memory capacity estimate: how much room is left to boot more sims.
     if (url === base + "/grid/api/memory") {
-      res.writeHead(200, {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store",
+      void sharedMemoryReport().then((report) => {
+        if (res.writableEnded || res.destroyed) return;
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        });
+        res.end(JSON.stringify(report));
       });
-      res.end(JSON.stringify(buildMemoryReport()));
       return;
     }
 
