@@ -59,6 +59,15 @@ the app, `camera <bundleId> --file <img> --mirror on` to re-inject, `openurl`
 to load the project, `tap 0.5 0.9` for the shutter, then read the saved JPEG
 off disk to verify (see the path under "agent-browser" above).
 
+## Driving the simulator from a Linux/remote agent
+
+An agent that isn't on the Mac (a Linux cloud agent, CI, a container) can drive a
+Mac simulator over an authenticated tunnel with the preview server's
+`--auth-token` / `--url` support. The full procedure — a dedicated bot sim,
+SSH/Tailscale/ngrok tunnels, passing the URL and token to the agent, the CLI and
+the direct-WebSocket recipes, and the human-only steps (TCC/Xcode dialogs) — is
+in [docs/cloud-agent-ios-verification/README.md](docs/cloud-agent-ios-verification/README.md).
+
 ## Duo regression contract
 
 - For changes to Duo rendering, input, controls, or capture, consult
