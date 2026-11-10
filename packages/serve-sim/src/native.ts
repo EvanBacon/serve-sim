@@ -37,6 +37,8 @@ interface SimHIDHandle {
   softwareKeyboard(): Promise<void>;
   caDebug(name: string, enabled: boolean): Promise<boolean>;
   isFoldable(): Promise<boolean>;
+  /** Swap the helper the Duo bridge launches; a no-op on other devices. */
+  setDuoHelper(path: string): Promise<void>;
   close(): Promise<void>;
   pose(name: string, fromDegrees: number): Promise<boolean>;
   hinge(degrees: number): Promise<boolean>;
@@ -165,13 +167,19 @@ function resolveAddon(): string {
   );
 }
 
+/** The guest-side Duo helper as bundled, without checking that it launches. */
+function bundledDuoHidHelperPath(): string {
+  return join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid");
+}
+
 let duoHidHelper: string | undefined;
 /**
  * The guest-side Duo helper (`simctl spawn`): HID commands and the hinge reader.
  * A hardened-runtime re-signed bundle resolves to a copy dyld can launch.
+ * Resolving runs a blocking `codesign` probe, so only call it for an iPhone Duo.
  */
 export function duoHidHelperPath(): string {
-  return duoHidHelper ??= launchableHelper(join(dirname(resolveAddon()), "..", "simduo", "serve-sim-duo-hid"));
+  return duoHidHelper ??= launchableHelper(bundledDuoHidHelperPath());
 }
 
 let addon: NativeAddon | undefined;
@@ -189,13 +197,35 @@ function load(): NativeAddon {
  * In-process HID injector for one simulator. Mirrors the WebSocket HID protocol
  * the spawned helper used to handle, but as direct native calls.
  */
+export interface NativeHidDeps {
+  SimHID?: NativeAddon["SimHID"];
+  /** The helper as bundled; must be cheap. */
+  bundledDuoHelper?: () => string;
+  /** The launchable helper; may run `codesign`, so it is only called for a Duo. */
+  duoHelper?: () => string;
+}
+
 export class NativeHid {
   private readonly handle: SimHIDHandle;
   private readonly keys: KeySequencer;
+  /** Settles once a Duo's bridge points at the launchable helper. */
+  private readonly duoHelperReady: Promise<void>;
 
-  constructor(udid: string) {
-    this.handle = new (load().SimHID)(udid, duoHidHelperPath());
+  constructor(udid: string, deps: NativeHidDeps = {}) {
+    const bundled = (deps.bundledDuoHelper ?? bundledDuoHidHelperPath)();
+    this.handle = new (deps.SimHID ?? load().SimHID)(udid, bundled);
     this.keys = new KeySequencer(this.handle);
+    const resolve = deps.duoHelper ?? duoHidHelperPath;
+    this.duoHelperReady = this.handle.isFoldable().then(async (foldable) => {
+      if (!foldable) return;
+      const helper = resolve();
+      if (helper !== bundled) await this.handle.setDuoHelper(helper);
+    }).catch(() => {});
+  }
+
+  /** Commands a Duo routes through its guest helper wait for it to be resolved. */
+  private viaDuoHelper<T>(fn: () => PromiseLike<T>): () => Promise<T> {
+    return () => this.duoHelperReady.then(fn);
   }
 
   // The N-API bindings throw synchronously when a JS value can't be coerced to
@@ -223,11 +253,11 @@ export class NativeHid {
   }
 
   button(button: string): Promise<void> {
-    return this.guard("button", () => this.handle.button(button), undefined);
+    return this.guard("button", this.viaDuoHelper(() => this.handle.button(button)), undefined);
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<void> {
-    return this.guard("buttonHid", () => this.handle.buttonHid(page, usage, phase), undefined);
+    return this.guard("buttonHid", this.viaDuoHelper(() => this.handle.buttonHid(page, usage, phase)), undefined);
   }
 
   key(type: KeyType, usage: number): Promise<void> {
@@ -244,7 +274,7 @@ export class NativeHid {
   }
 
   orientation(orientation: number): Promise<boolean> {
-    return this.guard("orientation", () => this.handle.orientation(orientation), false);
+    return this.guard("orientation", this.viaDuoHelper(() => this.handle.orientation(orientation)), false);
   }
 
   memoryWarning(): Promise<void> {
@@ -268,11 +298,11 @@ export class NativeHid {
   }
 
   pose(name: string, fromDegrees: number): Promise<boolean> {
-    return this.guard("pose", () => this.handle.pose(name, fromDegrees), false);
+    return this.guard("pose", this.viaDuoHelper(() => this.handle.pose(name, fromDegrees)), false);
   }
 
   hinge(degrees: number): Promise<boolean> {
-    return this.guard("hinge", () => this.handle.hinge(degrees), false);
+    return this.guard("hinge", this.viaDuoHelper(() => this.handle.hinge(degrees)), false);
   }
 }
 

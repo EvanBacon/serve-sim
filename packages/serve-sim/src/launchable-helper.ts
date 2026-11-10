@@ -24,10 +24,22 @@ function runCodesign(args: string[]) {
   return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 }
 
+/**
+ * True when the entitlements grant DYLD_* variables. `codesign` prints them as
+ * `[Key] <name>` / `[Value]` / `[Bool] true`, or as XML `<key>` / `<true/>`.
+ */
+function allowsDyldEnvironment(codesignOutput: string): boolean {
+  const at = codesignOutput.indexOf(DYLD_ENV_ENTITLEMENT);
+  if (at < 0) return false;
+  // Only the value directly after the key counts, never a later key's.
+  const value = /^\s*(?:\[Value\]\s*\[Bool\]\s*(\w+)|<\/key>\s*<(\w+)\s*\/>)/.exec(codesignOutput.slice(at + DYLD_ENV_ENTITLEMENT.length));
+  return (value?.[1] ?? value?.[2]) === "true";
+}
+
 /** True when dyld would strip the DYLD_* variables `simctl spawn` supplies. */
 function dropsDyldEnvironment(codesignOutput: string): boolean {
   const flags = /flags=0x[0-9a-f]+\(([^)]*)\)/i.exec(codesignOutput)?.[1]?.split(",") ?? [];
-  return flags.includes("runtime") && !codesignOutput.includes(DYLD_ENV_ENTITLEMENT);
+  return flags.includes("runtime") && !allowsDyldEnvironment(codesignOutput);
 }
 
 /** `helper`, or a re-signed copy of it that `simctl spawn` can launch. Never throws. */

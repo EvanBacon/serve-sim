@@ -12,7 +12,11 @@ import { launchableHelper } from "../launchable-helper";
 // bundles) aborts under `simctl spawn` with "DYLD_ROOT_PATH not set".
 const HARDENED = "CodeDirectory v=20500 size=342 flags=0x10002(adhoc,runtime) hashes=4+2 location=embedded";
 const LINKER_SIGNED = "CodeDirectory v=20400 size=342 flags=0x20002(adhoc,linker-signed) hashes=8+0 location=embedded";
-const ENTITLED = `${HARDENED}\n[Dict]\n\t[Key] com.apple.security.cs.allow-dyld-environment-variables\n\t[Value]\n\t\t[Bool] true`;
+const entitlements = (allowDyld: boolean) =>
+  `${HARDENED}\n[Dict]\n\t[Key] com.apple.security.cs.allow-dyld-environment-variables\n\t[Value]\n\t\t[Bool] ${allowDyld}` +
+  "\n\t[Key] com.apple.security.cs.disable-library-validation\n\t[Value]\n\t\t[Bool] true";
+const ENTITLED = entitlements(true);
+const XML_ENTITLED = `${HARDENED}\n<plist><dict><key>com.apple.security.cs.allow-dyld-environment-variables</key><true/></dict></plist>`;
 
 const scratchDirs: string[] = [];
 afterEach(() => {
@@ -68,10 +72,20 @@ describe("launchableHelper", () => {
 
   test("keeps the bundled helper when it already launches", () => {
     // npm's linker-signed helper, and a hardened one entitled to keep DYLD_* variables.
-    for (const output of [LINKER_SIGNED, ENTITLED, "CodeDirectory flags=0x2(adhoc) runtime-version"]) {
+    for (const output of [LINKER_SIGNED, ENTITLED, XML_ENTITLED, "CodeDirectory flags=0x2(adhoc) runtime-version"]) {
       const { helper, calls, codesign, cacheDir } = fixture({ status: 0, output });
       expect(launchableHelper(helper, { codesign, cacheDir })).toBe(helper);
       expect(calls).toHaveLength(1);
+    }
+  });
+
+  test("an allow-dyld-environment-variables entitlement set to false still gets re-signed", () => {
+    for (const output of [
+      entitlements(false),
+      `${HARDENED}\n<plist><dict><key>com.apple.security.cs.allow-dyld-environment-variables</key><false/><key>other</key><true/></dict></plist>`,
+    ]) {
+      const { helper, codesign, cacheDir } = fixture({ status: 0, output });
+      expect(launchableHelper(helper, { codesign, cacheDir })).not.toBe(helper);
     }
   });
 
@@ -125,5 +139,19 @@ describe.skipIf(!hasCodesign)("launchableHelper (codesign)", () => {
     expect(flags(resolved)).toMatch(/flags=0x[0-9a-f]+\(adhoc/);
     expect(flags(resolved)).not.toMatch(/flags=0x[0-9a-f]+\([^)]*runtime/);
     expect(spawnSync("/usr/bin/codesign", ["--verify", resolved]).status).toBe(0);
+  });
+
+  test("allow-dyld-environment-variables keeps the helper only when true", () => {
+    for (const allowDyld of [true, false]) {
+      const dir = scratch();
+      const helper = join(dir, "serve-sim-duo-hid");
+      copyFileSync(existsSync(BUILT_HELPER) ? BUILT_HELPER : "/usr/bin/true", helper);
+      const plist = join(dir, "entitlements.plist");
+      writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-dyld-environment-variables</key><${allowDyld}/><key>com.apple.security.cs.disable-library-validation</key><true/></dict></plist>`);
+      expect(spawnSync("/usr/bin/codesign", ["-f", "-s", "-", "--options", "runtime", "--entitlements", plist, helper]).status).toBe(0);
+      const resolved = launchableHelper(helper, { cacheDir: join(dir, "cache") });
+      if (allowDyld) expect(resolved).toBe(helper);
+      else expect(flags(resolved)).not.toMatch(/flags=0x[0-9a-f]+\([^)]*runtime/);
+    }
   });
 });

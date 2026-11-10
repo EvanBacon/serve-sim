@@ -6,7 +6,9 @@ import SimNativeSupport
 /// replies acknowledge dispatch, so a failed command never switches capture.
 final class DuoHIDBridge {
     private let udid: String
-    private let executable: String
+    /// Settable so JS can swap in a launchable copy once the device is known
+    /// to be a Duo (resolving it costs a `codesign` probe).
+    var executable: String
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
