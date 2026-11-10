@@ -48,4 +48,49 @@ describe("normalizeAxTree", () => {
     expect(tree.elements.find((element) => element.path === "0.1")?.label).toBe("Řádek panelů");
     expect(tree.elements.find((element) => element.path === "0.2")?.label).toBe("Profil");
   });
+
+  test("still visits children of a filtered oversized group", () => {
+    const tree = normalizeAxTree([
+      node({
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        role_description: "application",
+        type: "Application",
+        children: [
+          node({
+            frame: { x: -119, y: 0, width: 600, height: 874 },
+            children: [
+              node({
+                AXLabel: "Continue",
+                frame: { x: 20, y: 700, width: 362, height: 50 },
+                role_description: "button",
+                type: "Button",
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    expect(tree.elements.map((element) => element.path)).toEqual(["0.0.0"]);
+    expect(tree.elements[0]?.label).toBe("Continue");
+  });
+
+  test("keeps oversized groups that carry a label or value, and normal-sized anonymous groups", () => {
+    const oversized = { x: -119, y: 0, width: 600, height: 874 };
+    const tree = normalizeAxTree([
+      node({
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        role_description: "application",
+        type: "Application",
+        children: [
+          node({ AXLabel: "Carousel", frame: oversized }),
+          node({ AXValue: "Page 1 of 3", frame: oversized }),
+          node({ frame: { x: 0, y: 100, width: 402, height: 300 } }),
+          node({ AXLabel: "   ", frame: oversized }),
+        ],
+      }),
+    ]);
+
+    expect(tree.elements.map((element) => element.path)).toEqual(["0.0", "0.1", "0.2"]);
+  });
 });
