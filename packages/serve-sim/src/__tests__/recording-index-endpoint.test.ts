@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createServer, type Server } from "http";
+import { createServer, request, type IncomingMessage, type Server } from "http";
 import { writeFileSync } from "fs";
 import type { AddressInfo } from "net";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
@@ -25,13 +25,14 @@ const LEGACY_SUMMARY = { width: 1206, height: 2622, fps: 60, codec: "h264", rota
  * Fake native recorder: armed at uptime 500 s == the wall time of start. Like
  * the addon, it adds `index` to the summary only when the start asked for it
  * (`nativeIndex: false` models an addon without frame metadata). `starts`
- * records the options each start passed.
+ * records the options each start passed; `mp4Bytes` sizes the fake MP4.
  */
 function fakeCapture(
-  { nativeIndex = true, starts = [], startRecording }: {
+  { nativeIndex = true, starts = [], startRecording, mp4Bytes }: {
     nativeIndex?: boolean;
     starts?: RecordingStartOptions[];
     startRecording?: () => Promise<void>;
+    mp4Bytes?: number;
   } = {},
 ): DeviceSessionDependencies["capture"] {
   let active: { path: string; armedWallMs: number; index: boolean } | undefined;
@@ -51,7 +52,7 @@ function fakeCapture(
     stopRecording: async () => {
       const { path, armedWallMs, index: wantIndex } = active!;
       active = undefined;
-      writeFileSync(path, Buffer.from("fake-mp4"));
+      writeFileSync(path, mp4Bytes != null ? Buffer.alloc(mp4Bytes) : Buffer.from("fake-mp4"));
       const index: NativeRecordingIndex = {
         version: 1,
         fps: 60,
@@ -260,6 +261,27 @@ describe("GET /recording/index", () => {
     const base = await serve(new DeviceSession("TEST-UDID", { capture: fakeCapture(), hid: hid(), recordingIndexTtlMs: 300 }));
     const { token, stop } = await recordOnce(base);
     await stop.arrayBuffer();
+    expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
+    await Bun.sleep(500);
+    expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(404);
+  });
+
+  test("the TTL starts once the MP4 has been sent, not at stop", async () => {
+    // Big enough that a paused reader stalls the transfer on socket buffers.
+    const base = await serve(new DeviceSession("TEST-UDID", {
+      capture: fakeCapture({ mp4Bytes: 64 * 1024 * 1024 }), hid: hid(), recordingIndexTtlMs: 300,
+    }));
+    const { token } = await (await fetch(`${base}/recording/start?index=1`, { method: "POST" })).json() as { token: string };
+    const stop = await new Promise<IncomingMessage>((resolve, reject) => {
+      const req = request(`${base}/recording/stop?token=${token}`, { method: "POST" }, resolve);
+      req.once("error", reject);
+      req.end();
+    });
+    stop.pause();
+    expect(stop.statusCode).toBe(200);
+    await Bun.sleep(500); // past the TTL, download still in flight
+    expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
+    await new Promise<void>((resolve) => { stop.on("end", resolve); stop.resume(); });
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(200);
     await Bun.sleep(500);
     expect((await fetch(`${base}/recording/index?token=${token}`)).status).toBe(404);

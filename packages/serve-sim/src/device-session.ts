@@ -278,7 +278,10 @@ export interface DeviceSessionDependencies {
   softwareKeyboardVisible?: (udid: string) => Promise<boolean | null>;
   /** Raw axe-shaped AX JSON; defaults to the native bridge (`axDescribeAsync`). */
   axDescribe?: (udid: string) => Promise<string>;
-  /** How long a finished recording's index is kept; defaults to `RECORDING_INDEX_TTL_MS`. */
+  /**
+   * How long a finished recording's index is kept after its MP4 has been
+   * sent; defaults to `RECORDING_INDEX_TTL_MS`.
+   */
   recordingIndexTtlMs?: number;
   /** Event-log subscription for indexed recordings; defaults to `subscribeEventLog`. */
   subscribeEventLog?: (subscriber: (entry: EventLogEntry) => void) => () => void;
@@ -313,8 +316,11 @@ type StoredRecordingIndex = {
   index: NativeRecordingIndex;
   events: RecordingIndexEvent[];
   eventsDropped: number;
-  /** Deletes this entry once the TTL lapses (unref'd). */
-  expiry: ReturnType<typeof setTimeout>;
+  /**
+   * Deletes this entry once the TTL lapses (unref'd). Armed when the MP4
+   * has finished streaming to the client, so a slow download doesn't eat it.
+   */
+  expiry?: ReturnType<typeof setTimeout>;
 };
 
 /** Finished indexes kept per session, and for how long. */
@@ -1007,16 +1013,21 @@ export class DeviceSession {
       "Cache-Control": "no-store",
       [RECORDING_SUMMARY_HEADER]: publicSummary,
     });
-    await new Promise<void>((resolve) => {
-      const file = createReadStream(active.path);
-      const done = () => {
-        file.destroy();
-        void rm(active.path, { force: true }).finally(resolve);
-      };
-      file.once("error", () => { res.destroy(); done(); });
-      res.once("close", done);
-      file.pipe(res);
-    });
+    try {
+      await new Promise<void>((resolve) => {
+        const file = createReadStream(active.path);
+        const done = () => {
+          file.destroy();
+          void rm(active.path, { force: true }).finally(resolve);
+        };
+        file.once("error", () => { res.destroy(); done(); });
+        res.once("close", done);
+        file.pipe(res);
+      });
+    } finally {
+      // The index's TTL counts from the end of the MP4 transfer.
+      if (active.events) this.armRecordingIndexExpiry(active.token);
+    }
   }
 
   /**
@@ -1034,23 +1045,29 @@ export class DeviceSession {
     const clock = recordingClock(index);
     const durationSec = typeof summary.duration === "number" ? summary.duration : 0;
     const events = clock ? recordingIndexEvents(collector.entries(), clock, { durationSec }) : [];
-    const expiry = setTimeout(() => {
-      if (this.recordingIndexes.get(active.token)?.expiry === expiry) this.recordingIndexes.delete(active.token);
-    }, this.dependencies?.recordingIndexTtlMs ?? RECORDING_INDEX_TTL_MS);
-    expiry.unref?.();
     this.recordingIndexes.set(active.token, {
       fileName,
       summary: summary as RecordingIndexSummary,
       index,
       events,
       eventsDropped: collector.dropped,
-      expiry,
     });
     while (this.recordingIndexes.size > MAX_STORED_RECORDING_INDEXES) {
       const [oldest, stored] = this.recordingIndexes.entries().next().value!;
       clearTimeout(stored.expiry);
       this.recordingIndexes.delete(oldest);
     }
+  }
+
+  /** Start the TTL for a kept index (once its MP4 has been sent). */
+  private armRecordingIndexExpiry(token: string): void {
+    const stored = this.recordingIndexes.get(token);
+    if (!stored || stored.expiry) return;
+    const expiry = setTimeout(() => {
+      if (this.recordingIndexes.get(token) === stored) this.recordingIndexes.delete(token);
+    }, this.dependencies?.recordingIndexTtlMs ?? RECORDING_INDEX_TTL_MS);
+    expiry.unref?.();
+    stored.expiry = expiry;
   }
 
   /** `GET /recording/index?token=<start token>[&file=<mp4 name>]` → JSONL. */
