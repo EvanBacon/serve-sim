@@ -98,6 +98,8 @@ export interface SimulatorViewProps {
   onAvccError?: () => void;
 }
 
+const STREAM_STALL_ERROR = "Stream is not producing frames. The simulator may have stopped — try reconnecting.";
+
 /**
  * Renders a serve-sim MJPEG stream with touch and gesture input.
  * Connects directly to the serve-sim server (not through the gateway).
@@ -187,6 +189,9 @@ export function SimulatorView({
   }, [connectionQuality]);
 
   const streamUrl = `${url}/stream.mjpeg`;
+  // Direct MJPEG mode: called when the visible <img> decodes a part, so the
+  // startup watchdog trusts the stream the user actually sees (#128).
+  const directImageFrameRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     screenSizeRef.current = null;
@@ -240,7 +245,7 @@ export function SimulatorView({
     const STARTUP_MS = 6000;
     const watchdog = setTimeout(() => {
       if (!connectedRef.current) {
-        setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
+        setError(STREAM_STALL_ERROR);
       }
     }, STARTUP_MS);
 
@@ -482,14 +487,27 @@ export function SimulatorView({
     // where bytes never arrive.
     // In AVCC mode the decode hook owns the /stream.avcc connection and frame
     // accounting, so skip the MJPEG reader + its watchdog entirely.
+    // Either consumer proves liveness: the visible <img> (via onLoad) or the
+    // side fetch below. The fetch is a second connection to the same endless
+    // stream and can stall on its own — blocked by CORS when embedded
+    // cross-origin, or queued behind the per-host connection limit — while
+    // the <img> keeps painting, so it must not be the only witness (#128).
     let sawAnyFrame = false;
     const startupWatchdog = useAvcc
       ? null
       : setTimeout(() => {
           if (!sawAnyFrame) {
-            setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
+            setError(STREAM_STALL_ERROR);
           }
         }, 6000);
+    const noteFrame = () => {
+      if (sawAnyFrame) return;
+      sawAnyFrame = true;
+      if (startupWatchdog) clearTimeout(startupWatchdog);
+      // A frame after the timeout disproves the stall; leave other errors.
+      setError((prev) => (prev === STREAM_STALL_ERROR ? null : prev));
+    };
+    directImageFrameRef.current = useAvcc ? null : noteFrame;
 
     if (!useAvcc) (async () => {
       try {
@@ -511,10 +529,7 @@ export function SimulatorView({
               }
               if (match) {
                 frameCountRef.current++;
-                if (!sawAnyFrame) {
-                  sawAnyFrame = true;
-                  if (startupWatchdog) clearTimeout(startupWatchdog);
-                }
+                noteFrame();
               }
             }
           }
@@ -528,6 +543,7 @@ export function SimulatorView({
       fpsAbort.abort();
       clearInterval(fpsInterval);
       if (startupWatchdog) clearTimeout(startupWatchdog);
+      directImageFrameRef.current = null;
       ws.close();
       wsRef.current = null;
     };
@@ -859,6 +875,7 @@ export function SimulatorView({
             onLoad={(e) => {
               const el = e.currentTarget;
               if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                if (!relayMode) directImageFrameRef.current?.();
                 updateScreenConfig({ width: el.naturalWidth, height: el.naturalHeight });
               }
             }}
