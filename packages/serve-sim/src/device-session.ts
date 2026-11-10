@@ -65,6 +65,27 @@ const AVCC_SEED_TAG = 0x04;
 
 // WS server→client screen-config push (ClientManager.wsMsgConfig).
 const WS_MSG_CONFIG = 0x82;
+// WS server→client input acknowledgement: [0x84]{ ack, ok }. Sent only for
+// touch/button frames whose JSON carries a numeric `ack` id (the CLI's
+// tap/button/gesture), so the browser viewer's protocol is unchanged (#136).
+const WS_MSG_INPUT_ACK = 0x84;
+const ACKABLE_INPUT_TAGS = new Set([0x03, 0x04]);
+
+/** The CLI's `ack` id on a touch/button frame, if it asked for one. */
+function inputAckId(frame: Buffer): number | undefined {
+  if (!ACKABLE_INPUT_TAGS.has(frame[0]!) || !frame.includes('"ack"', 1)) return undefined;
+  try {
+    const ack = (JSON.parse(frame.subarray(1).toString("utf8")) as { ack?: unknown }).ack;
+    return typeof ack === "number" && Number.isFinite(ack) ? ack : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function withoutAck<T extends { ack?: unknown }>(message: T): Omit<T, "ack"> {
+  const { ack: _ack, ...rest } = message;
+  return rest;
+}
 
 const MJPEG_TRAILER = Buffer.from("\r\n", "ascii");
 // Native capture is event-driven, so an unchanged screen can legitimately
@@ -176,12 +197,12 @@ function newStreamHealth(): StreamHealth {
 function duoRendererErrorBody(error: DuoRendererError): { error: "duo_renderer_unavailable"; reason: string; stage: string; details: Record<string, unknown> } {
   return { error: "duo_renderer_unavailable", reason: redactHome(error.reason), stage: error.stage, details: redactHome(error.details) };
 }
-type HidTransport = Pick<
+/** Delivery-reporting sends resolve true only when the event reached the guest. */
+type ReportsDelivery<F> = F extends (...args: infer A) => Promise<boolean> ? (...args: A) => Promise<boolean | void> : never;
+type HidTransport = {
+  [K in "touch" | "multiTouch" | "button" | "buttonHid"]: ReportsDelivery<NativeHid[K]>;
+} & Pick<
   NativeHid,
-  | "touch"
-  | "multiTouch"
-  | "button"
-  | "buttonHid"
   | "key"
   | "scroll"
   | "digitalCrown"
@@ -854,7 +875,22 @@ export class DeviceSession {
           }
         }).catch((error) => { console.error("[hid] Pose reply failed:", error); });
       } else {
-        void this.handleHidMessage(frame).catch((error) => { console.error("[hid] Input failed:", error); });
+        const ack = inputAckId(frame);
+        const handled = this.handleHidMessage(frame);
+        if (ack === undefined) {
+          void handled.catch((error) => { console.error("[hid] Input failed:", error); });
+        } else {
+          void handled
+            .then((result) => result === true, (error) => {
+              console.error("[hid] Input failed:", error);
+              return false;
+            })
+            .then((ok) => {
+              if (this.hidSockets.has(ws)) {
+                ws.send(Buffer.concat([Buffer.from([WS_MSG_INPUT_ACK]), Buffer.from(JSON.stringify({ ack, ok }))]));
+              }
+            });
+        }
       }
     });
     ws.on("close", () => this.hidSockets.delete(ws));
@@ -877,24 +913,24 @@ export class DeviceSession {
     const H = this.height;
 
     switch (tag) {
+      // Touch and button resolve whether the injector delivered the event; the
+      // socket handler turns that into an ack when the frame asked for one.
       case 0x03: {
-        const m = json<{ type: string; x: number; y: number; edge?: number }>();
-        if (m) {
-          this.recordTouchEvent(m);
-          this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
-        }
-        break;
+        const raw = json<{ type: string; x: number; y: number; edge?: number; ack?: number }>();
+        if (!raw) return false;
+        const m = withoutAck(raw);
+        this.recordTouchEvent(m);
+        return this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
       }
       case 0x04: {
-        const m = json<{ button: string; page?: number; usage?: number; phase?: string }>();
-        if (!m) break;
+        const raw = json<{ button: string; page?: number; usage?: number; phase?: string; ack?: number }>();
+        if (!raw) return false;
+        const m = withoutAck(raw);
         this.recordHidEvent(tag, m);
         if (m.page != null && m.usage != null) {
-          this.hid.buttonHid(m.page, m.usage, (m.phase as "down" | "up" | "press") ?? "press");
-        } else {
-          this.hid.button(m.button);
+          return this.hid.buttonHid(m.page, m.usage, (m.phase as "down" | "up" | "press") ?? "press");
         }
-        break;
+        return this.hid.button(m.button);
       }
       case 0x05: {
         const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number }>();

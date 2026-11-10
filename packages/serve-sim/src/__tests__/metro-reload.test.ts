@@ -4,12 +4,15 @@ import { METRO_RELOAD_TIMEOUT_MS } from "../client/utils/metro-reload-request";
 import {
   METRO_RELOAD_SERVER_BUDGET_MS,
   appPeerIds,
+  appPeerRoles,
   metroServesApp,
+  metroServesOnlyApp,
   metroServesOnlyDevice,
   reloadViaMetro,
   sendMetroReload,
   supportsMetroReload,
   uniqueSimulatorName,
+  type MetroSendOptions,
   type MetroSendOutcome,
 } from "../metro-reload";
 
@@ -81,6 +84,20 @@ describe("metroServesOnlyDevice", () => {
   });
 });
 
+describe("metroServesOnlyApp", () => {
+  test("true when only this app on this simulator is connected", () => {
+    expect(metroServesOnlyApp([target(DEV_CLIENT, SIM), { deviceName: SIM }], DEV_CLIENT, SIM)).toBe(true);
+  });
+
+  test("false when another app on the same simulator is connected", () => {
+    expect(metroServesOnlyApp([target(DEV_CLIENT, SIM), target("com.example.other", SIM)], DEV_CLIENT, SIM)).toBe(false);
+  });
+
+  test("false when another device is connected", () => {
+    expect(metroServesOnlyApp([target(DEV_CLIENT, SIM), target(DEV_CLIENT, "Pixel 9")], DEV_CLIENT, SIM)).toBe(false);
+  });
+});
+
 describe("appPeerIds", () => {
   test("keeps app sockets (with a role) and drops tools", () => {
     expect(appPeerIds({ "1": "role=ios", "2": {}, "3": "", "4": "role=android&x=1" })).toEqual(["1", "4"]);
@@ -90,6 +107,11 @@ describe("appPeerIds", () => {
     expect(
       appPeerIds({ "1": { role: "ios" }, "2": { name: "tool" }, "3": null, "4": { role: "android", x: "1" } }),
     ).toEqual(["1", "4"]);
+  });
+
+  test("appPeerRoles reads roles from string and parsed queries", () => {
+    expect(appPeerRoles({ "1": "role=ios", "2": {}, "3": { role: "android" }, "4": "x=1" })).toEqual(["ios", "android"]);
+    expect(appPeerRoles(null)).toEqual([]);
   });
 
   test("handles junk", () => {
@@ -107,6 +129,7 @@ describe("reloadViaMetro", () => {
     8085: [target(EXPO_GO, SIM)],
     8086: [target(DEV_CLIENT, SIM), target(DEV_CLIENT, "Pixel 9")],
     8087: [target(DEV_CLIENT, SIM)],
+    8088: [target(DEV_CLIENT, SIM), target("com.example.other", SIM)],
   };
   const fetchJson = async (url: string) => {
     const port = Number(new URL(url).port);
@@ -183,6 +206,35 @@ describe("reloadViaMetro", () => {
       .toMatchObject({ sent: false, reason: "send-failed" });
     expect(await reloadViaMetro(DEV_CLIENT, SIM, [8083], { fetchJson, sendReload: recordSends("ambiguous").sendReload }))
       .toMatchObject({ sent: false, reason: "ambiguous" });
+  });
+
+  test("lets stale sockets from earlier reloads be broadcast to when one app is connected", async () => {
+    // After a reload Metro keeps the old JS instance's socket open, so
+    // getpeers lists several app sockets while /json/list shows one app.
+    const options: MetroSendOptions[] = [];
+    const sendReload = async (_port: number, opts: MetroSendOptions) => {
+      options.push(opts);
+      return opts.broadcastIfSeveral ? "broadcast" : "ambiguous";
+    };
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8083], { fetchJson, sendReload })).toEqual({
+      sent: true,
+      port: 8083,
+      targeted: false,
+    });
+    expect(options).toEqual([{ broadcastIfSeveral: true }]);
+  });
+
+  test("no broadcast to several sockets when two apps share the Metro on this device", async () => {
+    const options: MetroSendOptions[] = [];
+    const sendReload = async (_port: number, opts: MetroSendOptions) => {
+      options.push(opts);
+      return opts.broadcastIfSeveral ? "broadcast" : "ambiguous";
+    };
+    expect(await reloadViaMetro(DEV_CLIENT, SIM, [8088], { fetchJson, sendReload })).toMatchObject({
+      sent: false,
+      reason: "ambiguous",
+    });
+    expect(options).toEqual([{ broadcastIfSeveral: false }]);
   });
 
   test("resolves a pending device name alongside the Metro probes", async () => {
@@ -289,6 +341,30 @@ describe("sendMetroReload", () => {
   test("sends nothing when several apps are connected", async () => {
     const metro = await fakeMetro({ "7": "role=ios", "9": "role=ios" });
     expect(await sendMetroReload(metro.port)).toBe("ambiguous");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(metro.frames).toHaveLength(1);
+  });
+
+  test("broadcasts once to several app sockets when allowed", async () => {
+    // Stale sockets left by earlier reloads ignore a targeted reload.
+    const metro = await fakeMetro({ "18": "role=ios", "22": "role=ios", "30": {} });
+    expect(await sendMetroReload(metro.port, { broadcastIfSeveral: true })).toBe("broadcast");
+    await waitFor(() => metro.frames.length >= 2);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(metro.frames).toHaveLength(2);
+    expect(metro.frames[1]).toEqual({ version: 2, method: "reload" });
+  });
+
+  test("sends nothing to several app sockets when one is another platform", async () => {
+    const metro = await fakeMetro({ "socket#18": "role=ios", "socket#22": "role=android" });
+    expect(await sendMetroReload(metro.port, { broadcastIfSeveral: true })).toBe("ambiguous");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(metro.frames).toHaveLength(1);
+  });
+
+  test("sends nothing to several app sockets when a parsed query is another platform", async () => {
+    const metro = await fakeMetro({ "18": { role: "ios" }, "22": { role: "android" } });
+    expect(await sendMetroReload(metro.port, { broadcastIfSeveral: true })).toBe("ambiguous");
     await new Promise((r) => setTimeout(r, 30));
     expect(metro.frames).toHaveLength(1);
   });

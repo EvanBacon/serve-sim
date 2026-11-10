@@ -75,6 +75,7 @@ import { hostAction, noHostShell, openHostEventStream } from "./utils/exec";
 import { hidUsageForCode } from "./utils/hid";
 import { requestMetroReload } from "./utils/metro-reload-request";
 import { PASTE_EVENT_GRACE_MS, PASTE_KEY_EVENTS, isPasteShortcut, stageGuestPasteboard } from "./utils/paste-bridge";
+import { canReloadApp, reloadAction } from "./utils/reload-action";
 import {
   createSimKeyState,
   isFormControlTarget,
@@ -906,6 +907,16 @@ function AppWithConfig({
     sendKey("up", tap);
     for (const ev of simKeys.restoreEvents()) sendKey(ev.type, ev.usage);
   }, [sendKey, simKeys, reloadEndpoint]);
+  // Apps without a JS bundle to reload (or any app on Shift-click) are
+  // terminated and launched again.
+  const relaunchApp = useCallback(() => {
+    const bundleId = currentAppRef.current?.bundleId;
+    if (!bundleId) return;
+    const failed = () => toast.error("Could not relaunch the app.");
+    hostAction("relaunchApp", { udid: config.device, bundleId })
+      .then((r) => { if (r.exitCode !== 0) failed(); })
+      .catch(failed);
+  }, [config.device]);
 
   const simContainerRef = useRef<HTMLDivElement | null>(null);
   // The action toolbar under the device (reload, home, ...) is sim chrome:
@@ -1331,11 +1342,15 @@ function AppWithConfig({
             }}
           >
             <SimulatorToolbar.Actions>
-              {currentApp?.isReactNative && (
+              {canReloadApp(currentApp) && (
                 <SimulatorToolbar.Button
-                  aria-label="Reload React Native bundle"
-                  title="Reload (R, ⌘R)"
-                  onClick={() => void sendReactNativeReload()}
+                  aria-label={currentApp?.isReactNative ? "Reload React Native bundle" : "Relaunch app"}
+                  title={currentApp?.isReactNative ? "Reload (R, ⌘R) · ⇧-click to restart app" : "Relaunch app"}
+                  onClick={(e) => {
+                    const isReactNative = !!currentAppRef.current?.isReactNative;
+                    if (reloadAction({ isReactNative, shiftKey: e.shiftKey }) === "js-reload") void sendReactNativeReload();
+                    else relaunchApp();
+                  }}
                 >
                   <ReloadIcon />
                 </SimulatorToolbar.Button>

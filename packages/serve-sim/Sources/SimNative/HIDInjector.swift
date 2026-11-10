@@ -182,15 +182,22 @@ actor HIDInjector {
     static let edgeRight: UInt32  = 4  // Right edge
 
     /// Synchronously hand an already-built Indigo message to the guest, freeing it.
-    /// Must run on `inputQueue`.
-    private func rawSend(_ msg: UnsafeMutableRawPointer) {
-        guard let client = hidClient, let sendSel = sendSel else { free(msg); return }
+    /// Must run on `inputQueue`. Returns false when there is no HID client to
+    /// send through (setup never completed), so callers can report the drop.
+    @discardableResult
+    private func rawSend(_ msg: UnsafeMutableRawPointer) -> Bool {
+        guard let client = hidClient, let sendSel = sendSel else {
+            print("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
+            free(msg)
+            return false
+        }
         typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
         guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
             free(msg)
-            return
+            return false
         }
         unsafeBitCast(sendIMP, to: SendFunc.self)(client, sendSel, msg, ObjCBool(true), nil, nil)
+        return true
     }
 
     /// Build a single-finger touch message (normalized 0..1 coords). Pure — safe
@@ -209,25 +216,28 @@ actor HIDInjector {
 
     /// Synchronously build + send a single touch. For use inside gesture blocks
     /// already running on `inputQueue`.
-    private func rawSendTouch(type: String, x: Double, y: Double, edge: UInt32 = 0) {
-        if let msg = touchMessage(type: type, x: x, y: y, edge: edge) { rawSend(msg) }
+    @discardableResult
+    private func rawSendTouch(type: String, x: Double, y: Double, edge: UInt32 = 0) -> Bool {
+        guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return false }
+        return rawSend(msg)
     }
 
-    func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) {
+    /// Returns whether the touch was handed to the HID client.
+    func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) -> Bool {
         updateTouchTarget(width: screenWidth, height: screenHeight)
-        guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return }
+        guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return false }
         hidLog("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
-        rawSend(msg)
+        return rawSend(msg)
     }
 
-    func sendMultiTouch(type: String, x1: Double, y1: Double, x2: Double, y2: Double, screenWidth: Int, screenHeight: Int) {
-        guard let mouseFunc = mouseFunc else { return }
+    func sendMultiTouch(type: String, x1: Double, y1: Double, x2: Double, y2: Double, screenWidth: Int, screenHeight: Int) -> Bool {
+        guard let mouseFunc = mouseFunc else { return false }
 
         let eventType: Int32
         switch type {
         case "begin", "move": eventType = 1
         case "end":           eventType = 2
-        default: return
+        default: return false
         }
 
         updateTouchTarget(width: screenWidth, height: screenHeight)
@@ -236,11 +246,11 @@ actor HIDInjector {
         var point2 = CGPoint(x: x2, y: y2)
         guard let rawMsg = mouseFunc(&point1, &point2, touchTarget, eventType, 1.0, 1.0, 0) else {
             print("[hid] IndigoHIDMessageForMouseNSEvent returned nil for multi-touch \(type)")
-            return
+            return false
         }
 
         hidLog("[hid] Multi-touch \(type) f1=(\(String(format:"%.3f",x1)),\(String(format:"%.3f",y1))) f2=(\(String(format:"%.3f",x2)),\(String(format:"%.3f",y2)))")
-        rawSend(rawMsg)
+        return rawSend(rawMsg)
     }
 
     // MARK: - Button events
@@ -266,13 +276,14 @@ actor HIDInjector {
 
     /// Synchronously build + send a hardware-button message. Call only inside an
     /// `inputQueue` block (button sequences below run there).
-    private func sendHIDButton(eventSource: Int32, direction: Int32) {
-        guard let buttonFunc = buttonFunc else { return }
+    @discardableResult
+    private func sendHIDButton(eventSource: Int32, direction: Int32) -> Bool {
+        guard let buttonFunc = buttonFunc else { return false }
         guard let msg = buttonFunc(eventSource, direction, Self.buttonTargetHardware) else {
             print("[hid] IndigoHIDMessageForButton returned nil")
-            return
+            return false
         }
-        rawSend(msg)
+        return rawSend(msg)
     }
 
     // MARK: - Keyboard events
@@ -432,43 +443,46 @@ actor HIDInjector {
     /// volume up/down, the action button, and the watch side button.
     /// - phase: "down" / "up" hold the button for natural long-presses (power
     ///   off slider, side-button menus); "press" sends a momentary down+up.
-    func sendButtonHID(page: UInt32, usage: UInt32, phase: String) async {
+    /// Returns whether the press was handed to the guest.
+    @discardableResult
+    func sendButtonHID(page: UInt32, usage: UInt32, phase: String) async -> Bool {
         if let duoBridge {
             switch phase {
-            case "down": _ = duoBridge.send("key \(page) \(usage) 1")
-            case "up": _ = duoBridge.send("key \(page) \(usage) 0")
+            case "down": return duoBridge.send("key \(page) \(usage) 1")
+            case "up": return duoBridge.send("key \(page) \(usage) 0")
             case "press":
-                guard duoBridge.send("key \(page) \(usage) 1") else { return }
+                guard duoBridge.send("key \(page) \(usage) 1") else { return false }
                 try? await Task.sleep(for: .milliseconds(250))
-                _ = duoBridge.send("key \(page) \(usage) 0")
-            default: break
+                return duoBridge.send("key \(page) \(usage) 0")
+            default: return false
             }
-            return
         }
         guard let arb = hidArbitraryFunc else {
             print("[hid] Arbitrary HID injection unavailable (page=\(page) usage=\(usage))")
-            return
+            return false
         }
         let target = Self.buttonHIDTarget
-        func emit(_ direction: UInt32) {
+        func emit(_ direction: UInt32) -> Bool {
             guard let msg = arb(target, page, usage, direction) else {
                 print("[hid] IndigoHIDMessageForHIDArbitrary returned nil (page=\(page) usage=\(usage) dir=\(direction))")
-                return
+                return false
             }
-            rawSend(msg)
+            return rawSend(msg)
         }
         hidLog("[hid] HID button page=\(page) usage=\(usage) phase=\(phase)")
         switch phase {
-        case "down": emit(1)
-        case "up":   emit(2)
+        case "down": return emit(1)
+        case "up":   return emit(2)
         default:
-            emit(1)
+            guard emit(1) else { return false }
             try? await Task.sleep(for: .seconds(0.05))
-            emit(2)
+            return emit(2)
         }
     }
 
-    func sendButton(button: String, deviceUDID: String) async {
+    /// Returns whether the button was handed to the guest (false for an
+    /// unknown button or when the HID client / message builder is missing).
+    func sendButton(button: String, deviceUDID: String) async -> Bool {
         hidLog("[hid] Sending button: \(button)")
 
         switch button {
@@ -481,43 +495,45 @@ actor HIDInjector {
             // unconditionally rather than depending on whether the HID symbol
             // resolved.
             await launchSpringBoard(deviceUDID: deviceUDID)
+            return true
 
         case "swipe_home":
-            sendSwipeHome()
+            return sendSwipeHome()
 
         case "app_switcher":
             if buttonFunc != nil {
                 // Double home press with delay for app switcher
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonDown)
+                guard sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonDown) else { return false }
                 sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonUp)
                 try? await Task.sleep(for: .seconds(0.15))
                 sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonDown)
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonUp)
+                return sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonUp)
             } else {
                 print("[hid] App switcher not available (IndigoHIDMessageForButton not loaded)")
+                return false
             }
 
         case "lock":
             if duoBridge != nil {
-                await sendButtonHID(page: 0x0c, usage: 0x30, phase: "press")
-                return
+                return await sendButtonHID(page: 0x0c, usage: 0x30, phase: "press")
             }
-            sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonDown)
-            sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonUp)
+            guard sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonDown) else { return false }
+            return sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonUp)
 
         case "siri":
             // Holding Siri for ~300ms matches Simulator.app's "hold side button
             // to invoke Siri" gesture; a tap is ignored.
-            sendHIDButton(eventSource: Self.buttonSourceSiri, direction: Self.buttonDown)
+            guard sendHIDButton(eventSource: Self.buttonSourceSiri, direction: Self.buttonDown) else { return false }
             try? await Task.sleep(for: .seconds(0.3))
-            sendHIDButton(eventSource: Self.buttonSourceSiri, direction: Self.buttonUp)
+            return sendHIDButton(eventSource: Self.buttonSourceSiri, direction: Self.buttonUp)
 
         case "side_button":
-            sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonDown)
-            sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonUp)
+            guard sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonDown) else { return false }
+            return sendHIDButton(eventSource: Self.buttonSourceSideButton, direction: Self.buttonUp)
 
         default:
             print("[hid] Unknown button: \(button)")
+            return false
         }
     }
 
@@ -603,7 +619,7 @@ actor HIDInjector {
     /// Synthesize a swipe-up-from-bottom gesture (Face ID "go home" gesture).
     /// Uses IndigoHIDEdge.bottom to flag touches as system edge gestures,
     /// which iOS interprets as the home indicator swipe.
-    private func sendSwipeHome() {
+    private func sendSwipeHome() -> Bool {
         let xPos = 0.5
         let yStart = 0.95
         let yEnd = 0.35
@@ -612,7 +628,7 @@ actor HIDInjector {
         let edge = Self.edgeBottom
 
         // Touch down at bottom edge
-        rawSendTouch(type: "begin", x: xPos, y: yStart, edge: edge)
+        guard rawSendTouch(type: "begin", x: xPos, y: yStart, edge: edge) else { return false }
         Thread.sleep(forTimeInterval: stepDelay)
 
         // Interpolated moves upward
@@ -624,7 +640,7 @@ actor HIDInjector {
         }
 
         // Touch up
-        rawSendTouch(type: "end", x: xPos, y: yEnd, edge: edge)
+        return rawSendTouch(type: "end", x: xPos, y: yEnd, edge: edge)
     }
 
     /// Launches SpringBoard off the actor, falling back to `simctl`, and returns

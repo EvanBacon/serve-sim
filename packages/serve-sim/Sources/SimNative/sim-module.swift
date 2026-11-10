@@ -33,57 +33,75 @@ private func u32(_ v: Int) -> UInt32 {
         setupTask = Task { try await injector.setup(deviceUDID: udid, duoHelper: duoHelper) }
     }
 
+    // Every input method waits for `setup` first. The session is created on
+    // the first /ws connect, so a CLI `tap` lands milliseconds after this
+    // constructor; without the wait the frame reached the actor before setup
+    // and was dropped (no HID client yet) while the CLI exited 0 (#136).
+    // A failed setup (device gone / not booted) now throws to JS instead of
+    // silently swallowing every event.
+
     @NodeMethod func touch(_ type: String, _ x: Double, _ y: Double,
-                           _ w: Int, _ h: Int, _ edge: Int) async {
-        await injector.sendTouch(type: type, x: x, y: y,
-                           screenWidth: w, screenHeight: h, edge: u32(edge))
+                           _ w: Int, _ h: Int, _ edge: Int) async throws -> Bool {
+        try await setupTask.value
+        return await injector.sendTouch(type: type, x: x, y: y,
+                                        screenWidth: w, screenHeight: h, edge: u32(edge))
     }
 
     @NodeMethod func multiTouch(_ type: String, _ x1: Double, _ y1: Double,
-                                _ x2: Double, _ y2: Double, _ w: Int, _ h: Int) async {
-        await injector.sendMultiTouch(type: type, x1: x1, y1: y1, x2: x2, y2: y2,
-                                screenWidth: w, screenHeight: h)
+                                _ x2: Double, _ y2: Double, _ w: Int, _ h: Int) async throws -> Bool {
+        try await setupTask.value
+        return await injector.sendMultiTouch(type: type, x1: x1, y1: y1, x2: x2, y2: y2,
+                                             screenWidth: w, screenHeight: h)
     }
 
-    @NodeMethod func button(_ button: String) async {
-        await injector.sendButton(button: button, deviceUDID: udid)
+    @NodeMethod func button(_ button: String) async throws -> Bool {
+        try await setupTask.value
+        return await injector.sendButton(button: button, deviceUDID: udid)
     }
 
-    @NodeMethod func buttonHid(_ page: Int, _ usage: Int, _ phase: String) async {
-        await injector.sendButtonHID(page: u32(page), usage: u32(usage), phase: phase)
+    @NodeMethod func buttonHid(_ page: Int, _ usage: Int, _ phase: String) async throws -> Bool {
+        try await setupTask.value
+        return await injector.sendButtonHID(page: u32(page), usage: u32(usage), phase: phase)
     }
 
-    @NodeMethod func key(_ type: String, _ usage: Int) async {
+    @NodeMethod func key(_ type: String, _ usage: Int) async throws {
+        try await setupTask.value
         await injector.sendKey(type: type, usage: u32(usage))
     }
 
     /// NaN anchorX/anchorY mean "center" (the Swift API's nil).
     @NodeMethod func scroll(_ dx: Double, _ dy: Double,
-                            _ anchorX: Double, _ anchorY: Double, _ w: Int, _ h: Int) async {
+                            _ anchorX: Double, _ anchorY: Double, _ w: Int, _ h: Int) async throws {
+        try await setupTask.value
         await injector.sendScroll(dx: dx, dy: dy,
                             anchorX: anchorX.isNaN ? nil : anchorX,
                             anchorY: anchorY.isNaN ? nil : anchorY,
                             screenWidth: w, screenHeight: h)
     }
 
-    @NodeMethod func digitalCrown(_ delta: Double) async {
+    @NodeMethod func digitalCrown(_ delta: Double) async throws {
+        try await setupTask.value
         await injector.sendDigitalCrown(delta: delta)
     }
 
-    @NodeMethod func orientation(_ orientation: Int) async -> Bool {
-        await injector.sendOrientation(orientation: u32(orientation))
+    @NodeMethod func orientation(_ orientation: Int) async throws -> Bool {
+        try await setupTask.value
+        return await injector.sendOrientation(orientation: u32(orientation))
     }
 
-    @NodeMethod func memoryWarning() async {
+    @NodeMethod func memoryWarning() async throws {
+        try await setupTask.value
         await injector.simulateMemoryWarning()
     }
 
-    @NodeMethod func softwareKeyboard() async {
+    @NodeMethod func softwareKeyboard() async throws {
+        try await setupTask.value
         await injector.toggleSoftwareKeyboard()
     }
 
-    @NodeMethod func caDebug(_ name: String, _ enabled: Bool) async -> Bool {
-        await injector.setCADebugOption(name: name, enabled: enabled)
+    @NodeMethod func caDebug(_ name: String, _ enabled: Bool) async throws -> Bool {
+        try await setupTask.value
+        return await injector.setCADebugOption(name: name, enabled: enabled)
     }
 
     @NodeMethod func isFoldable() async throws -> Bool {
