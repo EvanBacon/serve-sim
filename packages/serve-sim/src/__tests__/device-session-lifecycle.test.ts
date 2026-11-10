@@ -358,6 +358,126 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
 }
 
+describe("DeviceSession hardware keyboard HID", () => {
+  function keyboardSession(
+    { saved = null, visible = async () => null }: {
+      saved?: boolean | null;
+      visible?: () => Promise<boolean | null>;
+    } = {},
+  ) {
+    const calls: boolean[] = [];
+    const writes: boolean[] = [];
+    const control = { accept: true, probes: 0 };
+    const session = new DeviceSession("TEST-UDID", {
+      ...dependencies(),
+      hid: {
+        ...dependencies().hid,
+        hardwareKeyboard: async (enabled) => {
+          calls.push(enabled);
+          return control.accept;
+        },
+      },
+      hardwareKeyboardState: {
+        read: () => (writes.length ? writes.at(-1)! : saved),
+        write: (_udid, enabled) => { writes.push(enabled); },
+      },
+      softwareKeyboardVisible: () => {
+        control.probes++;
+        return visible();
+      },
+    });
+    let receive!: (data: Buffer) => void;
+    session.attachHidSocket({ send() {}, close() {}, on(event, cb) { if (event === "message") receive = cb as (data: Buffer) => void; } });
+    const send = (tag: number, payload: object) => receive(Buffer.concat([Buffer.from([tag]), Buffer.from(JSON.stringify(payload))]));
+    return {
+      session, calls, writes, control,
+      toggle: () => send(0x0f, {}),
+      key: (usage: number) => { send(0x06, { type: "down", usage }); send(0x06, { type: "up", usage }); },
+    };
+  }
+
+  test("a visible software keyboard makes the first toggle connect", async () => {
+    const k = keyboardSession({ visible: async () => true });
+    k.key(0x04);
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([true]);
+    expect(k.writes).toEqual([true]);
+    k.session.close();
+  });
+
+  test("a hidden software keyboard makes the first toggle disconnect", async () => {
+    const k = keyboardSession({ visible: async () => false });
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([false]);
+    expect(k.writes).toEqual([false]);
+    k.session.close();
+  });
+
+  test("when AX fails and nothing was typed, the first toggle connects", async () => {
+    const k = keyboardSession({ visible: async () => { throw new Error("ax unavailable"); } });
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([true]);
+    k.session.close();
+  });
+
+  test("when AX can't tell after a forwarded letter, the first toggle disconnects", async () => {
+    const k = keyboardSession();
+    k.key(0x04);
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([false]);
+    k.session.close();
+  });
+
+  test("modifier-only keys do not count as typing in the fallback", async () => {
+    const k = keyboardSession();
+    k.key(0xe3);
+    k.key(0xe1);
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([true]);
+    k.session.close();
+  });
+
+  test("a same-boot explicit value wins and AX is not called", async () => {
+    const k = keyboardSession({ saved: false, visible: async () => false });
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([true]);
+    expect(k.control.probes).toBe(0);
+    k.session.close();
+  });
+
+  test("back-to-back toggles alternate after the first", async () => {
+    const k = keyboardSession({ visible: async () => false });
+    k.toggle();
+    k.toggle();
+    k.toggle();
+    await waitFor(() => k.calls.length === 3);
+    expect(k.calls).toEqual([false, true, false]);
+    expect(k.writes).toEqual([false, true, false]);
+    expect(k.control.probes).toBe(1);
+    k.session.close();
+  });
+
+  test("a failed native call writes nothing and does not flip", async () => {
+    const k = keyboardSession({ visible: async () => true });
+    k.control.accept = false;
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.writes).toEqual([]);
+    k.control.accept = true;
+    k.toggle();
+    await waitFor(() => k.calls.length === 2);
+    expect(k.calls).toEqual([true, true]);
+    expect(k.writes).toEqual([true]);
+    k.session.close();
+  });
+});
+
 describe("DeviceSession fold pose HID", () => {
   test("tag 0x0e named pose injects hinge and follows the active panel", async () => {
     const poses: string[] = [];
@@ -707,6 +827,7 @@ function dependencies(
       memoryWarning: async () => {},
       softwareKeyboard: async () => {},
       caDebug: async () => false,
+      hardwareKeyboard: async () => false,
       pose: async () => false,
       hinge: async () => false,
     },

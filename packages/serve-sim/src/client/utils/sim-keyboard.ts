@@ -21,6 +21,23 @@ export function isReloadShortcut(e: ModifierState): boolean {
   return e.code === "KeyR" && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
 }
 
+/**
+ * Cmd+K, Simulator.app's Toggle Software Keyboard: shows or hides the
+ * on-screen keyboard without touching the hardware-keyboard connection.
+ */
+export function isSoftwareKeyboardShortcut(e: ModifierState): boolean {
+  return e.code === "KeyK" && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+}
+
+/**
+ * Cmd+Shift+K, Simulator.app's Connect Hardware Keyboard (Device Hub's
+ * Simulate Hardware Keyboard). Disconnecting lets the software keyboard
+ * appear for focused fields; connecting hides it again.
+ */
+export function isHardwareKeyboardShortcut(e: ModifierState): boolean {
+  return e.code === "KeyK" && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey;
+}
+
 /** Keys that activate or move between focused toolbar buttons. */
 const BUTTON_KEY_CODES = new Set(["Tab", "Enter", "NumpadEnter", "Space"]);
 

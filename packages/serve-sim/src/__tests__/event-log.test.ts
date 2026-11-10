@@ -186,6 +186,22 @@ describe("eventLogEventForHidMessage", () => {
     });
   });
 
+  test("maps hardware keyboard connect and disconnect", () => {
+    expect(eventLogEventForHidMessage("UDID", 0x0f, { enabled: true })).toMatchObject({
+      device: "UDID",
+      source: "hid",
+      kind: "hardware-keyboard",
+      action: "connect",
+      summary: "Hardware keyboard connected",
+    });
+    expect(eventLogEventForHidMessage("UDID", 0x0f, { enabled: false })).toMatchObject({
+      kind: "hardware-keyboard",
+      action: "disconnect",
+      summary: "Hardware keyboard disconnected",
+    });
+    expect(eventLogEventForHidMessage("UDID", 0x0f, {})).toBeNull();
+  });
+
   test("redacts printable key HID usages", () => {
     for (const usage of [23, 0x1e, 0x2d]) {
       const event = eventLogEventForHidMessage("UDID", 0x06, { type: "up", usage });

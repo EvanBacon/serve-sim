@@ -37,6 +37,7 @@ interface SimHIDHandle {
   memoryWarning(): Promise<void>;
   softwareKeyboard(): Promise<void>;
   caDebug(name: string, enabled: boolean): Promise<boolean>;
+  hardwareKeyboard(enabled: boolean): Promise<boolean>;
   isFoldable(): Promise<boolean>;
   /** Swap the helper the Duo bridge launches; a no-op on other devices. */
   setDuoHelper(path: string): Promise<void>;
@@ -329,6 +330,10 @@ export class NativeHid {
 
   caDebug(name: string, enabled: boolean): Promise<boolean> {
     return this.guard("caDebug", () => this.handle.caDebug(name, enabled), false);
+  }
+
+  hardwareKeyboard(enabled: boolean): Promise<boolean> {
+    return this.guard("hardwareKeyboard", () => this.handle.hardwareKeyboard(enabled), false);
   }
 
   isFoldable(): Promise<boolean> {

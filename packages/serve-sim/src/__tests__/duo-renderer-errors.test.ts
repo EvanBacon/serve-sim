@@ -45,7 +45,7 @@ function duoSession(createDuoRenderer: DeviceSessionDependencies["createDuoRende
     hid: {
       touch: noop, multiTouch: noop, button: noop, buttonHid: noop, key: noop, scroll: noop,
       digitalCrown: noop, orientation: async () => false, memoryWarning: noop, softwareKeyboard: noop,
-      caDebug: async () => false, pose: async () => false, hinge: async () => false,
+      caDebug: async () => false, hardwareKeyboard: async () => false, pose: async () => false, hinge: async () => false,
       isFoldable: async () => true,
     },
     createDuoMonitor: () => ({ close() {}, refreshOrientation() {} }),

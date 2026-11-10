@@ -562,6 +562,46 @@ actor HIDInjector {
         return result.boolValue
     }
 
+    /// Connect or disconnect the simulated hardware keyboard, exactly like
+    /// Simulator.app's I/O → Keyboard → Connect Hardware Keyboard and Device
+    /// Hub's Simulate Hardware Keyboard (⇧⌘K). Calls `-[SimDevice
+    /// setHardwareKeyboardEnabled:keyboardType:error:]` (CoreSimulator
+    /// private). Disconnected (NO) lets the software keyboard appear for a
+    /// focused field; connected (YES) hides it. There is no getter, so callers
+    /// track the state themselves. Connecting sends NO, waits, then YES: a
+    /// YES that doesn't change CoreSimulator's state is a no-op, and the guest
+    /// coalesces a NO/YES pair sent back to back (measured: 0 ms no effect,
+    /// 250 ms reliable on iOS 27.2).
+    func setHardwareKeyboard(enabled: Bool) async -> Bool {
+        guard let device = simDevice else {
+            fputs("[sim] setHardwareKeyboard: no SimDevice\n", stderr)
+            return false
+        }
+        let sel = NSSelectorFromString("setHardwareKeyboardEnabled:keyboardType:error:")
+        guard device.responds(to: sel) else {
+            fputs("[sim] setHardwareKeyboard: selector not available on SimDevice\n", stderr)
+            return false
+        }
+        if enabled {
+            _ = callSetHardwareKeyboard(device, sel, enabled: false)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return callSetHardwareKeyboard(device, sel, enabled: enabled)
+    }
+
+    private func callSetHardwareKeyboard(_ device: NSObject, _ sel: Selector, enabled: Bool) -> Bool {
+        typealias Fn = @convention(c) (AnyObject, Selector, ObjCBool, UInt8, AutoreleasingUnsafeMutablePointer<NSError?>?) -> ObjCBool
+        let imp = device.method(for: sel)
+        let fn = unsafeBitCast(imp, to: Fn.self)
+        var error: NSError?
+        let result = fn(device, sel, ObjCBool(enabled), 0, &error)
+        hidLog("[sim] setHardwareKeyboard(\(enabled)) → \(result.boolValue)")
+        if !result.boolValue {
+            fputs("[sim] setHardwareKeyboard(\(enabled)) failed: \(error?.localizedDescription ?? "unknown error")\n", stderr)
+        }
+        return result.boolValue
+    }
+
     // MARK: - Fold pose / hinge
 
     func isFoldable() -> Bool { duoBridge != nil }

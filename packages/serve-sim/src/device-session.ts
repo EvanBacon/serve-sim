@@ -1,4 +1,6 @@
 import { warnDeviceHubInput } from "./device-hub-input";
+import { axTreeHasSoftwareKeyboard, readHardwareKeyboardState, writeHardwareKeyboardState } from "./hardware-keyboard-state";
+import { isModifierUsage } from "./keyboard-modifiers";
 import { DuoRenderer, DuoRendererError, logDuoRendererFailure } from "./duo-renderer";
 import { DuoPreview, type DuoRendererEvent } from "./duo-preview";
 import { redactHome } from "./diagnostics-redact";
@@ -125,6 +127,25 @@ function newTouchGesture(payload: { x: number; y: number; edge?: number }): Touc
   };
 }
 
+// One AX dump takes ~0.4 s; past this, fall back rather than stall the toggle.
+const SOFTWARE_KEYBOARD_PROBE_TIMEOUT_MS = 2_000;
+
+async function probeSoftwareKeyboardVisible(udid: string): Promise<boolean | null> {
+  try {
+    return axTreeHasSoftwareKeyboard(JSON.parse(await axDescribeAsync(udid)));
+  } catch {
+    return null;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 function mjpegHeader(jpegLength: number): Buffer {
   return Buffer.from(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpegLength}\r\n\r\n`, "ascii");
 }
@@ -210,6 +231,7 @@ type HidTransport = {
   | "memoryWarning"
   | "softwareKeyboard"
   | "caDebug"
+  | "hardwareKeyboard"
   | "pose"
   | "hinge"
 > & Partial<Pick<NativeHid, "close" | "isFoldable">>;
@@ -224,6 +246,13 @@ export interface DeviceSessionDependencies {
   maxRecordingMs?: number;
   /** How long a capped file is held for its owner; defaults to `RECORDING_HOLD_MS`. */
   recordingHoldMs?: number;
+  /** Per-boot hardware keyboard memory; defaults to files in `STATE_DIR`. */
+  hardwareKeyboardState?: {
+    read: (udid: string) => boolean | null;
+    write: (udid: string, enabled: boolean) => void;
+  };
+  /** Whether the software keyboard is on screen, or null if unknown; defaults to an AX probe. */
+  softwareKeyboardVisible?: (udid: string) => Promise<boolean | null>;
 }
 
 type ActiveRecording = {
@@ -267,6 +296,12 @@ export class DeviceSession {
   private followedCover?: boolean;
   private primaryDuoPanel?: DuoPanel;
   private poseQueue: Promise<void> = Promise.resolve();
+  // The guest has no getter, and initial visibility after boot isn't
+  // predictable from earlier boots. An explicit set lasts for the boot, so it
+  // is remembered per boot on disk. Otherwise the AX tree tells whether the
+  // software keyboard is on screen; forwarded typing is the last resort.
+  private forwardedTypingKey = false;
+  private hardwareKeyboardQueue: Promise<void> = Promise.resolve();
   private duoStateQueue: Promise<void> = Promise.resolve();
   private readonly streamResponses = new Set<ServerResponse>();
   private touchGestureLog?: TouchGestureLog;
@@ -945,6 +980,7 @@ export class DeviceSession {
         if (m) {
           this.recordHidEvent(tag, m);
           this.hid.key(m.type as "down" | "up", m.usage);
+          if (m.type === "down" && !isModifierUsage(m.usage)) this.forwardedTypingKey = true;
         }
         break;
       }
@@ -1000,6 +1036,33 @@ export class DeviceSession {
         this.recordHidEvent(tag, {});
         this.hid.softwareKeyboard();
         break;
+      case 0x0f: {
+        // Serialized so rapid presses each toggle from the settled state.
+        // A same-boot explicit value flips. Otherwise: software keyboard
+        // visible -> connect (hides it); hidden -> disconnect (lets it show).
+        // If AX can't tell, assume forwarded typing implicitly connected.
+        const state = this.dependencies?.hardwareKeyboardState ?? {
+          read: (udid: string) => readHardwareKeyboardState(udid),
+          write: (udid: string, enabled: boolean) => writeHardwareKeyboardState(udid, enabled),
+        };
+        const probe = this.dependencies?.softwareKeyboardVisible ?? probeSoftwareKeyboardVisible;
+        const toggle = this.hardwareKeyboardQueue.then(async () => {
+          const saved = state.read(this.udid);
+          let next: boolean;
+          if (saved != null) {
+            next = !saved;
+          } else {
+            const visible = await withTimeout(probe(this.udid), SOFTWARE_KEYBOARD_PROBE_TIMEOUT_MS).catch(() => null);
+            next = visible ?? !this.forwardedTypingKey;
+          }
+          if (!await this.hid.hardwareKeyboard(next)) return;
+          state.write(this.udid, next);
+          this.recordHidEvent(tag, { enabled: next });
+        });
+        this.hardwareKeyboardQueue = toggle.catch(() => {});
+        await toggle;
+        break;
+      }
       case 0x0d: {
         const m = json<{ width?: number; height?: number }>();
         if (!m) break;

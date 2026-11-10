@@ -3,8 +3,10 @@ import {
   HID_KEY_R,
   createSimKeyState,
   isFormControlTarget,
+  isHardwareKeyboardShortcut,
   isInteractiveTarget,
   isReloadShortcut,
+  isSoftwareKeyboardShortcut,
   keepsNativeButtonKey,
   releaseFocusToSim,
 } from "../client/utils/sim-keyboard";
@@ -27,6 +29,38 @@ describe("isReloadShortcut", () => {
     expect(isReloadShortcut(key("KeyR", { metaKey: true, ctrlKey: true }))).toBe(false);
     expect(isReloadShortcut(key("KeyR", { metaKey: true, altKey: true }))).toBe(false);
     expect(isReloadShortcut(key("KeyT", { metaKey: true }))).toBe(false);
+  });
+});
+
+describe("keyboard toggle shortcuts", () => {
+  test("Cmd+Shift+K connects/disconnects the hardware keyboard, Cmd+K toggles the software one", () => {
+    const cmdShiftK = key("KeyK", { metaKey: true, shiftKey: true });
+    expect(isHardwareKeyboardShortcut(cmdShiftK)).toBe(true);
+    expect(isSoftwareKeyboardShortcut(cmdShiftK)).toBe(false);
+
+    const cmdK = key("KeyK", { metaKey: true });
+    expect(isSoftwareKeyboardShortcut(cmdK)).toBe(true);
+    expect(isHardwareKeyboardShortcut(cmdK)).toBe(false);
+  });
+
+  test("other K chords match neither and are forwarded as keys", () => {
+    for (const e of [
+      key("KeyK"),
+      key("KeyK", { shiftKey: true }),
+      key("KeyK", { metaKey: true, altKey: true }),
+      key("KeyK", { metaKey: true, shiftKey: true, ctrlKey: true }),
+      key("KeyJ", { metaKey: true, shiftKey: true }),
+    ]) {
+      expect(isSoftwareKeyboardShortcut(e)).toBe(false);
+      expect(isHardwareKeyboardShortcut(e)).toBe(false);
+    }
+  });
+
+  test("Cmd+R stays the reload shortcut only", () => {
+    const cmdR = key("KeyR", { metaKey: true });
+    expect(isReloadShortcut(cmdR)).toBe(true);
+    expect(isSoftwareKeyboardShortcut(cmdR)).toBe(false);
+    expect(isHardwareKeyboardShortcut(cmdR)).toBe(false);
   });
 });
 
