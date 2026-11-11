@@ -818,4 +818,38 @@ describeWithNode("control process", () => {
       }
     });
   });
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const workerPids = (daemonPid: number) =>
+    spawnSync("pgrep", ["-P", String(daemonPid)], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter(Boolean)
+      .map(Number);
+
+  test("a held worker that dies before go sends the caller in-process and frees the daemon", async () => {
+    const r0 = await cli(["control", "start", "--json"], { env: { SERVE_SIM_CONTROL_IDLE_MS: "1500" } });
+    const daemon = JSON.parse(r0.stdout) as { pid: number };
+    await warm();
+    const marker = join(work, "ran.txt");
+    // The client stalls after `run`, so the daemon holds a worker for it
+    // while we kill every worker (the held one included).
+    const pending = race({ stallAfter: "run", stallMs: 1500, acceptTimeoutMs: 30_000, marker });
+    await until(async () => (await status()).busy === 1);
+    for (const pid of workerPids(daemon.pid)) process.kill(pid, "SIGKILL");
+    const r = await pending;
+    expect(r.result).toEqual({ kind: "bypass", reason: "worker exited" });
+    expect(ranCount(marker)).toBe(0);
+    await until(async () => (await status()).busy === 0);
+    // The real bin finishes such a call in-process.
+    expect((await cli(["--version"])).stdout).toBe("fake 1.0.0\n");
+    // Nothing pins it: it still idle-exits.
+    await until(async () => !alive(daemon.pid), 8000);
+  });
+
 });

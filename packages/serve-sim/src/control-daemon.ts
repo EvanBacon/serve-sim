@@ -163,6 +163,8 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
   const busyChildren = new Set<ChildProcess>();
   /** Accepted callers that haven't said `go` yet, and the worker held for each. */
   const held = new Map<Socket, Worker>();
+  const holdTimers = new Map<Socket, ReturnType<typeof setTimeout>>();
+  const holdWatchers = new Map<Socket, () => void>();
   const connections = new Set<Socket>();
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => (resolveClosed = resolve));
@@ -189,6 +191,8 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
   writeJsonFile(pidFile, { pid: process.pid, socket, startedAt });
 
   const ownsSocket = () => socketInode != null && inodeOf(socket) === socketInode;
+  /** Exited, or its IPC channel is gone; its `close` may not have been handled yet. */
+  const isGone = (w: Worker) => w.child.exitCode != null || w.child.signalCode != null || !w.child.connected;
 
   function spawnWorker(): void {
     if (stopping) return;
@@ -272,7 +276,8 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
 
   function acquire(): Promise<Worker | null> {
     if (stopping) return Promise.resolve(null);
-    const ready = pool.find((w) => w.ready);
+    // A dead worker stays in the pool until its `close` handler refills.
+    const ready = pool.find((w) => w.ready && !isGone(w));
     if (ready) {
       removeFromPool(ready);
       refill();
@@ -286,8 +291,27 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
 
   function release(worker: Worker): void {
     // A pristine worker whose caller went away goes back to the pool.
-    if (stopping || worker.child.exitCode != null || pool.length >= opts.poolSize) worker.child.kill("SIGTERM");
+    if (stopping || isGone(worker) || pool.length >= opts.poolSize) worker.child.kill("SIGTERM");
     else pool.unshift(worker);
+  }
+
+  function hold(conn: Socket, worker: Worker, onExit: () => void): void {
+    held.set(conn, worker);
+    holdWatchers.set(conn, onExit);
+    worker.child.once("close", onExit);
+  }
+
+  /** Stop holding the caller's worker; returns it if it was still held. */
+  function unhold(conn: Socket): Worker | undefined {
+    const worker = held.get(conn);
+    if (!worker) return undefined;
+    held.delete(conn);
+    clearTimeout(holdTimers.get(conn));
+    holdTimers.delete(conn);
+    const onExit = holdWatchers.get(conn);
+    holdWatchers.delete(conn);
+    if (onExit) worker.child.off("close", onExit);
+    return worker;
   }
 
   /** Nothing has run yet: tell the caller to run the command itself. */
@@ -312,11 +336,9 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     let child: ChildProcess | null = null;
     conn.on("close", () => {
       clientGone = true;
-      const worker = held.get(conn);
+      const worker = unhold(conn);
       if (worker) {
         // Accepted but never told to go: the worker is still pristine.
-        held.delete(conn);
-        clearTimeout(goTimer);
         busy--;
         release(worker);
         maybeFinishStop();
@@ -328,29 +350,33 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
 
     // Hold a worker before accepting, so "no worker" is still a bypass.
     const worker = await acquire();
-    if (!worker || clientGone || stopping) {
+    if (!worker || clientGone || stopping || isGone(worker)) {
       busy--;
       if (worker) release(worker);
-      if (!clientGone) bypass(conn, worker ? "stopping" : "no worker available");
+      if (!clientGone) bypass(conn, !worker ? "no worker available" : stopping ? "stopping" : "worker exited");
       maybeFinishStop();
       return;
     }
-    held.set(conn, worker);
-    const goTimer = setTimeout(() => {
-      if (held.get(conn) !== worker) return;
-      held.delete(conn);
+    // Nothing has run yet if the held worker dies before `go` (an outside
+    // `pkill`, a crash): send the caller in-process rather than leave it,
+    // and this daemon, waiting on a dead child.
+    const dropHeld = (reason: string) => {
+      if (!unhold(conn)) return;
       busy--;
       release(worker);
-      conn.destroy();
+      bypass(conn, reason);
       maybeFinishStop();
-    }, GO_TIMEOUT_MS);
+    };
+    hold(conn, worker, () => dropHeld("worker exited"));
+    // Freed before any late `go` is honoured, so bypass is still safe.
+    holdTimers.set(conn, setTimeout(() => dropHeld("go timeout"), GO_TIMEOUT_MS));
     conn.write(encodeJson({ t: "accepted" }));
 
     jobListeners.set(conn, (m: ControlMessage) => {
       if (m.t === "go") {
         if (held.get(conn) !== worker) return;
-        held.delete(conn);
-        clearTimeout(goTimer);
+        if (isGone(worker)) return dropHeld("worker exited");
+        unhold(conn);
         start(worker);
       } else if (m.t === "signal" && child && FORWARDED_SIGNALS.includes(m.signal)) {
         child.kill(m.signal);
@@ -371,16 +397,29 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
       c.stderr?.on("data", (chunk: Buffer) => {
         if (!clientGone) conn.write(encodeFrame(FRAME_STDERR, chunk));
       });
+      // The command never reached the worker (it died just now): the
+      // caller can still run it itself.
+      let undelivered = false;
       c.removeAllListeners("close");
       c.once("close", (code, signal) => {
         busyChildren.delete(c);
         busy--;
         lastActiveAt = Date.now();
-        if (!clientGone) conn.end(encodeJson({ t: "exit", code, signal }));
+        if (undelivered) {
+          served--;
+          bypass(conn, "worker exited");
+        }
+        else if (!clientGone) conn.end(encodeJson({ t: "exit", code, signal }));
         maybeFinishStop();
       });
       const { t: _t, fingerprint: _fp, ...payload } = msg;
-      c.send({ t: "run", ...payload });
+      try {
+        c.send({ t: "run", ...payload }, (error) => {
+          if (error) undelivered = true;
+        });
+      } catch {
+        undelivered = true;
+      }
     }
   }
 
@@ -452,8 +491,8 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     }
     // Queued and accepted-but-not-started callers haven't run anything.
     for (const waiter of waiting.splice(0)) waiter(null);
-    for (const [conn, worker] of [...held]) {
-      held.delete(conn);
+    for (const conn of [...held.keys()]) {
+      const worker = unhold(conn)!;
       busy--;
       worker.child.kill("SIGTERM");
       bypass(conn, "stopping");
