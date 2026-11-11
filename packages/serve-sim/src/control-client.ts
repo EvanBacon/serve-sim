@@ -139,17 +139,17 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
   const bypass = (reason: string) => Promise.resolve<DispatchResult>({ kind: "bypass", reason });
   const mode = controlMode(ctx.env);
   if (mode === "off") return bypass("disabled");
-  if (!isDispatchable(args)) return bypass("not dispatchable");
-  const runtime = nodeRuntimeOverride(ctx.env, ctx.execArgv);
-  if (runtime) return bypass(`caller sets ${runtime}`);
-  const sandbox = sandboxMarker(ctx.env);
-  if (sandbox) return bypass(`sandboxed (${sandbox})`);
   let cwd: string;
   try {
     cwd = ctx.cwd();
   } catch {
     return bypass("no cwd");
   }
+  if (!isDispatchable(args, cwd)) return bypass("not dispatchable");
+  const runtime = nodeRuntimeOverride(ctx.env, ctx.execArgv);
+  if (runtime) return bypass(`caller sets ${runtime}`);
+  const sandbox = sandboxMarker(ctx.env);
+  if (sandbox) return bypass(`sandboxed (${sandbox})`);
   const paths = pathsFor(ctx);
   const fingerprint = controlFingerprint(ctx);
   const unusable = unusableSocket(paths);
@@ -410,6 +410,13 @@ export async function controlCli(args: string[], ctx: ControlContext): Promise<n
     return status ? 0 : 1;
   }
   if (verb === "start") {
+    // A daemon born inside a sandbox would confine every other caller's
+    // commands for as long as it lives.
+    const sandbox = sandboxMarker(ctx.env);
+    if (sandbox) {
+      ctx.stderr.write(`serve-sim: control process can't start inside a sandbox (${sandbox})\n`);
+      return 1;
+    }
     // Socket-level problems inside our own private dir are the daemon's to
     // clear; refuse only what it can't fix.
     const tooLong = Buffer.byteLength(paths.socket) > MAX_SOCKET_PATH_BYTES;

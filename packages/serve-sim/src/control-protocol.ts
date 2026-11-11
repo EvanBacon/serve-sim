@@ -7,9 +7,9 @@
  * pull in node builtins — anything heavier defeats the point.
  */
 import { createHash } from "crypto";
-import { lstatSync, statSync } from "fs";
+import { lstatSync, readlinkSync, realpathSync, statSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { join } from "path";
+import { basename, dirname, isAbsolute, join, resolve } from "path";
 
 const CONTROL_PROTOCOL = 2;
 /** argv[2] marker for the daemon process (visible in `ps`). */
@@ -52,8 +52,11 @@ const DISPATCHABLE_COMMANDS: ReadonlySet<string> = new Set([
 
 const ROOT_INFO_FLAGS = new Set(["--help", "-h", "--version", "-v"]);
 
-/** Whether `args` (argv after the script) may run in a warm worker. */
-export function isDispatchable(args: readonly string[]): boolean {
+/**
+ * Whether `args` (argv after the script) may run in a warm worker. `cwd` is
+ * the caller's working directory, used to resolve relative `--file` paths.
+ */
+export function isDispatchable(args: readonly string[], cwd?: string): boolean {
   const [first] = args;
   if (first == null) return false; // bare `serve-sim` starts the preview server
   if (args.length === 1 && ROOT_INFO_FLAGS.has(first)) return true;
@@ -61,16 +64,41 @@ export function isDispatchable(args: readonly string[]): boolean {
   if (!DISPATCHABLE_COMMANDS.has(first)) return false;
   // stdin is not forwarded to workers (nor are its /dev aliases).
   if (args.includes("--stdin")) return false;
-  if (readsDevFile(args)) return false;
+  if (readsDevFile(args, cwd)) return false;
   return true;
 }
 
-/** `--file /dev/stdin`, `--file=/dev/fd/0` and friends read the caller's fds. */
-function readsDevFile(args: readonly string[]): boolean {
+/**
+ * `--file /dev/stdin`, `--file=/dev/fd/0` and friends read the caller's fds.
+ * Relative paths (`../../dev/stdin`) and symlinks into /dev count too.
+ */
+export function readsDevFile(args: readonly string[], cwd?: string): boolean {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     const value = a === "--file" ? args[i + 1] : a.startsWith("--file=") ? a.slice("--file=".length) : null;
-    if (value != null && value.startsWith("/dev/")) return true;
+    if (value == null || value === "") continue;
+    if (!isAbsolute(value) && cwd == null) continue;
+    if (intoDev(isAbsolute(value) ? resolve(value) : resolve(cwd!, value))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether `path` lands in /dev/, following symlinks one hop at a time
+ * (realpath on /dev/stdin itself resolves fd 0, which can fail or vary).
+ */
+function intoDev(path: string): boolean {
+  let p = path;
+  for (let hop = 0; hop < 32; hop++) {
+    if (p.startsWith("/dev/")) return true;
+    try {
+      p = join(realpathSync(dirname(p)), basename(p));
+      if (p.startsWith("/dev/")) return true;
+      if (!lstatSync(p).isSymbolicLink()) return false;
+      p = resolve(dirname(p), readlinkSync(p));
+    } catch {
+      return false;
+    }
   }
   return false;
 }

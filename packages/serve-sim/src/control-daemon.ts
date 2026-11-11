@@ -328,7 +328,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     }
     // Don't trust the client's filter: only short one-shot commands may
     // occupy a worker (and keep the daemon alive).
-    if (!Array.isArray(msg.argv) || !isDispatchable(msg.argv)) return bypass(conn, "not dispatchable");
+    if (!Array.isArray(msg.argv) || !isDispatchable(msg.argv, typeof msg.cwd === "string" ? msg.cwd : undefined)) return bypass(conn, "not dispatchable");
     if (stopping) return bypass(conn, "stopping");
     busy++;
     lastActiveAt = Date.now();
@@ -408,8 +408,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
         if (undelivered) {
           served--;
           bypass(conn, "worker exited");
-        }
-        else if (!clientGone) conn.end(encodeJson({ t: "exit", code, signal }));
+        } else if (!clientGone) conn.end(encodeJson({ t: "exit", code, signal }));
         maybeFinishStop();
       });
       const { t: _t, fingerprint: _fp, ...payload } = msg;
@@ -453,8 +452,10 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
         if (msg.t === "ping") conn.end(encodeJson({ t: "pong", status: status() }));
         else if (msg.t === "stop") {
           shutdown("stop requested");
-          // What's left after shutdown is commands that are already running.
-          conn.end(encodeJson({ t: "stopping", busy }));
+          // What's left after shutdown is commands that are already running
+          // (queued and held callers were bypassed, though `busy` only
+          // drops for them a microtask later).
+          conn.end(encodeJson({ t: "stopping", busy: busyChildren.size + held.size }));
         } else if (msg.t === "run") void runJob(conn, msg);
         else conn.destroy();
       }

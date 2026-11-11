@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -70,6 +71,27 @@ describe("isDispatchable", () => {
     expect(isDispatchable(["type", "--file=/dev/fd/0"])).toBe(false);
     expect(isDispatchable(["paste", "-d", "X", "--file", "/dev/fd/3"])).toBe(false);
     expect(isDispatchable(["type", "--file", "/tmp/notes.txt"])).toBe(true);
+  });
+
+  test("--file resolves against the caller's cwd and through symlinks before the /dev check", () => {
+    const dir = realpathSync(mkdtempSync("/tmp/ssctl-devfile-"));
+    try {
+      const up = "../".repeat(dir.split("/").length);
+      expect(isDispatchable(["type", "--file", `${up}dev/stdin`], dir)).toBe(false);
+      expect(isDispatchable(["type", `--file=./../${up}dev/fd/0`], dir)).toBe(false);
+      symlinkSync("/dev/stdin", join(dir, "in"));
+      expect(isDispatchable(["type", "--file", "in"], dir)).toBe(false);
+      symlinkSync("in", join(dir, "in2"));
+      expect(isDispatchable(["type", "--file", "in2"], dir)).toBe(false);
+      symlinkSync("/dev", join(dir, "devdir"));
+      expect(isDispatchable(["type", "--file", "devdir/fd/0"], dir)).toBe(false);
+      expect(isDispatchable(["type", "--file", join(dir, "in")])).toBe(false);
+      writeFileSync(join(dir, "notes.txt"), "hi");
+      expect(isDispatchable(["type", "--file", "notes.txt"], dir)).toBe(true);
+      expect(isDispatchable(["type", "--file", "missing.txt"], dir)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("sandboxed callers are recognised by their env markers", () => {
@@ -889,13 +911,17 @@ describeWithNode("control process", () => {
       .map(Number);
 
   test("a held worker that dies before go sends the caller in-process and frees the daemon", async () => {
-    const r0 = await cli(["control", "start", "--json"], { env: { SERVE_SIM_CONTROL_IDLE_MS: "1500" } });
+    // Idle longer than the client's stall, so the daemon is still there to
+    // report busy 0 once the stall ends.
+    const r0 = await cli(["control", "start", "--json"], { env: { SERVE_SIM_CONTROL_IDLE_MS: "7000" } });
     const daemon = JSON.parse(r0.stdout) as { pid: number };
     await warm();
     const marker = join(work, "ran.txt");
     // The client stalls after `run`, so the daemon holds a worker for it
     // while we kill every worker (the held one included).
-    const pending = race({ stallAfter: "run", stallMs: 1500, acceptTimeoutMs: 30_000, marker });
+    // stallMs only has to outlast the polling and kills below, and stay
+    // under the daemon's 10 s go timeout.
+    const pending = race({ stallAfter: "run", stallMs: 5000, acceptTimeoutMs: 30_000, marker });
     await until(async () => (await status()).busy === 1);
     for (const pid of workerPids(daemon.pid)) process.kill(pid, "SIGKILL");
     const r = await pending;
@@ -905,8 +931,8 @@ describeWithNode("control process", () => {
     // The real bin finishes such a call in-process.
     expect((await cli(["--version"])).stdout).toBe("fake 1.0.0\n");
     // Nothing pins it: it still idle-exits.
-    await until(async () => !alive(daemon.pid), 8000);
-  });
+    await until(async () => !alive(daemon.pid), 12_000);
+  }, 30_000);
 
   test("stop with a command in flight reports stopping, not stopped", async () => {
     const daemon = await startDaemon();
@@ -960,5 +986,17 @@ describeWithNode("control process", () => {
     const seen = JSON.parse((await cli(["tap", "1", "1"], { env: { CODEX_SANDBOX_NETWORK_DISABLED: "1" } })).stdout);
     expect(seen.ppid).not.toBe(daemon.pid);
     expect((await status()).served).toBe(0);
+  });
+
+  test("control start refuses inside a sandbox", async () => {
+    for (const [key, value] of [["CODEX_SANDBOX", "seatbelt"], ["SANDBOX_RUNTIME", "1"]] as const) {
+      const r = await cli(["control", "start"], { env: { [key]: value } });
+      expect(r.code).toBe(1);
+      expect(r.stderr).toBe(`serve-sim: control process can't start inside a sandbox (${key})\n`);
+    }
+    await Bun.sleep(300);
+    expect((await status()).running).toBe(false);
+    expect(daemonPids()).toEqual([]);
+    expect(existsSync(ctlDir) ? readdirSync(ctlDir) : []).toEqual([]);
   });
 });
