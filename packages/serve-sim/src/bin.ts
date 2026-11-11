@@ -9,12 +9,14 @@ import { fileURLToPath } from "url";
 import { controlCli, dispatchViaControl, type ControlContext } from "./control-client";
 import { runControlDaemonProcess } from "./control-daemon";
 import {
+  CONTROL_ACCEPT_ENV,
   CONTROL_DAEMON_ARG,
   CONTROL_IDLE_ENV,
   CONTROL_ROLE_ENV,
   DEFAULT_POOL_SIZE,
   controlFingerprint,
   controlPaths,
+  parseAcceptMs,
   parseIdleMs,
 } from "./control-protocol";
 import { runControlWorker } from "./control-worker";
@@ -29,10 +31,13 @@ function context(): ControlContext {
     binFile,
     mainFile: fileURLToPath(mainUrl),
     execPath: process.execPath,
+    execArgv: process.execArgv,
     env: process.env,
-    cwd: process.cwd(),
+    // Lazy: a deleted cwd must not break commands that never dispatch.
+    cwd: () => process.cwd(),
     stdout: process.stdout,
     stderr: process.stderr,
+    acceptTimeoutMs: parseAcceptMs(process.env[CONTROL_ACCEPT_ENV]),
   };
 }
 
@@ -43,8 +48,7 @@ if (process.env[CONTROL_ROLE_ENV] === "worker") {
   const paths = controlPaths(ctx);
   await runControlDaemonProcess({
     binFile,
-    socket: paths.socket,
-    pidFile: paths.pidFile,
+    paths,
     fingerprint: controlFingerprint(ctx),
     idleMs: parseIdleMs(process.env[CONTROL_IDLE_ENV]),
     poolSize: DEFAULT_POOL_SIZE,

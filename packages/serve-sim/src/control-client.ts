@@ -2,12 +2,14 @@
  * Thin client for the persistent control process, plus `serve-sim control
  * start|stop|status`. Runs inside the tiny bin entry, so node builtins only.
  *
- * Every failure before the daemon has accepted a command means "run it
- * in-process instead", so a missing, stale or wedged daemon only costs a
- * failed connect.
+ * The daemon replies `accepted` once it holds a warm worker for the call,
+ * and only hands the worker the command after the client answers `go`.
+ * Every failure before `go` therefore means "run it in-process instead":
+ * nothing has run yet, so a missing, stale or wedged daemon only costs a
+ * failed connect. After `go` the client never falls back.
  */
 import { execFileSync, spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, fstatSync, readFileSync, unlinkSync } from "fs";
 import { createConnection } from "net";
 import {
   CONTROL_DAEMON_ARG,
@@ -15,12 +17,18 @@ import {
   FRAME_STDERR,
   FRAME_STDOUT,
   FrameDecoder,
+  MAX_SOCKET_PATH_BYTES,
   controlFingerprint,
   controlMode,
   controlPaths,
   encodeJson,
   isDispatchable,
+  nodeRuntimeOverride,
   parseJsonFrame,
+  unsafeControlDir,
+  unsafeControlSocket,
+  withoutNodeRuntimeEnv,
+  type ControlFingerprint,
   type ControlPaths,
   type ControlStatus,
   type ForwardedSignal,
@@ -31,12 +39,17 @@ export interface ControlContext {
   binFile: string;
   mainFile: string;
   execPath: string;
+  /** The caller's node flags; workers can't adopt them. */
+  execArgv: readonly string[];
   env: NodeJS.ProcessEnv;
-  cwd: string;
+  /** Read lazily: the caller's cwd may have been deleted. */
+  cwd: () => string;
   stdout: NodeJS.WriteStream;
   stderr: NodeJS.WriteStream;
   /** How long to wait for the daemon to accept before running in-process. */
   acceptTimeoutMs?: number;
+  /** Test hook: called right after each client frame is written. */
+  afterWrite?: (t: string) => void;
 }
 
 export type DispatchResult =
@@ -53,6 +66,46 @@ function stringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
+/** Whether fds 1 and 2 are the same open file (`2>&1`, one pty). */
+function sameOutputFile(): boolean {
+  try {
+    const out = fstatSync(1);
+    const err = fstatSync(2);
+    return out.dev === err.dev && out.ino === err.ino;
+  } catch {
+    return false;
+  }
+}
+
+/** Don't retry a daemon whose workers couldn't load this build for a while. */
+const FAILED_BACKOFF_MS = 10 * 60_000;
+
+interface FailRecord {
+  at: number;
+  binMtimeMs: number;
+  mainMtimeMs: number;
+  reason?: string;
+}
+
+function readFailRecord(file: string): FailRecord | null {
+  try {
+    const v = JSON.parse(readFileSync(file, "utf8")) as FailRecord;
+    return typeof v.at === "number" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function recentlyFailed(paths: ControlPaths, fp: ControlFingerprint): boolean {
+  const rec = readFailRecord(paths.failFile);
+  return (
+    rec != null &&
+    Date.now() - rec.at < FAILED_BACKOFF_MS &&
+    rec.binMtimeMs === fp.binMtimeMs &&
+    rec.mainMtimeMs === fp.mainMtimeMs
+  );
+}
+
 /** Start a detached daemon and return immediately. */
 function spawnDaemon(ctx: ControlContext): void {
   try {
@@ -60,11 +113,21 @@ function spawnDaemon(ctx: ControlContext): void {
       cwd: "/",
       detached: true,
       stdio: "ignore",
-      env: ctx.env,
+      env: withoutNodeRuntimeEnv(ctx.env),
     });
     child.on("error", () => {});
     child.unref();
   } catch {}
+}
+
+/** Why the control socket can't be used, or null. "missing" means start one. */
+function unusableSocket(paths: ControlPaths): string | null {
+  if (Buffer.byteLength(paths.socket) > MAX_SOCKET_PATH_BYTES) return "socket path too long";
+  const dir = unsafeControlDir(paths.dir);
+  if (dir) return dir === "missing" ? "missing" : `control dir ${dir}`;
+  const sock = unsafeControlSocket(paths.socket);
+  if (sock) return sock === "missing" ? "missing" : `control socket ${sock}`;
+  return null;
 }
 
 /**
@@ -72,19 +135,38 @@ function spawnDaemon(ctx: ControlContext): void {
  * whenever the caller should run the command in-process.
  */
 export function dispatchViaControl(args: string[], ctx: ControlContext): Promise<DispatchResult> {
+  const bypass = (reason: string) => Promise.resolve<DispatchResult>({ kind: "bypass", reason });
   const mode = controlMode(ctx.env);
-  if (mode === "off") return Promise.resolve({ kind: "bypass", reason: "disabled" });
-  if (!isDispatchable(args)) return Promise.resolve({ kind: "bypass", reason: "not dispatchable" });
-  const { socket } = pathsFor(ctx);
-  // sun_path is 104 bytes on macOS; a deep TMPDIR can't host the socket.
-  if (Buffer.byteLength(socket) > 103) return Promise.resolve({ kind: "bypass", reason: "socket path too long" });
+  if (mode === "off") return bypass("disabled");
+  if (!isDispatchable(args)) return bypass("not dispatchable");
+  const runtime = nodeRuntimeOverride(ctx.env, ctx.execArgv);
+  if (runtime) return bypass(`caller sets ${runtime}`);
+  let cwd: string;
+  try {
+    cwd = ctx.cwd();
+  } catch {
+    return bypass("no cwd");
+  }
+  const paths = pathsFor(ctx);
+  const fingerprint = controlFingerprint(ctx);
+  const unusable = unusableSocket(paths);
+  if (unusable === "missing") {
+    if (mode === "auto" && !recentlyFailed(paths, fingerprint)) spawnDaemon(ctx);
+    return bypass("not running");
+  }
+  if (unusable) return bypass(unusable);
 
   return new Promise((resolve) => {
-    const conn = createConnection(socket);
+    const conn = createConnection(paths.socket);
     const decoder = new FrameDecoder();
-    let accepted = false;
+    // Once `go` is written the worker may be running: never fall back after.
+    let committed = false;
     let settled = false;
     const signalHandlers = new Map<ForwardedSignal, () => void>();
+    const send = (msg: Parameters<typeof encodeJson>[0]) => {
+      conn.write(encodeJson(msg));
+      ctx.afterWrite?.(msg.t);
+    };
 
     const finish = (result: DispatchResult) => {
       if (settled) return;
@@ -94,44 +176,43 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
       conn.destroy();
       resolve(result);
     };
+    const lost = (detail: string) => {
+      ctx.stderr.write(`serve-sim: lost the control process mid-command (${detail})\n`);
+      finish({ kind: "done", code: 1, signal: null });
+    };
+    // Covers connect + waiting for a worker. It can only fire before `go`:
+    // the `accepted` handler clears it and sends `go` in the same tick.
     const acceptTimer = setTimeout(
       () => finish({ kind: "bypass", reason: "accept timeout" }),
       ctx.acceptTimeoutMs ?? 1000,
     );
 
     conn.on("error", (error: NodeJS.ErrnoException) => {
-      if (accepted) {
-        ctx.stderr.write(`serve-sim: lost the control process mid-command (${error.code ?? error.message})\n`);
-        finish({ kind: "done", code: 1, signal: null });
-        return;
-      }
-      if (mode === "auto" && (error.code === "ENOENT" || error.code === "ECONNREFUSED")) spawnDaemon(ctx);
+      if (committed) return lost(error.code ?? error.message);
+      if (mode === "auto" && (error.code === "ENOENT" || error.code === "ECONNREFUSED") && !recentlyFailed(paths, fingerprint)) spawnDaemon(ctx);
       finish({ kind: "bypass", reason: error.code ?? "connect failed" });
     });
     conn.on("close", () => {
       if (settled) return;
-      if (!accepted) finish({ kind: "bypass", reason: "closed before accept" });
-      else {
-        ctx.stderr.write("serve-sim: control process exited mid-command\n");
-        finish({ kind: "done", code: 1, signal: null });
-      }
+      if (committed) lost("closed");
+      else finish({ kind: "bypass", reason: "closed before accept" });
     });
     conn.on("connect", () => {
-      conn.write(
-        encodeJson({
-          t: "run",
-          fingerprint: controlFingerprint(ctx),
-          argv: args,
-          cwd: ctx.cwd,
-          env: stringEnv(ctx.env),
-          tty: {
-            stdout: { isTTY: ctx.stdout.isTTY === true, columns: ctx.stdout.columns },
-            stderr: { isTTY: ctx.stderr.isTTY === true, columns: ctx.stderr.columns },
-          },
-        }),
-      );
+      send({
+        t: "run",
+        fingerprint,
+        argv: args,
+        cwd,
+        env: stringEnv(ctx.env),
+        tty: {
+          stdout: { isTTY: ctx.stdout.isTTY === true, columns: ctx.stdout.columns },
+          stderr: { isTTY: ctx.stderr.isTTY === true, columns: ctx.stderr.columns },
+        },
+        sharedOutput: sameOutputFile(),
+      });
     });
     conn.on("data", (chunk) => {
+      if (settled) return;
       let frames;
       try {
         frames = decoder.push(chunk);
@@ -140,6 +221,7 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
         return;
       }
       for (const frame of frames) {
+        if (settled) return;
         if (frame.type === FRAME_STDOUT) {
           ctx.stdout.write(frame.payload);
           continue;
@@ -150,13 +232,15 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
         }
         const msg = parseJsonFrame(frame);
         if (!msg) continue;
+        // The daemon only says bypass before it handed the job to a worker.
         if (msg.t === "bypass") finish({ kind: "bypass", reason: msg.reason });
-        else if (msg.t === "accepted") {
-          accepted = true;
+        else if (msg.t === "accepted" && !committed) {
           clearTimeout(acceptTimer);
+          committed = true;
+          send({ t: "go" });
           // From here the worker owns the command: forward signals to it.
           for (const sig of FORWARDED_SIGNALS) {
-            const handler = () => conn.write(encodeJson({ t: "signal", signal: sig }));
+            const handler = () => send({ t: "signal", signal: sig });
             signalHandlers.set(sig, handler);
             process.on(sig, handler);
           }
@@ -266,21 +350,52 @@ export async function controlCli(args: string[], ctx: ControlContext): Promise<n
     (rest.length > 1 ? ctx.stderr : ctx.stdout).write(`${CONTROL_USAGE}\n`);
     return rest.length > 1 ? 1 : 0;
   }
+  const unsafeDir = unsafeControlDir(paths.dir);
+  if (unsafeDir && unsafeDir !== "missing" && verb !== "start") {
+    ctx.stderr.write(`serve-sim: ignoring control dir ${paths.dir}: ${unsafeDir}\n`);
+    return 1;
+  }
   if (verb === "status") {
-    const status = await pingSocket(paths.socket);
+    const status = unusableSocket(paths) ? null : await pingSocket(paths.socket);
     if (json) out(JSON.stringify(status ? { running: true, ...status } : { running: false, socket: paths.socket }));
     else out(status ? formatStatus(status) : "control process not running");
     return status ? 0 : 1;
   }
   if (verb === "start") {
+    // Socket-level problems inside our own private dir are the daemon's to
+    // clear; refuse only what it can't fix.
+    const tooLong = Buffer.byteLength(paths.socket) > MAX_SOCKET_PATH_BYTES;
+    if (tooLong || (unsafeDir && unsafeDir !== "missing")) {
+      const why = tooLong
+        ? `socket path ${paths.socket} is ${Buffer.byteLength(paths.socket)} bytes (max ${MAX_SOCKET_PATH_BYTES}); set SERVE_SIM_CONTROL_DIR to a shorter directory`
+        : `${paths.dir} is ${unsafeDir}; it must be a directory owned by you with mode 0700`;
+      ctx.stderr.write(`serve-sim: control process can't start: ${why}\n`);
+      return 1;
+    }
     let status = await pingSocket(paths.socket);
     const already = status != null;
     if (!status) {
+      // An explicit start retries even after workers failed to load.
+      try {
+        unlinkSync(paths.failFile);
+      } catch {}
       spawnDaemon(ctx);
       status = await waitFor(() => pingSocket(paths.socket), 5000);
+      // Don't report success until a worker could actually load the CLI;
+      // a daemon whose workers can't load writes its fail file and exits.
+      if (status && status.warm === 0) {
+        const ready = await waitFor(async () => {
+          const s = await pingSocket(paths.socket);
+          if (s) return s.warm > 0 ? s : null;
+          return existsSync(paths.failFile) ? "failed" : null;
+        }, 10_000);
+        status = ready && ready !== "failed" ? ready : null;
+      }
     }
     if (!status) {
-      ctx.stderr.write("serve-sim: control process did not start\n");
+      const failed = readFailRecord(paths.failFile);
+      const detail = failed?.reason ? `: workers failed to load the CLI\n${failed.reason.trimEnd()}` : "";
+      ctx.stderr.write(`serve-sim: control process did not start${detail}\n`);
       return 1;
     }
     if (json) out(JSON.stringify({ running: true, alreadyRunning: already, ...status }));

@@ -7,11 +7,11 @@
  * pull in node builtins — anything heavier defeats the point.
  */
 import { createHash } from "crypto";
-import { statSync } from "fs";
+import { lstatSync, statSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 
-const CONTROL_PROTOCOL = 1;
+const CONTROL_PROTOCOL = 2;
 /** argv[2] marker for the daemon process (visible in `ps`). */
 export const CONTROL_DAEMON_ARG = "__control-daemon";
 /** Set on pre-warmed worker processes; stripped before the command runs. */
@@ -20,8 +20,11 @@ export const CONTROL_ROLE_ENV = "SERVE_SIM_CONTROL_ROLE";
 const CONTROL_ENV = "SERVE_SIM_CONTROL";
 /** Quiet period before the daemon exits on its own (ms). */
 export const CONTROL_IDLE_ENV = "SERVE_SIM_CONTROL_IDLE_MS";
-/** Override the socket/pid directory (tests, unusual TMPDIRs). */
+/** Override the socket/pid directory (tests, unusual TMPDIRs). @lintignore Exported for tests. */
 export const CONTROL_DIR_ENV = "SERVE_SIM_CONTROL_DIR";
+/** How long a caller waits for the daemon to hand it a worker (ms). */
+export const CONTROL_ACCEPT_ENV = "SERVE_SIM_CONTROL_ACCEPT_MS";
+const DEFAULT_ACCEPT_MS = 1000;
 const DEFAULT_IDLE_MS = 5 * 60_000;
 /** Warm workers kept ready; each is single-use, then replaced. */
 export const DEFAULT_POOL_SIZE = 2;
@@ -77,6 +80,31 @@ export function controlMode(env: NodeJS.ProcessEnv): ControlMode {
   return "auto";
 }
 
+export function parseAcceptMs(raw: string | undefined): number {
+  const n = raw == null || raw.trim() === "" ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_ACCEPT_MS;
+}
+
+/**
+ * Node runtime settings a warm worker can't adopt after it has started:
+ * they shape how node itself boots (preloads, inspector, CA store, proxy).
+ * They are stripped from the daemon and its workers, and a caller that sets
+ * any of them runs in-process.
+ */
+const NODE_RUNTIME_ENV = ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "NODE_USE_ENV_PROXY"] as const;
+
+export function withoutNodeRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const key of NODE_RUNTIME_ENV) delete out[key];
+  return out;
+}
+
+/** The first runtime setting the caller has that a worker can't honor. */
+export function nodeRuntimeOverride(env: NodeJS.ProcessEnv, execArgv: readonly string[]): string | null {
+  for (const key of NODE_RUNTIME_ENV) if (env[key]) return key;
+  return execArgv.length > 0 ? "execArgv" : null;
+}
+
 export function parseIdleMs(raw: string | undefined): number {
   if (raw == null || raw.trim() === "") return DEFAULT_IDLE_MS;
   const n = Number(raw);
@@ -87,6 +115,8 @@ export interface ControlPaths {
   dir: string;
   socket: string;
   pidFile: string;
+  /** Written when workers can't load, so callers stop respawning a daemon. */
+  failFile: string;
 }
 
 /**
@@ -98,7 +128,9 @@ export function controlPaths(opts: {
   execPath: string;
   env: NodeJS.ProcessEnv;
 }): ControlPaths {
-  const dir = opts.env[CONTROL_DIR_ENV] || join(tmpdir(), "serve-sim");
+  // Per-uid so another user on a shared /tmp can't pre-create the directory.
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const dir = opts.env[CONTROL_DIR_ENV] || join(tmpdir(), uid == null ? "serve-sim-control" : `serve-sim-control-${uid}`);
   const id = createHash("sha256")
     .update(`${opts.binFile}\0${opts.execPath}\0${opts.env.HOME ?? homedir()}`)
     .digest("hex")
@@ -107,7 +139,50 @@ export function controlPaths(opts: {
     dir,
     socket: join(dir, `control-${id}.sock`),
     pidFile: join(dir, `control-${id}.json`),
+    failFile: join(dir, `control-${id}.failed`),
   };
+}
+
+/** sun_path is 104 bytes on macOS, including the terminating NUL. */
+export const MAX_SOCKET_PATH_BYTES = 103;
+
+function currentUid(): number | null {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
+
+/**
+ * Why `dir` can't hold the control socket, or null if it is a real
+ * directory owned by us that nobody else can write to. The client sends its
+ * whole environment over the socket, so it must be ours.
+ */
+export function unsafeControlDir(dir: string): string | null {
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+  }
+  if (st.isSymbolicLink()) return "symlink";
+  if (!st.isDirectory()) return "not a directory";
+  const uid = currentUid();
+  if (uid != null && st.uid !== uid) return `owned by uid ${st.uid}`;
+  if ((st.mode & 0o077) !== 0) return `mode ${(st.mode & 0o777).toString(8)} is group/other accessible`;
+  return null;
+}
+
+/** Why `socket` isn't a socket we own ("missing" when absent), or null. */
+export function unsafeControlSocket(socket: string): string | null {
+  let st;
+  try {
+    st = lstatSync(socket);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+  }
+  if (st.isSymbolicLink()) return "symlink";
+  if (!st.isSocket()) return "not a socket";
+  const uid = currentUid();
+  if (uid != null && st.uid !== uid) return `owned by uid ${st.uid}`;
+  return null;
 }
 
 /**
@@ -171,6 +246,7 @@ export function isStaleBuild(field: keyof ControlFingerprint | null): boolean {
 // [type u8][length u32 BE][payload]. JSON frames carry control messages;
 // stdout/stderr frames carry raw command output bytes.
 
+/** @lintignore Exported for tests. */
 export const FRAME_JSON = 0x4a; // J
 export const FRAME_STDOUT = 0x4f; // O
 export const FRAME_STDERR = 0x45; // E
@@ -230,7 +306,12 @@ export type ControlMessage =
       cwd: string;
       env: Record<string, string>;
       tty: { stdout: StreamTty; stderr: StreamTty };
+      /** The caller's stdout and stderr are the same file (e.g. `2>&1`). */
+      sharedOutput?: boolean;
     }
+  // Two-phase start: the daemon replies `accepted` once it holds a worker
+  // for the caller, and only hands it the command after the caller's `go`.
+  | { t: "go" }
   | { t: "signal"; signal: ForwardedSignal }
   | { t: "ping" }
   | { t: "stop" }

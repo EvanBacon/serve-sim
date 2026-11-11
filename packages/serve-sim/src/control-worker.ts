@@ -16,9 +16,22 @@ function adoptTty(stream: NodeJS.WriteStream, tty: StreamTty | undefined): void 
   // Help wrapping and a couple of commands key off these; the stream itself
   // is a pipe to the daemon, so don't fake any TTY methods.
   Object.defineProperty(stream, "isTTY", { value: true, configurable: true });
-  if (tty.columns) Object.defineProperty(stream, "columns", { value: tty.columns, configurable: true });
+  if (tty.columns != null) Object.defineProperty(stream, "columns", { value: tty.columns, configurable: true });
 }
 
+interface PipeHandle {
+  setBlocking?: (blocking: boolean) => void;
+}
+
+/**
+ * Make writes to the daemon pipe synchronous, as they are for a file or TTY
+ * in a direct run, so `write(big); process.exit()` doesn't lose output.
+ */
+function blockingWrites(stream: NodeJS.WriteStream): void {
+  (stream as unknown as { _handle?: PipeHandle })._handle?.setBlocking?.(true);
+}
+
+/** @lintignore Exported for tests. */
 export function adoptCaller(message: RunMessage, proc: NodeJS.Process = process): void {
   proc.chdir(message.cwd);
   for (const key of Object.keys(proc.env)) {
@@ -28,6 +41,16 @@ export function adoptCaller(message: RunMessage, proc: NodeJS.Process = process)
   proc.argv.splice(2, proc.argv.length - 2, ...message.argv);
   adoptTty(proc.stdout, message.tty.stdout);
   adoptTty(proc.stderr, message.tty.stderr);
+  blockingWrites(proc.stdout);
+  blockingWrites(proc.stderr);
+  if (message.sharedOutput) {
+    // The caller's stdout and stderr are one file (`2>&1`): send both down
+    // one pipe so the daemon can't reorder them. Writes from child
+    // processes that inherit fd 2 still travel separately.
+    const stdout = proc.stdout;
+    proc.stderr.write = ((...args: Parameters<NodeJS.WriteStream["write"]>) =>
+      stdout.write(...args)) as NodeJS.WriteStream["write"];
+  }
 }
 
 export async function runControlWorker(mainUrl: string): Promise<void> {

@@ -1,6 +1,11 @@
 // Stand-in for dist/serve-sim-cli.js in control-process tests: built next to
 // a real bin build, it reports what the process it ran in looked like.
+import { appendFileSync } from "fs";
 import { runCliMain } from "../../control-protocol";
+
+// Simulates an install whose bundle can't load in a worker (only workers
+// have an IPC channel), while direct runs still work.
+if (process.env.FAKE_WORKER_LOAD_FAIL === "1" && process.send) throw new Error("cannot load ws");
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
@@ -9,6 +14,7 @@ async function main() {
     return;
   }
   if (command === "tap") {
+    if (process.env.MARKER) appendFileSync(process.env.MARKER, `ran ${process.pid}\n`);
     console.log(
       JSON.stringify({
         argv: process.argv.slice(2),
@@ -38,6 +44,30 @@ async function main() {
     console.log("waiting");
     await new Promise((r) => setTimeout(r, 10_000));
     console.log("timed out");
+    return;
+  }
+  if (command === "event-log") {
+    // A big write followed by a hard exit must not lose output.
+    process.stdout.write("x".repeat(Number(rest[0])));
+    process.exit(0);
+  }
+  if (command === "gesture") {
+    for (let i = 0; i < 40; i++) {
+      process.stdout.write(`out${i}\n`);
+      process.stderr.write(`err${i}\n`);
+    }
+    console.log(`ppid ${process.ppid}`);
+    return;
+  }
+  if (command === "buffer") {
+    console.log(
+      JSON.stringify({
+        pre: (globalThis as { __pre?: string }).__pre ?? null,
+        execArgv: process.execArgv,
+        nodeOptions: process.env.NODE_OPTIONS ?? null,
+        ppid: process.ppid,
+      }),
+    );
     return;
   }
   if (command === "ax") {

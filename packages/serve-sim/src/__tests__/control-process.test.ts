@@ -1,6 +1,18 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import {
   CONTROL_DIR_ENV,
@@ -15,8 +27,13 @@ import {
   fingerprintMismatch,
   isDispatchable,
   isStaleBuild,
+  nodeRuntimeOverride,
+  parseAcceptMs,
   parseIdleMs,
   parseJsonFrame,
+  unsafeControlDir,
+  unsafeControlSocket,
+  withoutNodeRuntimeEnv,
   type ControlMessage,
 } from "../control-protocol";
 import { adoptCaller } from "../control-worker";
@@ -63,6 +80,62 @@ describe("controlMode", () => {
     expect(parseIdleMs("2000")).toBe(2000);
     expect(parseIdleMs("nope")).toBe(300_000);
     expect(parseIdleMs("5")).toBe(300_000);
+    expect(parseAcceptMs(undefined)).toBe(1000);
+    expect(parseAcceptMs("30000")).toBe(30000);
+    expect(parseAcceptMs("-1")).toBe(1000);
+  });
+
+  test("node runtime settings are stripped from workers and force in-process", () => {
+    expect(withoutNodeRuntimeEnv({ NODE_OPTIONS: "--require x", NODE_EXTRA_CA_CERTS: "/ca", KEEP: "1" })).toEqual({
+      KEEP: "1",
+    });
+    expect(nodeRuntimeOverride({}, [])).toBeNull();
+    expect(nodeRuntimeOverride({ NODE_OPTIONS: "" }, [])).toBeNull();
+    expect(nodeRuntimeOverride({ NODE_USE_ENV_PROXY: "1" }, [])).toBe("NODE_USE_ENV_PROXY");
+    expect(nodeRuntimeOverride({}, ["--inspect"])).toBe("execArgv");
+  });
+});
+
+describe("control dir and socket ownership", () => {
+  test("default dir is per uid", () => {
+    const p = controlPaths({ binFile: "/a", execPath: "/n", env: { HOME: "/h" } });
+    expect(p.dir.endsWith(`serve-sim-control-${process.getuid!()}`)).toBe(true);
+  });
+
+  test("rejects missing, group/other-writable, symlinked and foreign-owned dirs", () => {
+    const base = realpathSync(mkdtempSync("/tmp/ssctl-own-"));
+    try {
+      const ok = join(base, "ok");
+      mkdirSync(ok, { mode: 0o700 });
+      expect(unsafeControlDir(ok)).toBeNull();
+      expect(unsafeControlDir(join(base, "nope"))).toBe("missing");
+      const open = join(base, "open");
+      mkdirSync(open);
+      chmodSync(open, 0o777);
+      expect(unsafeControlDir(open)).toMatch(/group\/other/);
+      chmodSync(open, 0o750);
+      expect(unsafeControlDir(open)).toMatch(/group\/other/);
+      const link = join(base, "link");
+      symlinkSync(ok, link);
+      expect(unsafeControlDir(link)).toBe("symlink");
+      const file = join(base, "file");
+      writeFileSync(file, "");
+      expect(unsafeControlDir(file)).toBe("not a directory");
+      // Root-owned: stands in for a directory another user pre-created.
+      if (process.getuid!() !== 0) expect(unsafeControlDir("/")).toBe("owned by uid 0");
+      expect(unsafeControlSocket(join(ok, "x.sock"))).toBe("missing");
+      expect(unsafeControlSocket(file)).toBe("not a socket");
+      const sockLink = join(base, "s.sock");
+      symlinkSync(file, sockLink);
+      expect(unsafeControlSocket(sockLink)).toBe("symlink");
+      // A root-owned socket, where the OS has one.
+      const rootSock = "/var/run/mDNSResponder";
+      if (process.getuid!() !== 0 && existsSync(rootSock) && statSync(rootSock).isSocket()) {
+        expect(unsafeControlSocket(rootSock)).toBe("owned by uid 0");
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 
@@ -149,6 +222,29 @@ describe("adoptCaller", () => {
     expect(proc.stderr.isTTY).toBeUndefined();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  test("keeps a 0-column TTY width and merges stderr into stdout for 2>&1", () => {
+    const writes: string[] = [];
+    const stdout = { write: (c: string) => writes.push(`out:${c}`) } as unknown as NodeJS.WriteStream;
+    const stderr = { write: (c: string) => writes.push(`err:${c}`) } as unknown as NodeJS.WriteStream;
+    const proc = { argv: [], env: {}, chdir: () => {}, stdout, stderr } as unknown as NodeJS.Process;
+    adoptCaller(
+      {
+        t: "run",
+        fingerprint: {} as never,
+        argv: [],
+        cwd: "/",
+        env: {},
+        tty: { stdout: { isTTY: true, columns: 0 }, stderr: { isTTY: true, columns: 0 } },
+        sharedOutput: true,
+      },
+      proc,
+    );
+    expect(stdout.columns).toBe(0);
+    proc.stderr.write("a");
+    proc.stdout.write("b");
+    expect(writes).toEqual(["out:a", "out:b"]);
+  });
 });
 
 // ─── Real processes ──────────────────────────────────────────────────────
@@ -164,6 +260,7 @@ describeWithNode("control process", () => {
   let dist: string;
   let binFile: string;
   let mainFile: string;
+  let driverFile: string;
   let ctlDir: string;
   let work: string;
   const stray: ChildProcess[] = [];
@@ -175,12 +272,14 @@ describeWithNode("control process", () => {
     for (const [entry, naming] of [
       [join(import.meta.dir, "../bin.ts"), "serve-sim.js"],
       [join(import.meta.dir, "fixtures/control-fake-cli.ts"), "serve-sim-cli.js"],
+      [join(import.meta.dir, "fixtures/control-race-driver.ts"), "race-driver.js"],
     ] as const) {
       const result = await Bun.build({ entrypoints: [entry], target: "node", format: "esm", outdir: dist, naming });
       if (!result.success) throw new Error(result.logs.map(String).join("\n"));
     }
     binFile = join(dist, "serve-sim.js");
     mainFile = join(dist, "serve-sim-cli.js");
+    driverFile = join(dist, "race-driver.js");
   });
 
   beforeEach(() => {
@@ -198,8 +297,15 @@ describeWithNode("control process", () => {
   });
 
   function env(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
-    const e: NodeJS.ProcessEnv = { ...process.env, [CONTROL_DIR_ENV]: ctlDir, SERVE_SIM_CONTROL_IDLE_MS: "60000" };
+    const e: NodeJS.ProcessEnv = {
+      ...process.env,
+      [CONTROL_DIR_ENV]: ctlDir,
+      SERVE_SIM_CONTROL_IDLE_MS: "60000",
+      // Slow CI must not turn dispatches into in-process runs.
+      SERVE_SIM_CONTROL_ACCEPT_MS: "30000",
+    };
     delete e.CI;
+    for (const k of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "NODE_USE_ENV_PROXY", "MARKER", "FAKE_WORKER_LOAD_FAIL"]) delete e[k];
     delete e.SERVE_SIM_CONTROL;
     delete e.EXIT_CODE;
     for (const [k, v] of Object.entries(extra)) {
@@ -209,12 +315,11 @@ describeWithNode("control process", () => {
     return e;
   }
 
-  function cli(
-    args: string[],
-    opts: { env?: Record<string, string | undefined>; cwd?: string } = {},
-  ): Promise<{ code: number | null; signal: string | null; stdout: string; stderr: string }> {
+  type Run = { code: number | null; signal: string | null; stdout: string; stderr: string };
+
+  function run(cmd: string, argv: string[], opts: { env?: Record<string, string | undefined>; cwd?: string } = {}): Promise<Run> {
     return new Promise((resolve) => {
-      const child = spawn(nodePath!, [binFile, ...args], { cwd: opts.cwd ?? work, env: env(opts.env) });
+      const child = spawn(cmd, argv, { cwd: opts.cwd ?? work, env: env(opts.env) });
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (d) => (stdout += d));
@@ -222,6 +327,19 @@ describeWithNode("control process", () => {
       child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
     });
   }
+
+  function cli(
+    args: string[],
+    opts: { env?: Record<string, string | undefined>; cwd?: string; nodeArgs?: string[] } = {},
+  ): Promise<Run> {
+    return run(nodePath!, [...(opts.nodeArgs ?? []), binFile, ...args], opts);
+  }
+
+  const paths = () => controlPaths({ binFile, execPath: nodePath!, env: env() });
+  const daemonPids = () =>
+    spawnSync("pgrep", ["-f", `${binFile} __control-daemon`], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter(Boolean);
 
   async function status(): Promise<{ running: boolean; pid?: number; served?: number; warm?: number; busy?: number }> {
     const r = await cli(["control", "status", "--json"]);
@@ -458,11 +576,9 @@ describeWithNode("control process", () => {
       const v = await status();
       return v.running ? v : null;
     });
-    await Bun.sleep(500);
-    const daemons = spawnSync("pgrep", ["-f", `${binFile} __control-daemon`], { encoding: "utf8" })
-      .stdout.split("\n")
-      .filter(Boolean);
-    expect(daemons).toEqual([String(s.pid)]);
+    // Losers notice the takeover on their next ownership check.
+    await until(async () => daemonPids().length === 1);
+    expect(daemonPids()).toEqual([String(s.pid)]);
   });
 
   test("rejects malformed and unknown first messages without wedging", async () => {
@@ -477,5 +593,229 @@ describeWithNode("control process", () => {
       c.resume();
     });
     expect((await cli(["--version"])).stdout).toBe("fake 1.0.0\n");
+  });
+  // ─── Review regressions ──────────────────────────────────────────────
+
+  function race(o: { stallAfter: string; stallMs: number; acceptTimeoutMs: number; marker: string }) {
+    return run(nodePath!, [driverFile], {
+      env: {
+        MARKER: o.marker,
+        RACE_OPTS: JSON.stringify({ binFile, mainFile, argv: ["tap", "1", "1"], ...o }),
+      },
+    }).then((r) => {
+      const line = r.stderr.split("\n").find((l) => l.startsWith("RESULT "));
+      return { ...r, result: JSON.parse(line!.slice(7)) as { kind: string; reason?: string; code?: number; signal?: string | null } };
+    });
+  }
+
+  const ranCount = (marker: string) => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean).length : 0);
+
+  test("an accept timeout that fires before go never also runs the command in a worker", async () => {
+    await startDaemon();
+    const marker = join(work, "ran.txt");
+    // The client stalls right after `run`, so by the time it looks again its
+    // timer has expired even though `accepted` is waiting in the buffer.
+    const r = await race({ stallAfter: "run", stallMs: 400, acceptTimeoutMs: 50, marker });
+    expect(r.result).toEqual({ kind: "bypass", reason: "accept timeout" });
+    // The held worker went back to the pool untouched.
+    await until(async () => {
+      const s = await status();
+      return s.busy === 0 && (s.warm ?? 0) >= 1;
+    });
+    expect((await status()).served).toBe(0);
+    expect(ranCount(marker)).toBe(0);
+  });
+
+  test("once go is sent, a stall past the timeout never falls back", async () => {
+    await startDaemon();
+    const marker = join(work, "ran.txt");
+    const r = await race({ stallAfter: "go", stallMs: 1500, acceptTimeoutMs: 1000, marker });
+    expect(r.result).toEqual({ kind: "done", code: 0, signal: null });
+    expect(ranCount(marker)).toBe(1);
+    expect((await status()).served).toBe(1);
+  });
+
+  test("refuses a group/other-writable or symlinked control dir", async () => {
+    chmodSync(ctlDir, 0o777);
+    const r = await cli(["tap", "1", "1"]);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).argv).toEqual(["tap", "1", "1"]);
+    const start = await cli(["control", "start"]);
+    expect(start.code).toBe(1);
+    expect(start.stderr).toMatch(/can't start: .* group\/other accessible/);
+    // The daemon itself refuses too.
+    const direct = await cli(["__control-daemon"]);
+    expect(direct.code).toBe(1);
+    expect(direct.stderr).toMatch(/refused to start/);
+    await Bun.sleep(200);
+    expect(daemonPids()).toEqual([]);
+    chmodSync(ctlDir, 0o700);
+
+    const real = mkdtempSync(join(root, "real"));
+    const link = join(root, `link-${Date.now()}`);
+    symlinkSync(real, link);
+    const viaLink = { env: { [CONTROL_DIR_ENV]: link } };
+    expect((await cli(["control", "start"], viaLink)).stderr).toMatch(/symlink/);
+    expect((await cli(["tap", "1", "1"], viaLink)).code).toBe(0);
+    await Bun.sleep(200);
+    expect(daemonPids()).toEqual([]);
+  });
+
+  test("never sends a command to a planted (symlinked) socket", async () => {
+    const elsewhere = mkdtempSync(join(root, "e"));
+    const planted = join(elsewhere, "p.sock");
+    const log = join(elsewhere, "received");
+    const listener = spawn(nodePath!, [
+      "-e",
+      `const fs=require("fs");require("net").createServer(c=>c.on("data",d=>fs.appendFileSync(${JSON.stringify(log)},d))).listen(${JSON.stringify(planted)},()=>console.log("up"))`,
+    ]);
+    stray.push(listener);
+    await new Promise<void>((resolve) => listener.stdout.on("data", () => resolve()));
+    symlinkSync(planted, paths().socket);
+    const r = await cli(["tap", "1", "1"], { env: { SECRET_TOKEN: "hunter2" } });
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).argv).toEqual(["tap", "1", "1"]);
+    await Bun.sleep(100);
+    expect(existsSync(log)).toBe(false);
+  });
+
+  test("binds its socket owner-only", async () => {
+    await startDaemon();
+    expect(statSync(paths().socket).mode & 0o777).toBe(0o600);
+    expect(statSync(ctlDir).mode & 0o077).toBe(0);
+  });
+
+  test("workers that can't load: start fails loudly, callers run in-process, no respawn loop", async () => {
+    const broken = { env: { FAKE_WORKER_LOAD_FAIL: "1" } };
+    const start = await cli(["control", "start"], broken);
+    expect(start.code).toBe(1);
+    expect(start.stderr).toContain("workers failed to load the CLI");
+    expect(start.stderr).toContain("cannot load ws");
+    expect(existsSync(paths().failFile)).toBe(true);
+    await until(async () => daemonPids().length === 0);
+
+    // In-process still works, and the fail marker stops auto-start.
+    for (let i = 0; i < 3; i++) expect(await cli(["--version"], broken)).toMatchObject({ code: 0, stdout: "fake 1.0.0\n" });
+    await Bun.sleep(300);
+    expect(daemonPids()).toEqual([]);
+
+    // A caller queued on such a daemon is told to bypass, not exit 1.
+    rmSync(paths().failFile);
+    const daemon = spawn(nodePath!, [binFile, "__control-daemon"], { env: env(broken.env), stdio: "ignore" });
+    stray.push(daemon);
+    const r = await cli(["tap", "1", "1"], broken);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.stdout).argv).toEqual(["tap", "1", "1"]);
+    await new Promise((res) => (daemon.exitCode != null ? res(null) : daemon.on("close", res)));
+  });
+
+  test("a write over 64 KB followed by process.exit arrives intact", async () => {
+    await startDaemon();
+    const r = await cli(["event-log", "500000"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout.length).toBe(500_000);
+    expect((await status()).served).toBe(1);
+  });
+
+  test("keeps stdout/stderr order under 2>&1", async () => {
+    const daemon = await startDaemon();
+    const expected = Array.from({ length: 40 }, (_, i) => `out${i}\nerr${i}\n`).join("") + `ppid ${daemon.pid}\n`;
+    for (let i = 0; i < 3; i++) {
+      const r = await run("/bin/sh", ["-c", `exec "$0" "$1" gesture 2>&1`, nodePath!, binFile]);
+      expect(r.stdout).toBe(expected);
+    }
+    // Separate streams stay separate.
+    const split = await cli(["gesture"]);
+    expect(split.stderr).toBe(Array.from({ length: 40 }, (_, i) => `err${i}\n`).join(""));
+  });
+
+  test("the first caller's NODE_OPTIONS doesn't leak; callers with node flags run in-process", async () => {
+    const pre = join(work, "pre.cjs");
+    writeFileSync(pre, `globalThis.__pre = "preloaded-by-first-caller";`);
+    const withPre = { env: { NODE_OPTIONS: `--require ${pre}` } };
+    const start = await cli(["control", "start", "--json"], withPre);
+    expect(start.code).toBe(0);
+    const { pid } = JSON.parse(start.stdout);
+    await warm();
+    const plain = JSON.parse((await cli(["buffer"])).stdout);
+    expect(plain).toMatchObject({ pre: null, nodeOptions: null, ppid: pid });
+    const own = JSON.parse((await cli(["buffer"], withPre)).stdout);
+    expect(own.pre).toBe("preloaded-by-first-caller");
+    expect(own.ppid).not.toBe(pid);
+    const flagged = JSON.parse((await cli(["buffer"], { nodeArgs: ["--no-warnings"] })).stdout);
+    expect(flagged.execArgv).toEqual(["--no-warnings"]);
+    expect(flagged.ppid).not.toBe(pid);
+  });
+
+  test("works from a deleted cwd, with and without the control process", async () => {
+    const gone = join(work, "gone");
+    const script = `mkdir "$2" && cd "$2" && rmdir "$2" && exec "$0" "$1" --version`;
+    for (const extra of [{ SERVE_SIM_CONTROL: "0" }, {}]) {
+      const r = await run("/bin/sh", ["-c", script, nodePath!, binFile, gone], { env: extra });
+      expect(r).toMatchObject({ code: 0, stdout: "fake 1.0.0\n" });
+    }
+    await startDaemon();
+    const r = await run("/bin/sh", ["-c", script, nodePath!, binFile, gone]);
+    expect(r).toMatchObject({ code: 0, stdout: "fake 1.0.0\n" });
+  });
+
+  test("the daemon re-checks that a command may run in a worker", async () => {
+    await startDaemon();
+    const { createConnection } = await import("net");
+    const fp = controlFingerprint({ binFile, mainFile, execPath: nodePath!, env: env() });
+    const reply = await new Promise<string>((resolve) => {
+      const c = createConnection(paths().socket);
+      let data = Buffer.alloc(0);
+      c.on("connect", () =>
+        c.write(
+          encodeJson({
+            t: "run",
+            fingerprint: fp,
+            argv: ["--port", "3412"],
+            cwd: "/",
+            env: {},
+            tty: { stdout: { isTTY: false }, stderr: { isTTY: false } },
+          }),
+        ),
+      );
+      c.on("data", (d) => (data = Buffer.concat([data, Buffer.from(d)])));
+      c.on("close", () => resolve(new FrameDecoder().push(data).map((f) => f.payload.toString()).join("")));
+    });
+    expect(JSON.parse(reply)).toEqual({ t: "bypass", reason: "not dispatchable" });
+    expect((await status()).busy).toBe(0);
+  });
+  test("a stop request lets a running command finish", async () => {
+    const daemon = await startDaemon();
+    const child = spawn(nodePath!, [binFile, "settle"], { cwd: work, env: env() });
+    stray.push(child);
+    let stdout = "";
+    await new Promise<void>((resolve) =>
+      child.stdout.on("data", (d) => {
+        stdout += d;
+        if (stdout.includes("waiting")) resolve();
+      }),
+    );
+    const { createConnection } = await import("net");
+    await new Promise<void>((resolve) => {
+      const c = createConnection(paths().socket);
+      c.on("connect", () => c.write(encodeJson({ t: "stop" })));
+      c.resume();
+      c.on("close", () => resolve());
+    });
+    // Longer than the daemon's reply-drain window.
+    await Bun.sleep(1500);
+    expect(child.exitCode).toBeNull();
+    child.kill("SIGINT");
+    const code = await new Promise((r) => child.on("close", (c) => r(c)));
+    expect(code).toBe(130);
+    expect(stdout).toBe("waiting\ngot SIGINT\n");
+    await until(async () => {
+      try {
+        process.kill(daemon.pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
   });
 });

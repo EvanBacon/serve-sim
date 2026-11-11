@@ -9,7 +9,6 @@
 import { spawn, type ChildProcess } from "child_process";
 import { chmodSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createConnection, createServer, type Server, type Socket } from "net";
-import { dirname } from "path";
 import {
   FORWARDED_SIGNALS,
   FRAME_STDERR,
@@ -18,16 +17,19 @@ import {
   encodeFrame,
   encodeJson,
   fingerprintMismatch,
+  isDispatchable,
   isStaleBuild,
   parseJsonFrame,
+  unsafeControlDir,
+  withoutNodeRuntimeEnv,
   type ControlFingerprint,
   type ControlMessage,
+  type ControlPaths,
   type ControlStatus,
 } from "./control-protocol";
 
 interface ControlDaemonOptions {
-  socket: string;
-  pidFile: string;
+  paths: ControlPaths;
   /** Spawns one warm worker (stdio must include an IPC channel). */
   spawnWorker: () => ChildProcess;
   fingerprint: ControlFingerprint;
@@ -46,9 +48,15 @@ interface ControlDaemon {
 interface Worker {
   child: ChildProcess;
   ready: boolean;
+  /** Last bytes a worker printed while loading, for the fail file. */
+  loadOutput: string;
 }
 
 const MAX_SPAWN_FAILURES = 3;
+/** How long an accepted caller has to answer `go` before its worker is freed. */
+const GO_TIMEOUT_MS = 10_000;
+/** Cap on waiting for replies to flush before the daemon exits. */
+const DRAIN_TIMEOUT_MS = 1000;
 
 /** Probe a socket path: true only if a control daemon answers a ping. */
 export function pingSocket(socket: string, timeoutMs = 500): Promise<ControlStatus | null> {
@@ -89,7 +97,13 @@ function listen(server: Server, socket: string): Promise<void> {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(socket);
+    // Create the socket owner-only from the start: no window before chmod.
+    const previous = process.umask(0o077);
+    try {
+      server.listen(socket);
+    } finally {
+      process.umask(previous);
+    }
   });
 }
 
@@ -122,25 +136,34 @@ function inodeOf(path: string): number | null {
 }
 
 async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDaemon | null> {
-  mkdirSync(dirname(opts.socket), { recursive: true, mode: 0o700 });
+  const { socket, pidFile, failFile, dir } = opts.paths;
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Callers send their whole environment here: refuse a directory that
+  // someone else owns or can write to.
+  const unsafe = unsafeControlDir(dir);
+  if (unsafe) throw new Error(`control dir ${dir} is ${unsafe}`);
   const server = createServer();
-  if (!(await bindExclusive(server, opts.socket))) {
+  if (!(await bindExclusive(server, socket))) {
     server.close();
     return null;
   }
   try {
-    chmodSync(opts.socket, 0o600);
+    chmodSync(socket, 0o600);
   } catch {}
-  const socketInode = inodeOf(opts.socket);
+  const socketInode = inodeOf(socket);
   const startedAt = Date.now();
   let lastActiveAt = startedAt;
   let busy = 0;
   let served = 0;
   let spawnFailures = 0;
+  let lastLoadOutput = "";
   let stopping = false;
   const pool: Worker[] = [];
   const waiting: Array<(worker: Worker | null) => void> = [];
   const busyChildren = new Set<ChildProcess>();
+  /** Accepted callers that haven't said `go` yet, and the worker held for each. */
+  const held = new Map<Socket, Worker>();
+  const connections = new Set<Socket>();
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => (resolveClosed = resolve));
 
@@ -153,37 +176,48 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     warming: pool.filter((w) => !w.ready).length,
     busy,
     served,
-    socket: opts.socket,
+    socket,
   });
 
-  const writePidFile = () => {
-    const tmp = `${opts.pidFile}.${process.pid}.tmp`;
+  const writeJsonFile = (file: string, value: unknown) => {
+    const tmp = `${file}.${process.pid}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify({ pid: process.pid, socket: opts.socket, startedAt }), { mode: 0o600 });
-      renameSync(tmp, opts.pidFile);
+      writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 });
+      renameSync(tmp, file);
     } catch {}
   };
-  writePidFile();
+  writeJsonFile(pidFile, { pid: process.pid, socket, startedAt });
 
-  const ownsSocket = () => socketInode != null && inodeOf(opts.socket) === socketInode;
+  const ownsSocket = () => socketInode != null && inodeOf(socket) === socketInode;
 
   function spawnWorker(): void {
     if (stopping) return;
     let child: ChildProcess;
     try {
       child = opts.spawnWorker();
-    } catch {
+    } catch (error) {
+      lastLoadOutput = (error as Error).message;
       onSpawnFailure();
       return;
     }
-    const worker: Worker = { child, ready: false };
+    const worker: Worker = { child, ready: false, loadOutput: "" };
     pool.push(worker);
-    // Anything a worker prints before it is assigned is load noise.
-    child.stdout?.on("data", () => {});
-    child.stderr?.on("data", () => {});
+    // Anything a worker prints before it is assigned is load noise, kept
+    // only to explain a worker that never becomes ready.
+    const keep = (chunk: Buffer) => {
+      if (!worker.ready) worker.loadOutput = (worker.loadOutput + chunk.toString()).slice(-4096);
+    };
+    child.stdout?.on("data", keep);
+    child.stderr?.on("data", keep);
     child.on("message", (msg: { t?: string }) => {
       if (msg?.t !== "ready" || worker.ready) return;
       worker.ready = true;
+      worker.loadOutput = "";
+      if (spawnFailures > 0 || served === 0) {
+        try {
+          unlinkSync(failFile);
+        } catch {}
+      }
       spawnFailures = 0;
       const waiter = waiting.shift();
       if (waiter) {
@@ -192,24 +226,37 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
         refill();
       }
     });
-    child.on("exit", () => {
+    // "close", not "exit": a failed load's output can arrive after exit.
+    child.on("close", () => {
       if (!pool.includes(worker)) return;
       removeFromPool(worker);
-      if (!worker.ready) onSpawnFailure();
-      else refill();
+      if (!worker.ready) {
+        lastLoadOutput = worker.loadOutput;
+        onSpawnFailure();
+      } else refill();
     });
-    child.on("error", () => {});
+    child.on("error", (error) => {
+      lastLoadOutput = error.message;
+    });
   }
 
   function onSpawnFailure(): void {
     spawnFailures++;
     if (spawnFailures >= MAX_SPAWN_FAILURES) {
-      // Workers can't load (broken dist?). Send everyone in-process.
-      for (const waiter of waiting.splice(0)) waiter(null);
+      // Workers can't load (broken install?). Tell callers to stop starting
+      // daemons for this build, and send everyone in-process.
+      writeJsonFile(failFile, {
+        at: Date.now(),
+        binMtimeMs: opts.fingerprint.binMtimeMs,
+        mainMtimeMs: opts.fingerprint.mainMtimeMs,
+        reason: lastLoadOutput,
+      });
       shutdown("workers failing to start");
       return;
     }
-    if (waiting.length > 0) refill();
+    // Back off a little, then keep the pool warm so the next caller doesn't
+    // pay for a cold spawn.
+    setTimeout(refill, 100 * spawnFailures).unref();
   }
 
   function removeFromPool(worker: Worker): void {
@@ -224,6 +271,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
   }
 
   function acquire(): Promise<Worker | null> {
+    if (stopping) return Promise.resolve(null);
     const ready = pool.find((w) => w.ready);
     if (ready) {
       removeFromPool(ready);
@@ -238,79 +286,112 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
 
   function release(worker: Worker): void {
     // A pristine worker whose caller went away goes back to the pool.
-    if (stopping || pool.length >= opts.poolSize) worker.child.kill("SIGTERM");
+    if (stopping || worker.child.exitCode != null || pool.length >= opts.poolSize) worker.child.kill("SIGTERM");
     else pool.unshift(worker);
+  }
+
+  /** Nothing has run yet: tell the caller to run the command itself. */
+  function bypass(conn: Socket, reason: string): void {
+    if (!conn.destroyed) conn.end(encodeJson({ t: "bypass", reason }));
   }
 
   async function runJob(conn: Socket, msg: Extract<ControlMessage, { t: "run" }>): Promise<void> {
     const mismatch = fingerprintMismatch(opts.fingerprint, msg.fingerprint);
     if (mismatch) {
-      conn.end(encodeJson({ t: "bypass", reason: `fingerprint:${mismatch}` }));
+      bypass(conn, `fingerprint:${mismatch}`);
       if (isStaleBuild(mismatch)) shutdown("dist rebuilt");
       return;
     }
-    if (stopping) {
-      conn.end(encodeJson({ t: "bypass", reason: "stopping" }));
-      return;
-    }
+    // Don't trust the client's filter: only short one-shot commands may
+    // occupy a worker (and keep the daemon alive).
+    if (!Array.isArray(msg.argv) || !isDispatchable(msg.argv)) return bypass(conn, "not dispatchable");
+    if (stopping) return bypass(conn, "stopping");
     busy++;
     lastActiveAt = Date.now();
-    conn.write(encodeJson({ t: "accepted" }));
     let clientGone = false;
     let child: ChildProcess | null = null;
-    const pendingSignals: string[] = [];
     conn.on("close", () => {
       clientGone = true;
+      const worker = held.get(conn);
+      if (worker) {
+        // Accepted but never told to go: the worker is still pristine.
+        held.delete(conn);
+        clearTimeout(goTimer);
+        busy--;
+        release(worker);
+        maybeFinishStop();
+      }
       // The caller died mid-command (e.g. SIGKILL): don't leave it running.
       child?.kill("SIGTERM");
     });
     conn.on("error", () => {});
-    const onClientMessage = (m: ControlMessage) => {
-      if (m.t !== "signal" || !FORWARDED_SIGNALS.includes(m.signal)) return;
-      if (child) child.kill(m.signal);
-      else pendingSignals.push(m.signal);
-    };
-    jobListeners.set(conn, onClientMessage);
 
+    // Hold a worker before accepting, so "no worker" is still a bypass.
     const worker = await acquire();
-    if (!worker) {
+    if (!worker || clientGone || stopping) {
       busy--;
-      if (!clientGone) conn.end(encodeJson({ t: "exit", code: 1, signal: null }));
+      if (worker) release(worker);
+      if (!clientGone) bypass(conn, worker ? "stopping" : "no worker available");
+      maybeFinishStop();
       return;
     }
-    if (clientGone) {
+    held.set(conn, worker);
+    const goTimer = setTimeout(() => {
+      if (held.get(conn) !== worker) return;
+      held.delete(conn);
       busy--;
       release(worker);
+      conn.destroy();
       maybeFinishStop();
-      return;
-    }
-    child = worker.child;
-    busyChildren.add(child);
-    served++;
-    child.stdout?.removeAllListeners("data");
-    child.stderr?.removeAllListeners("data");
-    child.stdout?.on("data", (chunk: Buffer) => {
-      if (!clientGone) conn.write(encodeFrame(FRAME_STDOUT, chunk));
+    }, GO_TIMEOUT_MS);
+    conn.write(encodeJson({ t: "accepted" }));
+
+    jobListeners.set(conn, (m: ControlMessage) => {
+      if (m.t === "go") {
+        if (held.get(conn) !== worker) return;
+        held.delete(conn);
+        clearTimeout(goTimer);
+        start(worker);
+      } else if (m.t === "signal" && child && FORWARDED_SIGNALS.includes(m.signal)) {
+        child.kill(m.signal);
+      }
     });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (!clientGone) conn.write(encodeFrame(FRAME_STDERR, chunk));
-    });
-    child.removeAllListeners("exit");
-    child.once("close", (code, signal) => {
-      busyChildren.delete(child!);
-      busy--;
+
+    function start(w: Worker): void {
+      const c = w.child;
+      child = c;
+      busyChildren.add(c);
+      served++;
       lastActiveAt = Date.now();
-      if (!clientGone) conn.end(encodeJson({ t: "exit", code, signal }));
-      maybeFinishStop();
-    });
-    const { t: _t, fingerprint: _fp, ...payload } = msg;
-    child.send({ t: "run", ...payload });
-    for (const sig of pendingSignals) child.kill(sig as NodeJS.Signals);
+      c.stdout?.removeAllListeners("data");
+      c.stderr?.removeAllListeners("data");
+      c.stdout?.on("data", (chunk: Buffer) => {
+        if (!clientGone) conn.write(encodeFrame(FRAME_STDOUT, chunk));
+      });
+      c.stderr?.on("data", (chunk: Buffer) => {
+        if (!clientGone) conn.write(encodeFrame(FRAME_STDERR, chunk));
+      });
+      c.removeAllListeners("close");
+      c.once("close", (code, signal) => {
+        busyChildren.delete(c);
+        busy--;
+        lastActiveAt = Date.now();
+        if (!clientGone) conn.end(encodeJson({ t: "exit", code, signal }));
+        maybeFinishStop();
+      });
+      const { t: _t, fingerprint: _fp, ...payload } = msg;
+      c.send({ t: "run", ...payload });
+    }
   }
 
   const jobListeners = new WeakMap<Socket, (m: ControlMessage) => void>();
 
   server.on("connection", (conn) => {
+    connections.add(conn);
+    conn.on("close", () => {
+      connections.delete(conn);
+      if (stopping) maybeFinishStop();
+    });
     const decoder = new FrameDecoder();
     let first = true;
     conn.on("error", () => {});
@@ -352,6 +433,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
   }, checkMs);
 
   let unlinkOnExit = true;
+  let drainTimer: ReturnType<typeof setTimeout> | null = null;
   function shutdown(_reason: string, o: { unlink?: boolean } = {}): void {
     if (o.unlink === false) unlinkOnExit = false;
     if (stopping) return;
@@ -360,21 +442,39 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     server.close();
     if (unlinkOnExit && ownsSocket()) {
       try {
-        unlinkSync(opts.socket);
+        unlinkSync(socket);
       } catch {}
     }
     if (unlinkOnExit) {
       try {
-        unlinkSync(opts.pidFile);
+        unlinkSync(pidFile);
       } catch {}
     }
+    // Queued and accepted-but-not-started callers haven't run anything.
     for (const waiter of waiting.splice(0)) waiter(null);
+    for (const [conn, worker] of [...held]) {
+      held.delete(conn);
+      busy--;
+      worker.child.kill("SIGTERM");
+      bypass(conn, "stopping");
+    }
     for (const w of pool.splice(0)) w.child.kill("SIGTERM");
     maybeFinishStop();
   }
 
   function maybeFinishStop(): void {
-    if (stopping && busy === 0 && busyChildren.size === 0) resolveClosed();
+    // Running commands finish first; then replies already queued (bypass,
+    // exit) get a moment to reach their callers before the process exits.
+    if (!stopping || busy > 0 || busyChildren.size > 0) return;
+    if (connections.size === 0) {
+      if (drainTimer) clearTimeout(drainTimer);
+      resolveClosed();
+      return;
+    }
+    drainTimer ??= setTimeout(() => {
+      for (const conn of connections) conn.destroy();
+      resolveClosed();
+    }, DRAIN_TIMEOUT_MS);
   }
 
   refill();
@@ -384,8 +484,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
 /** Entry for `node serve-sim.js __control-daemon`. */
 export async function runControlDaemonProcess(opts: {
   binFile: string;
-  socket: string;
-  pidFile: string;
+  paths: ControlPaths;
   fingerprint: ControlFingerprint;
   idleMs: number;
   poolSize: number;
@@ -395,23 +494,30 @@ export async function runControlDaemonProcess(opts: {
   try {
     process.chdir("/");
   } catch {}
-  const daemon = await startControlDaemon({
-    socket: opts.socket,
-    pidFile: opts.pidFile,
-    fingerprint: opts.fingerprint,
-    idleMs: opts.idleMs,
-    poolSize: opts.poolSize,
-    spawnWorker: () =>
-      spawn(process.execPath, [opts.binFile], {
-        cwd: "/",
-        env: { ...process.env, [opts.roleEnv]: "worker" },
-        stdio: ["ignore", "pipe", "pipe", "ipc"],
-      }),
-  });
+  let daemon: ControlDaemon | null;
+  try {
+    daemon = await startControlDaemon({
+      paths: opts.paths,
+      fingerprint: opts.fingerprint,
+      idleMs: opts.idleMs,
+      poolSize: opts.poolSize,
+      spawnWorker: () =>
+        spawn(process.execPath, [opts.binFile], {
+          cwd: "/",
+          // The first caller's node flags must not leak into later callers.
+          env: { ...withoutNodeRuntimeEnv(process.env), [opts.roleEnv]: "worker" },
+          stdio: ["ignore", "pipe", "pipe", "ipc"],
+        }),
+    });
+  } catch (error) {
+    process.stderr.write(`serve-sim: control process refused to start: ${(error as Error).message}\n`);
+    process.exit(1);
+  }
   if (!daemon) return; // another daemon already owns the socket
-  process.on("SIGTERM", () => daemon.stop("SIGTERM"));
-  process.on("SIGINT", () => daemon.stop("SIGINT"));
+  const running = daemon;
+  process.on("SIGTERM", () => running.stop("SIGTERM"));
+  process.on("SIGINT", () => running.stop("SIGINT"));
   process.on("SIGHUP", () => {});
-  await daemon.closed;
+  await running.closed;
   process.exit(0);
 }
