@@ -64,29 +64,23 @@ export function persistChromeHiddenPreference(
   } catch {}
 }
 
-/** Whether the live preview should wrap the stream in DeviceKit chrome. */
+/** Whether the live preview should wrap the stream in DeviceKit chrome. The
+ *  bezel stays on in every orientation: landscape turns the portrait frame on
+ *  its side (see `device-rotation.ts`) rather than dropping it. */
 export function shouldUseDeviceChrome({
   hasChrome,
-  isLandscape,
   hideChrome,
 }: {
   hasChrome: boolean;
-  isLandscape: boolean;
   hideChrome: boolean;
 }): boolean {
-  return hasChrome && !isLandscape && !hideChrome;
+  return hasChrome && !hideChrome;
 }
 
 /** Keep the DeviceKit wrapper mounted whenever chrome *could* be shown.
- *  Hiding the bezel must not remount the live stream (that flashes
- *  "Connecting…" while the MJPEG/AVCC node reconnects). Landscape and
- *  devices without chrome data stay unwrapped. */
-export function shouldWrapDeviceChrome({
-  hasChrome,
-  isLandscape,
-}: {
-  hasChrome: boolean;
-  isLandscape: boolean;
-}): boolean {
-  return hasChrome && !isLandscape;
+ *  Hiding the bezel or rotating must not remount the live stream (that
+ *  flashes "Connecting…" while the MJPEG/AVCC node reconnects). Only devices
+ *  without chrome data stay unwrapped. */
+export function shouldWrapDeviceChrome({ hasChrome }: { hasChrome: boolean }): boolean {
+  return hasChrome;
 }

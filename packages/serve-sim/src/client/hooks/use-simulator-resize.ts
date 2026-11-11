@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -95,7 +96,19 @@ export function useSimulatorResize({
   const initialWidth = useMemo(() => readRestoredWidth(), [readRestoredWidth]);
   const [frameWidth, setFrameWidth] = useState<number | null>(initialWidth);
   const lastWidthRef = useRef<number | null>(initialWidth);
-  const restoredDefaultWidthRef = useRef(defaultWidth);
+  // A new default (device switch, rotation) restores the saved scale against it
+  // during render, not in an effect: the frame must take its new size in the
+  // same commit as the new aspect ratio, or rotation would paint one frame of
+  // the old width with the new aspect before correcting.
+  const [restoredDefaultWidth, setRestoredDefaultWidth] = useState(defaultWidth);
+  if (restoredDefaultWidth !== defaultWidth) {
+    setRestoredDefaultWidth(defaultWidth);
+    // An in-flight drag owns the width; the clamp effect settles it after.
+    if (!isResizing && !isInertia) setFrameWidth(roundToDevicePixel(readRestoredWidth()));
+  }
+  useLayoutEffect(() => {
+    lastWidthRef.current = frameWidth;
+  }, [frameWidth]);
 
   const maxWidth = getSimulatorFrameMaxWidth(defaultWidth, viewportWidth, viewportHeight, aspectRatio);
   const minWidth = Math.min(SIMULATOR_RESIZE_MIN_WIDTH, maxWidth);
@@ -148,12 +161,6 @@ export function useSimulatorResize({
     const next = clampSimulatorFrameWidth(current, defaultWidth, viewportWidth, viewportHeight, aspectRatio);
     if (next !== current) writeWidth(next);
   }, [aspectRatio, defaultWidth, isInertia, isResizing, viewportHeight, viewportWidth, writeWidth]);
-
-  useEffect(() => {
-    if (restoredDefaultWidthRef.current === defaultWidth) return;
-    restoredDefaultWidthRef.current = defaultWidth;
-    writeWidth(readRestoredWidth());
-  }, [defaultWidth, readRestoredWidth, writeWidth]);
 
   useEffect(() => {
     if (!isResizing && !isInertia) return;
