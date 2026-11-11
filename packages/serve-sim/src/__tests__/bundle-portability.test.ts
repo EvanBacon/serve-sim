@@ -15,7 +15,7 @@ import { join } from "path";
 const PKG_DIR = join(import.meta.dir, "../..");
 const SRC_DIR = join(PKG_DIR, "src");
 
-const BUNDLES = ["dist/serve-sim.js", "dist/middleware.js"] as const;
+const BUNDLES = ["dist/serve-sim.js", "dist/serve-sim-cli.js", "dist/middleware.js"] as const;
 
 // CI builds dist before running this directory; locally, run
 // `bun run build.ts` first or the suite skips.
