@@ -6,6 +6,7 @@ import { join } from "path";
 import {
   DARWIN_INTEGRATION_TEST_FILES,
   SIM_E2E_TEST_FILES,
+  SIM_SHUTDOWN_E2E_TEST_FILE,
   isDarwinSkipPath,
   isDarwinTestFile,
   needsDarwinE2E,
@@ -23,7 +24,7 @@ function actionYml(): string {
 
 describe("Darwin vs unit test plan", () => {
   test("every listed Darwin file exists", () => {
-    for (const file of [...SIM_E2E_TEST_FILES, ...DARWIN_INTEGRATION_TEST_FILES]) {
+    for (const file of [...SIM_E2E_TEST_FILES, ...DARWIN_INTEGRATION_TEST_FILES, SIM_SHUTDOWN_E2E_TEST_FILE]) {
       expect(existsSync(join(REPO, file))).toBe(true);
     }
   });
@@ -31,6 +32,7 @@ describe("Darwin vs unit test plan", () => {
   test("listed files are classified as Darwin tests", () => {
     for (const file of SIM_E2E_TEST_FILES) expect(isDarwinTestFile(file)).toBe(true);
     expect(isDarwinTestFile(DARWIN_INTEGRATION_TEST_FILES[0]!)).toBe(true);
+    expect(isDarwinTestFile(SIM_SHUTDOWN_E2E_TEST_FILE)).toBe(true);
     expect(isDarwinTestFile("packages/serve-sim/src/__tests__/ports.test.ts")).toBe(false);
   });
 
@@ -73,9 +75,23 @@ describe("CI workflow factory invariants", () => {
     expect(runner).toContain("Simulator reboot failed; not retrying");
   });
 
+  test("the shutdown e2e runs last, opted in on the CI-owned simulator", () => {
+    // It shuts down and reboots its simulator, so nothing may run after it, and
+    // without SERVE_SIM_E2E_SHUTDOWN_UDID it would only ever skip.
+    expect(SIM_E2E_TEST_FILES as readonly string[]).not.toContain(SIM_SHUTDOWN_E2E_TEST_FILE);
+    const runner = readFileSync(join(REPO, "packages/serve-sim/scripts/run-sim-e2e.ts"), "utf-8");
+    const optIn = runner.indexOf("SERVE_SIM_E2E_SHUTDOWN_UDID: udid");
+    expect(optIn).toBeGreaterThan(runner.indexOf("for (const file of SIM_E2E_TEST_FILES)"));
+    expect(optIn).toBeGreaterThan(runner.indexOf("for (const file of DARWIN_INTEGRATION_TEST_FILES)"));
+    expect(runner.indexOf("SIM_SHUTDOWN_E2E_TEST_FILE", optIn - 400)).toBeGreaterThan(-1);
+    // The workflow shuts that simulator down afterwards regardless.
+    const sim = workflow("sim-test.yml");
+    expect(sim).toMatch(/if: always\(\) && steps\.ci-build\.outputs\.udid != ''\s*\n\s*run: xcrun simctl shutdown "\$\{\{ steps\.ci-build\.outputs\.udid \}\}"/);
+  });
+
   test("sim-test.yml path filters include every Darwin test file and exclude client-only", () => {
     const sim = workflow("sim-test.yml");
-    for (const file of [...SIM_E2E_TEST_FILES, ...DARWIN_INTEGRATION_TEST_FILES]) {
+    for (const file of [...SIM_E2E_TEST_FILES, ...DARWIN_INTEGRATION_TEST_FILES, SIM_SHUTDOWN_E2E_TEST_FILE]) {
       expect(sim).toContain(file);
     }
     expect(sim).toContain("packages/serve-sim/src/*.ts");

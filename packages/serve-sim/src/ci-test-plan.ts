@@ -9,14 +9,21 @@ export const SIM_E2E_TEST_FILES = [
   "packages/serve-sim/src/__tests__/accessibility-endpoint.test.ts",
   "packages/serve-sim/src/__tests__/avcc-stream-endpoint.test.ts",
   "packages/serve-sim/src/__tests__/camera-connections.e2e.test.ts",
-  // Opt-in (SERVE_SIM_E2E_SHUTDOWN_UDID): it shuts its simulator down.
-  "packages/serve-sim/src/__tests__/hid-after-shutdown.e2e.test.ts",
   "packages/serve-sim/src/__tests__/hid-malformed-input.test.ts",
   "packages/serve-sim/src/__tests__/idle-floor.test.ts",
   "packages/serve-sim/src/__tests__/permissions.e2e.test.ts",
   "packages/serve-sim/src/__tests__/type-command-sim.test.ts",
   "packages/serve-sim/src/__tests__/ui-settings.e2e.test.ts",
 ] as const;
+
+/**
+ * Shuts its simulator down and boots it again, so it is opt-in
+ * (SERVE_SIM_E2E_SHUTDOWN_UDID). The runner runs it after every other Darwin
+ * test, opted in on the CI-owned simulator, which the workflow shuts down
+ * afterwards anyway.
+ */
+export const SIM_SHUTDOWN_E2E_TEST_FILE =
+  "packages/serve-sim/src/__tests__/hid-after-shutdown.e2e.test.ts";
 
 export const DARWIN_INTEGRATION_TEST_FILES = [
   "packages/serve-sim/src/__tests__/shm-probe.integration.test.ts",
@@ -27,6 +34,7 @@ export const DARWIN_INTEGRATION_TEST_FILES = [
 const DARWIN_TEST_FILE_SET = new Set<string>([
   ...SIM_E2E_TEST_FILES,
   ...DARWIN_INTEGRATION_TEST_FILES,
+  SIM_SHUTDOWN_E2E_TEST_FILE,
 ]);
 
 export function isDarwinTestFile(file: string): boolean {

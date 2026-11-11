@@ -1,45 +1,79 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync, spawn, spawnSync } from "child_process";
+import { type ChildProcess, execFileSync, spawn, spawnSync } from "child_process";
 import { existsSync } from "fs";
 import { join } from "path";
 
 /**
  * After `simctl shutdown`, SimDeviceLegacyHIDClient keeps accepting sends, so
- * `serve-sim tap` exited 0 for ~5-15s — until the detached server's
- * --exit-on-simulator-shutdown watcher exited. The injector now drops input once
- * SimDevice.state leaves Booted, so the CLI fails within ~1s while the server is
- * still up.
+ * `serve-sim tap` exited 0 until the server went away. Its port also stays dead
+ * after the same device boots again, so a server that stayed up (foreground,
+ * not --detach) acked taps that never reached the guest. The injector now
+ * drops input while the device isn't Booted and rebuilds the client when it
+ * comes back.
  *
- * Opt-in because it shuts the simulator down: set SERVE_SIM_E2E_SHUTDOWN_UDID to
- * a booted (or bootable) iOS simulator this test may shut down — never a shared one.
+ * Opt-in because it shuts the simulator down and boots it again: set
+ * SERVE_SIM_E2E_SHUTDOWN_UDID to an iOS simulator this test may restart, never a
+ * shared one. CI runs it last on its own simulator (scripts/run-sim-e2e.ts).
  */
 
 const CLI = join(import.meta.dir, "../../dist/serve-sim.js");
 const udid = process.env.SERVE_SIM_E2E_SHUTDOWN_UDID;
 const describeIfOptedIn = udid && existsSync(CLI) ? describe : describe.skip;
+const RECONNECTED = "[hid] Simulator Booted again, reconnected HID client";
+const NO_SERVER = "No serve-sim server running";
 
 function tap(): { status: number | null; stderr: string } {
   const r = spawnSync("node", [CLI, "tap", "0.97", "0.03", "-d", udid!], { encoding: "utf-8", timeout: 15_000 });
   return { status: r.status, stderr: r.stderr ?? "" };
 }
 
-describeIfOptedIn(`HID input after simctl shutdown (${udid ?? "<skipped>"})`, () => {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Boot and wait. No `bootstatus -b`: on Xcode 27 it can stay blocked once Booted. */
+function bootAndWait(): void {
+  spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
+  execFileSync("xcrun", ["simctl", "bootstatus", udid!], { stdio: "ignore", timeout: 120_000 });
+}
+
+async function tapUntilOk(timeoutMs: number): Promise<{ status: number | null; stderr: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let last = tap();
+  while (last.status !== 0 && Date.now() < deadline) {
+    await sleep(500);
+    last = tap();
+  }
+  return last;
+}
+
+describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>"})`, () => {
+  let server: ChildProcess | undefined;
+  let serverLog = "";
+
   beforeAll(async () => {
-    spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
-    execFileSync("xcrun", ["simctl", "bootstatus", udid!, "-b"], { stdio: "ignore", timeout: 120_000 });
+    bootAndWait();
     try { execFileSync("node", [CLI, "--kill", udid!], { stdio: "pipe" }); } catch {}
     const port = 40_000 + Math.floor(Math.random() * 20_000);
-    const detach = spawnSync("node", [CLI, "--detach", "-p", String(port), udid!], {
-      encoding: "utf-8", stdio: ["ignore", "pipe", "inherit"], timeout: 45_000,
-    });
-    if (detach.status !== 0) throw new Error(`serve-sim --detach failed: ${detach.stdout}`);
+    // Foreground (no --detach): unlike a detached helper it has no
+    // --exit-on-simulator-shutdown watcher, so it stays up across the reboot.
+    server = spawn("node", [CLI, udid!, "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"] });
+    server.stdout!.on("data", (d) => { serverLog += d; });
+    server.stderr!.on("data", (d) => { serverLog += d; });
+    const ready = await tapUntilOk(45_000);
+    if (ready.status !== 0) throw new Error(`serve-sim server never accepted a tap: ${ready.stderr}\n${serverLog}`);
+  }, 240_000);
+
+  afterAll(async () => {
+    if (server && server.exitCode === null) {
+      server.kill("SIGTERM");
+      await Promise.race([new Promise((r) => server!.once("exit", r)), sleep(5_000)]);
+      if (server.exitCode === null) server.kill("SIGKILL");
+    }
+    try { execFileSync("node", [CLI, "--kill", udid!], { stdio: "pipe" }); } catch {}
+    // Leave the simulator booted, as the test found it.
+    bootAndWait();
   }, 180_000);
 
-  afterAll(() => {
-    try { execFileSync("node", [CLI, "--kill", udid!], { stdio: "pipe" }); } catch {}
-  }, 30_000);
-
-  test("tap fails with an undelivered error within ~1s of shutdown", async () => {
+  test("tap fails with an undelivered error within 2s of shutdown, while the server is up", async () => {
     expect(tap().status).toBe(0);
 
     const shutdown = spawn("xcrun", ["simctl", "shutdown", udid!], { stdio: "ignore" });
@@ -51,10 +85,29 @@ describeIfOptedIn(`HID input after simctl shutdown (${udid ?? "<skipped>"})`, ()
     }
     await new Promise((r) => shutdown.on("exit", r));
 
-    // The server must still be answering — a "No serve-sim server" failure
-    // would only mean the shutdown watcher already exited.
     if (!failure) throw new Error("every tap in the 2s after `simctl shutdown` exited 0");
-    expect(failure.stderr).toContain("could not deliver the tap");
     expect(failure.afterMs).toBeLessThan(2_000);
+    // The injector refused the tap, so the server was answering.
+    expect(failure.stderr).toContain("could not deliver the tap");
+    expect(failure.stderr).not.toContain(NO_SERVER);
+    expect(server!.exitCode).toBeNull();
+    // It still answers once the device is fully down.
+    const down = tap();
+    expect(down.status).not.toBe(0);
+    expect(down.stderr).toContain("could not deliver the tap");
+    expect(down.stderr).not.toContain(NO_SERVER);
   }, 60_000);
+
+  test("after the same simulator boots again, the server rebuilds its HID client", async () => {
+    bootAndWait();
+    const r = await tapUntilOk(30_000);
+    expect(r.stderr).not.toContain(NO_SERVER);
+    expect(r.status).toBe(0);
+    expect(server!.exitCode).toBeNull();
+    // Without the rebuild the tap above also exits 0 but never reaches the guest.
+    const deadline = Date.now() + 5_000;
+    while (!serverLog.includes(RECONNECTED) && Date.now() < deadline) await sleep(100);
+    expect(serverLog).toContain(RECONNECTED);
+    expect(serverLog.split(RECONNECTED).length - 1).toBe(1);
+  }, 180_000);
 });
