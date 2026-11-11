@@ -3,6 +3,33 @@ import { ChevronRight } from "lucide-react";
 import type { ScreenshotToast as ScreenshotToastState } from "../hooks/use-screenshot-toast";
 import { DROP_HOST_PATH_TYPE } from "../utils/drop";
 
+/** What the card says. Screenshots and recordings share the same card. */
+export interface CaptureToastCopy {
+  savingTitle: string;
+  savedTitle: string;
+  subtitle: string;
+  /** Accessible name of the card while saved (it reveals the file). */
+  revealLabel: string;
+  /** Error text when the failure has no message of its own. */
+  errorFallback: string;
+}
+
+export const SCREENSHOT_TOAST_COPY: CaptureToastCopy = {
+  savingTitle: "Saving Screenshot…",
+  savedTitle: "Screenshot Saved",
+  subtitle: "Open in Finder",
+  revealLabel: "Open screenshot in Finder",
+  errorFallback: "Screenshot failed",
+};
+
+export const RECORDING_TOAST_COPY: CaptureToastCopy = {
+  savingTitle: "Saving Recording…",
+  savedTitle: "Recording Saved",
+  subtitle: "Open in Finder",
+  revealLabel: "Open recording in Finder",
+  errorFallback: "Recording failed",
+};
+
 interface ScreenshotToastProps {
   toast: ScreenshotToastState;
   onReveal: () => void;
@@ -30,6 +57,7 @@ export function ScreenshotToast({
   onPause,
   onResume,
 }: ScreenshotToastProps) {
+  const copy = toast.copy ?? SCREENSHOT_TOAST_COPY;
   const [dragging, setDragging] = useState(false);
   const dragImageRef = useRef<HTMLImageElement | null>(null);
   const dragFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -58,7 +86,7 @@ export function ScreenshotToast({
     // blocks `file://` hrefs — the drop then lands as "[…](about:blank#blocked)".
     // Plain text inserts the literal URL into any text field.
     e.dataTransfer.setData("text/plain", fileUrlFor(toast.path));
-    // Dropping onto the simulator adds the screenshot to Photos in place.
+    // Dropping onto the simulator adds the file to Photos in place.
     e.dataTransfer.setData(DROP_HOST_PATH_TYPE, toast.path);
     e.dataTransfer.effectAllowed = "copy";
     // Drag the thumbnail, not a snapshot of the pill — the snapshot clips the
@@ -114,7 +142,7 @@ export function ScreenshotToast({
       {toast.status === "error" ? (
         <div className="flex items-center gap-2 px-3.5 py-2.5 bg-panel border border-ink/12 rounded-xl text-ink-90 text-[12px] shadow-popover">
           <span className="size-1.5 rounded-full shrink-0 bg-danger" />
-          <span className="select-text">{toast.message ?? "Screenshot failed"}</span>
+          <span className="select-text">{toast.message ?? copy.errorFallback}</span>
         </div>
       ) : (
         <button
@@ -124,7 +152,7 @@ export function ScreenshotToast({
           draggable={toast.status === "saved"}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
-          aria-label="Open screenshot in Finder"
+          aria-label={copy.revealLabel}
           title="Click to reveal in Finder · drag to copy the file"
           className={`group flex w-full items-center gap-3 pl-2 pr-3.5 py-2 bg-panel border border-ink/12 rounded-xl shadow-popover text-left cursor-pointer enabled:hover:bg-panel-hover disabled:cursor-default [transition:background_0.15s_ease] ${dragging ? "invisible" : ""}`}
         >
@@ -137,10 +165,10 @@ export function ScreenshotToast({
           </div>
           <div className="flex flex-col leading-tight pointer-events-none">
             <span className="text-[13px] font-semibold text-ink">
-              {toast.status === "saving" ? "Saving Screenshot…" : "Screenshot Saved"}
+              {toast.status === "saving" ? copy.savingTitle : copy.savedTitle}
             </span>
             {toast.status === "saved" && (
-              <span className="text-[11px] text-ink-60">Open in Finder</span>
+              <span className="text-[11px] text-ink-60">{copy.subtitle}</span>
             )}
           </div>
           {toast.status === "saved" && (

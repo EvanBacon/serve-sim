@@ -11,7 +11,7 @@ import {
   writeSync,
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join } from "path";
+import { basename, dirname, join, resolve, sep } from "path";
 import { PERMISSION_SERVICES } from "./client/utils/permissions";
 import { shellJoin } from "./shell-quote";
 import { simctlArguments } from "./simctl";
@@ -68,6 +68,8 @@ const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 // Files the page staged through uploadChunk: `/tmp/<prefix>-<uuid>.<ext>`.
 const UPLOAD_PATH_RE = new RegExp(`^/tmp/serve-sim-(upload|install|camsrc)-${UUID}\\.([a-z0-9]{1,10})$`);
 const SCREENSHOT_NAME_RE = /^serve-sim-screenshot-[0-9A-Za-z-]{1,64}\.png$/;
+// The toolbar's recordings: `serve-sim-recording-<stamp>.mp4` (recordingFileName).
+const RECORDING_NAME_RE = /^serve-sim-recording-[0-9A-Za-z-]{1,64}\.mp4$/;
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 const PERMISSION_ACTIONS = ["grant", "revoke", "reset"] as const;
@@ -193,6 +195,36 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
     return v;
   };
 
+  const home = () => resolve(opts.homeDir ?? homedir());
+
+  /** A toolbar recording's file name, as the browser downloaded it. */
+  const recordingNameParam = (p: Params): string => {
+    const v = p.fileName;
+    if (typeof v !== "string" || !RECORDING_NAME_RE.test(v)) fail("invalid fileName");
+    return v;
+  };
+
+  /**
+   * A downloaded toolbar recording: a regular file named like
+   * `serve-sim-recording-*.mp4` somewhere under the home directory (the
+   * browser picks the folder, usually ~/Downloads).
+   */
+  const recordingPathParam = (p: Params): string => {
+    const v = p.path;
+    if (
+      typeof v !== "string" || v !== resolve(v) || !v.startsWith(home() + sep) ||
+      !RECORDING_NAME_RE.test(basename(v))
+    ) fail("invalid path");
+    let isFile = false;
+    try { isFile = lstatSync(v).isFile(); } catch {}
+    if (!isFile) fail("recording not found");
+    return v;
+  };
+
+  const isRegularFile = (path: string): boolean => {
+    try { return lstatSync(path).isFile(); } catch { return false; }
+  };
+
   const appContainer = async (udid: string, bundleId: string): Promise<string> => {
     const r = await run("xcrun", simctlArguments(["get_app_container", udid, bundleId, "app"]));
     if (r.exitCode !== 0) fail(r.stderr.trim() || "App not found on simulator");
@@ -260,6 +292,28 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
 
     async revealScreenshot(p) {
       const path = screenshotPathParam(p);
+      return { ...(await run("open", ["-R", path])) };
+    },
+
+    // Find a recording the page just downloaded, by its exact file name: the
+    // usual download folders first, then Spotlight under the home directory.
+    async locateRecording(p) {
+      const name = recordingNameParam(p);
+      for (const dir of ["Downloads", "Desktop"]) {
+        const candidate = join(home(), dir, name);
+        if (isRegularFile(candidate)) return { path: candidate };
+      }
+      const r = await run("mdfind", ["-onlyin", home(), `kMDItemFSName == "${name}"`]);
+      const found = r.exitCode === 0
+        ? r.stdout.split("\n").map((line) => line.trim()).find((line) => {
+            try { recordingPathParam({ path: line }); return basename(line) === name; } catch { return false; }
+          })
+        : undefined;
+      return { path: found ?? "" };
+    },
+
+    async revealRecording(p) {
+      const path = recordingPathParam(p);
       return { ...(await run("open", ["-R", path])) };
     },
 
@@ -430,7 +484,11 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       try {
         path = uploadPathParam(p, "path", ["upload"]);
       } catch {
-        path = screenshotPathParam(p);
+        try {
+          path = screenshotPathParam(p);
+        } catch {
+          path = recordingPathParam(p);
+        }
       }
       await requireDevice(udid);
       return { ...(await run("xcrun", simctlArguments(["addmedia", udid, path]))) };

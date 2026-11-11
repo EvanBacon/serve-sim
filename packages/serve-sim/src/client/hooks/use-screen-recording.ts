@@ -65,7 +65,17 @@ async function fetchRecordingStatus(device: string): Promise<RecordingStatusBody
  */
 export function useScreenRecording(
   device: string | null | undefined,
-  { pollMs = RECORDING_STATUS_POLL_MS }: { pollMs?: number } = {},
+  {
+    pollMs = RECORDING_STATUS_POLL_MS,
+    onDownloaded,
+  }: {
+    pollMs?: number;
+    /**
+     * Called after any recording this hook collects is downloaded (the
+     * Finder toast). When set, it replaces the plain "Saved <file>" toast.
+     */
+    onDownloaded?: (downloaded: { fileName: string; blob: Blob }) => void;
+  } = {},
 ) {
   const [state, setState] = useState<ScreenRecordingState>({ status: "idle" });
   // The device whose recording this hook drives; cleared on unmount/switch so
@@ -77,6 +87,8 @@ export function useScreenRecording(
   const pollIdRef = useRef(0);
   // Token from the start this hook made: only it may auto-collect at the cap.
   const ownedRef = useRef<{ device: string; token: string } | null>(null);
+  const onDownloadedRef = useRef(onDownloaded);
+  onDownloadedRef.current = onDownloaded;
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
@@ -92,8 +104,10 @@ export function useScreenRecording(
       if (!res.ok) throw new Error(await errorMessage(res));
       if (ownedRef.current?.token === owned) ownedRef.current = null;
       const fileName = attachmentFileName(res.headers.get("content-disposition")) ?? recordingFileName();
-      download(await res.blob(), fileName);
-      toast.success(`Saved ${fileName}`);
+      const blob = await res.blob();
+      download(blob, fileName);
+      if (onDownloadedRef.current) onDownloadedRef.current({ fileName, blob });
+      else toast.success(`Saved ${fileName}`);
       if (deviceRef.current === udid) setState({ status: "idle" });
     } catch (error) {
       toast.error(`Could not save recording: ${error instanceof Error ? error.message : String(error)}`);

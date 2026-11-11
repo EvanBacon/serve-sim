@@ -1,7 +1,13 @@
 import { useCallback, useRef } from "react";
 import { toast as sonnerToast } from "sonner";
-import { ScreenshotToast } from "../components/screenshot-toast";
+import {
+  RECORDING_TOAST_COPY,
+  SCREENSHOT_TOAST_COPY,
+  ScreenshotToast,
+  type CaptureToastCopy,
+} from "../components/screenshot-toast";
 import { hostAction } from "../utils/exec";
+import { videoFrameThumbnail } from "../utils/video-frame-thumbnail";
 
 export type ScreenshotToast = {
   id: string;
@@ -15,6 +21,10 @@ export type ScreenshotToast = {
   // data: URL of a downscaled preview, filled in best-effort after the save.
   thumb?: string;
   message?: string;
+  /** Title/subtitle copy; screenshots when absent. */
+  copy?: CaptureToastCopy;
+  /** File name the browser saved (recordings: the host path is looked up). */
+  fileName?: string;
 };
 
 // How long the success pill lingers before auto-dismissing. Hovering pauses
@@ -23,12 +33,19 @@ export type ScreenshotToast = {
 const SAVED_DISMISS_MS = 3500;
 const ERROR_DISMISS_MS = 4000;
 
-export function useScreenshotToast(deviceUdid?: string | null, display?: "primary" | "primary-1") {
+/**
+ * The capture card behind both screenshot and recording saves: one Sonner
+ * toast at a time per hook, with hover-to-pause auto-dismiss, reveal on
+ * click, and drag-to-copy (by the card component).
+ */
+function useCaptureToast(copy: CaptureToastCopy, revealToast: (toast: ScreenshotToast) => void) {
   const toastRef = useRef<ScreenshotToast | null>(null);
   const toastIdRef = useRef<string | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dismissDeadlineRef = useRef<number | null>(null);
   const remainingDismissMsRef = useRef<number | null>(null);
+  const revealToastRef = useRef(revealToast);
+  revealToastRef.current = revealToast;
 
   const clearDismissTimer = useCallback(() => {
     if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
@@ -49,7 +66,7 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
 
   const reveal = useCallback(() => {
     const t = toastRef.current;
-    if (t?.path) void hostAction("revealScreenshot", { path: t.path });
+    if (t) revealToastRef.current(t);
   }, []);
 
   const scheduleDismiss = useCallback((ms: number) => {
@@ -73,13 +90,15 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
     scheduleDismiss(remaining);
   }, [scheduleDismiss]);
 
-  const render = useCallback((next: ScreenshotToast, duration = Infinity) => {
-    toastRef.current = next;
-    toastIdRef.current = next.id;
+  /** Draw `next`; a finite `duration` (re)starts the dismiss timer, `null` leaves it as is. */
+  const render = useCallback((next: ScreenshotToast, duration: number | null = Infinity) => {
+    const shown = next.copy ? next : { ...next, copy };
+    toastRef.current = shown;
+    toastIdRef.current = shown.id;
     sonnerToast.custom(
       (id) => (
         <ScreenshotToast
-          toast={next}
+          toast={shown}
           onReveal={reveal}
           onDismiss={() => dismiss(id)}
           onPause={pauseDismiss}
@@ -87,14 +106,29 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
         />
       ),
       // This toast draws its own panel. Leave Sonner's chrome for plain toasts.
-      { id: next.id, duration: Infinity, unstyled: true },
+      { id: shown.id, duration: Infinity, unstyled: true },
     );
+    if (duration === null) return;
     if (Number.isFinite(duration)) scheduleDismiss(duration);
     else {
       clearDismissTimer();
       remainingDismissMsRef.current = null;
     }
-  }, [clearDismissTimer, dismiss, pauseDismiss, resumeDismiss, reveal, scheduleDismiss]);
+  }, [clearDismissTimer, copy, dismiss, pauseDismiss, resumeDismiss, reveal, scheduleDismiss]);
+
+  /** Patch the toast `id` if it is still the one showing; the timer keeps running (or paused). */
+  const update = useCallback((id: string, patch: Partial<ScreenshotToast>) => {
+    const current = toastRef.current;
+    if (current?.id === id) render({ ...current, ...patch }, null);
+  }, [render]);
+
+  return { render, update, dismiss, reveal, toastRef };
+}
+
+export function useScreenshotToast(deviceUdid?: string | null, display?: "primary" | "primary-1") {
+  const { render, dismiss, reveal, toastRef } = useCaptureToast(SCREENSHOT_TOAST_COPY, (t) => {
+    if (t.path) void hostAction("revealScreenshot", { path: t.path });
+  });
 
   const capture = useCallback(async () => {
     if (!deviceUdid) return;
@@ -137,7 +171,86 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
     } catch {
       // ignore — the pill is fully functional without a preview.
     }
-  }, [deviceUdid, display, render]);
+  }, [deviceUdid, display, render, toastRef]);
 
   return { capture, reveal, dismiss };
+}
+
+/** Where the browser put a downloaded recording, or "" if it isn't there (yet). */
+async function locateRecording(fileName: string): Promise<string> {
+  try {
+    const res = await hostAction("locateRecording", { fileName });
+    return typeof res.path === "string" ? res.path : "";
+  } catch {
+    return "";
+  }
+}
+
+const LOCATE_ATTEMPTS = 8;
+const LOCATE_RETRY_MS = 500;
+
+export interface RecordingToastOptions {
+  /** Poster for the card (default: a frame from the MP4, decoded in the page). */
+  thumbnail?: (blob: Blob) => Promise<string | undefined>;
+  /** Host path of the downloaded file, "" if not found (default: host RPC). */
+  locate?: (fileName: string) => Promise<string>;
+  /** Wait between locate attempts while the browser finishes writing. */
+  locateRetryMs?: number;
+}
+
+/**
+ * The screenshot card for a recording the toolbar just downloaded: "Recording
+ * Saved" / "Open in Finder" with a frame from the recording as its thumbnail.
+ * The browser chose where the file went, so its host path is looked up by
+ * name (a few tries while the download finishes; again on click if needed).
+ * The card shows immediately; thumb and path fill in when they land.
+ */
+export function useRecordingToast({
+  thumbnail = videoFrameThumbnail,
+  locate = locateRecording,
+  locateRetryMs = LOCATE_RETRY_MS,
+}: RecordingToastOptions = {}) {
+  const locateRef = useRef(locate);
+  locateRef.current = locate;
+
+  const { render, update, dismiss, reveal, toastRef } = useCaptureToast(RECORDING_TOAST_COPY, (t) => {
+    if (t.path) {
+      void hostAction("revealRecording", { path: t.path });
+      return;
+    }
+    if (!t.fileName) return;
+    const fileName = t.fileName;
+    void locateRef.current(fileName).then((path) => {
+      if (path) {
+        update(t.id, { path });
+        void hostAction("revealRecording", { path });
+      } else {
+        sonnerToast.error(`Couldn't find ${fileName}. Check your browser's downloads.`);
+      }
+    });
+  });
+
+  const show = useCallback(({ fileName, blob }: { fileName: string; blob: Blob }) => {
+    const id = crypto.randomUUID();
+    render({ id, status: "saved", phase: "in", fileName }, SAVED_DISMISS_MS);
+
+    void thumbnail(blob)
+      .then((thumb) => { if (thumb) update(id, { thumb }); })
+      .catch(() => {});
+
+    void (async () => {
+      for (let attempt = 0; attempt < LOCATE_ATTEMPTS; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, locateRetryMs));
+        // Dismissed or replaced: the click path looks it up again if needed.
+        if (toastRef.current?.id !== id) return;
+        const path = await locateRef.current(fileName).catch(() => "");
+        if (path) {
+          update(id, { path });
+          return;
+        }
+      }
+    })();
+  }, [locateRetryMs, render, thumbnail, toastRef, update]);
+
+  return { show, reveal, dismiss };
 }
