@@ -58,8 +58,7 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === "nu
 
 /**
  * Parse sidecar text; `label` (usually the path) prefixes error messages.
- * Also used by the web UI's scrub timeline (no `fs`: the browser bundle
- * stubs it, and only `readRecordingIndex` touches it).
+ * @lintignore Exported for tests.
  */
 export function parseRecordingIndex(text: string, label: string): ParsedRecordingIndex {
   let header: RecordingIndexHeader | null = null;

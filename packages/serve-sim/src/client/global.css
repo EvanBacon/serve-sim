@@ -316,3 +316,18 @@ details.lem-section > summary:hover .lem-chevron {
 @media (prefers-reduced-motion: reduce) {
   .duo-hardware-region > button { transition: none !important; }
 }
+
+/* Resize corner arc: hidden at rest so it doesn't float as a stray arc above
+   the toolbar; shown while the device is hovered, the handle is focused, or a
+   resize is in flight. Pointers without hover (touch) always see it. */
+[data-sim-resize-handle] > svg {
+  transition: opacity 160ms ease-out;
+}
+@media (hover: hover) {
+  [data-sim-frame]:not(:hover) [data-sim-resize-handle][data-resize-phase="idle"]:not(:focus-visible) > svg {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-sim-resize-handle] > svg { transition: none; }
+}

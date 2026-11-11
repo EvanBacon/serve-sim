@@ -202,6 +202,8 @@ export function SimulatorResizeCornerHandle({
   return (
     <div
       role="separator"
+      data-sim-resize-handle
+      data-resize-phase={phase}
       aria-label="Resize simulator width. Drag the corner or use Left and Right Arrow keys; hold Shift for larger steps."
       aria-orientation="vertical"
       aria-valuemin={Math.round(simulatorResize.minWidth)}

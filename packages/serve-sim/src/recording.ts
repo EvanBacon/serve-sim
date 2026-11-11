@@ -55,7 +55,7 @@ export function parseRecordingQuery(
       return { error: "bitrate must be an integer in bits/s (100000..500000000)" };
     }
   }
-  // Opt-in: `serve-sim record`, and the web UI while its scrub timeline is open.
+  // Opt-in: only `serve-sim record` asks for the index sidecar.
   const index = params.get("index") === "1";
   return { codec: codec as RecordingCodec, fps, ...(bitrate != null ? { bitrate } : {}), ...(index ? { index } : {}) };
 }

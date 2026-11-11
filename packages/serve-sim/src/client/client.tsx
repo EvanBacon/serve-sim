@@ -15,7 +15,6 @@ import {
   SimulatorView,
   digitalCrownDeltaFromWheel,
   displayStreamConfig,
-  streamDisplayGeometry,
   fallbackScreenSize,
   isLandscapeConfig,
   screenBorderRadius,
@@ -58,14 +57,13 @@ import type { StreamError } from "./utils/stream-retry";
 import { useAvccStream } from "./hooks/use-avcc-stream";
 import { useResizableWidth } from "./hooks/use-resizable-width";
 import { useScreenshotToast } from "./hooks/use-screenshot-toast";
-import { useScreenRecording, type SavedRecording } from "./hooks/use-screen-recording";
+import { useScreenRecording } from "./hooks/use-screen-recording";
 import { RecordToolbarButton } from "./components/record-toolbar-button";
 import {
-  SCRUB_TIMELINE_MIN_WIDTH,
-  SCRUB_TIMELINE_RESERVED_HEIGHT,
-  ScrubTimeline,
-  ScrubTimelineToolbarButton,
-} from "./components/scrub-timeline";
+  SIM_ACTIONS_BUTTONS_STYLE,
+  SIM_ACTIONS_PILL_STYLE,
+  SIM_ACTIONS_ROW_CLASS,
+} from "./utils/simulator-actions-layout";
 import { useSimulatorResize } from "./hooks/use-simulator-resize";
 import { useUploadToasts } from "./hooks/use-upload-toasts";
 import { useWebKitDevtools } from "./hooks/use-webkit-devtools";
@@ -1091,17 +1089,7 @@ function AppWithConfig({
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
-  // Scrub timeline (not on Duo: its screen is a 3D projection). Closed, it
-  // fetches nothing and recordings start exactly as before; open, toolbar
-  // recordings ask for the index sidecar so they land on the timeline.
-  const [timelineOpen, setTimelineOpen] = useState(false);
-  const scrubTimelineOpen = timelineOpen && !foldable;
-  const [savedRecording, setSavedRecording] = useState<SavedRecording | null>(null);
-  const [scrubOverlayEl, setScrubOverlayEl] = useState<HTMLDivElement | null>(null);
-  const screenRecording = useScreenRecording(config.device, {
-    index: scrubTimelineOpen,
-    onSaved: setSavedRecording,
-  });
+  const screenRecording = useScreenRecording(config.device);
   const mediaDrop = useMediaDrop({
     host: hostAction,
     udid: config.device,
@@ -1123,9 +1111,7 @@ function AppWithConfig({
   const simulatorResize = useSimulatorResize({
     defaultWidth: containerDefaultWidth,
     viewportWidth,
-    viewportHeight: scrubTimelineOpen
-      ? Math.max(0, viewportHeight - SCRUB_TIMELINE_RESERVED_HEIGHT)
-      : viewportHeight,
+    viewportHeight,
     aspectRatio: containerAspectRatioValue,
     initialFit: foldable || initialState?.fit === true,
     onStart: () => setSimFocused(false),
@@ -1224,6 +1210,7 @@ function AppWithConfig({
           ref={simContainerRef}
           className="relative max-h-full select-none"
           data-device-chrome={useChrome ? "on" : "off"}
+          data-sim-frame
           style={{
             width: simulatorFrameWidth,
             aspectRatio: containerAspectRatio,
@@ -1284,9 +1271,6 @@ function AppWithConfig({
               <>
                 {streamView}
                 {axOverlayEnabled && <AxDomOverlay />}
-                {scrubTimelineOpen && (
-                  <div ref={setScrubOverlayEl} className="absolute inset-0 z-[15] pointer-events-none" />
-                )}
               </>
             );
             if (!wrapChrome) return screenContent;
@@ -1349,7 +1333,7 @@ function AppWithConfig({
             </>
           )}
         </div>
-        <div ref={simActionsRef} className={`inline-flex items-center justify-center gap-2 ${foldable ? "" : "max-w-full"}`}>
+        <div ref={simActionsRef} className={foldable ? "inline-flex items-center justify-center gap-2" : SIM_ACTIONS_ROW_CLASS}>
           <SimulatorToolbar
             exec={noHostShell}
             onRotate={rotateDevice}
@@ -1359,18 +1343,20 @@ function AppWithConfig({
             deviceRuntime={deviceRuntime}
             streaming={streaming}
             aria-label="Simulator actions"
-            style={{
-              alignSelf: "center",
-              minWidth: 0,
-              justifyContent: "center",
-              padding: "6px 8px",
-              borderRadius: 18,
-              ...(foldable
-                ? { flexWrap: "nowrap", width: "max-content", maxWidth: "none" }
-                : { width: "auto", maxWidth: "100%" }),
-            }}
+            style={foldable
+              ? {
+                  alignSelf: "center",
+                  minWidth: 0,
+                  justifyContent: "center",
+                  padding: "6px 8px",
+                  borderRadius: 18,
+                  flexWrap: "nowrap",
+                  width: "max-content",
+                  maxWidth: "none",
+                }
+              : SIM_ACTIONS_PILL_STYLE}
           >
-            <SimulatorToolbar.Actions>
+            <SimulatorToolbar.Actions style={foldable ? undefined : SIM_ACTIONS_BUTTONS_STYLE}>
               {canReloadApp(currentApp) && (
                 <SimulatorToolbar.Button
                   aria-label={currentApp?.isReactNative ? "Reload React Native bundle" : "Relaunch app"}
@@ -1396,9 +1382,6 @@ function AppWithConfig({
                 onClick={(e) => { e.preventDefault(); void screenshot.capture(); }}
               />
               <RecordToolbarButton state={screenRecording.state} onToggle={screenRecording.toggle} />
-              {!foldable && (
-                <ScrubTimelineToolbarButton open={timelineOpen} onToggle={() => setTimelineOpen((o) => !o)} />
-              )}
               <SimulatorToolbar.RotateButton title="Rotate device" />
               {!foldable && !!activeChrome && (
                 <ChromeToolbarButton
@@ -1435,6 +1418,7 @@ function AppWithConfig({
               streaming={streaming}
               aria-label="Accessibility overlay"
               style={{
+                flexShrink: 0,
                 width: "auto",
                 minWidth: 0,
                 justifyContent: "center",
@@ -1450,22 +1434,6 @@ function AppWithConfig({
             </SimulatorToolbar>
           )}
         </div>
-        {!foldable && (
-          <ScrubTimeline
-            device={config.device}
-            open={scrubTimelineOpen}
-            saved={savedRecording}
-            onSavedConsumed={() => setSavedRecording(null)}
-            streamGeometry={{
-              width: activeStreamConfig.width,
-              height: activeStreamConfig.height,
-              rotationDegrees: streamDisplayGeometry(activeStreamConfig).rotationDegrees,
-            }}
-            overlayTarget={scrubOverlayEl}
-            overlayBorderRadius={useChrome ? undefined : imgBorderRadius}
-            style={{ width: Math.max(SCRUB_TIMELINE_MIN_WIDTH, deviceWidth), maxWidth: "calc(100vw - 48px)" }}
-          />
-        )}
       </div>
 
       {/* The left device sidebar + its rail live in App so they persist across
