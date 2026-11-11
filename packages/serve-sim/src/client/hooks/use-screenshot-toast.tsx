@@ -20,6 +20,8 @@ export type ScreenshotToast = {
   path?: string;
   // data: URL of a downscaled preview, filled in best-effort after the save.
   thumb?: string;
+  /** No preview is coming (decode failed or timed out): show a static icon, not the spinner. */
+  thumbFailed?: boolean;
   message?: string;
   /** Title/subtitle copy; screenshots when absent. */
   copy?: CaptureToastCopy;
@@ -126,7 +128,7 @@ function useCaptureToast(copy: CaptureToastCopy, revealToast: (toast: Screenshot
 }
 
 export function useScreenshotToast(deviceUdid?: string | null, display?: "primary" | "primary-1") {
-  const { render, dismiss, reveal, toastRef } = useCaptureToast(SCREENSHOT_TOAST_COPY, (t) => {
+  const { render, update, dismiss, reveal, toastRef } = useCaptureToast(SCREENSHOT_TOAST_COPY, (t) => {
     if (t.path) void hostAction("revealScreenshot", { path: t.path });
   });
 
@@ -158,20 +160,23 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
     render({ id, status: "saved", phase: "in", path }, SAVED_DISMISS_MS);
 
     // Best-effort thumbnail: the server downscales to a temp PNG and returns
-    // it base64'd. Failures (sips missing, etc.) just leave the placeholder.
+    // it base64'd. Failures (sips missing, etc.) swap the spinner for an icon.
+    let b64 = "";
     try {
       const tr = await hostAction("screenshotThumbnail", { path });
-      const b64 = typeof tr.data === "string" ? tr.data.replace(/\s+/g, "") : "";
-      if (b64) {
-        const current = toastRef.current;
-        if (current?.id === id) {
-          render({ ...current, thumb: `data:image/png;base64,${b64}` }, SAVED_DISMISS_MS);
-        }
-      }
+      b64 = typeof tr.data === "string" ? tr.data.replace(/\s+/g, "") : "";
     } catch {
       // ignore — the pill is fully functional without a preview.
     }
-  }, [deviceUdid, display, render, toastRef]);
+    if (b64) {
+      const current = toastRef.current;
+      if (current?.id === id) {
+        render({ ...current, thumb: `data:image/png;base64,${b64}` }, SAVED_DISMISS_MS);
+      }
+    } else {
+      update(id, { thumbFailed: true });
+    }
+  }, [deviceUdid, display, render, toastRef, update]);
 
   return { capture, reveal, dismiss };
 }
@@ -234,9 +239,10 @@ export function useRecordingToast({
     const id = crypto.randomUUID();
     render({ id, status: "saved", phase: "in", fileName }, SAVED_DISMISS_MS);
 
+    // No frame (timeout, undecodable codec): a static icon, not a forever spinner.
     void thumbnail(blob)
-      .then((thumb) => { if (thumb) update(id, { thumb }); })
-      .catch(() => {});
+      .catch(() => undefined)
+      .then((thumb) => update(id, thumb ? { thumb } : { thumbFailed: true }));
 
     void (async () => {
       for (let attempt = 0; attempt < LOCATE_ATTEMPTS; attempt++) {

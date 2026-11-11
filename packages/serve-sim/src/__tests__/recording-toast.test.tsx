@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act, isValidElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -9,8 +9,25 @@ import {
   SCREENSHOT_TOAST_COPY,
   ScreenshotToast,
 } from "../client/components/screenshot-toast";
-import { useRecordingToast, type ScreenshotToast as ToastState } from "../client/hooks/use-screenshot-toast";
+import {
+  useRecordingToast,
+  useScreenshotToast,
+  type ScreenshotToast as ToastState,
+} from "../client/hooks/use-screenshot-toast";
+import * as execModule from "../client/utils/exec";
+import type { HostActionFn } from "../client/utils/exec";
 import { fitThumbSize, posterTime } from "../client/utils/video-frame-thumbnail";
+
+// Record what the card asks the host to do. mock.module is process-wide, so
+// the stand-in delegates to the real hostAction outside this file's tests.
+const realExec = { ...execModule };
+let hostActionImpl: HostActionFn = realExec.hostAction;
+mock.module("../client/utils/exec", () => ({
+  ...realExec,
+  hostAction: (method: string, params?: Record<string, unknown>) => hostActionImpl(method, params),
+}));
+let hostCalls: Array<[string, Record<string, unknown> | undefined]>;
+let hostReplies: Record<string, Record<string, unknown>>;
 
 const noop = () => {};
 const NAME = "serve-sim-recording-2026-11-11-12-30-00.mp4";
@@ -71,7 +88,7 @@ const GLOBALS = ["window", "document", "navigator", "HTMLElement", "Element", "N
 let dom: Window;
 let root: Root | undefined;
 let previous: Map<string, unknown>;
-let hook: ReturnType<typeof useRecordingToast>;
+let hook: { dismiss: () => void } | undefined;
 
 beforeEach(() => {
   dom = new Window({ url: "http://localhost/" });
@@ -84,12 +101,20 @@ beforeEach(() => {
   previous.set("requestAnimationFrame", globalThis.requestAnimationFrame);
   globalThis.requestAnimationFrame = (cb: FrameRequestCallback) => { setTimeout(() => cb(0), 0); return 0; };
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  hostCalls = [];
+  hostReplies = {};
+  hostActionImpl = async (method, params) => {
+    hostCalls.push([method, params]);
+    return { stdout: "", stderr: "", exitCode: 0, ...hostReplies[method] };
+  };
 });
 
 afterEach(async () => {
   // Dismiss through the hook so its auto-dismiss timer can't fire after this
   // file's globals are gone (it would land in another test file).
   await act(async () => { hook?.dismiss(); });
+  hook = undefined;
+  hostActionImpl = realExec.hostAction;
   await flush();
   await act(async () => { root?.unmount(); });
   root = undefined;
@@ -102,17 +127,27 @@ afterEach(async () => {
   }
 });
 
+let recording: ReturnType<typeof useRecordingToast>;
+let screenshot: ReturnType<typeof useScreenshotToast>;
+
 function Harness(props: Parameters<typeof useRecordingToast>[0]) {
-  hook = useRecordingToast(props);
+  hook = recording = useRecordingToast(props);
   return null;
 }
 
-async function mount(props: Parameters<typeof useRecordingToast>[0]) {
+function ScreenshotHarness() {
+  hook = screenshot = useScreenshotToast("UDID-1");
+  return null;
+}
+
+async function mount(props: Parameters<typeof useRecordingToast>[0], node = <Harness {...props} />) {
   await act(async () => {
     root = createRoot(dom.document.createElement("div") as unknown as HTMLElement);
-    root.render(<Harness {...props} />);
+    root.render(node);
   });
 }
+
+const reveals = (method: string) => hostCalls.filter(([m]) => m === method);
 
 async function flush(ms = 5) {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)); });
@@ -139,7 +174,7 @@ describe("useRecordingToast", () => {
       locateRetryMs: 1,
     });
     const blob = new Blob(["mp4"], { type: "video/mp4" });
-    await act(async () => { hook.show({ fileName: NAME, blob }); });
+    await act(async () => { recording.show({ fileName: NAME, blob }); });
 
     let shown = shownCard();
     expect(shown).toMatchObject({ status: "saved", fileName: NAME, copy: RECORDING_TOAST_COPY });
@@ -163,18 +198,96 @@ describe("useRecordingToast", () => {
       locate: async (fileName) => { located.push(fileName); return ""; },
       locateRetryMs: 1,
     });
-    await act(async () => { hook.show({ fileName: NAME, blob: new Blob(["x"]) }); });
+    await act(async () => { recording.show({ fileName: NAME, blob: new Blob(["x"]) }); });
     await flush(40);
     const shown = shownCard();
     expect(shown).toMatchObject({ status: "saved", fileName: NAME });
     expect(shown?.path).toBeUndefined();
+    expect(shown?.thumbFailed).toBe(true);
+    expect(card(shown!)).toContain('data-testid="thumb-placeholder"');
+    expect(card(shown!)).not.toContain("animate-");
     expect(located.length).toBe(8);
 
     // Clicking still looks for the file; when it's missing, say so.
-    await act(async () => { hook.reveal(); });
+    await act(async () => { recording.reveal(); });
     await flush();
     expect(located.length).toBe(9);
     const titles = sonnerToast.getToasts().map((t) => ("title" in t ? t.title : undefined));
     expect(titles).toContain(`Couldn't find ${NAME}. Check your browser's downloads.`);
+    expect(reveals("revealRecording")).toEqual([]);
+  });
+
+  test("a thumbnail that throws also falls back to the static icon", async () => {
+    await mount({
+      thumbnail: async () => { throw new Error("HEVC not supported"); },
+      locate: async () => PATH,
+      locateRetryMs: 1,
+    });
+    await act(async () => { recording.show({ fileName: NAME, blob: new Blob(["x"]) }); });
+    await flush();
+    expect(shownCard()).toMatchObject({ thumbFailed: true, path: PATH });
+  });
+
+  test("the spinner shows only while the thumbnail is still pending", () => {
+    const pending = card({ id: "1", status: "saved", phase: "in", copy: RECORDING_TOAST_COPY });
+    expect(pending).toContain("animate-");
+    expect(pending).not.toContain("thumb-placeholder");
+  });
+
+  test("clicking reveals the located path in Finder", async () => {
+    await mount({ thumbnail: async () => undefined, locate: async () => PATH, locateRetryMs: 1 });
+    await act(async () => { recording.show({ fileName: NAME, blob: new Blob(["x"]) }); });
+    await flush();
+    expect(shownCard()?.path).toBe(PATH);
+
+    await act(async () => { recording.reveal(); });
+    expect(reveals("revealRecording")).toEqual([["revealRecording", { path: PATH }]]);
+  });
+
+  test("clicking before the path is known looks it up, patches the card, then reveals", async () => {
+    let found = false;
+    const located: string[] = [];
+    await mount({
+      thumbnail: async () => undefined,
+      locate: async (fileName) => { located.push(fileName); return found ? PATH : ""; },
+      locateRetryMs: 1,
+    });
+    await act(async () => { recording.show({ fileName: NAME, blob: new Blob(["x"]) }); });
+    await flush(40);
+    expect(shownCard()?.path).toBeUndefined();
+    expect(reveals("revealRecording")).toEqual([]);
+
+    found = true;
+    await act(async () => { recording.reveal(); });
+    await flush();
+    expect(located.length).toBe(9);
+    expect(shownCard()?.path).toBe(PATH);
+    expect(reveals("revealRecording")).toEqual([["revealRecording", { path: PATH }]]);
+    expect(reveals("revealScreenshot")).toEqual([]);
+  });
+});
+
+describe("useScreenshotToast", () => {
+  const SHOT = "/Users/x/Desktop/serve-sim-screenshot-1.png";
+
+  test("clicking the screenshot card still calls revealScreenshot", async () => {
+    hostReplies.screenshot = { path: SHOT };
+    hostReplies.screenshotThumbnail = { data: "AAAA" };
+    await mount(undefined, <ScreenshotHarness />);
+    await act(async () => { await screenshot.capture(); });
+    expect(shownCard()).toMatchObject({ status: "saved", path: SHOT, thumb: "data:image/png;base64,AAAA" });
+
+    await act(async () => { screenshot.reveal(); });
+    expect(reveals("revealScreenshot")).toEqual([["revealScreenshot", { path: SHOT }]]);
+    expect(reveals("revealRecording")).toEqual([]);
+  });
+
+  test("a screenshot without a thumbnail shows the static icon", async () => {
+    hostReplies.screenshot = { path: SHOT };
+    await mount(undefined, <ScreenshotHarness />);
+    await act(async () => { await screenshot.capture(); });
+    const shown = shownCard();
+    expect(shown).toMatchObject({ status: "saved", path: SHOT, thumbFailed: true });
+    expect(card(shown!)).toContain('data-testid="thumb-placeholder"');
   });
 });

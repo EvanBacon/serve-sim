@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Film, Image as ImageIcon, type LucideIcon } from "lucide-react";
 import type { ScreenshotToast as ScreenshotToastState } from "../hooks/use-screenshot-toast";
 import { DROP_HOST_PATH_TYPE } from "../utils/drop";
 
 /** What the card says. Screenshots and recordings share the same card. */
 export interface CaptureToastCopy {
+  /** Shown in the thumbnail slot when no preview could be made. */
+  placeholderIcon: LucideIcon;
   savingTitle: string;
   savedTitle: string;
   subtitle: string;
@@ -15,6 +17,7 @@ export interface CaptureToastCopy {
 }
 
 export const SCREENSHOT_TOAST_COPY: CaptureToastCopy = {
+  placeholderIcon: ImageIcon,
   savingTitle: "Saving Screenshot…",
   savedTitle: "Screenshot Saved",
   subtitle: "Open in Finder",
@@ -23,6 +26,7 @@ export const SCREENSHOT_TOAST_COPY: CaptureToastCopy = {
 };
 
 export const RECORDING_TOAST_COPY: CaptureToastCopy = {
+  placeholderIcon: Film,
   savingTitle: "Saving Recording…",
   savedTitle: "Recording Saved",
   subtitle: "Open in Finder",
@@ -58,6 +62,7 @@ export function ScreenshotToast({
   onResume,
 }: ScreenshotToastProps) {
   const copy = toast.copy ?? SCREENSHOT_TOAST_COPY;
+  const Placeholder = copy.placeholderIcon;
   const [dragging, setDragging] = useState(false);
   const dragImageRef = useRef<HTMLImageElement | null>(null);
   const dragFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -159,6 +164,9 @@ export function ScreenshotToast({
           <div className="size-9 rounded-md overflow-hidden bg-ink/10 shrink-0 flex items-center justify-center ring-1 ring-ink/10 pointer-events-none">
             {toast.thumb ? (
               <img src={toast.thumb} alt="" className="size-full object-cover" draggable={false} />
+            ) : toast.thumbFailed ? (
+              // A spinner next to "Saved" would read as still working.
+              <Placeholder data-testid="thumb-placeholder" className="text-ink-80" size={18} strokeWidth={2} />
             ) : (
               <span className="block size-4 rounded-full border-2 border-ink/30 border-t-ink animate-[grid-spin_0.8s_linear_infinite]" />
             )}
