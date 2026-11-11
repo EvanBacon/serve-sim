@@ -39,7 +39,7 @@ import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
 import { DeviceRotor, DeviceRotorScreen, useDeviceRotationInFlight } from "./components/device-rotor";
-import { deviceChromeLayout, deviceRotationDegrees } from "./utils/device-rotation";
+import { deviceChromeLayout, deviceRotationDegrees, isOrientationConfirmed } from "./utils/device-rotation";
 import { usePrefersReducedMotion } from "./hooks/use-prefers-reduced-motion";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
@@ -652,9 +652,10 @@ function AppWithConfig({
   // While the device turns, the container snaps to its new size and the rotor
   // carries the motion; a width / aspect tween here would squash the bezel.
   const rotationInFlight = useDeviceRotationInFlight(deviceDegrees);
-  // Before the first config push for this stream, `deviceDegrees` comes from
-  // the portrait fallback; the rotor must not spin into the real orientation.
-  const orientationConfirmed = !!(liveStreamConfig ?? streamConfig);
+  // Until a config that carries an orientation arrives for this stream,
+  // `deviceDegrees` is a 0° guess (portrait fallback, or a size-only MJPEG
+  // frame report); the rotor must not spin into the real orientation.
+  const orientationConfirmed = isOrientationConfirmed(liveStreamConfig, streamConfig);
   const reducedMotion = usePrefersReducedMotion();
   const duoAspect = duoProjection && duoProjection.width > 0 && duoProjection.height > 0
     ? duoProjection.width / duoProjection.height
@@ -1339,11 +1340,11 @@ function AppWithConfig({
             // swapping this wrapper (and the stream inside it).
             return (
               <DeviceRotor
-                  degrees={deviceDegrees}
-                  reducedMotion={reducedMotion}
-                  confirmed={orientationConfirmed}
-                  streamKey={config.streamUrl}
-                >
+                degrees={deviceDegrees}
+                reducedMotion={reducedMotion}
+                confirmed={orientationConfirmed}
+                streamKey={config.streamUrl}
+              >
                 <DeviceKitChrome
                   chrome={activeChrome!}
                   framed={useChrome}

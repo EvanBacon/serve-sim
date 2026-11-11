@@ -43,6 +43,18 @@ type OrientedConfig = {
   orientation?: SimulatorOrientation | null;
 };
 
+/** Whether the resolved stream config (live frame config over the ws push,
+ *  the same precedence as the client's `activeStreamConfig`) actually reports
+ *  an orientation. A size-only config — e.g. the MJPEG `<img>` onLoad report
+ *  before the first 0x82 push — yields a 0° guess, so it must not let the
+ *  rotor animate into the real orientation. */
+export function isOrientationConfirmed(
+  live?: OrientedConfig | null,
+  ws?: OrientedConfig | null,
+): boolean {
+  return (live ?? ws)?.orientation != null;
+}
+
 /** A landscape-shaped config that doesn't say which way the device is turned
  *  (older helpers, partial pushes). We can't pick a rotor angle for it, so it
  *  falls back to the bare screen, as before the bezel learned to rotate. */

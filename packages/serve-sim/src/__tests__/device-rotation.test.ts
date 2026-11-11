@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEVICE_ROTATION_DURATION_MS,
   deviceChromeLayout as layoutFor,
+  isOrientationConfirmed,
   isUnorientedLandscape,
   deviceRotationDegrees,
   deviceRotationStart,
@@ -137,5 +138,32 @@ describe("rotationFromMatrix", () => {
     const out = rotationFromMatrix(m);
     expect(out.degrees).toBeCloseTo(30);
     expect(out.scale).toBeCloseTo(0.8);
+  });
+});
+
+describe("isOrientationConfirmed", () => {
+  const sizeOnly = { width: 1179, height: 2556 };
+  const landscape = { width: 1179, height: 2556, orientation: "landscape_left" as const };
+
+  test("no config yet is unconfirmed", () => {
+    expect(isOrientationConfirmed(null, null)).toBe(false);
+  });
+
+  test("a size-only frame config (MJPEG onLoad) is not confirmed", () => {
+    expect(isOrientationConfirmed(sizeOnly, null)).toBe(false);
+  });
+
+  test("size-only frame then oriented push: only the push confirms", () => {
+    // MJPEG frame decodes first, then 0x82 arrives and the live config is
+    // cleared because its orientation differs. The first render must not count
+    // as confirmed, or the rotor spins 0° → 90° on first load.
+    expect(isOrientationConfirmed(sizeOnly, null)).toBe(false);
+    expect(isOrientationConfirmed(null, landscape)).toBe(true);
+  });
+
+  test("the live config wins over the ws config, like activeStreamConfig", () => {
+    expect(isOrientationConfirmed(sizeOnly, landscape)).toBe(false);
+    expect(isOrientationConfirmed(landscape, sizeOnly)).toBe(true);
+    expect(isOrientationConfirmed({ ...sizeOnly, orientation: "portrait" }, null)).toBe(true);
   });
 });
