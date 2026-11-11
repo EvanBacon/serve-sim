@@ -1,12 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import {
   DEVICE_ROTATION_DURATION_MS,
-  deviceChromeLayout,
+  deviceChromeLayout as layoutFor,
+  isUnorientedLandscape,
   deviceRotationDegrees,
   deviceRotationStart,
   isSidewaysRotation,
   rotationFromMatrix,
 } from "../client/utils/device-rotation";
+
+type Orientation = Parameters<typeof layoutFor>[1]["orientation"];
+
+/** Layout for a config whose raw framebuffer is the portrait panel. */
+function deviceChromeLayout(c: typeof chrome, orientation: Orientation) {
+  const layout = layoutFor(c, { width: 1179, height: 2556, orientation });
+  if (!layout) throw new Error("expected a chrome layout");
+  return layout;
+}
 
 const chrome = {
   frame: { width: 1000, height: 2000 },
@@ -54,6 +64,25 @@ describe("deviceChromeLayout", () => {
       // screen's long edge.
       expect(layout.chromeScale).toBeCloseTo(2000 / 1880);
     }
+  });
+});
+
+describe("orientation-less landscape configs", () => {
+  test("a width > height config with no orientation drops the bezel", () => {
+    const config = { width: 2556, height: 1179 };
+    expect(isUnorientedLandscape(config)).toBe(true);
+    // Not a portrait bezel with a tiny letterboxed landscape stream.
+    expect(layoutFor(chrome, config)).toBeNull();
+  });
+
+  test("oriented or portrait-shaped configs keep the bezel", () => {
+    expect(isUnorientedLandscape({ width: 1179, height: 2556 })).toBe(false);
+    expect(isUnorientedLandscape({ width: 2556, height: 1179, orientation: "landscape_left" })).toBe(false);
+    expect(layoutFor(chrome, { width: 1179, height: 2556 })?.aspectRatioCss).toBe("1000 / 2000");
+    // Raw landscape frames with a known orientation still turn the frame.
+    expect(
+      layoutFor(chrome, { width: 2556, height: 1179, orientation: "landscape_right" })?.aspectRatioCss,
+    ).toBe("2000 / 1000");
   });
 });
 

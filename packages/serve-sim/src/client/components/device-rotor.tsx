@@ -46,19 +46,46 @@ function rotorTransform(degrees: number, scale = 1): string {
   return `translate(-50%, -50%) rotate(${degrees}deg) scale(${scale})`;
 }
 
+/** Mark the rotor as mid-spin. Taps are blocked meanwhile: the input layer's
+ *  bounding box is the axis-aligned box of a turning element, so a tap would
+ *  map to the wrong point. */
+function setRotating(el: HTMLElement, rotating: boolean) {
+  if (rotating) {
+    el.dataset.rotating = "true";
+    el.style.pointerEvents = "none";
+  } else {
+    delete el.dataset.rotating;
+    el.style.pointerEvents = "";
+  }
+}
+
 export function DeviceRotor({
   degrees,
   reducedMotion,
+  confirmed = true,
+  streamKey,
   children,
 }: {
   /** Clockwise page rotation of the device (0, 90, 180, -90). */
   degrees: number;
   /** Snap instead of spinning. */
   reducedMotion: boolean;
+  /** Whether `degrees` comes from a real config push for this stream (vs. a
+   *  placeholder before the first one). Only a change between two confirmed
+   *  orientations of the same stream animates; the first real config after
+   *  load / device switch / reconnect just snaps into place. */
+  confirmed?: boolean;
+  /** Identity of the stream; a change resets the baseline (no spin). */
+  streamKey?: string;
   children: ReactNode;
 }) {
   const rotorRef = useRef<HTMLDivElement | null>(null);
-  const lastRef = useRef<{ degrees: number; length: number } | null>(null);
+  const lastRef = useRef<{
+    degrees: number;
+    length: number;
+    confirmed: boolean;
+    streamKey?: string;
+  } | null>(null);
 
   // FLIP: React has already laid the rotor out for the new orientation; start
   // it at the pose (and on-screen size) the viewer last saw and animate to
@@ -68,8 +95,9 @@ export function DeviceRotor({
     if (!el) return;
     const toLength = el.offsetHeight;
     const prev = lastRef.current;
-    lastRef.current = { degrees, length: toLength };
+    lastRef.current = { degrees, length: toLength, confirmed, streamKey };
     if (!prev || prev.degrees === degrees) return;
+    const animate = confirmed && prev.confirmed && prev.streamKey === streamKey;
 
     const running = typeof el.getAnimations === "function" ? el.getAnimations() : [];
     let fromDegrees = prev.degrees;
@@ -84,8 +112,8 @@ export function DeviceRotor({
       }
       for (const animation of running) animation.cancel();
     }
-    delete el.dataset.rotating;
-    if (reducedMotion || typeof el.animate !== "function") return;
+    setRotating(el, false);
+    if (!animate || reducedMotion || typeof el.animate !== "function") return;
 
     const start = deviceRotationStart({
       fromDegrees,
@@ -94,7 +122,7 @@ export function DeviceRotor({
       fromLength: prev.length,
       toLength,
     });
-    el.dataset.rotating = "true";
+    setRotating(el, true);
     const animation = el.animate(
       [
         { transform: rotorTransform(start.degrees, start.scale) },
@@ -103,9 +131,9 @@ export function DeviceRotor({
       { duration: DEVICE_ROTATION_DURATION_MS, easing: DEVICE_ROTATION_EASING },
     );
     animation.onfinish = () => {
-      if (rotorRef.current === el && el.getAnimations().length === 0) delete el.dataset.rotating;
+      if (rotorRef.current === el && el.getAnimations().length === 0) setRotating(el, false);
     };
-  }, [degrees, reducedMotion]);
+  }, [degrees, reducedMotion, confirmed, streamKey]);
 
   return (
     <div style={fill}>

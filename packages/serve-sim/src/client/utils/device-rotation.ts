@@ -37,13 +37,29 @@ export interface DeviceChromeLayout {
   chromeScale: number;
 }
 
-/** Container geometry for a framed device in `orientation`: the portrait
- *  frame, laid on its side for landscape. */
+type OrientedConfig = {
+  width: number;
+  height: number;
+  orientation?: SimulatorOrientation | null;
+};
+
+/** A landscape-shaped config that doesn't say which way the device is turned
+ *  (older helpers, partial pushes). We can't pick a rotor angle for it, so it
+ *  falls back to the bare screen, as before the bezel learned to rotate. */
+export function isUnorientedLandscape(config?: OrientedConfig | null): boolean {
+  return !!config && !config.orientation && config.width > config.height;
+}
+
+/** Container geometry for a framed device in `config.orientation`: the
+ *  portrait frame, laid on its side for landscape. `null` when the bezel can't
+ *  be posed for this config (see {@link isUnorientedLandscape}). */
 export function deviceChromeLayout(
   chrome: Pick<DeviceKitChromeDescriptor, "frame" | "screen">,
-  orientation?: SimulatorOrientation | null,
-): DeviceChromeLayout {
+  config: OrientedConfig,
+): DeviceChromeLayout | null {
+  if (isUnorientedLandscape(config)) return null;
   const { frame, screen } = chrome;
+  const { orientation } = config;
   if (isSidewaysRotation(deviceRotationDegrees(orientation))) {
     return {
       aspectRatio: frame.height / frame.width,

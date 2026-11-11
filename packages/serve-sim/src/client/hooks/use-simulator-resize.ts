@@ -103,7 +103,8 @@ export function useSimulatorResize({
   const [restoredDefaultWidth, setRestoredDefaultWidth] = useState(defaultWidth);
   if (restoredDefaultWidth !== defaultWidth) {
     setRestoredDefaultWidth(defaultWidth);
-    setFrameWidth(roundToDevicePixel(readRestoredWidth()));
+    // An in-flight drag owns the width; the clamp effect settles it after.
+    if (!isResizing && !isInertia) setFrameWidth(roundToDevicePixel(readRestoredWidth()));
   }
   useLayoutEffect(() => {
     lastWidthRef.current = frameWidth;

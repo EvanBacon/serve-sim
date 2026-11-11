@@ -626,10 +626,18 @@ function AppWithConfig({
   // `chromeScale` is how much bigger the frame is than the screen, so we scale
   // the container up by it while keeping the *screen* at the same comfortable
   // size — and resize / panel-collision math all operate on the frame dimensions.
-  const deviceDegrees = foldable
-    ? 0
-    : deviceRotationDegrees((activeStreamConfig as { orientation?: SimulatorOrientation }).orientation);
-  const useChrome = !foldable && shouldUseDeviceChrome({
+  const activeOrientation = (activeStreamConfig as { orientation?: SimulatorOrientation }).orientation;
+  const deviceDegrees = foldable ? 0 : deviceRotationDegrees(activeOrientation);
+  // An orientation-less landscape config can't be posed, so it gets the bare
+  // screen (the wrapper stays mounted, like hideChrome).
+  const chromeLayoutCandidate = activeChrome
+    ? deviceChromeLayout(activeChrome, {
+      width: activeStreamConfig.width,
+      height: activeStreamConfig.height,
+      orientation: activeOrientation,
+    })
+    : null;
+  const useChrome = !foldable && !!chromeLayoutCandidate && shouldUseDeviceChrome({
     hasChrome: !!activeChrome,
     hideChrome,
   });
@@ -639,13 +647,14 @@ function AppWithConfig({
   const wrapChrome = !foldable && shouldWrapDeviceChrome({
     hasChrome: !!activeChrome,
   });
-  const chromeLayout = useChrome
-    ? deviceChromeLayout(activeChrome!, (activeStreamConfig as { orientation?: SimulatorOrientation }).orientation)
-    : null;
+  const chromeLayout = useChrome ? chromeLayoutCandidate : null;
   const chromeScale = chromeLayout?.chromeScale ?? 1;
   // While the device turns, the container snaps to its new size and the rotor
   // carries the motion; a width / aspect tween here would squash the bezel.
   const rotationInFlight = useDeviceRotationInFlight(deviceDegrees);
+  // Before the first config push for this stream, `deviceDegrees` comes from
+  // the portrait fallback; the rotor must not spin into the real orientation.
+  const orientationConfirmed = !!(liveStreamConfig ?? streamConfig);
   const reducedMotion = usePrefersReducedMotion();
   const duoAspect = duoProjection && duoProjection.width > 0 && duoProjection.height > 0
     ? duoProjection.width / duoProjection.height
@@ -1186,8 +1195,11 @@ function AppWithConfig({
       style={{
         paddingLeft: 24 + shiftForLeftPanel,
         paddingRight: 24 + shiftForRightPanel,
+        // No padding slide while the device turns: the rotor carries the motion.
         transition:
-          simulatorResize.isResizing || simulatorResize.isInertia ? "none" : SIMULATOR_RESIZE_PAGE_TRANSITION,
+          simulatorResize.isResizing || simulatorResize.isInertia || rotationInFlight
+            ? "none"
+            : SIMULATOR_RESIZE_PAGE_TRANSITION,
       }}
     >
       <div
@@ -1309,7 +1321,12 @@ function AppWithConfig({
             );
             if (!wrapChrome) {
               return (
-                <DeviceRotor degrees={deviceDegrees} reducedMotion={reducedMotion}>
+                <DeviceRotor
+                  degrees={deviceDegrees}
+                  reducedMotion={reducedMotion}
+                  confirmed={orientationConfirmed}
+                  streamKey={config.streamUrl}
+                >
                   {turnedScreen}
                 </DeviceRotor>
               );
@@ -1321,7 +1338,12 @@ function AppWithConfig({
             // overflowing past the bezel. `framed` hides that chrome without
             // swapping this wrapper (and the stream inside it).
             return (
-              <DeviceRotor degrees={deviceDegrees} reducedMotion={reducedMotion}>
+              <DeviceRotor
+                  degrees={deviceDegrees}
+                  reducedMotion={reducedMotion}
+                  confirmed={orientationConfirmed}
+                  streamKey={config.streamUrl}
+                >
                 <DeviceKitChrome
                   chrome={activeChrome!}
                   framed={useChrome}
