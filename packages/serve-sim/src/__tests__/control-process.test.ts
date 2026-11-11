@@ -743,6 +743,12 @@ describeWithNode("control process", () => {
     expect(start.stderr).toContain("cannot load ws");
     expect(existsSync(paths().failFile)).toBe(true);
     await until(async () => daemonPids().length === 0);
+    // status explains why nothing is running.
+    const st = await cli(["control", "status"], broken);
+    expect(st.code).toBe(1);
+    expect(st.stdout).toMatch(/workers failed to load the CLI .*`serve-sim control start` to retry/s);
+    expect(st.stdout).toContain("cannot load ws");
+    expect(JSON.parse((await cli(["control", "status", "--json"], broken)).stdout).failed.reason).toContain("cannot load ws");
 
     // In-process still works, and the fail marker stops auto-start.
     for (let i = 0; i < 3; i++) expect(await cli(["--version"], broken)).toMatchObject({ code: 0, stdout: "fake 1.0.0\n" });

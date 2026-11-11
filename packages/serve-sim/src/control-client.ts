@@ -386,8 +386,27 @@ export async function controlCli(args: string[], ctx: ControlContext): Promise<n
   }
   if (verb === "status") {
     const status = unusableSocket(paths) ? null : await pingSocket(paths.socket);
-    if (json) out(JSON.stringify(status ? { running: true, ...status } : { running: false, socket: paths.socket }));
-    else out(status ? formatStatus(status) : "control process not running");
+    // A recent fail record is why commands aren't starting one.
+    const failed = status ? null : readFailRecord(paths.failFile);
+    const recent = failed && Date.now() - failed.at < FAILED_BACKOFF_MS ? failed : null;
+    if (json) {
+      out(
+        JSON.stringify(
+          status
+            ? { running: true, ...status }
+            : { running: false, socket: paths.socket, ...(recent ? { failed: { at: recent.at, reason: recent.reason ?? "" } } : {}) },
+        ),
+      );
+    } else if (status) out(formatStatus(status));
+    else if (recent) {
+      const ago = Math.max(0, Math.round((Date.now() - recent.at) / 1000));
+      const reason = recent.reason?.trim() ? `\n${recent.reason.trimEnd()}` : "";
+      out(
+        `control process not running: its workers failed to load the CLI ${ago}s ago, so commands run in-process ` +
+          `and won't auto-start it for ${Math.ceil(FAILED_BACKOFF_MS / 60_000)} minutes; ` +
+          `run \`serve-sim control start\` to retry${reason}`,
+      );
+    } else out("control process not running");
     return status ? 0 : 1;
   }
   if (verb === "start") {
