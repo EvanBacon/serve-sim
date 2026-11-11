@@ -90,10 +90,10 @@ export function readsDevFile(args: readonly string[], cwd?: string): boolean {
 function intoDev(path: string): boolean {
   let p = path;
   for (let hop = 0; hop < 32; hop++) {
-    if (p.startsWith("/dev/")) return true;
+    if (isFdPath(p)) return true;
     try {
       p = join(realpathSync(dirname(p)), basename(p));
-      if (p.startsWith("/dev/")) return true;
+      if (isFdPath(p)) return true;
       if (!lstatSync(p).isSymbolicLink()) return false;
       p = resolve(dirname(p), readlinkSync(p));
     } catch {
@@ -101,6 +101,11 @@ function intoDev(path: string): boolean {
     }
   }
   return false;
+}
+
+/** /dev/... or, on Linux where /dev/fd -> /proc/self/fd, /proc/<self|pid>/fd/... */
+function isFdPath(p: string): boolean {
+  return p.startsWith("/dev/") || /^\/proc\/(?:self|thread-self|\d+)\/fd\//.test(p);
 }
 
 export type ControlMode = "off" | "use" | "auto";
