@@ -9,6 +9,8 @@ export const SIM_E2E_TEST_FILES = [
   "packages/serve-sim/src/__tests__/accessibility-endpoint.test.ts",
   "packages/serve-sim/src/__tests__/avcc-stream-endpoint.test.ts",
   "packages/serve-sim/src/__tests__/camera-connections.e2e.test.ts",
+  // Opt-in (SERVE_SIM_E2E_SHUTDOWN_UDID): it shuts its simulator down.
+  "packages/serve-sim/src/__tests__/hid-after-shutdown.e2e.test.ts",
   "packages/serve-sim/src/__tests__/hid-malformed-input.test.ts",
   "packages/serve-sim/src/__tests__/idle-floor.test.ts",
   "packages/serve-sim/src/__tests__/permissions.e2e.test.ts",

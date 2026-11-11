@@ -21,6 +21,7 @@ on:
       - "packages/serve-sim/src/__tests__/accessibility-endpoint.test.ts"
       - "packages/serve-sim/src/__tests__/avcc-stream-endpoint.test.ts"
       - "packages/serve-sim/src/__tests__/camera-connections.e2e.test.ts"
+      - "packages/serve-sim/src/__tests__/hid-after-shutdown.e2e.test.ts"
       - "packages/serve-sim/src/__tests__/hid-malformed-input.test.ts"
       - "packages/serve-sim/src/__tests__/idle-floor.test.ts"
       - "packages/serve-sim/src/__tests__/permissions.e2e.test.ts"
