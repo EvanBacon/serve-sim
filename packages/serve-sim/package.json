@@ -25,6 +25,7 @@
   },
   "files": [
     "dist/serve-sim.js",
+    "dist/serve-sim-cli.js",
     "dist/middleware.js",
     "dist/middleware.cjs",
     "dist/simcam/libSimCameraInjector.dylib",

@@ -135,6 +135,8 @@ serve-sim ax --refs [--all] [--text]  Compact snapshot with element refs (@e1…
 serve-sim tap @e2 [--settle] [--timeout <ms>]
                                       Tap an element ref; --settle prints the diff
 serve-sim settle [--timeout <ms>]     Wait for the screen to settle; print the diff
+serve-sim control [status|start|stop] Persistent control process that keeps short
+                                      commands fast (automatic; see below)
 
 serve-sim camera <bundle-id> [-d udid] [source-options]
                                       Inject a synthetic camera feed and (re)launch the app
@@ -356,6 +358,52 @@ HTTP, under the same device helper routes and auth as `/recording` (`--auth-toke
 - `GET …/buffer/frame[?id=<n> | ?ago=<s>]`: one `image/jpeg`, the latest by default, with `X-Serve-Sim-Buffer-Frame: {id, at, width, height, sourceWidth, sourceHeight}`. `409 buffer_off` when off, `404 frame_not_found` when it isn't held.
 
 Limits: sampling at 4 fps can miss a state shown for less than a tick (record for frame-exact history). Frames are the raw framebuffer orientation, like the stream before rotation. When serve-sim is embedded as middleware, `SERVE_SIM_BUFFER` in the dev server's environment starts the buffer when a device's session opens (its first viewer or command), not at startup.
+
+### Control process (faster repeated commands)
+
+Each `serve-sim` call is a new Node process, and most of a short command used to be Node compiling and running the ~1 MB CLI bundle. The `serve-sim` bin is now an 18 KB entry that hands short commands to a background control process. That process keeps two workers that have already loaded the CLI. Each worker runs one command in its own process, then exits and is replaced, so exit codes, `process.exit`, and signal handlers behave as in a normal run.
+
+- **Which commands**: `tap`, `gesture`, `settle`, `button`, `type`, `paste`, `rotate`, `fold`, `ca-debug`, `memory-warning`, `event-log`, `ax`, `buffer`, and bare `--help`/`--version`. Everything else runs in-process as before: the preview server, `--detach`, `record`, `camera`, `exec`, `doctor`, `permissions`, `ui`, and anything with `--stdin` (stdin is not forwarded).
+- **What carries over**: argv, cwd, the full environment, the umask, stdout/stderr, the exit code or signal, and whether stdout/stderr are TTYs plus their column width. The worker writes stdout/stderr synchronously, so `process.exit` right after a large write loses nothing. That is better than a direct run: when stdout is a pipe on macOS, a direct run can cut that output short (to 64 KiB) because Node writes pipes asynchronously. When stdout and stderr are the same file (`2>&1`, one terminal), the worker sends both down one pipe so their order is kept; output from child processes that inherit stderr is the exception. A slow reader (a pager, a stalled pipe) holds the worker back as it would a direct run, instead of the output piling up in the control process. Ctrl+C, SIGTERM and SIGHUP are forwarded to the worker once the command has started. If the caller dies, its worker is stopped. What does not carry over: resource limits (`ulimit`), the nice level, and any OS sandbox around the caller; those come from whoever started the control process. stdin isn't forwarded either, so `--stdin` and `--file` paths that resolve into `/dev/` (relative or via a symlink) run in-process.
+- **Lifecycle**: the first short command starts it in the background and runs in-process itself. It exits after 5 minutes without commands (`SERVE_SIM_CONTROL_IDLE_MS`). It also exits when the dist it came from is rebuilt; that call runs in-process. Callers whose `HOME`, `TMPDIR` or `DEBUG` differ from the daemon's, that use a different node binary or install, or that set `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY` or node flags, always run in-process. So do callers inside a known agent sandbox (`CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, or Claude Code's `SANDBOX_RUNTIME`), and they never start one (`serve-sim control start` refuses there too), so a daemon is never born inside a sandbox or used to step outside it. Other sandboxes aren't detected; set `SERVE_SIM_CONTROL=0` under them. Those settings are also removed from the daemon's and workers' environment, so one caller's preloads never reach another's command.
+- **Fallback**: the daemon first reserves a warm worker and replies "accepted"; the command is only handed to the worker after the caller confirms. If the control process is missing, stale, or doesn't reserve a worker within 1 s (`SERVE_SIM_CONTROL_ACCEPT_MS`), nothing has run yet and the command runs in-process. Once the caller has confirmed, it never falls back: a lost connection fails that call (exit 1) instead of running the command twice. If the reserved worker dies before it is handed the command (for example `pkill node`), or the caller takes more than 10 s to confirm, the daemon frees it and the caller runs the command in-process.
+- **Broken installs**: if workers can't load the CLI, the daemon records why in a `.failed` file next to its socket and exits. Commands keep running in-process, and for 10 minutes (or until the dist is rebuilt) they don't start a new daemon. `serve-sim control start` retries immediately, and only reports success once a worker has loaded; otherwise it prints the worker's error and exits 1.
+- **Off switch**: `SERVE_SIM_CONTROL=0` never uses or starts it. Under `CI` it is only used if already running; `SERVE_SIM_CONTROL=1` auto-starts it there too.
+
+```sh
+serve-sim control status [--json]   # exit 1 when not running; shows a recent worker load failure
+serve-sim control start             # idempotent; waits until it answers
+serve-sim control stop              # idempotent; also clears stale socket/pid files
+                                    # (says "stopping" while running commands finish)
+                                    # (a daemon that doesn't acknowledge within 2 s gets
+                                    # SIGTERM, only if its pid file names that daemon)
+```
+
+It listens on a Unix socket at `$TMPDIR/serve-sim-control-<uid>/control-<id>.sock` (or under `SERVE_SIM_CONTROL_DIR`), with a pid file next to it. `<id>` is derived from the bin path, the node binary, and `HOME`. Callers send their whole environment over that socket, so both sides check ownership first: the directory must be a real directory (not a symlink) owned by you with no group/other access, and the socket must be a socket owned by you. Otherwise commands run in-process and the daemon refuses to start. The socket is created owner-only (mode 0600) with no window where it is more open. A daemon that finds a dead socket replaces it. When several start at once, the extra ones see their socket was taken over and exit.
+
+Measured on an Apple Silicon Mac with Node 24.13: each case was spawned with `spawnSync` from a node script, after 3 warm-up runs. Back-to-back means calls ran one after another. "Before" runs the full CLI bundle directly, which is what the bin was before this change. `tap` ran against a live preview on its own simulator.
+
+| case | p50 ms | p95 ms |
+|---|---|---|
+| `node -e 0` (floor) | 23.1 | 27.1 |
+| `--help`, before | 66.2 | 82.7 |
+| `--help`, warm control process | 31.9 | 32.8 |
+| `--help`, first call with no daemon (starts it) | 76.0 | 81.7 |
+| `--help`, the call right after that | 51.1 | 54.2 |
+| `tap`, before | 113.3 | 119.4 |
+| `tap`, warm control process | 84.8 | 86.6 |
+| `tap`, first call with no daemon (starts it) | 114.0 | 121.2 |
+| `tap`, the call right after that | 86.6 | 89.6 |
+
+With calls spaced 400 ms apart, a more agent-like pace, everything is slower, including bare Node (p50 38 ms). The saving stays about the same: `--help` drops from 72.5 to 44.5 ms and `tap` from 132.1 to 105.9 ms.
+
+Where the warm time goes:
+
+- About 23 ms is Node's own startup, which can't be avoided.
+- About 9 ms is the bin, the socket round trip, the worker running the command, and the worker's exit.
+- For `tap`, about 40 ms more is spent waiting on the preview server for the touch-config fetch, the WebSocket connect, and the HID ack.
+
+The first call with no daemon running costs about 10 ms extra. That is the daemon spawn, plus its workers competing with the command for CPU.
 
 ### Accessibility refs for agents
 

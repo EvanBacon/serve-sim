@@ -3,7 +3,9 @@
  * Unified serve-sim build.
  *
  * Produces, all minified and with no runtime deps on workspace packages:
- *   dist/serve-sim.js      ESM bin (node target) referenced by package.json#bin
+ *   dist/serve-sim.js      Tiny ESM bin (node target) referenced by package.json#bin;
+ *                          dispatches to the control process or loads:
+ *   dist/serve-sim-cli.js  The full CLI bundle (node target)
  *   dist/serve-sim         Compiled single-file executable (bun --compile)
  *   dist/middleware.js    Public subpath export "serve-sim/middleware" (ESM)
  *   dist/middleware.cjs   Thin CJS wrapper for the same
@@ -150,27 +152,51 @@ writeFileSync(
 );
 console.log("dist/middleware.cjs (wrapper)");
 
-// ─── 4. Bin JS bundle ────────────────────────────────────────────────────
+// ─── 4. Bin JS bundles ───────────────────────────────────────────────────
+// dist/serve-sim-cli.js is the whole CLI. dist/serve-sim.js is the bin: only
+// node builtins, so a short command handed to the persistent control process
+// skips compiling the ~1 MB CLI bundle (see src/bin.ts).
 
-const binJsResult = await Bun.build({
+const NODE_EXTERNALS = ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"];
+
+const cliJsResult = await Bun.build({
   entrypoints: [resolve(root, "src/index.ts")],
   target: "node",
   format: "esm",
   minify: true,
   outdir: distDir,
-  naming: "serve-sim.js",
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"],
+  naming: "serve-sim-cli.js",
+  external: NODE_EXTERNALS,
   define: PREVIEW_DEFINE,
   sourcemap: "linked",
+});
+if (!cliJsResult.success) {
+  console.error("CLI JS build failed:");
+  for (const log of cliJsResult.logs) console.error(log);
+  process.exit(1);
+}
+console.log(`dist/serve-sim-cli.js ${kb((await cliJsResult.outputs[0]!.text()).length)}`);
+
+const binJsResult = await Bun.build({
+  entrypoints: [resolve(root, "src/bin.ts")],
+  target: "node",
+  format: "esm",
+  minify: true,
+  outdir: distDir,
+  naming: "serve-sim.js",
+  external: NODE_EXTERNALS,
 });
 if (!binJsResult.success) {
   console.error("Bin JS build failed:");
   for (const log of binJsResult.logs) console.error(log);
   process.exit(1);
 }
-
-const binJsSize = (await binJsResult.outputs[0]!.text()).length;
-console.log(`dist/serve-sim.js   ${kb(binJsSize)}`);
+const binJs = await binJsResult.outputs[0]!.text();
+if (/\bws\b["']|from"ws"|commander/.test(binJs)) {
+  console.error("dist/serve-sim.js must only import node builtins");
+  process.exit(1);
+}
+console.log(`dist/serve-sim.js   ${kb(binJs.length)}`);
 
 // ─── 5. Compiled single-file executable ──────────────────────────────────
 // Bun.build doesn't expose --compile yet, so shell out. The define arg carries

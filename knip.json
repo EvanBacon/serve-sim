@@ -16,6 +16,7 @@
       ],
       "entry": [
         "src/index.ts",
+        "src/bin.ts",
         "src/middleware.ts",
         "src/state.ts",
         "src/client/client.tsx",
