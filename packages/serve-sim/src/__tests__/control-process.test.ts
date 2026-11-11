@@ -31,6 +31,7 @@ import {
   parseAcceptMs,
   parseIdleMs,
   parseJsonFrame,
+  sandboxMarker,
   unsafeControlDir,
   unsafeControlSocket,
   withoutNodeRuntimeEnv,
@@ -62,6 +63,21 @@ describe("isDispatchable", () => {
     expect(isDispatchable(["paste", "--stdin", "-d", "X"])).toBe(false);
     expect(isDispatchable(["iPhone 16"])).toBe(false);
     expect(isDispatchable(["--help", "tap"])).toBe(false);
+  });
+
+  test("--file pointing at a /dev alias of stdin stays in-process", () => {
+    expect(isDispatchable(["type", "--file", "/dev/stdin"])).toBe(false);
+    expect(isDispatchable(["type", "--file=/dev/fd/0"])).toBe(false);
+    expect(isDispatchable(["paste", "-d", "X", "--file", "/dev/fd/3"])).toBe(false);
+    expect(isDispatchable(["type", "--file", "/tmp/notes.txt"])).toBe(true);
+  });
+
+  test("sandboxed callers are recognised by their env markers", () => {
+    expect(sandboxMarker({})).toBeNull();
+    expect(sandboxMarker({ CODEX_SANDBOX: "seatbelt" })).toBe("CODEX_SANDBOX");
+    expect(sandboxMarker({ CODEX_SANDBOX_NETWORK_DISABLED: "1" })).toBe("CODEX_SANDBOX_NETWORK_DISABLED");
+    expect(sandboxMarker({ SANDBOX_RUNTIME: "1" })).toBe("SANDBOX_RUNTIME");
+    expect(sandboxMarker({ SANDBOX_RUNTIME: "" })).toBeNull();
   });
 });
 
@@ -223,6 +239,30 @@ describe("adoptCaller", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("adopts the caller's umask when sent", () => {
+    const umasks: number[] = [];
+    const proc = {
+      argv: [],
+      env: {},
+      chdir: () => {},
+      umask: (m: number) => umasks.push(m),
+      stdout: {} as NodeJS.WriteStream,
+      stderr: {} as NodeJS.WriteStream,
+    } as unknown as NodeJS.Process;
+    const msg = {
+      t: "run" as const,
+      fingerprint: {} as never,
+      argv: [],
+      cwd: "/",
+      env: {},
+      tty: { stdout: { isTTY: false }, stderr: { isTTY: false } },
+    };
+    adoptCaller(msg, proc);
+    expect(umasks).toEqual([]);
+    adoptCaller({ ...msg, umask: 0o027 }, proc);
+    expect(umasks).toEqual([0o027]);
+  });
+
   test("keeps a 0-column TTY width and merges stderr into stdout for 2>&1", () => {
     const writes: string[] = [];
     const stdout = { write: (c: string) => writes.push(`out:${c}`) } as unknown as NodeJS.WriteStream;
@@ -305,7 +345,17 @@ describeWithNode("control process", () => {
       SERVE_SIM_CONTROL_ACCEPT_MS: "30000",
     };
     delete e.CI;
-    for (const k of ["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "NODE_USE_ENV_PROXY", "MARKER", "FAKE_WORKER_LOAD_FAIL"]) delete e[k];
+    for (const k of [
+      "NODE_OPTIONS",
+      "NODE_EXTRA_CA_CERTS",
+      "NODE_USE_ENV_PROXY",
+      "MARKER",
+      "FAKE_WORKER_LOAD_FAIL",
+      "CODEX_SANDBOX",
+      "CODEX_SANDBOX_NETWORK_DISABLED",
+      "SANDBOX_RUNTIME",
+    ])
+      delete e[k];
     delete e.SERVE_SIM_CONTROL;
     delete e.EXIT_CODE;
     for (const [k, v] of Object.entries(extra)) {
@@ -882,4 +932,27 @@ describeWithNode("control process", () => {
     child.kill("SIGINT");
   });
 
+  test("workers run with the caller's umask", async () => {
+    const daemon = await startDaemon();
+    const script = `umask $2 && exec "$0" "$1" tap 1 1`;
+    for (const mask of ["077", "027"]) {
+      const r = await run("/bin/sh", ["-c", script, nodePath!, binFile, mask]);
+      const seen = JSON.parse(r.stdout);
+      expect(seen.ppid).toBe(daemon.pid);
+      expect(seen.umask).toBe(parseInt(mask, 8));
+    }
+  });
+
+  test("sandboxed callers run in-process and never start a daemon", async () => {
+    for (const marker of [{ CODEX_SANDBOX: "seatbelt" }, { SANDBOX_RUNTIME: "1" }]) {
+      expect((await cli(["tap", "1", "1"], { env: marker })).code).toBe(0);
+    }
+    await Bun.sleep(300);
+    expect((await status()).running).toBe(false);
+    expect(daemonPids()).toEqual([]);
+    const daemon = await startDaemon();
+    const seen = JSON.parse((await cli(["tap", "1", "1"], { env: { CODEX_SANDBOX_NETWORK_DISABLED: "1" } })).stdout);
+    expect(seen.ppid).not.toBe(daemon.pid);
+    expect((await status()).served).toBe(0);
+  });
 });

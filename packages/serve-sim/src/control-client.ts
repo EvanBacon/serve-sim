@@ -25,6 +25,7 @@ import {
   isDispatchable,
   nodeRuntimeOverride,
   parseJsonFrame,
+  sandboxMarker,
   unsafeControlDir,
   unsafeControlSocket,
   withoutNodeRuntimeEnv,
@@ -141,6 +142,8 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
   if (!isDispatchable(args)) return bypass("not dispatchable");
   const runtime = nodeRuntimeOverride(ctx.env, ctx.execArgv);
   if (runtime) return bypass(`caller sets ${runtime}`);
+  const sandbox = sandboxMarker(ctx.env);
+  if (sandbox) return bypass(`sandboxed (${sandbox})`);
   let cwd: string;
   try {
     cwd = ctx.cwd();
@@ -209,6 +212,7 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
           stderr: { isTTY: ctx.stderr.isTTY === true, columns: ctx.stderr.columns },
         },
         sharedOutput: sameOutputFile(),
+        umask: process.umask(),
       });
     });
     conn.on("data", (chunk) => {

@@ -59,9 +59,20 @@ export function isDispatchable(args: readonly string[]): boolean {
   if (args.length === 1 && ROOT_INFO_FLAGS.has(first)) return true;
   if (first === "help") return args.length <= 2;
   if (!DISPATCHABLE_COMMANDS.has(first)) return false;
-  // stdin is not forwarded to workers.
+  // stdin is not forwarded to workers (nor are its /dev aliases).
   if (args.includes("--stdin")) return false;
+  if (readsDevFile(args)) return false;
   return true;
+}
+
+/** `--file /dev/stdin`, `--file=/dev/fd/0` and friends read the caller's fds. */
+function readsDevFile(args: readonly string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const value = a === "--file" ? args[i + 1] : a.startsWith("--file=") ? a.slice("--file=".length) : null;
+    if (value != null && value.startsWith("/dev/")) return true;
+  }
+  return false;
 }
 
 export type ControlMode = "off" | "use" | "auto";
@@ -97,6 +108,19 @@ export function withoutNodeRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   const out = { ...env };
   for (const key of NODE_RUNTIME_ENV) delete out[key];
   return out;
+}
+
+/**
+ * Env markers of an OS sandbox around the caller (Codex's seatbelt, Claude
+ * Code's sandbox runtime). A worker can't enter the caller's sandbox, and a
+ * daemon started inside one would confine everyone else's commands, so
+ * these callers run in-process and never start a daemon.
+ */
+const SANDBOX_ENV = ["CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "SANDBOX_RUNTIME"] as const;
+
+export function sandboxMarker(env: NodeJS.ProcessEnv): string | null {
+  for (const key of SANDBOX_ENV) if (env[key]) return key;
+  return null;
 }
 
 /** The first runtime setting the caller has that a worker can't honor. */
@@ -308,6 +332,8 @@ export type ControlMessage =
       tty: { stdout: StreamTty; stderr: StreamTty };
       /** The caller's stdout and stderr are the same file (e.g. `2>&1`). */
       sharedOutput?: boolean;
+      /** The caller's umask, so files the command writes get its modes. */
+      umask?: number;
     }
   // Two-phase start: the daemon replies `accepted` once it holds a worker
   // for the caller, and only hands it the command after the caller's `go`.

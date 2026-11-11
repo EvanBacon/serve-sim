@@ -26,6 +26,7 @@ async function main() {
         columns: process.stdout.columns ?? null,
         pid: process.pid,
         ppid: process.ppid,
+        umask: process.umask(),
       }),
     );
     process.stderr.write("to stderr\n");

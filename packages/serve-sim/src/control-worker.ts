@@ -1,8 +1,8 @@
 /**
  * A pre-warmed, single-use worker. It loads the full CLI bundle ahead of time
  * (that load is most of a cold `serve-sim` call), tells the daemon it is
- * ready, then waits for one command: it adopts the caller's argv, cwd, env
- * and TTY shape, runs the CLI exactly as the normal bin would, and exits.
+ * ready, then waits for one command: it adopts the caller's argv, cwd, env,
+ * umask and TTY shape, runs the CLI exactly as the normal bin would, and exits.
  *
  * Because every command still gets its own process, `process.exit`, exit
  * codes, signal handlers and module state behave as in a direct run.
@@ -34,6 +34,7 @@ function blockingWrites(stream: NodeJS.WriteStream): void {
 /** @lintignore Exported for tests. */
 export function adoptCaller(message: RunMessage, proc: NodeJS.Process = process): void {
   proc.chdir(message.cwd);
+  if (typeof message.umask === "number") proc.umask(message.umask);
   for (const key of Object.keys(proc.env)) {
     if (!(key in message.env)) delete proc.env[key];
   }
