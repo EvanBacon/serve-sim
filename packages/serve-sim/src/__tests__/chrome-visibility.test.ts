@@ -1,34 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   CHROME_VISIBILITY_STORAGE_KEY,
-  parseChromeHiddenQuery,
   persistChromeHiddenPreference,
   readChromeHiddenPreference,
   shouldUseDeviceChrome,
   shouldWrapDeviceChrome,
 } from "../client/utils/chrome-visibility";
-
-describe("parseChromeHiddenQuery", () => {
-  test("treats 0/off/false/hide/bare as hidden", () => {
-    for (const value of ["0", "off", "false", "hide", "bare", "OFF", " False "]) {
-      expect(parseChromeHiddenQuery(`chrome=${value}`)).toBe(true);
-    }
-  });
-
-  test("treats 1/on/true/show as shown", () => {
-    for (const value of ["1", "on", "true", "show", "ON"]) {
-      expect(parseChromeHiddenQuery(`?chrome=${value}`)).toBe(false);
-    }
-  });
-
-  test("ignores missing or unknown values", () => {
-    expect(parseChromeHiddenQuery("")).toBeNull();
-    expect(parseChromeHiddenQuery("device=abc")).toBeNull();
-    expect(parseChromeHiddenQuery("chrome=")).toBeNull();
-    expect(parseChromeHiddenQuery("chrome=maybe")).toBeNull();
-    expect(parseChromeHiddenQuery(null)).toBeNull();
-  });
-});
 
 describe("readChromeHiddenPreference", () => {
   test("defaults to shown when nothing is set", () => {
