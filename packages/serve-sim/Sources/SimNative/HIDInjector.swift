@@ -47,6 +47,8 @@ actor HIDInjector {
     private var hidClient: NSObject?
     private var sendSel: Selector?
     private var simDevice: NSObject?
+    /// Drops input once the device leaves Booted; see `HIDDeliveryGate`.
+    private var deliveryGate = HIDDeliveryGate { nil }
     private let springBoardLauncher = SpringBoardLauncher()
     private var deviceHubKeyboardBridge: DeviceHubKeyboardBridge?
 
@@ -94,6 +96,11 @@ actor HIDInjector {
                           userInfo: [NSLocalizedDescriptionKey: "Device \(deviceUDID) not found"])
         }
         self.simDevice = device
+        if device.responds(to: NSSelectorFromString("state")) {
+            deliveryGate = HIDDeliveryGate { [weak device] in
+                (device?.value(forKey: "state") as? NSNumber)?.intValue
+            }
+        }
         if let type = device.value(forKey: "deviceType") as? NSObject,
            let identifier = type.value(forKey: "identifier") as? String,
            identifier == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo" {
@@ -181,11 +188,27 @@ actor HIDInjector {
     static let edgeLeft: UInt32   = 1  // Left edge
     static let edgeRight: UInt32  = 4  // Right edge
 
+    /// False when the device has left Booted (e.g. `simctl shutdown`): the HID
+    /// client still accepts sends then, so this is the only drop signal.
+    private func deviceAcceptsInput() -> Bool {
+        switch deliveryGate.admit() {
+        case .deliver: return true
+        case .drop(let log):
+            if let log { print(log); fflush(stdout) }
+            return false
+        }
+    }
+
     /// Synchronously hand an already-built Indigo message to the guest, freeing it.
     /// Must run on `inputQueue`. Returns false when there is no HID client to
-    /// send through (setup never completed), so callers can report the drop.
+    /// send through (setup never completed) or the device is no longer booted,
+    /// so callers can report the drop.
     @discardableResult
     private func rawSend(_ msg: UnsafeMutableRawPointer) -> Bool {
+        guard deviceAcceptsInput() else {
+            free(msg)
+            return false
+        }
         guard let client = hidClient, let sendSel = sendSel else {
             print("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
             free(msg)
@@ -446,6 +469,7 @@ actor HIDInjector {
     /// Returns whether the press was handed to the guest.
     @discardableResult
     func sendButtonHID(page: UInt32, usage: UInt32, phase: String) async -> Bool {
+        guard deviceAcceptsInput() else { return false }
         if let duoBridge {
             switch phase {
             case "down": return duoBridge.send("key \(page) \(usage) 1")
@@ -484,6 +508,9 @@ actor HIDInjector {
     /// unknown button or when the HID client / message builder is missing).
     func sendButton(button: String, deviceUDID: String) async -> Bool {
         hidLog("[hid] Sending button: \(button)")
+        // Home relaunches SpringBoard and Duo buttons go through the guest
+        // helper, neither via `rawSend`, so check the device here too.
+        guard deviceAcceptsInput() else { return false }
 
         switch button {
         case "home":
