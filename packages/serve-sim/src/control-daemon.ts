@@ -20,12 +20,14 @@ import {
   isDispatchable,
   isStaleBuild,
   parseJsonFrame,
+  parseRunMessage,
   unsafeControlDir,
   withoutNodeRuntimeEnv,
   type ControlFingerprint,
   type ControlMessage,
   type ControlPaths,
   type ControlStatus,
+  type RunMessage,
 } from "./control-protocol";
 
 interface ControlDaemonOptions {
@@ -179,6 +181,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     busy,
     served,
     socket,
+    buffered: [...connections].reduce((n, c) => n + c.writableLength, 0),
   });
 
   const writeJsonFile = (file: string, value: unknown) => {
@@ -319,7 +322,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     if (!conn.destroyed) conn.end(encodeJson({ t: "bypass", reason }));
   }
 
-  async function runJob(conn: Socket, msg: Extract<ControlMessage, { t: "run" }>): Promise<void> {
+  async function runJob(conn: Socket, msg: RunMessage): Promise<void> {
     const mismatch = fingerprintMismatch(opts.fingerprint, msg.fingerprint);
     if (mismatch) {
       bypass(conn, `fingerprint:${mismatch}`);
@@ -328,14 +331,17 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
     }
     // Don't trust the client's filter: only short one-shot commands may
     // occupy a worker (and keep the daemon alive).
-    if (!Array.isArray(msg.argv) || !isDispatchable(msg.argv, typeof msg.cwd === "string" ? msg.cwd : undefined)) return bypass(conn, "not dispatchable");
+    if (!isDispatchable(msg.argv, msg.cwd)) return bypass(conn, "not dispatchable");
     if (stopping) return bypass(conn, "stopping");
     busy++;
     lastActiveAt = Date.now();
     let clientGone = false;
     let child: ChildProcess | null = null;
+    /** Called when the caller goes away, to stop holding back its output. */
+    let releaseOutput = () => {};
     conn.on("close", () => {
       clientGone = true;
+      releaseOutput();
       const worker = unhold(conn);
       if (worker) {
         // Accepted but never told to go: the worker is still pristine.
@@ -391,12 +397,31 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
       lastActiveAt = Date.now();
       c.stdout?.removeAllListeners("data");
       c.stderr?.removeAllListeners("data");
-      c.stdout?.on("data", (chunk: Buffer) => {
-        if (!clientGone) conn.write(encodeFrame(FRAME_STDOUT, chunk));
-      });
-      c.stderr?.on("data", (chunk: Buffer) => {
-        if (!clientGone) conn.write(encodeFrame(FRAME_STDERR, chunk));
-      });
+      // Backpressure: while the caller isn't keeping up (a slow pipe, a
+      // stopped pager), stop reading the worker's output rather than queue
+      // it here, where one big command could exhaust the shared daemon. The
+      // worker's writes are blocking, so it simply waits, as it would on a
+      // full pipe in a direct run.
+      const streams = [c.stdout, c.stderr].filter((x) => x != null);
+      let paused = false;
+      const resume = () => {
+        if (!paused) return;
+        paused = false;
+        for (const x of streams) x.resume();
+      };
+      // A caller that left can't drain: discard the rest so the worker
+      // (killed on close) can finish closing its pipes.
+      releaseOutput = resume;
+      conn.on("drain", resume);
+      const relay = (type: number) => (chunk: Buffer) => {
+        if (clientGone) return;
+        if (!conn.write(encodeFrame(type, chunk)) && !paused) {
+          paused = true;
+          for (const x of streams) x.pause();
+        }
+      };
+      c.stdout?.on("data", relay(FRAME_STDOUT));
+      c.stderr?.on("data", relay(FRAME_STDERR));
       // The command never reached the worker (it died just now): the
       // caller can still run it itself.
       let undelivered = false;
@@ -411,7 +436,7 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
         } else if (!clientGone) conn.end(encodeJson({ t: "exit", code, signal }));
         maybeFinishStop();
       });
-      const { t: _t, fingerprint: _fp, ...payload } = msg;
+      const { t: _t, fingerprint: _fp, ...payload } = msg; // already reduced to known fields
       try {
         c.send({ t: "run", ...payload }, (error) => {
           if (error) undelivered = true;
@@ -456,8 +481,15 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
           // (queued and held callers were bypassed, though `busy` only
           // drops for them a microtask later).
           conn.end(encodeJson({ t: "stopping", busy: busyChildren.size + held.size }));
-        } else if (msg.t === "run") void runJob(conn, msg);
-        else conn.destroy();
+        } else if (msg.t === "run") {
+          const runMsg = parseRunMessage(msg);
+          if (!runMsg) {
+            bypass(conn, "malformed run request");
+            continue;
+          }
+          // Never let one caller's job take the shared daemon down.
+          runJob(conn, runMsg).catch(() => conn.destroy());
+        } else conn.destroy();
       }
     });
   });

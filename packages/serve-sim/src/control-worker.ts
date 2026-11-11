@@ -7,9 +7,7 @@
  * Because every command still gets its own process, `process.exit`, exit
  * codes, signal handlers and module state behave as in a direct run.
  */
-import { CONTROL_ROLE_ENV, deferCliMain, type ControlMessage, type StreamTty } from "./control-protocol";
-
-type RunMessage = Extract<ControlMessage, { t: "run" }>;
+import { CONTROL_ROLE_ENV, deferCliMain, type ControlMessage, type RunMessage, type StreamTty } from "./control-protocol";
 
 function adoptTty(stream: NodeJS.WriteStream, tty: StreamTty | undefined): void {
   if (!tty?.isTTY) return;

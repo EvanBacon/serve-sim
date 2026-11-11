@@ -413,7 +413,7 @@ describeWithNode("control process", () => {
       .stdout.split("\n")
       .filter(Boolean);
 
-  async function status(): Promise<{ running: boolean; pid?: number; served?: number; warm?: number; busy?: number }> {
+  async function status(): Promise<{ running: boolean; pid?: number; served?: number; warm?: number; busy?: number; buffered?: number }> {
     const r = await cli(["control", "status", "--json"]);
     return JSON.parse(r.stdout);
   }
@@ -665,6 +665,45 @@ describeWithNode("control process", () => {
       c.resume();
     });
     expect((await cli(["--version"])).stdout).toBe("fake 1.0.0\n");
+
+    // `run` requests missing or mistyping required fields are bypassed,
+    // never crash the daemon, and never stop it as a "stale build".
+    const fp = controlFingerprint({ binFile, mainFile, execPath: nodePath!, env: env() });
+    const good = {
+      t: "run",
+      fingerprint: fp,
+      argv: ["tap", "1", "1"],
+      cwd: "/",
+      env: {},
+      tty: { stdout: { isTTY: false }, stderr: { isTTY: false } },
+    };
+    const malformed: unknown[] = [
+      { t: "run" },
+      { ...good, fingerprint: undefined },
+      { ...good, fingerprint: null },
+      { ...good, fingerprint: {} },
+      { ...good, fingerprint: { ...fp, protocol: "1" } },
+      { ...good, argv: "tap" },
+      { ...good, argv: ["tap", 1] },
+      { ...good, cwd: undefined },
+      { ...good, env: { A: 1 } },
+      { ...good, tty: undefined },
+      { ...good, tty: { stdout: { isTTY: false } } },
+      { ...good, umask: "022" },
+    ];
+    for (const msg of malformed) {
+      const reply = await new Promise<string>((resolve) => {
+        const c = createConnection(paths.socket);
+        let data = Buffer.alloc(0);
+        c.on("connect", () => c.write(encodeFrame(FRAME_JSON, JSON.stringify(msg))));
+        c.on("data", (d) => (data = Buffer.concat([data, Buffer.from(d)])));
+        c.on("close", () => resolve(new FrameDecoder().push(data).map((f) => f.payload.toString()).join("")));
+      });
+      expect(JSON.parse(reply)).toEqual({ t: "bypass", reason: "malformed run request" });
+    }
+    const after = await status();
+    expect(after).toMatchObject({ running: true, busy: 0, served: 1 });
+    expect(JSON.parse((await cli(["tap", "1", "1"])).stdout).ppid).toBe(after.pid);
   });
   // ─── Review regressions ──────────────────────────────────────────────
 
@@ -794,6 +833,40 @@ describeWithNode("control process", () => {
     expect(r.stdout.length).toBe(500_000);
     expect((await status()).served).toBe(1);
   });
+
+  test("a slow reader holds back a big output instead of buffering it in the daemon", async () => {
+    const daemon = await startDaemon();
+    const rss = (pid: number) => Number(spawnSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()) * 1024;
+    const before = rss(daemon.pid);
+    const size = 64 * 1024 * 1024;
+    // Nobody reads the pipe for 3 s, then it is counted. Under 2>&1 and
+    // with separate streams.
+    const pending = Promise.all(
+      [`"$0" "$1" event-log $2 | (sleep 3; wc -c)`, `"$0" "$1" event-log $2 2>&1 | (sleep 3; wc -c)`].map((script) =>
+        run("/bin/sh", ["-c", script, nodePath!, binFile, String(size)]),
+      ),
+    );
+    await until(async () => (await status()).busy === 2);
+    let peakBuffered = 0;
+    let peakRss = 0;
+    const end = Date.now() + 2000;
+    while (Date.now() < end) {
+      const s = await status();
+      // Still in flight: the workers are waiting on the readers.
+      expect(s.busy).toBe(2);
+      peakBuffered = Math.max(peakBuffered, s.buffered ?? 0);
+      peakRss = Math.max(peakRss, rss(daemon.pid));
+      await Bun.sleep(100);
+    }
+    expect(peakBuffered).toBeLessThan(4 * 1024 * 1024);
+    expect(peakRss - before).toBeLessThan(32 * 1024 * 1024);
+    for (const r of await pending) {
+      expect(r.code).toBe(0);
+      expect(r.stdout.trim()).toBe(String(size));
+    }
+    await until(async () => (await status()).busy === 0);
+    expect((await status()).served).toBe(2);
+  }, 30_000);
 
   test("keeps stdout/stderr order under 2>&1", async () => {
     const daemon = await startDaemon();
@@ -932,6 +1005,40 @@ describeWithNode("control process", () => {
     expect((await cli(["--version"])).stdout).toBe("fake 1.0.0\n");
     // Nothing pins it: it still idle-exits.
     await until(async () => !alive(daemon.pid), 12_000);
+  }, 30_000);
+
+  test("stop gives up on a daemon that never acknowledges and terminates only the recorded one", async () => {
+    const p = paths();
+    // Answers ping like a daemon but ignores stop; `__control-daemon` in its
+    // argv is what the pid check looks for.
+    const script = `
+      const net = require("net");
+      const pong = (pid) => { const b = Buffer.from(JSON.stringify({ t: "pong", status: { pid, startedAt: 0, lastActiveAt: Date.now(), idleMs: 60000, warm: 1, warming: 0, busy: 0, served: 0, socket: ${JSON.stringify(p.socket)} } })); const h = Buffer.alloc(5); h.writeUInt8(0x4a, 0); h.writeUInt32BE(b.length, 1); return Buffer.concat([h, b]); };
+      net.createServer((c) => c.on("data", (d) => { if (d.includes('"ping"')) c.end(pong(process.pid)); })).listen(${JSON.stringify(p.socket)}, () => console.log("up"));`;
+    const startFake = async () => {
+      const fake = spawn(nodePath!, ["-e", script, "__control-daemon"]);
+      stray.push(fake);
+      await new Promise<void>((resolve) => fake.stdout.on("data", () => resolve()));
+      return fake;
+    };
+
+    // The pid file names someone else: nothing is killed.
+    const fake = await startFake();
+    const bystander = spawn("/bin/sleep", ["30"]);
+    stray.push(bystander);
+    writeFileSync(p.pidFile, JSON.stringify({ pid: bystander.pid }));
+    const t0 = Date.now();
+    const r1 = JSON.parse((await cli(["control", "stop", "--json"])).stdout);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(r1).toMatchObject({ wasRunning: true, pid: fake.pid, stopped: false });
+    expect(alive(fake.pid!)).toBe(true);
+    expect(alive(bystander.pid!)).toBe(true);
+
+    // The pid file names it: it is terminated after the deadline.
+    writeFileSync(p.pidFile, JSON.stringify({ pid: fake.pid }));
+    const r2 = JSON.parse((await cli(["control", "stop", "--json"])).stdout);
+    expect(r2).toMatchObject({ wasRunning: true, pid: fake.pid, stopped: true });
+    expect(alive(fake.pid!)).toBe(false);
   }, 30_000);
 
   test("stop with a command in flight reports stopping, not stopped", async () => {

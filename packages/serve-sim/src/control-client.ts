@@ -215,6 +215,20 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
         umask: process.umask(),
       });
     });
+    // Backpressure: stop reading the socket while stdout/stderr can't keep
+    // up, so the daemon stops reading the worker instead of anyone
+    // buffering a big output in memory. Resume once every full destination
+    // has drained.
+    const full = new Set<NodeJS.WriteStream>();
+    const relay = (dest: NodeJS.WriteStream, payload: Buffer) => {
+      if (dest.write(payload) || full.has(dest)) return;
+      full.add(dest);
+      conn.pause();
+      dest.once("drain", () => {
+        full.delete(dest);
+        if (full.size === 0 && !settled) conn.resume();
+      });
+    };
     conn.on("data", (chunk) => {
       if (settled) return;
       let frames;
@@ -227,11 +241,11 @@ export function dispatchViaControl(args: string[], ctx: ControlContext): Promise
       for (const frame of frames) {
         if (settled) return;
         if (frame.type === FRAME_STDOUT) {
-          ctx.stdout.write(frame.payload);
+          relay(ctx.stdout, frame.payload);
           continue;
         }
         if (frame.type === FRAME_STDERR) {
-          ctx.stderr.write(frame.payload);
+          relay(ctx.stderr, frame.payload);
           continue;
         }
         const msg = parseJsonFrame(frame);
@@ -339,25 +353,52 @@ function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
   return waitFor(async () => (isAlive(pid) ? null : true), timeoutMs).then((v) => v === true);
 }
 
-/** Ask the daemon to stop; resolves with how many commands it is still running. */
-function requestStop(socket: string): Promise<number> {
+/** How long `control stop` waits for the daemon to acknowledge a stop. */
+const STOP_REPLY_TIMEOUT_MS = 2000;
+
+/**
+ * Ask the daemon to stop; resolves with how many commands it is still
+ * running, or null when it never acknowledged (wedged after answering ping).
+ */
+function requestStop(socket: string, timeoutMs = STOP_REPLY_TIMEOUT_MS): Promise<number | null> {
   return new Promise((resolve) => {
     const conn = createConnection(socket);
     const decoder = new FrameDecoder();
-    let busy = 0;
+    let busy: number | null = null;
+    const done = () => {
+      clearTimeout(timer);
+      conn.destroy();
+      resolve(busy);
+    };
+    const timer = setTimeout(done, timeoutMs);
     conn.on("connect", () => conn.write(encodeJson({ t: "stop" })));
     // Read the reply, or the socket never reaches end/close.
     conn.on("data", (chunk) => {
       try {
         for (const frame of decoder.push(chunk)) {
           const msg = parseJsonFrame(frame);
-          if (msg?.t === "stopping" && typeof msg.busy === "number") busy = msg.busy;
+          if (msg?.t === "stopping") busy = typeof msg.busy === "number" ? msg.busy : 0;
         }
       } catch {}
     });
-    conn.on("close", () => resolve(busy));
-    conn.on("error", () => resolve(busy));
+    conn.on("close", done);
+    conn.on("error", done);
   });
+}
+
+/**
+ * SIGTERM an unresponsive daemon, but only if the pid file names a live
+ * control daemon (not us, not a recycled pid) and, when `expected` is known
+ * from a ping, the same one. Resolves the pid tried and whether it exited.
+ */
+async function terminateRecordedDaemon(paths: ControlPaths, expected?: number): Promise<{ pid: number; stopped: boolean } | null> {
+  const rec = readPidRecord(paths.pidFile);
+  if (!rec || rec.pid === process.pid || (expected != null && rec.pid !== expected)) return null;
+  if (!isAlive(rec.pid) || !looksLikeDaemon(rec.pid)) return null;
+  try {
+    process.kill(rec.pid, "SIGTERM");
+  } catch {}
+  return { pid: rec.pid, stopped: await waitForExit(rec.pid, 3000) };
 }
 
 function formatStatus(s: ControlStatus): string {
@@ -466,19 +507,22 @@ export async function controlCli(args: string[], ctx: ControlContext): Promise<n
     let stopped = false;
     /** Commands the daemon is letting finish before it exits. */
     let running = 0;
-    if (status) {
-      running = await requestStop(paths.socket);
+    const acked = status ? await requestStop(paths.socket) : null;
+    if (status && acked != null) {
+      running = acked;
       stopped = await waitForExit(status.pid, running > 0 ? 1000 : 5000);
     } else {
-      // Alive but not answering (wedged or stopped): terminate it if the
-      // pid really is our daemon, not a recycled pid.
-      const rec = readPidRecord(paths.pidFile);
-      if (rec && rec.pid !== process.pid && isAlive(rec.pid) && looksLikeDaemon(rec.pid)) {
-        pid = rec.pid;
-        try {
-          process.kill(rec.pid, "SIGTERM");
-        } catch {}
-        stopped = await waitForExit(rec.pid, 3000);
+      // Alive but not answering (wedged or stopped), or it answered ping
+      // but never acknowledged the stop: terminate it if the pid really is
+      // our daemon, not a recycled pid.
+      // (One that exited on its own meanwhile just counts as stopped.)
+      if (status && !isAlive(status.pid)) stopped = true;
+      else {
+        const killed = await terminateRecordedDaemon(paths, status?.pid);
+        if (killed) {
+          pid = killed.pid;
+          stopped = killed.stopped;
+        }
       }
     }
     const cleared = await clearStaleControlFiles(paths);

@@ -391,6 +391,8 @@ export interface ControlStatus {
   busy: number;
   served: number;
   socket: string;
+  /** Command output queued for callers that aren't reading it yet. */
+  buffered?: number;
 }
 
 export function parseJsonFrame(frame: Frame): ControlMessage | null {
@@ -401,6 +403,52 @@ export function parseJsonFrame(frame: Frame): ControlMessage | null {
   } catch {
     return null;
   }
+}
+
+export type RunMessage = Extract<ControlMessage, { t: "run" }>;
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const isStreamTty = (v: unknown): v is StreamTty =>
+  isObject(v) && typeof v.isTTY === "boolean" && (v.columns === undefined || typeof v.columns === "number");
+
+const FINGERPRINT_TYPES: Record<keyof ControlFingerprint, "number" | "string"> = {
+  protocol: "number",
+  execPath: "string",
+  home: "string",
+  tmpdir: "string",
+  debug: "string",
+  binMtimeMs: "number",
+  mainMtimeMs: "number",
+};
+const isFingerprint = (v: unknown): v is ControlFingerprint =>
+  isObject(v) && Object.entries(FINGERPRINT_TYPES).every(([k, type]) => typeof v[k] === type);
+
+/**
+ * A well-formed `run` request, rebuilt from only the fields the protocol
+ * defines; null for anything else. The daemon must not trust its callers'
+ * JSON: a missing field would otherwise throw deep inside the job.
+ */
+export function parseRunMessage(msg: ControlMessage): RunMessage | null {
+  const m = msg as unknown as Record<string, unknown>;
+  if (m.t !== "run") return null;
+  const { fingerprint, argv, cwd, env, tty, sharedOutput, umask } = m;
+  if (!isFingerprint(fingerprint)) return null;
+  if (!Array.isArray(argv) || !argv.every((a) => typeof a === "string")) return null;
+  if (typeof cwd !== "string") return null;
+  if (!isObject(env) || !Object.values(env).every((v) => typeof v === "string")) return null;
+  if (!isObject(tty) || !isStreamTty(tty.stdout) || !isStreamTty(tty.stderr)) return null;
+  if (sharedOutput !== undefined && typeof sharedOutput !== "boolean") return null;
+  if (umask !== undefined && (typeof umask !== "number" || !Number.isInteger(umask) || umask < 0 || umask > 0o777)) return null;
+  return {
+    t: "run",
+    fingerprint,
+    argv: argv as string[],
+    cwd,
+    env: env as Record<string, string>,
+    tty: { stdout: tty.stdout, stderr: tty.stderr },
+    ...(sharedOutput !== undefined ? { sharedOutput } : {}),
+    ...(umask !== undefined ? { umask } : {}),
+  };
 }
 
 // ─── Deferred main ───────────────────────────────────────────────────────
