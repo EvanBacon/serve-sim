@@ -17,7 +17,6 @@ import {
   displayStreamConfig,
   streamDisplayGeometry,
   fallbackScreenSize,
-  isLandscapeConfig,
   screenBorderRadius,
   SimulatorToolbar,
   getDeviceType,
@@ -39,6 +38,9 @@ import { ChromeToolbarButton } from "./components/chrome-toolbar-button";
 import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
+import { DeviceRotor, DeviceRotorScreen, useDeviceRotationInFlight } from "./components/device-rotor";
+import { deviceChromeLayout, deviceRotationDegrees } from "./utils/device-rotation";
+import { usePrefersReducedMotion } from "./hooks/use-prefers-reduced-motion";
 import { GridPanel } from "./components/grid-panel";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
@@ -614,28 +616,37 @@ function AppWithConfig({
     : 1;
 
   // DeviceKit chrome wraps the live stream in the real device bezel (with
-  // working hardware buttons). It's authored portrait, so in landscape we drop
-  // back to the bare rounded screen. Viewers can also hide it (toolbar, tools
-  // panel, or `?chrome=0`) — default stays framed so desktop previews match
-  // Simulator.app. Foldables never ask: the 3D model is their frame.
+  // working hardware buttons). It's authored portrait, so other orientations
+  // turn the whole device (bezel + screen) on the page — the same thing
+  // Simulator.app shows — and animate that turn (see DeviceRotor). Viewers can
+  // also hide it (toolbar, tools panel, or `?chrome=0`) — default stays framed
+  // so desktop previews match Simulator.app. Foldables never ask: the 3D model
+  // is their frame.
   // When chromed, the on-screen container is the full frame (bezel + screen):
   // `chromeScale` is how much bigger the frame is than the screen, so we scale
   // the container up by it while keeping the *screen* at the same comfortable
   // size — and resize / panel-collision math all operate on the frame dimensions.
-  const isLandscape = isLandscapeConfig(activeStreamConfig);
+  const deviceDegrees = foldable
+    ? 0
+    : deviceRotationDegrees((activeStreamConfig as { orientation?: SimulatorOrientation }).orientation);
   const useChrome = !foldable && shouldUseDeviceChrome({
     hasChrome: !!activeChrome,
-    isLandscape,
     hideChrome,
   });
-  // Wrap whenever chrome *could* be shown. Toggling hideChrome only fades the
-  // bezel / expands the screen slot — remounting DeviceKitChrome would tear
-  // down SimulatorView and flash "Connecting…".
+  // Wrap whenever chrome *could* be shown. Toggling hideChrome or rotating
+  // only fades the bezel / turns the device — remounting DeviceKitChrome would
+  // tear down SimulatorView and flash "Connecting…".
   const wrapChrome = !foldable && shouldWrapDeviceChrome({
     hasChrome: !!activeChrome,
-    isLandscape,
   });
-  const chromeScale = useChrome ? activeChrome!.frame.width / activeChrome!.screen.width : 1;
+  const chromeLayout = useChrome
+    ? deviceChromeLayout(activeChrome!, (activeStreamConfig as { orientation?: SimulatorOrientation }).orientation)
+    : null;
+  const chromeScale = chromeLayout?.chromeScale ?? 1;
+  // While the device turns, the container snaps to its new size and the rotor
+  // carries the motion; a width / aspect tween here would squash the bezel.
+  const rotationInFlight = useDeviceRotationInFlight(deviceDegrees);
+  const reducedMotion = usePrefersReducedMotion();
   const duoAspect = duoProjection && duoProjection.width > 0 && duoProjection.height > 0
     ? duoProjection.width / duoProjection.height
     : 10 / 9;
@@ -644,13 +655,13 @@ function AppWithConfig({
     : frameMaxWidth * chromeScale;
   const containerAspectRatioValue = foldable
     ? duoAspect
-    : useChrome
-      ? activeChrome!.frame.width / activeChrome!.frame.height
+    : chromeLayout
+      ? chromeLayout.aspectRatio
       : frameAspectRatioValue;
   const containerAspectRatio = foldable
     ? String(duoAspect)
-    : useChrome
-      ? `${activeChrome!.frame.width} / ${activeChrome!.frame.height}`
+    : chromeLayout
+      ? chromeLayout.aspectRatioCss
       : frameAspectRatio;
 
   // Touch/button relay via direct WebSocket
@@ -1183,7 +1194,7 @@ function AppWithConfig({
         className="flex flex-col items-center gap-3 min-w-0"
         style={{
           width: simulatorFrameWidth,
-          transition: simulatorFrameLayoutTransition(simulatorResize),
+          transition: rotationInFlight ? "none" : simulatorFrameLayoutTransition(simulatorResize),
         }}
       >
         <SimulatorToolbar
@@ -1227,7 +1238,7 @@ function AppWithConfig({
           style={{
             width: simulatorFrameWidth,
             aspectRatio: containerAspectRatio,
-            transition: simulatorFrameLayoutTransition(simulatorResize),
+            transition: rotationInFlight ? "none" : simulatorFrameLayoutTransition(simulatorResize),
             willChange:
               simulatorResize.isResizing || simulatorResize.isInertia ? "width" : undefined,
           }}
@@ -1289,7 +1300,20 @@ function AppWithConfig({
                 )}
               </>
             );
-            if (!wrapChrome) return screenContent;
+            // The device turns as one unit (bezel + screen) inside DeviceRotor;
+            // DeviceRotorScreen turns the screen content back so the stream and
+            // input layer are axis-aligned at rest. Same tree in every
+            // orientation, so rotating never remounts the stream.
+            const turnedScreen = (
+              <DeviceRotorScreen degrees={deviceDegrees}>{screenContent}</DeviceRotorScreen>
+            );
+            if (!wrapChrome) {
+              return (
+                <DeviceRotor degrees={deviceDegrees} reducedMotion={reducedMotion}>
+                  {turnedScreen}
+                </DeviceRotor>
+              );
+            }
             // The screen slot is the bezel's true opening; the stream letterboxes
             // (contains) inside it, filling the constraining axis and leaving a
             // thin black margin on the other — the device's own black screen
@@ -1297,21 +1321,23 @@ function AppWithConfig({
             // overflowing past the bezel. `framed` hides that chrome without
             // swapping this wrapper (and the stream inside it).
             return (
-              <DeviceKitChrome
-                chrome={activeChrome!}
-                framed={useChrome}
-                interactive={useChrome}
-                onButton={handleChromeButton}
-                onCrownWheel={(deltaY, deltaMode) => {
-                  const delta = digitalCrownDeltaFromWheel(
-                    deltaY,
-                    deltaMode,
-                    deviceRenderedHeight || 1,
-                  );
-                  if (delta != null) onStreamDigitalCrown(delta);
-                }}
-                screen={screenContent}
-              />
+              <DeviceRotor degrees={deviceDegrees} reducedMotion={reducedMotion}>
+                <DeviceKitChrome
+                  chrome={activeChrome!}
+                  framed={useChrome}
+                  interactive={useChrome}
+                  onButton={handleChromeButton}
+                  onCrownWheel={(deltaY, deltaMode) => {
+                    const delta = digitalCrownDeltaFromWheel(
+                      deltaY,
+                      deltaMode,
+                      deviceRenderedHeight || 1,
+                    );
+                    if (delta != null) onStreamDigitalCrown(delta);
+                  }}
+                  screen={turnedScreen}
+                />
+              </DeviceRotor>
             );
           })()}
           {mediaDrop.isDragOver && (

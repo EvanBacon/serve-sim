@@ -89,28 +89,21 @@ describe("persistChromeHiddenPreference", () => {
 });
 
 describe("shouldUseDeviceChrome", () => {
-  test("shows chrome only when data exists, portrait, and the user has not hidden it", () => {
-    expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: false, hideChrome: false })).toBe(true);
-    expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: false, hideChrome: true })).toBe(false);
+  test("shows chrome when data exists and the user has not hidden it", () => {
+    expect(shouldUseDeviceChrome({ hasChrome: true, hideChrome: false })).toBe(true);
+    expect(shouldUseDeviceChrome({ hasChrome: true, hideChrome: true })).toBe(false);
+    expect(shouldUseDeviceChrome({ hasChrome: false, hideChrome: false })).toBe(false);
   });
-
-  test("keeps landscape and missing-chrome paths unframed", () => {
-    expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: true, hideChrome: false })).toBe(false);
-    expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: true, hideChrome: true })).toBe(false);
-    expect(shouldUseDeviceChrome({ hasChrome: false, isLandscape: false, hideChrome: false })).toBe(false);
-  });
-
 });
 
 describe("shouldWrapDeviceChrome", () => {
   test("keeps the chrome wrapper mounted when the user hides the bezel", () => {
-    expect(shouldWrapDeviceChrome({ hasChrome: true, isLandscape: false })).toBe(true);
-    expect(shouldUseDeviceChrome({ hasChrome: true, isLandscape: false, hideChrome: true })).toBe(false);
+    expect(shouldWrapDeviceChrome({ hasChrome: true })).toBe(true);
+    expect(shouldUseDeviceChrome({ hasChrome: true, hideChrome: true })).toBe(false);
   });
 
-  test("does not wrap landscape or missing-chrome paths", () => {
-    expect(shouldWrapDeviceChrome({ hasChrome: true, isLandscape: true })).toBe(false);
-    expect(shouldWrapDeviceChrome({ hasChrome: false, isLandscape: false })).toBe(false);
+  test("does not wrap devices without chrome data", () => {
+    expect(shouldWrapDeviceChrome({ hasChrome: false })).toBe(false);
   });
 });
 
