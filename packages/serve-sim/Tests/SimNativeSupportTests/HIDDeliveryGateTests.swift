@@ -117,4 +117,41 @@ final class HIDDeliveryGateTests: XCTestCase {
         XCTAssertFalse(HIDDeliveryGate.isClientDisconnected(domain: domain, code: 2))
         XCTAssertFalse(HIDDeliveryGate.isClientDisconnected(domain: NSPOSIXErrorDomain, code: 3))
     }
+
+
+    func testTimedOutStateReadDropsInput() {
+        let hold = NSCondition()
+        var stuck = true
+        let gate = HIDDeliveryGate(readState: {
+            hold.lock()
+            while stuck { hold.wait() }
+            hold.unlock()
+            return 3
+        }, timeout: 0.05)
+        let t0 = Date()
+        guard case .drop(let log) = gate.admit() else { return XCTFail("expected drop") }
+        XCTAssertEqual(log, "[hid] Dropping input: simulator state could not be read in time")
+        XCTAssertLessThan(Date().timeIntervalSince(t0), 0.2)
+        // Same in-flight read: no second log, still a drop, still fast.
+        XCTAssertEqual(gate.admit(), .drop(log: nil))
+        hold.lock(); stuck = false; hold.broadcast(); hold.unlock()
+        // After the stuck read finishes (Booted) the next admit delivers
+        // and asks for a reconnect, because the timeout was treated as a trip
+        // out of a known-good state.
+        let deadline = Date().addingTimeInterval(1)
+        var last: HIDDeliveryGate.Decision?
+        while Date() < deadline {
+            last = gate.admit()
+            if case .deliver = last { break }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertEqual(last, .deliver(reconnect: true))
+    }
+
+    func testIsClientNotReadyIsHIDError2() {
+        let domain = "SimulatorKit.SimDeviceLegacyHIDClient.HIDError"
+        XCTAssertTrue(HIDDeliveryGate.isClientNotReady(domain: domain, code: 2))
+        XCTAssertFalse(HIDDeliveryGate.isClientNotReady(domain: domain, code: 3))
+        XCTAssertFalse(HIDDeliveryGate.isClientNotReady(domain: NSPOSIXErrorDomain, code: 2))
+    }
 }

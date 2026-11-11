@@ -74,6 +74,10 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
   }, 180_000);
 
   test("tap fails with an undelivered error within 2s of shutdown, while the server is up", async () => {
+    // The bound is 2s because a correct drop is fast (locally ~0.4–1.2s,
+    // including CLI startup). On macos-26 CI, a synchronous SimDevice.state
+    // read during `simctl shutdown` blocked the first tap for 6312ms; the
+    // gate now times that read out at 100ms, so this bound stays at 2s.
     expect(tap().status).toBe(0);
 
     const shutdown = spawn("xcrun", ["simctl", "shutdown", udid!], { stdio: "ignore" });
@@ -98,7 +102,7 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     expect(down.stderr).not.toContain(NO_SERVER);
   }, 60_000);
 
-  test("after the same simulator boots again, the server rebuilds its HID client", async () => {
+  test("after the same simulator boots again, a tap on the guest lands", async () => {
     bootAndWait();
     const r = await tapUntilOk(30_000);
     expect(r.stderr).not.toContain(NO_SERVER);
@@ -109,5 +113,38 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     while (!serverLog.includes(RECONNECTED) && Date.now() < deadline) await sleep(100);
     expect(serverLog).toContain(RECONNECTED);
     expect(serverLog.split(RECONNECTED).length - 1).toBe(1);
+
+    // Prove the rebuilt client actually delivers: open Settings, tap General,
+    // and assert the General screen (About) appears in the AX tree.
+    try { execFileSync("xcrun", ["simctl", "terminate", udid!, "com.apple.Preferences"], { stdio: "pipe" }); } catch {}
+    execFileSync("xcrun", ["simctl", "launch", udid!, "com.apple.Preferences"], { stdio: "pipe", timeout: 30_000 });
+
+    const axText = (): { status: number | null; stdout: string } => {
+      const s = spawnSync("node", [CLI, "ax", "--refs", "--text", "-d", udid!], { encoding: "utf-8", timeout: 15_000 });
+      return { status: s.status, stdout: s.stdout ?? "" };
+    };
+
+    let snapshot = "";
+    const settingsDeadline = Date.now() + 20_000;
+    while (Date.now() < settingsDeadline) {
+      const s = axText();
+      if (s.status === 0 && /"General"/.test(s.stdout)) { snapshot = s.stdout; break; }
+      await sleep(500);
+    }
+    if (!/"General"/.test(snapshot)) throw new Error(`Settings did not show a General row after launch:\n${snapshot}`);
+    const generalRef = snapshot.match(/(@e\d+)\s+\S+\s+"General"/)?.[1];
+    if (!generalRef) throw new Error(`could not find a General ref in:\n${snapshot}`);
+    const tapped = spawnSync("node", [CLI, "tap", generalRef, "-d", udid!], { encoding: "utf-8", timeout: 15_000 });
+    expect(tapped.status).toBe(0);
+    expect(tapped.stderr).not.toContain(NO_SERVER);
+
+    let after = "";
+    const generalDeadline = Date.now() + 15_000;
+    while (Date.now() < generalDeadline) {
+      const s = axText();
+      if (s.status === 0 && /"About"/.test(s.stdout)) { after = s.stdout; break; }
+      await sleep(300);
+    }
+    if (!/"About"/.test(after)) throw new Error(`tapping General should open the General screen (About row):\n${after}`);
   }, 180_000);
 });

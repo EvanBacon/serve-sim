@@ -15,6 +15,7 @@ final class HIDClientChannelTests: XCTestCase {
         var connectSucceeds = true
         var logs: [String] = []
         var reconnectHooks = 0
+        var now: TimeInterval = 0
         lazy var channel: HIDClientChannel<FakeClient> = {
             let gate = HIDDeliveryGate { [unowned self] in
                 self.stateReads += 1
@@ -27,7 +28,9 @@ final class HIDClientChannelTests: XCTestCase {
                     return self.connectSucceeds ? FakeClient() : nil
                 },
                 log: { [unowned self] in self.logs.append($0) },
-                didReconnect: { [unowned self] in self.reconnectHooks += 1 }
+                didReconnect: { [unowned self] in self.reconnectHooks += 1 },
+                now: { [unowned self] in self.now },
+                notReadyLimit: 30
             )
         }()
 
@@ -126,8 +129,49 @@ final class HIDClientChannelTests: XCTestCase {
     func testBootErrorsDoNotRebuild() {
         let h = Harness(); h.setup()
         h.channel.clientReported(h.channel.client!, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
-        XCTAssertTrue(h.channel.send { _ in true })
+        // Still the same client: error 2 means "not ready", not "disconnected".
+        var sends = 0
+        XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
+        XCTAssertEqual(sends, 0)
         XCTAssertEqual(h.connects, 1)
+    }
+
+    func testHIDError2DropsUntilASuccessfulSend() {
+        let h = Harness(); h.setup()
+        let client = h.channel.client!
+        h.channel.clientReported(client, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
+        var sends = 0
+        XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
+        XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
+        XCTAssertEqual(sends, 0)
+        XCTAssertEqual(h.logs, [HIDClientChannel<FakeClient>.notReadyMessage])
+        h.channel.clientReportedSuccess(client)
+        XCTAssertTrue(h.channel.send { _ in sends += 1; return true })
+        XCTAssertEqual(sends, 1)
+        XCTAssertEqual(h.connects, 1)
+    }
+
+    func testHIDError2ExpiresAfterTheLimit() {
+        let h = Harness(); h.setup()
+        h.channel.clientReported(h.channel.client!, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
+        h.now = 29
+        XCTAssertFalse(h.channel.send { _ in true })
+        h.now = 30
+        var sends = 0
+        XCTAssertTrue(h.channel.send { _ in sends += 1; return true })
+        XCTAssertEqual(sends, 1)
+        XCTAssertEqual(h.connects, 1)
+    }
+
+    func testLateSuccessFromAReplacedClientIsIgnored() {
+        let h = Harness(); h.setup()
+        let first = h.channel.client!
+        h.channel.clientReported(first, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 3)
+        XCTAssertTrue(h.channel.send { _ in true }) // rebuilt
+        h.channel.clientReported(h.channel.client!, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
+        h.channel.clientReportedSuccess(first) // stale success must not clear not-ready
+        XCTAssertFalse(h.channel.send { _ in true })
+        XCTAssertEqual(h.connects, 2)
     }
 
     func testFailedReconnectReportsUndeliveredAndRetries() {

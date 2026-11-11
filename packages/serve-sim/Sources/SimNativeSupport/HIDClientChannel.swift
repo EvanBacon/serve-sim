@@ -14,29 +14,43 @@ import Foundation
 /// and the device's notifications).
 public final class HIDClientChannel<Client: AnyObject> {
     public static var reconnectedMessage: String { "[hid] Simulator Booted again, reconnected HID client" }
+    public static var notReadyMessage: String { "[hid] Dropping input: HID client is not ready (HIDError 2, guest still starting)" }
+    public static var notReadyLimit: TimeInterval { 30 }
 
     private let gate: HIDDeliveryGate
     private let makeClient: () -> Client?
     private let log: (String) -> Void
     private let didReconnect: () -> Void
+    private let now: () -> TimeInterval
+    private let notReadyLimit: TimeInterval
+    private var notReady = false
+    private var notReadySince: TimeInterval?
+    private var loggedNotReady = false
     public private(set) var client: Client?
 
     public init(
         gate: HIDDeliveryGate,
         connect: @escaping () -> Client?,
         log: @escaping (String) -> Void,
-        didReconnect: @escaping () -> Void = {}
+        didReconnect: @escaping () -> Void = {},
+        now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        notReadyLimit: TimeInterval = HIDClientChannel<Client>.notReadyLimit
     ) {
         self.gate = gate
         self.makeClient = connect
         self.log = log
         self.didReconnect = didReconnect
+        self.now = now
+        self.notReadyLimit = notReadyLimit
     }
 
     /// Create (or replace) the client. Returns whether one exists now.
     @discardableResult
     public func connect() -> Bool {
         client = makeClient()
+        notReady = false
+        notReadySince = nil
+        loggedNotReady = false
         return client != nil
     }
 
@@ -44,6 +58,9 @@ public final class HIDClientChannel<Client: AnyObject> {
     /// its error can fail setup).
     public func adopt(_ client: Client) {
         self.client = client
+        notReady = false
+        notReadySince = nil
+        loggedNotReady = false
     }
 
     /// Whether input may go to the guest now. Rebuilds the client first when
@@ -54,7 +71,7 @@ public final class HIDClientChannel<Client: AnyObject> {
             if let message { log(message) }
             return false
         case .deliver(reconnect: false):
-            return true
+            return admitReady()
         case .deliver(reconnect: true):
             guard connect() else {
                 // Try again on the next input rather than sending through a dead port.
@@ -64,7 +81,7 @@ public final class HIDClientChannel<Client: AnyObject> {
             }
             log(Self.reconnectedMessage)
             didReconnect()
-            return true
+            return admitReady()
         }
     }
 
@@ -91,15 +108,56 @@ public final class HIDClientChannel<Client: AnyObject> {
     }
 
     /// A send completion from `reporter`. A disconnect error from the
-    /// current client makes the next input rebuild it. Late errors from a
-    /// client that was already replaced are ignored.
+    /// current client makes the next input rebuild it. A not-ready error
+    /// (HIDError 2) drops later input until a send completes without error
+    /// or `notReadyLimit` has passed. Late errors from a client that was
+    /// already replaced are ignored.
     public func clientReported(_ reporter: Client, domain: String, code: Int) {
-        guard reporter === client, HIDDeliveryGate.isClientDisconnected(domain: domain, code: code) else { return }
-        gate.noteClientDisconnected()
+        guard reporter === client else { return }
+        if HIDDeliveryGate.isClientDisconnected(domain: domain, code: code) {
+            gate.noteClientDisconnected()
+            notReady = false
+            notReadySince = nil
+            loggedNotReady = false
+            return
+        }
+        guard HIDDeliveryGate.isClientNotReady(domain: domain, code: code) else { return }
+        if !notReady {
+            notReady = true
+            notReadySince = now()
+            loggedNotReady = false
+        }
+    }
+
+    /// A successful send completion from `reporter` clears the not-ready
+    /// flag: the guest accepted input, so later sends can be acked again.
+    public func clientReportedSuccess(_ reporter: Client) {
+        guard reporter === client else { return }
+        notReady = false
+        notReadySince = nil
+        loggedNotReady = false
     }
 
     /// See `HIDDeliveryGate.noteNotification`.
     public func noteDeviceNotification(_ info: [AnyHashable: Any]) {
         gate.noteNotification(info)
+    }
+
+    /// After the gate has admitted the device as Booted, drop input while
+    /// the current client is still reporting HIDError 2 (iOS starting up).
+    private func admitReady() -> Bool {
+        guard notReady else { return true }
+        let started = notReadySince ?? now()
+        if now() - started >= notReadyLimit {
+            notReady = false
+            notReadySince = nil
+            loggedNotReady = false
+            return true
+        }
+        if !loggedNotReady {
+            log(Self.notReadyMessage)
+            loggedNotReady = true
+        }
+        return false
     }
 }

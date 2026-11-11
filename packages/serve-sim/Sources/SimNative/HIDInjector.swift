@@ -55,7 +55,6 @@ actor HIDInjector {
     /// and runs on `queue`, which is this actor's executor.
     private var completion: AnyObject?
     private weak var completionClient: NSObject?
-    private var notificationHandlerID: UInt?
     private var simDevice: NSObject?
     private let springBoardLauncher = SpringBoardLauncher()
     private var deviceHubKeyboardBridge: DeviceHubKeyboardBridge?
@@ -146,10 +145,14 @@ actor HIDInjector {
         }
 
 
-        // Read on every admit (a plain in-process KVC read).
-        let gate = device.responds(to: NSSelectorFromString("state"))
-            ? HIDDeliveryGate { (device.value(forKey: "state") as? NSNumber)?.intValue }
-            : HIDDeliveryGate { nil }
+        // Read on every admit, with a 100ms cap. The KVC read is usually
+        // cheap, but `simctl shutdown` can hold a CoreSimulator lock for
+        // several seconds (6.3s on macos-26 CI); a synchronous read on this
+        // actor would hang the tap ack that long.
+        let readState: () -> Int? = device.responds(to: NSSelectorFromString("state"))
+            ? { (device.value(forKey: "state") as? NSNumber)?.intValue }
+            : { nil }
+        let gate = HIDDeliveryGate(readState: readState, timeout: HIDDeliveryGate.stateReadTimeout)
         // Thrown errors here fail setup, as before.
         let firstClient = try Self.makeHIDClient(device: device)
         let duo = duoBridge
@@ -212,10 +215,37 @@ actor HIDInjector {
         return clientObj
     }
 
+    /// Holds a `SimDevice` notification registration so it is released even
+    /// if `close()` is never called (the JS `SimHID` handle can be dropped
+    /// by GC). The actor stores this object; `deinit` unregisters.
+    private final class NotificationSubscription {
+        private let device: NSObject
+        private var id: UInt?
+
+        init(device: NSObject) { self.device = device }
+
+        func setID(_ id: UInt) { self.id = id }
+
+        func unregister() {
+            let sel = NSSelectorFromString("unregisterNotificationHandler:error:")
+            guard let id, device.responds(to: sel) else { return }
+            self.id = nil
+            typealias UnregisterFunc = @convention(c) (AnyObject, Selector, UInt, AutoreleasingUnsafeMutablePointer<NSError?>) -> ObjCBool
+            var error: NSError?
+            _ = unsafeBitCast(device.method(for: sel), to: UnregisterFunc.self)(device, sel, id, &error)
+        }
+
+        deinit { unregister() }
+    }
+
+    private var notifications: NotificationSubscription?
+
     /// Watch `device_state` so a shutdown + boot with no input in between still
     /// rebuilds the client: then the gate only ever reads Booted. The handler
     /// runs on `queue`, this actor's executor, so it never races the channel.
     private func registerStateNotifications(device: NSObject) {
+        notifications?.unregister()
+        notifications = nil
         let sel = NSSelectorFromString("registerNotificationHandlerOnQueue:handler:")
         guard device.responds(to: sel) else { return }
         let channel = self.channel
@@ -223,18 +253,17 @@ actor HIDInjector {
             guard let info = info as? [AnyHashable: Any] else { return }
             channel?.noteDeviceNotification(info)
         }
+        let sub = NotificationSubscription(device: device)
         typealias RegisterFunc = @convention(c) (AnyObject, Selector, AnyObject, AnyObject) -> UInt
-        notificationHandlerID = unsafeBitCast(device.method(for: sel), to: RegisterFunc.self)(
+        let id = unsafeBitCast(device.method(for: sel), to: RegisterFunc.self)(
             device, sel, queue, handler as AnyObject)
+        sub.setID(id)
+        notifications = sub
     }
 
     private func unregisterStateNotifications() {
-        let sel = NSSelectorFromString("unregisterNotificationHandler:error:")
-        guard let id = notificationHandlerID, let device = simDevice, device.responds(to: sel) else { return }
-        notificationHandlerID = nil
-        typealias UnregisterFunc = @convention(c) (AnyObject, Selector, UInt, AutoreleasingUnsafeMutablePointer<NSError?>) -> ObjCBool
-        var error: NSError?
-        _ = unsafeBitCast(device.method(for: sel), to: UnregisterFunc.self)(device, sel, id, &error)
+        notifications?.unregister()
+        notifications = nil
     }
 
     /// The completion block for sends through `client`. A HIDError 3 from it
@@ -244,9 +273,16 @@ actor HIDInjector {
     private func completion(for client: NSObject) -> AnyObject {
         if let completion, completionClient === client { return completion }
         let channel = self.channel
+        // Completions run on `queue` (this actor's executor). They are not
+        // awaited: waiting would add the HID round trip to every send (measured
+        // as no extra cost with a nil completion vs this fire-and-forget block).
         let block: @convention(block) (NSError?) -> Void = { [weak channel, weak client] error in
-            guard let error, let channel, let client else { return }
-            channel.clientReported(client, domain: error.domain, code: error.code)
+            guard let channel, let client else { return }
+            if let error {
+                channel.clientReported(client, domain: error.domain, code: error.code)
+            } else {
+                channel.clientReportedSuccess(client)
+            }
         }
         completion = block as AnyObject
         completionClient = client
