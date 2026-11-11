@@ -852,4 +852,34 @@ describeWithNode("control process", () => {
     await until(async () => !alive(daemon.pid), 8000);
   });
 
+  test("stop with a command in flight reports stopping, not stopped", async () => {
+    const daemon = await startDaemon();
+    const child = spawn(nodePath!, [binFile, "settle"], { cwd: work, env: env() });
+    stray.push(child);
+    await new Promise<void>((resolve) => child.stdout.on("data", () => resolve()));
+    const stop = await cli(["control", "stop", "--json"]);
+    expect(JSON.parse(stop.stdout)).toEqual({
+      wasRunning: true,
+      pid: daemon.pid,
+      stopped: false,
+      stopping: true,
+      busy: 1,
+      clearedStale: false,
+    });
+    expect(alive(daemon.pid)).toBe(true);
+    child.kill("SIGINT");
+    await until(async () => !alive(daemon.pid));
+    expect(JSON.parse((await cli(["control", "stop", "--json"])).stdout)).toMatchObject({ wasRunning: false });
+  });
+
+  test("stop text output says it is waiting for running commands", async () => {
+    await startDaemon();
+    const child = spawn(nodePath!, [binFile, "settle"], { cwd: work, env: env() });
+    stray.push(child);
+    await new Promise<void>((resolve) => child.stdout.on("data", () => resolve()));
+    const stop = await cli(["control", "stop"]);
+    expect(stop.stdout).toMatch(/^stopping \(pid \d+\); waiting for 1 running command\(s\) to finish\n$/);
+    child.kill("SIGINT");
+  });
+
 });

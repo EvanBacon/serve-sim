@@ -319,7 +319,8 @@ export type ControlMessage =
   | { t: "bypass"; reason: string }
   | { t: "exit"; code: number | null; signal: string | null }
   | { t: "pong"; status: ControlStatus }
-  | { t: "stopping" };
+  /** `busy`: commands still running; the daemon exits once they finish. */
+  | { t: "stopping"; busy?: number };
 
 export interface ControlStatus {
   pid: number;

@@ -331,6 +331,31 @@ async function waitFor<T>(probe: () => Promise<T | null>, timeoutMs: number): Pr
   }
 }
 
+function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  return waitFor(async () => (isAlive(pid) ? null : true), timeoutMs).then((v) => v === true);
+}
+
+/** Ask the daemon to stop; resolves with how many commands it is still running. */
+function requestStop(socket: string): Promise<number> {
+  return new Promise((resolve) => {
+    const conn = createConnection(socket);
+    const decoder = new FrameDecoder();
+    let busy = 0;
+    conn.on("connect", () => conn.write(encodeJson({ t: "stop" })));
+    // Read the reply, or the socket never reaches end/close.
+    conn.on("data", (chunk) => {
+      try {
+        for (const frame of decoder.push(chunk)) {
+          const msg = parseJsonFrame(frame);
+          if (msg?.t === "stopping" && typeof msg.busy === "number") busy = msg.busy;
+        }
+      } catch {}
+    });
+    conn.on("close", () => resolve(busy));
+    conn.on("error", () => resolve(busy));
+  });
+}
+
 function formatStatus(s: ControlStatus): string {
   const idleLeft = Math.max(0, s.idleMs - (Date.now() - s.lastActiveAt));
   return (
@@ -407,40 +432,43 @@ export async function controlCli(args: string[], ctx: ControlContext): Promise<n
   }
   if (verb === "stop") {
     const status = await pingSocket(paths.socket);
+    let pid: number | null = status?.pid ?? null;
     let stopped = false;
-    let stoppedPid: number | null = status?.pid ?? null;
+    /** Commands the daemon is letting finish before it exits. */
+    let running = 0;
     if (status) {
-      await new Promise<void>((resolve) => {
-        const conn = createConnection(paths.socket);
-        conn.on("connect", () => conn.write(encodeJson({ t: "stop" })));
-        // Consume the reply, or the socket never reaches end/close.
-        conn.resume();
-        conn.on("close", () => resolve());
-        conn.on("error", () => resolve());
-      });
-      stopped = (await waitFor(async () => (isAlive(status.pid) ? null : true), 5000)) === true;
-      if (!stopped) {
-        try {
-          process.kill(status.pid, "SIGTERM");
-        } catch {}
-      }
-    }
-    if (!status) {
+      running = await requestStop(paths.socket);
+      stopped = await waitForExit(status.pid, running > 0 ? 1000 : 5000);
+    } else {
       // Alive but not answering (wedged or stopped): terminate it if the
       // pid really is our daemon, not a recycled pid.
       const rec = readPidRecord(paths.pidFile);
       if (rec && rec.pid !== process.pid && isAlive(rec.pid) && looksLikeDaemon(rec.pid)) {
+        pid = rec.pid;
         try {
           process.kill(rec.pid, "SIGTERM");
-          stoppedPid = rec.pid;
-          stopped = (await waitFor(async () => (isAlive(rec.pid) ? null : true), 3000)) === true;
         } catch {}
+        stopped = await waitForExit(rec.pid, 3000);
       }
     }
     const cleared = await clearStaleControlFiles(paths);
-    const wasRunning = stoppedPid != null;
-    if (json) out(JSON.stringify({ wasRunning, pid: stoppedPid, stopped: wasRunning && (stopped || status != null), clearedStale: cleared }));
-    else out(wasRunning ? `stopped (pid ${stoppedPid})` : cleared ? "not running (cleared stale files)" : "not running");
+    const wasRunning = pid != null;
+    // Only report stopped once the process is really gone.
+    const stopping = wasRunning && !stopped;
+    if (json) {
+      out(
+        JSON.stringify({
+          wasRunning,
+          pid,
+          stopped: wasRunning && stopped,
+          ...(stopping ? { stopping: true, busy: running } : {}),
+          clearedStale: cleared,
+        }),
+      );
+    } else if (!wasRunning) out(cleared ? "not running (cleared stale files)" : "not running");
+    else if (stopped) out(`stopped (pid ${pid})`);
+    else if (running > 0) out(`stopping (pid ${pid}); waiting for ${running} running command(s) to finish`);
+    else out(`stopping (pid ${pid}); it has not exited yet`);
     return 0;
   }
   ctx.stderr.write(`serve-sim: unknown control verb '${verb}'\n${CONTROL_USAGE}\n`);

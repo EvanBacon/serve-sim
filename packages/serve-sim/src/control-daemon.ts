@@ -452,8 +452,9 @@ async function startControlDaemon(opts: ControlDaemonOptions): Promise<ControlDa
         first = false;
         if (msg.t === "ping") conn.end(encodeJson({ t: "pong", status: status() }));
         else if (msg.t === "stop") {
-          conn.end(encodeJson({ t: "stopping" }));
           shutdown("stop requested");
+          // What's left after shutdown is commands that are already running.
+          conn.end(encodeJson({ t: "stopping", busy }));
         } else if (msg.t === "run") void runJob(conn, msg);
         else conn.destroy();
       }
