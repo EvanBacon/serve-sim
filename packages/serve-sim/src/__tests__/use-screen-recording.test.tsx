@@ -50,15 +50,17 @@ afterEach(async () => {
   }
 });
 
-function Harness({ device, pollMs }: { device: string | null; pollMs: number }) {
-  hook = useScreenRecording(device, { pollMs });
+type Downloaded = { fileName: string; blob: Blob };
+
+function Harness({ device, pollMs, onDownloaded }: { device: string | null; pollMs: number; onDownloaded?: (d: Downloaded) => void }) {
+  hook = useScreenRecording(device, { pollMs, onDownloaded });
   return null;
 }
 
-async function render(device: string | null, pollMs = 60_000) {
+async function render(device: string | null, pollMs = 60_000, onDownloaded?: (d: Downloaded) => void) {
   await act(async () => {
     if (!root) root = createRoot(dom.document.createElement("div") as unknown as HTMLElement);
-    root.render(<Harness device={device} pollMs={pollMs} />);
+    root.render(<Harness device={device} pollMs={pollMs} onDownloaded={onDownloaded} />);
   });
   await flush();
 }
@@ -70,6 +72,31 @@ async function flush(ms = 5) {
 const STARTED = "2026-10-23T08:00:00.000Z";
 
 describe("useScreenRecording", () => {
+  test("hands the downloaded MP4 and its file name to onDownloaded (the Finder toast)", async () => {
+    const fileName = "serve-sim-recording-2026-11-11-12-30-00.mp4";
+    handler = ({ method, path }) => {
+      if (path.endsWith("/recording/stop")) {
+        return new Response("mp4-bytes", {
+          headers: { "content-type": "video/mp4", "content-disposition": `attachment; filename="${fileName}"` },
+        });
+      }
+      if (method === "GET") return json({ recording: true, startedAt: STARTED });
+      return json({});
+    };
+    const realCreate = URL.createObjectURL;
+    URL.createObjectURL = () => "blob:test";
+    const downloaded: Downloaded[] = [];
+    try {
+      await render("A", 60_000, (d) => downloaded.push(d));
+      await act(async () => { await hook.stop(); });
+    } finally {
+      URL.createObjectURL = realCreate;
+    }
+    expect(downloaded.map((d) => d.fileName)).toEqual([fileName]);
+    expect(await downloaded[0]!.blob.text()).toBe("mp4-bytes");
+    expect(hook.state).toEqual({ status: "idle" });
+  });
+
   test("a failed stop re-reads server status instead of forcing idle", async () => {
     handler = ({ method, path }) => {
       if (path.endsWith("/recording/stop")) return json({ error: "recording_failed", message: "boom" }, 500);

@@ -56,7 +56,7 @@ import { useMjpegStream } from "./hooks/use-mjpeg-stream";
 import type { StreamError } from "./utils/stream-retry";
 import { useAvccStream } from "./hooks/use-avcc-stream";
 import { useResizableWidth } from "./hooks/use-resizable-width";
-import { useScreenshotToast } from "./hooks/use-screenshot-toast";
+import { useRecordingToast, useScreenshotToast } from "./hooks/use-screenshot-toast";
 import { useScreenRecording } from "./hooks/use-screen-recording";
 import { RecordToolbarButton } from "./components/record-toolbar-button";
 import {
@@ -1089,7 +1089,10 @@ function AppWithConfig({
 
   const uploads = useUploadToasts();
   const screenshot = useScreenshotToast(config.device, screenshotDisplayName(matchedDisplay?.role ?? duoProjection?.panel));
-  const screenRecording = useScreenRecording(config.device);
+  const recordingToast = useRecordingToast();
+  const screenRecording = useScreenRecording(config.device, {
+    onDownloaded: recordingToast.show,
+  });
   const mediaDrop = useMediaDrop({
     host: hostAction,
     udid: config.device,
