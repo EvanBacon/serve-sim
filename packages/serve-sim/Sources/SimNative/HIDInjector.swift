@@ -44,11 +44,19 @@ actor HIDInjector {
     let queue = DispatchSerialQueue(label: "hid-injector", qos: .userInteractive)
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
-    private var hidClient: NSObject?
-    private var sendSel: Selector?
+    /// The SimDeviceLegacyHIDClient, behind the device-state gate. It drops
+    /// input once the device leaves Booted and rebuilds the client when the same
+    /// device boots again; see `HIDClientChannel`.
+    private var channel = HIDClientChannel<NSObject>(
+        gate: HIDDeliveryGate { nil }, connect: { nil }, log: HIDInjector.logLine
+    )
+    private static let sendSel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
+    /// Send completion for `completionClient`. It is built once per client, not per send,
+    /// and runs on `queue`, which is this actor's executor.
+    private var completion: AnyObject?
+    private weak var completionClient: NSObject?
+    private var notificationHandlerID: UInt?
     private var simDevice: NSObject?
-    /// Drops input once the device leaves Booted; see `HIDDeliveryGate`.
-    private var deliveryGate = HIDDeliveryGate { nil }
     private let springBoardLauncher = SpringBoardLauncher()
     private var deviceHubKeyboardBridge: DeviceHubKeyboardBridge?
 
@@ -96,11 +104,6 @@ actor HIDInjector {
                           userInfo: [NSLocalizedDescriptionKey: "Device \(deviceUDID) not found"])
         }
         self.simDevice = device
-        if device.responds(to: NSSelectorFromString("state")) {
-            deliveryGate = HIDDeliveryGate { [weak device] in
-                (device?.value(forKey: "state") as? NSNumber)?.intValue
-            }
-        }
         if let type = device.value(forKey: "deviceType") as? NSObject,
            let identifier = type.value(forKey: "identifier") as? String,
            identifier == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo" {
@@ -143,6 +146,49 @@ actor HIDInjector {
         }
 
 
+        // Read on every admit (a plain in-process KVC read).
+        let gate = device.responds(to: NSSelectorFromString("state"))
+            ? HIDDeliveryGate { (device.value(forKey: "state") as? NSNumber)?.intValue }
+            : HIDDeliveryGate { nil }
+        // Thrown errors here fail setup, as before.
+        let firstClient = try Self.makeHIDClient(device: device)
+        let duo = duoBridge
+        channel = HIDClientChannel(
+            gate: gate,
+            connect: {
+                do { return try Self.makeHIDClient(device: device) } catch {
+                    print("[hid] Could not create SimDeviceLegacyHIDClient: \(error.localizedDescription)")
+                    return nil
+                }
+            },
+            log: Self.logLine,
+            // The Duo guest helper ran inside the old boot; start a new one.
+            // Weak so `close()` can still release the bridge (and its helper).
+            didReconnect: { [weak duo] in duo?.reset() }
+        )
+        channel.adopt(firstClient)
+        registerStateNotifications(device: device)
+        // DeviceHubKeyboardBridge needs no reconnect: it holds no device port, only
+        // Device Hub's (host app) pid, which it re-validates on every key-down.
+        let deviceName = device.value(forKey: "name") as? String ?? deviceUDID
+        let runtimeName = (device.value(forKey: "runtime") as? NSObject)?
+            .value(forKey: "name") as? String
+        self.deviceHubKeyboardBridge = DeviceHubKeyboardBridge.makeIfSupported(
+            deviceUDID: deviceUDID,
+            deviceName: deviceName,
+            runtimeName: runtimeName
+        )
+        hidLog("[hid] SimDeviceLegacyHIDClient created")
+        hidLog("[hid] IndigoHIDMessageForMouseNSEvent loaded (with edge gesture support)")
+    }
+
+    private static func logLine(_ line: String) {
+        print(line)
+        fflush(stdout)
+    }
+
+    /// A new SimDeviceLegacyHIDClient for the device's current boot.
+    private static func makeHIDClient(device: NSObject) throws -> NSObject {
         guard let hidClass = NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") else {
             throw NSError(domain: "HIDInjector", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "SimDeviceLegacyHIDClient not found"])
@@ -163,19 +209,48 @@ actor HIDInjector {
             throw NSError(domain: "HIDInjector", code: 4,
                           userInfo: [NSLocalizedDescriptionKey: "Failed to create HID client"])
         }
+        return clientObj
+    }
 
-        self.hidClient = clientObj
-        self.sendSel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
-        let deviceName = device.value(forKey: "name") as? String ?? deviceUDID
-        let runtimeName = (device.value(forKey: "runtime") as? NSObject)?
-            .value(forKey: "name") as? String
-        self.deviceHubKeyboardBridge = DeviceHubKeyboardBridge.makeIfSupported(
-            deviceUDID: deviceUDID,
-            deviceName: deviceName,
-            runtimeName: runtimeName
-        )
-        hidLog("[hid] SimDeviceLegacyHIDClient created")
-        hidLog("[hid] IndigoHIDMessageForMouseNSEvent loaded (with edge gesture support)")
+    /// Watch `device_state` so a shutdown + boot with no input in between still
+    /// rebuilds the client: then the gate only ever reads Booted. The handler
+    /// runs on `queue`, this actor's executor, so it never races the channel.
+    private func registerStateNotifications(device: NSObject) {
+        let sel = NSSelectorFromString("registerNotificationHandlerOnQueue:handler:")
+        guard device.responds(to: sel) else { return }
+        let channel = self.channel
+        let handler: @convention(block) (NSDictionary?) -> Void = { [weak channel] info in
+            guard let info = info as? [AnyHashable: Any] else { return }
+            channel?.noteDeviceNotification(info)
+        }
+        typealias RegisterFunc = @convention(c) (AnyObject, Selector, AnyObject, AnyObject) -> UInt
+        notificationHandlerID = unsafeBitCast(device.method(for: sel), to: RegisterFunc.self)(
+            device, sel, queue, handler as AnyObject)
+    }
+
+    private func unregisterStateNotifications() {
+        let sel = NSSelectorFromString("unregisterNotificationHandler:error:")
+        guard let id = notificationHandlerID, let device = simDevice, device.responds(to: sel) else { return }
+        notificationHandlerID = nil
+        typealias UnregisterFunc = @convention(c) (AnyObject, Selector, UInt, AutoreleasingUnsafeMutablePointer<NSError?>) -> ObjCBool
+        var error: NSError?
+        _ = unsafeBitCast(device.method(for: sel), to: UnregisterFunc.self)(device, sel, id, &error)
+    }
+
+    /// The completion block for sends through `client`. A HIDError 3 from it
+    /// ("Mach port invalid, device disconnected") makes the next input rebuild
+    /// the client. The send that hit it was already acked: waiting for the
+    /// completion would add its round trip to every send.
+    private func completion(for client: NSObject) -> AnyObject {
+        if let completion, completionClient === client { return completion }
+        let channel = self.channel
+        let block: @convention(block) (NSError?) -> Void = { [weak channel, weak client] error in
+            guard let error, let channel, let client else { return }
+            channel.clientReported(client, domain: error.domain, code: error.code)
+        }
+        completion = block as AnyObject
+        completionClient = client
+        return block as AnyObject
     }
 
     // IndigoHIDEdge values (x4 param to IndigoHIDMessageForMouseNSEvent).
@@ -188,39 +263,23 @@ actor HIDInjector {
     static let edgeLeft: UInt32   = 1  // Left edge
     static let edgeRight: UInt32  = 4  // Right edge
 
-    /// False when the device has left Booted (e.g. `simctl shutdown`): the HID
-    /// client still accepts sends then, so this is the only drop signal.
-    private func deviceAcceptsInput() -> Bool {
-        switch deliveryGate.admit() {
-        case .deliver: return true
-        case .drop(let log):
-            if let log { print(log); fflush(stdout) }
-            return false
-        }
-    }
-
     /// Synchronously hand an already-built Indigo message to the guest, freeing it.
     /// Must run on `inputQueue`. Returns false when there is no HID client to
     /// send through (setup never completed) or the device is no longer booted,
     /// so callers can report the drop.
     @discardableResult
     private func rawSend(_ msg: UnsafeMutableRawPointer) -> Bool {
-        guard deviceAcceptsInput() else {
-            free(msg)
-            return false
+        var handedOff = false
+        let sent = channel.send { client in
+            typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
+            guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, Self.sendSel) else { return false }
+            // freeWhenDone: the client owns `msg` from here.
+            unsafeBitCast(sendIMP, to: SendFunc.self)(client, Self.sendSel, msg, ObjCBool(true), queue, completion(for: client))
+            handedOff = true
+            return true
         }
-        guard let client = hidClient, let sendSel = sendSel else {
-            print("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
-            free(msg)
-            return false
-        }
-        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
-        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, sendSel) else {
-            free(msg)
-            return false
-        }
-        unsafeBitCast(sendIMP, to: SendFunc.self)(client, sendSel, msg, ObjCBool(true), nil, nil)
-        return true
+        if !handedOff { free(msg) }
+        return sent
     }
 
     /// Build a single-finger touch message (normalized 0..1 coords). Pure — safe
@@ -469,7 +528,11 @@ actor HIDInjector {
     /// Returns whether the press was handed to the guest.
     @discardableResult
     func sendButtonHID(page: UInt32, usage: UInt32, phase: String) async -> Bool {
-        guard deviceAcceptsInput() else { return false }
+        // Duo keys go through the guest helper, not `rawSend`.
+        await channel.gated { await sendButtonHIDAdmitted(page: page, usage: usage, phase: phase) }
+    }
+
+    private func sendButtonHIDAdmitted(page: UInt32, usage: UInt32, phase: String) async -> Bool {
         if let duoBridge {
             switch phase {
             case "down": return duoBridge.send("key \(page) \(usage) 1")
@@ -509,9 +572,11 @@ actor HIDInjector {
     func sendButton(button: String, deviceUDID: String) async -> Bool {
         hidLog("[hid] Sending button: \(button)")
         // Home relaunches SpringBoard and Duo buttons go through the guest
-        // helper, neither via `rawSend`, so check the device here too.
-        guard deviceAcceptsInput() else { return false }
+        // helper, neither via `rawSend`, so gate the whole press.
+        return await channel.gated { await sendButtonAdmitted(button: button, deviceUDID: deviceUDID) }
+    }
 
+    private func sendButtonAdmitted(button: String, deviceUDID: String) async -> Bool {
         switch button {
         case "home":
             // Xcode 26+ silently drops the Indigo HID home-button press, so the
@@ -641,7 +706,10 @@ actor HIDInjector {
 
     func setDuoHelper(_ path: String) { duoBridge?.executable = path }
 
-    func close() { duoBridge = nil }
+    func close() {
+        unregisterStateNotifications()
+        duoBridge = nil
+    }
 
     private func updateTouchTarget(width: Int, height: Int) {
         guard duoBridge != nil else { return }
@@ -651,11 +719,14 @@ actor HIDInjector {
     func setPose(_ name: String, fromDegrees: Double) -> Bool {
         guard let pose = DevicePose.preset(named: name), fromDegrees.isFinite,
               (0...180).contains(fromDegrees) else { return false }
+        // Gated like other input: a dead device would only fail later, in the guest helper's spawn.
+        guard channel.admit() else { return false }
         return duoBridge?.send("sweep \(fromDegrees) \(pose.hingeDegrees) 800") == true
     }
 
     func setHingeAngle(degrees: Double) -> Bool {
         guard degrees.isFinite, (0...180).contains(degrees) else { return false }
+        guard channel.admit() else { return false }
         return duoBridge?.send("angle \(degrees)") == true
     }
 
@@ -774,6 +845,9 @@ actor HIDInjector {
     /// Simulator.app itself rotates the device, and how idb's
     /// `FBSimulatorPurpleHID.orientationEvent:` is delivered.
     func sendOrientation(orientation: UInt32) -> Bool {
+        // A shut-down device would otherwise fail later (PurpleWorkspacePort
+        // lookup / the Duo helper's spawn). The gate fails fast and with the same log line.
+        guard channel.admit() else { return false }
         if let duoBridge {
             guard (1...4).contains(orientation) else { return false }
             return duoBridge.send("orientation \(orientation)")
