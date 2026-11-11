@@ -24,11 +24,23 @@ describe("simulator actions toolbar layout", () => {
   });
 
   test("buttons wrap inside the pill instead of overflowing it on tiny viewports", () => {
-    expect(SIM_ACTIONS_PILL_STYLE.maxWidth).toBe("100%");
+    // Must not be "100%": that resolved against the device column and
+    // clipped reload when the bezel was hidden (narrower than the pill).
+    expect(SIM_ACTIONS_PILL_STYLE.maxWidth).toBe("calc(100vw - 16px)");
     expect(SIM_ACTIONS_PILL_STYLE.minWidth).toBe(0);
     expect(SIM_ACTIONS_BUTTONS_STYLE.flexWrap).toBe("wrap");
     expect(SIM_ACTIONS_BUTTONS_STYLE.flexShrink).toBe(1);
     expect(SIM_ACTIONS_BUTTONS_STYLE.minWidth).toBe(0);
+  });
+
+  test("the device column width does not wrap the actions row", () => {
+    // Title + stream stay at simulatorFrameWidth; the actions row is a
+    // sibling so it can grow past a chromeless screen.
+    const start = clientTsx.indexOf("maxWidth: \"calc(100vw - 16px)\"");
+    expect(start).toBeGreaterThan(0);
+    const column = clientTsx.slice(start, clientTsx.indexOf("simActionsRef", start));
+    expect(column).toContain("width: simulatorFrameWidth");
+    expect(column).toContain("</div>");
   });
 
   test("the inspect button never shrinks out of round", () => {

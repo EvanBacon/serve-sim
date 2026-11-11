@@ -21,7 +21,9 @@ export const SIM_ACTIONS_PILL_STYLE: CSSProperties = {
   alignSelf: "center",
   minWidth: 0,
   width: "auto",
-  maxWidth: "100%",
+  // Cap at the viewport, not the device column (which can be narrower than
+  // the pill when the bezel is hidden or the sim is resized down).
+  maxWidth: "calc(100vw - 16px)",
   justifyContent: "center",
   padding: "6px 8px",
   borderRadius: 18,

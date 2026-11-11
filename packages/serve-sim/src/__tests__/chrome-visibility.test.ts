@@ -33,19 +33,18 @@ describe("parseChromeHiddenQuery", () => {
 describe("readChromeHiddenPreference", () => {
   test("defaults to shown when nothing is set", () => {
     expect(readChromeHiddenPreference()).toBe(false);
-    expect(readChromeHiddenPreference({ search: "", storage: memoryStorage() })).toBe(false);
+    expect(readChromeHiddenPreference({ storage: memoryStorage() })).toBe(false);
   });
 
-  test("URL query wins over localStorage", () => {
-    const storage = memoryStorage({ [CHROME_VISIBILITY_STORAGE_KEY]: "hidden" });
-    expect(readChromeHiddenPreference({ search: "chrome=1", storage })).toBe(false);
-    expect(readChromeHiddenPreference({ search: "chrome=0", storage: memoryStorage() })).toBe(true);
-  });
-
-  test("falls back to localStorage when the URL is silent", () => {
+  test("reads only the current storage key, not a leftover ?chrome=0 or the v1 key", () => {
+    // Stale URL / v1 storage must not keep the frame off.
     expect(
       readChromeHiddenPreference({
-        search: "device=abc",
+        storage: memoryStorage({ "serve-sim:chrome": "hidden" }),
+      }),
+    ).toBe(false);
+    expect(
+      readChromeHiddenPreference({
         storage: memoryStorage({ [CHROME_VISIBILITY_STORAGE_KEY]: "hidden" }),
       }),
     ).toBe(true);
@@ -58,7 +57,7 @@ describe("readChromeHiddenPreference", () => {
 });
 
 describe("persistChromeHiddenPreference", () => {
-  test("writes hidden/shown to storage and syncs ?chrome=0 on the URL", () => {
+  test("writes hidden/shown to storage and never adds ?chrome=0", () => {
     const storage = memoryStorage();
     const urls: string[] = [];
     persistChromeHiddenPreference(true, {
@@ -67,7 +66,7 @@ describe("persistChromeHiddenPreference", () => {
       replaceState: (url) => urls.push(url),
     });
     expect(storage.getItem(CHROME_VISIBILITY_STORAGE_KEY)).toBe("hidden");
-    expect(urls).toEqual(["/?device=abc&chrome=0"]);
+    expect(urls).toEqual([]);
 
     persistChromeHiddenPreference(false, {
       storage,
@@ -75,13 +74,22 @@ describe("persistChromeHiddenPreference", () => {
       replaceState: (url) => urls.push(url),
     });
     expect(storage.getItem(CHROME_VISIBILITY_STORAGE_KEY)).toBe("shown");
-    expect(urls[1]).toBe("/?device=abc");
+    expect(urls).toEqual(["/?device=abc"]);
   });
 
-  test("skips replaceState when the query already matches", () => {
+  test("strips a leftover ?chrome=0 even when the user is hiding the bezel", () => {
     const urls: string[] = [];
     persistChromeHiddenPreference(true, {
-      location: { href: "http://localhost:3200/?chrome=0" },
+      location: { href: "http://localhost:3200/?device=abc&chrome=0" },
+      replaceState: (url) => urls.push(url),
+    });
+    expect(urls).toEqual(["/?device=abc"]);
+  });
+
+  test("skips replaceState when the URL has no chrome param", () => {
+    const urls: string[] = [];
+    persistChromeHiddenPreference(true, {
+      location: { href: "http://localhost:3200/?device=abc" },
       replaceState: (url) => urls.push(url),
     });
     expect(urls).toEqual([]);

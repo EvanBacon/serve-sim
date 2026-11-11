@@ -549,7 +549,6 @@ function AppWithConfig({
   // (and the toolbar / tools toggle) hide the bezel without restarting the helper.
   const [hideChrome, setHideChrome] = useState(() =>
     readChromeHiddenPreference({
-      search: window.location.search,
       storage: window.localStorage,
     }),
   );
@@ -1195,10 +1194,21 @@ function AppWithConfig({
       <div
         className="flex flex-col items-center gap-3 min-w-0"
         style={{
-          width: simulatorFrameWidth,
+          // The device itself is sized below. This outer column must not be
+          // capped at that width: the actions pill (reload … frame) is often
+          // wider than a chromeless screen, and a 100% / column cap clipped
+          // the first icons (reload) past the rounded edge.
+          maxWidth: "calc(100vw - 16px)",
           transition: rotationInFlight ? "none" : simulatorFrameLayoutTransition(simulatorResize),
         }}
       >
+        <div
+          className="flex flex-col items-center gap-3 min-w-0"
+          style={{
+            width: simulatorFrameWidth,
+            transition: rotationInFlight ? "none" : simulatorFrameLayoutTransition(simulatorResize),
+          }}
+        >
         <SimulatorToolbar
           exec={noHostShell}
           onRotate={rotateDevice}
@@ -1384,6 +1394,7 @@ function AppWithConfig({
               />
             </>
           )}
+        </div>
         </div>
         <div ref={simActionsRef} className={foldable ? "inline-flex items-center justify-center gap-2" : SIM_ACTIONS_ROW_CLASS}>
           <SimulatorToolbar
