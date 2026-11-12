@@ -93,4 +93,47 @@ describe("normalizeAxTree", () => {
 
     expect(tree.elements.map((element) => element.path)).toEqual(["0.0", "0.1", "0.2"]);
   });
+
+  test("filters a full-height anonymous group that is not wider than the screen", () => {
+    const tree = normalizeAxTree([
+      node({
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        role_description: "application",
+        type: "Application",
+        children: [
+          node({
+            frame: { x: 0, y: 0, width: 250, height: 873.99 },
+            children: [
+              node({
+                AXLabel: "Settings",
+                frame: { x: 20, y: 100, width: 210, height: 44 },
+                role_description: "button",
+                type: "Button",
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    expect(tree.elements.map((element) => element.path)).toEqual(["0.0.0"]);
+    expect(tree.elements[0]?.label).toBe("Settings");
+  });
+
+  test("keeps a shorter anonymous group and a full-height group with a label", () => {
+    const tree = normalizeAxTree([
+      node({
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        role_description: "application",
+        type: "Application",
+        children: [
+          node({ frame: { x: 0, y: 0, width: 250, height: 820 } }),
+          node({ AXLabel: "Sidebar", frame: { x: 0, y: 0, width: 250, height: 873.99 } }),
+        ],
+      }),
+    ]);
+
+    expect(tree.elements.map((element) => element.path)).toEqual(["0.0", "0.1"]);
+    expect(tree.elements[1]?.label).toBe("Sidebar");
+  });
 });
