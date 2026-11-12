@@ -304,21 +304,40 @@ actor HIDInjector {
     static let edgeLeft: UInt32   = 1  // Left edge
     static let edgeRight: UInt32  = 4  // Right edge
 
+    /// Hand `msg` to `client`. On success the client owns `msg` (`freeWhenDone`).
+    private func handOff(_ msg: UnsafeMutableRawPointer, to client: NSObject) -> Bool {
+        typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
+        guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, Self.sendSel) else { return false }
+        unsafeBitCast(sendIMP, to: SendFunc.self)(client, Self.sendSel, msg, ObjCBool(true), queue, completion(for: client))
+        return true
+    }
+
+    /// A touch-up with no preceding down is ignored by the guest; its
+    /// completion still reports whether the HID client can accept input.
+    /// Used as the not-ready probe so a caller's begin/end is never split.
+    private func sendReadinessProbe(through client: NSObject) -> Bool {
+        guard let msg = touchMessage(type: "end", x: 0.5, y: 0.5, edge: Self.edgeNone) else { return false }
+        guard handOff(msg, to: client) else {
+            free(msg)
+            return false
+        }
+        return true
+    }
+
     /// Synchronously hand an already-built Indigo message to the guest, freeing it.
     /// Must run on `inputQueue`. Returns false when there is no HID client to
-    /// send through (setup never completed) or the device is no longer booted,
-    /// so callers can report the drop.
+    /// send through (setup never completed), the device is no longer booted,
+    /// or the HID client is not ready, so callers can report the drop.
     @discardableResult
     private func rawSend(_ msg: UnsafeMutableRawPointer) -> Bool {
         var handedOff = false
-        let sent = channel.send { client in
-            typealias SendFunc = @convention(c) (AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?) -> Void
-            guard let sendIMP = class_getMethodImplementation(object_getClass(client)!, Self.sendSel) else { return false }
-            // freeWhenDone: the client owns `msg` from here.
-            unsafeBitCast(sendIMP, to: SendFunc.self)(client, Self.sendSel, msg, ObjCBool(true), queue, completion(for: client))
+        let sent = channel.send({ [self] client in
+            guard self.handOff(msg, to: client) else { return false }
             handedOff = true
             return true
-        }
+        }, probe: { [self] client in
+            self.sendReadinessProbe(through: client)
+        })
         if !handedOff { free(msg) }
         return sent
     }

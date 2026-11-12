@@ -16,8 +16,9 @@ public final class HIDClientChannel<Client: AnyObject> {
     public static var reconnectedMessage: String { "[hid] Simulator Booted again, reconnected HID client" }
     public static var notReadyMessage: String { "[hid] Dropping input: HID client is not ready (HIDError 2, guest still starting)" }
     public static var notReadyLimit: TimeInterval { 30 }
-    /// While not-ready, one unacked probe send is allowed this often so a
-    /// successful completion can clear the flag before `notReadyLimit`.
+    /// While not-ready, one non-action probe is allowed this often so a
+    /// successful completion can clear the flag. The caller's event is never
+    /// used as that probe.
     public static var notReadyProbeInterval: TimeInterval { 0.5 }
 
     private enum SendAdmission {
@@ -37,6 +38,7 @@ public final class HIDClientChannel<Client: AnyObject> {
     private var notReadySince: TimeInterval?
     private var lastNotReadyProbeAt: TimeInterval?
     private var loggedNotReady = false
+    private var loggedNotReadyLimit = false
     public private(set) var client: Client?
 
     public init(
@@ -72,15 +74,17 @@ public final class HIDClientChannel<Client: AnyObject> {
         clearNotReady()
     }
 
-    /// Whether input may go to the guest now. Rebuilds the client first when
-    /// the device has just come back.
+    /// Whether input that does not go through the HID client may run now
+    /// (Home's SpringBoard relaunch, Duo-helper keys). Rebuilds the client
+    /// first when the device has just come back. Does not apply the
+    /// HIDError-2 not-ready window: that only affects Indigo sends.
     public func admit() -> Bool {
         switch gate.admit() {
         case .drop(let message):
             if let message { log(message) }
             return false
         case .deliver(reconnect: false):
-            return admitReady()
+            return true
         case .deliver(reconnect: true):
             guard connect() else {
                 // Try again on the next input rather than sending through a dead port.
@@ -90,31 +94,40 @@ public final class HIDClientChannel<Client: AnyObject> {
             }
             log(Self.reconnectedMessage)
             didReconnect()
-            return admitReady()
+            return true
         }
     }
 
     /// Gate, then hand the current client to `transmit`. False when the
-    /// device isn't booted, there is no client, `transmit` failed, or this
-    /// send is a not-ready probe (never acked; its completion may clear the
-    /// flag). `transmit` isn't called when the device isn't booted or there
-    /// is no client.
-    public func send(_ transmit: (Client) -> Bool) -> Bool {
-        let probe: Bool
+    /// device isn't booted, there is no client, `transmit` failed, or the
+    /// HID client is not ready. A successful return means the message was
+    /// handed to the client (the existing ready-path contract); it is not a
+    /// guest completion. While not-ready, `transmit` is not called — a
+    /// non-action `probe` is sent at most once per `notReadyProbeInterval`
+    /// instead, and this returns false so the caller's event is never
+    /// acked or left half-delivered. `probe` isn't called when the device
+    /// isn't booted or there is no client, and the probe slot is only
+    /// consumed when `probe` returns true.
+    public func send(_ transmit: (Client) -> Bool, probe: ((Client) -> Bool)? = nil) -> Bool {
         switch admitForSend() {
         case .drop:
             return false
         case .deliver:
-            probe = false
+            guard let client else {
+                log("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
+                return false
+            }
+            return transmit(client)
         case .probe:
-            probe = true
-        }
-        guard let client else {
-            log("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
+            guard let client else {
+                log("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
+                return false
+            }
+            if probe?(client) == true {
+                lastNotReadyProbeAt = now()
+            }
             return false
         }
-        let delivered = transmit(client)
-        return probe ? false : delivered
     }
 
     /// Gate input that doesn't go through the client (it still triggers the
@@ -129,10 +142,9 @@ public final class HIDClientChannel<Client: AnyObject> {
 
     /// A send completion from `reporter`. A disconnect error from the
     /// current client makes the next input rebuild it. A not-ready error
-    /// (HIDError 2) drops later input until a send completes without error
-    /// or `notReadyLimit` has passed, except for a periodic unacked probe
-    /// so that success path can actually run. Late errors from a client
-    /// that was already replaced are ignored.
+    /// (HIDError 2) drops later Indigo input until a probe or send
+    /// completes without error. Time passing does not clear the flag.
+    /// Late errors from a client that was already replaced are ignored.
     public func clientReported(_ reporter: Client, domain: String, code: Int) {
         guard reporter === client else { return }
         if HIDDeliveryGate.isClientDisconnected(domain: domain, code: code) {
@@ -146,6 +158,7 @@ public final class HIDClientChannel<Client: AnyObject> {
             notReadySince = now()
             lastNotReadyProbeAt = nil
             loggedNotReady = false
+            loggedNotReadyLimit = false
         }
     }
 
@@ -161,20 +174,8 @@ public final class HIDClientChannel<Client: AnyObject> {
         gate.noteNotification(info)
     }
 
-    /// After the gate has admitted the device as Booted, drop (or expire)
-    /// the not-ready window. Used by `admit` / `gated`, which do not probe.
-    private func admitReady() -> Bool {
-        guard notReady else { return true }
-        if expiredNotReady() {
-            clearNotReady()
-            return true
-        }
-        logNotReadyOnce()
-        return false
-    }
-
-    /// Like `admit()`, but while not-ready lets one unacked probe send
-    /// through every `notReadyProbeInterval` so a success can clear the flag.
+    /// Like `admit()`, but while not-ready withholds the caller's event and
+    /// lets one non-action probe through every `notReadyProbeInterval`.
     private func admitForSend() -> SendAdmission {
         switch gate.admit() {
         case .drop(let message):
@@ -195,18 +196,14 @@ public final class HIDClientChannel<Client: AnyObject> {
     }
 
     private func admitReadyForSend() -> SendAdmission {
-        if admitReady() { return .deliver }
+        guard notReady else { return .deliver }
+        logNotReadyOnce()
+        logNotReadyLimitOnce()
         let t = now()
         if let last = lastNotReadyProbeAt, t - last < notReadyProbeInterval {
             return .drop
         }
-        lastNotReadyProbeAt = t
         return .probe
-    }
-
-    private func expiredNotReady() -> Bool {
-        let started = notReadySince ?? now()
-        return now() - started >= notReadyLimit
     }
 
     private func logNotReadyOnce() {
@@ -216,10 +213,19 @@ public final class HIDClientChannel<Client: AnyObject> {
         }
     }
 
+    private func logNotReadyLimitOnce() {
+        guard !loggedNotReadyLimit else { return }
+        let started = notReadySince ?? now()
+        guard now() - started >= notReadyLimit else { return }
+        log("[hid] HID client still not ready after \(Int(notReadyLimit))s; continuing to probe, not acking input until a send succeeds")
+        loggedNotReadyLimit = true
+    }
+
     private func clearNotReady() {
         notReady = false
         notReadySince = nil
         lastNotReadyProbeAt = nil
         loggedNotReady = false
+        loggedNotReadyLimit = false
     }
 }

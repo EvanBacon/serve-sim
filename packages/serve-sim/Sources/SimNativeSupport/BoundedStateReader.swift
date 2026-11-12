@@ -23,10 +23,17 @@ public final class BoundedStateReader: @unchecked Sendable {
     private let timeout: TimeInterval
     private let queue: DispatchQueue
     private let lock = NSCondition()
-    private var inFlight = false
-    private var finished = false
-    private var value: Int?
-    private var timedOutThisFlight = false
+    /// Waiters hold the `Flight` they joined, so a later probe starting a
+    /// new read cannot reset this flight's completion out from under them.
+    private final class Flight {
+        var finished = false
+        var value: Int?
+        var timedOut = false
+    }
+    private var inFlight: Flight?
+    /// Callers currently inside `probe()` for tests that need to wait until
+    /// an overlapping caller has joined the in-flight read.
+    private(set) var waiterCount = 0
 
     public init(timeout: TimeInterval = BoundedStateReader.defaultTimeout, read: @escaping () -> Int?) {
         self.timeout = timeout
@@ -37,35 +44,41 @@ public final class BoundedStateReader: @unchecked Sendable {
     public func probe() -> Probe {
         lock.lock()
         defer { lock.unlock() }
+        waiterCount += 1
+        defer { waiterCount -= 1 }
 
-        if !inFlight {
-            inFlight = true
-            finished = false
-            timedOutThisFlight = false
-            value = nil
+        let flight: Flight
+        if let current = inFlight {
+            flight = current
+            // An earlier caller already waited out this flight; don't pile
+            // another `timeout` onto every subsequent tap.
+            if flight.timedOut {
+                return .timedOut
+            }
+        } else {
+            flight = Flight()
+            inFlight = flight
             let read = self.read
             queue.async { [self] in
                 let result = read()
                 self.lock.lock()
-                self.value = result
-                self.finished = true
-                self.inFlight = false
+                flight.value = result
+                flight.finished = true
+                if self.inFlight === flight {
+                    self.inFlight = nil
+                }
                 self.lock.broadcast()
                 self.lock.unlock()
             }
-        } else if timedOutThisFlight && !finished {
-            // An earlier caller already waited out this flight; don't pile
-            // another `timeout` onto every subsequent tap.
-            return .timedOut
         }
 
         let deadline = Date().addingTimeInterval(timeout)
-        while !finished {
+        while !flight.finished {
             if !lock.wait(until: deadline) {
-                timedOutThisFlight = true
+                flight.timedOut = true
                 return .timedOut
             }
         }
-        return .ready(value)
+        return .ready(flight.value)
     }
 }

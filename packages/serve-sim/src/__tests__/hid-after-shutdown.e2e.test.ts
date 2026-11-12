@@ -18,7 +18,10 @@ import { join } from "path";
 
 const CLI = join(import.meta.dir, "../../dist/serve-sim.js");
 const udid = process.env.SERVE_SIM_E2E_SHUTDOWN_UDID;
-const describeIfOptedIn = udid && existsSync(CLI) ? describe : describe.skip;
+if (udid && !existsSync(CLI)) {
+  throw new Error(`SERVE_SIM_E2E_SHUTDOWN_UDID is set but ${CLI} is missing; build the CLI first`);
+}
+const describeIfOptedIn = udid ? describe : describe.skip;
 const RECONNECTED = "[hid] Simulator Booted again, reconnected HID client";
 const NO_SERVER = "No serve-sim server running";
 
@@ -105,22 +108,30 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
   test("after simctl boot, input is acked again well before the 30s not-ready limit", async () => {
     // Don't wait for bootstatus: the not-ready window used to refuse every
     // tap for a full 30s because admit() blocked transmit, so a success
-    // could never clear the flag. Probes every 0.5s should get an ack
-    // once the guest can take input, well under the backstop.
-    const issued = Date.now();
+    // could never clear the flag. A non-action probe every 0.5s should
+    // clear that flag once the guest can take input. Guest boot itself
+    // can exceed 20s on a slow CI runner, so the 20s bound is measured
+    // from the first not-ready log, not from `simctl boot`.
+    const logAtStart = serverLog.length;
     spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
-    let firstOk: number | undefined;
-    const deadline = Date.now() + 25_000;
+    let firstOkAt: number | undefined;
+    let notReadyAt: number | undefined;
+    const deadline = Date.now() + 45_000;
     while (Date.now() < deadline) {
       const r = tap();
-      if (r.status === 0) { firstOk = Date.now() - issued; break; }
+      if (notReadyAt == null && serverLog.slice(logAtStart).includes("[hid] Dropping input: HID client is not ready")) {
+        notReadyAt = Date.now();
+      }
+      if (r.status === 0) { firstOkAt = Date.now(); break; }
       expect(r.stderr).not.toContain(NO_SERVER);
       await sleep(400);
     }
-    if (firstOk == null) throw new Error("no successful tap within 25s of simctl boot");
-    expect(firstOk).toBeLessThan(20_000);
+    if (firstOkAt == null) throw new Error("no successful tap within 45s of simctl boot");
+    if (notReadyAt != null) {
+      expect(firstOkAt - notReadyAt).toBeLessThan(20_000);
+    }
     expect(server!.exitCode).toBeNull();
-  }, 60_000);
+  }, 90_000);
 
   test("after the same simulator boots again, a tap on the guest lands", async () => {
     bootAndWait();

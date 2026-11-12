@@ -74,8 +74,13 @@ final class BoundedStateReaderTests: XCTestCase {
             second = reader.probe()
             secondDone.signal()
         }
-        // Let the second caller join the in-flight read.
-        Thread.sleep(forTimeInterval: 0.05)
+        // Wait until the second caller has entered probe() and joined the
+        // in-flight read, then release it. A fixed sleep can miss that join.
+        let joined = Date().addingTimeInterval(1)
+        while reader.waiterCount < 2 && Date() < joined {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        XCTAssertGreaterThanOrEqual(reader.waiterCount, 2)
         hold.signal()
         firstDone.wait()
         secondDone.wait()
