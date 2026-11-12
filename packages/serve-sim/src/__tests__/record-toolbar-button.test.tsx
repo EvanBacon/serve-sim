@@ -34,6 +34,34 @@ describe("RecordToolbarButton", () => {
     expect(html).toContain('aria-label="Saving recording…"');
     expect(html).toContain("disabled");
   });
+
+  test("marks the control so idle and recording can animate width and glyph", () => {
+    const idle = render({ status: "idle" });
+    expect(idle).toContain('data-recording="false"');
+    expect(idle).toContain('data-busy="false"');
+    expect(idle).toContain('data-open="false"');
+    expect(idle).toContain("serve-sim-record-timer-slot");
+    expect(idle).toContain('data-testid="recording-elapsed"');
+    expect(idle).toContain("serve-sim-record-glyph--morph");
+    expect(idle).toContain("serve-sim-record-glyph--fade");
+
+    const rec = render({ status: "recording", startedAt: Date.now() - 65_000 });
+    expect(rec).toContain('data-recording="true"');
+    expect(rec).toContain('data-open="true"');
+    expect(rec).toContain("1:05");
+  });
+
+  test("shows a spinner while starting or saving and keeps the timer slot closed", () => {
+    const starting = render({ status: "starting" });
+    expect(starting).toContain('data-busy="true"');
+    expect(starting).toContain('data-open="false"');
+    expect(starting).toContain("serve-sim-record-spinner");
+
+    const saving = render({ status: "saving" });
+    expect(saving).toContain('data-busy="true"');
+    expect(saving).toContain('data-recording="false"');
+    expect(saving).toContain('data-open="false"');
+  });
 });
 
 test("formatRecordingElapsed", () => {

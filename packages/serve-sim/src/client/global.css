@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./components/record-toolbar-button.css";
 
 @source "./";
 

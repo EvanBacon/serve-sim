@@ -1,0 +1,148 @@
+/* Idle ↔ recording motion for the toolbar record control. 240ms ease-out.
+   Under prefers-reduced-motion, only opacities crossfade — no morph, slide, or width animation. */
+
+.serve-sim-record-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.serve-sim-record-icon > * {
+  grid-area: 1 / 1;
+}
+
+.serve-sim-record-spinner {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms ease-out;
+}
+
+.serve-sim-record-btn[data-busy="true"] .serve-sim-record-spinner {
+  opacity: 1;
+}
+
+.serve-sim-record-glyph--morph {
+  display: block;
+}
+
+.serve-sim-record-glyph--fade {
+  display: none;
+  position: relative;
+  width: 18px;
+  height: 18px;
+}
+
+.serve-sim-record-glyph--fade > * {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  transition: opacity 240ms ease-out;
+}
+
+.serve-sim-record-glyph--stop {
+  width: 14px;
+  height: 14px;
+  opacity: 0;
+}
+
+.serve-sim-record-btn[data-recording="true"] .serve-sim-record-glyph--idle {
+  opacity: 0;
+}
+
+.serve-sim-record-btn[data-recording="true"] .serve-sim-record-glyph--stop {
+  opacity: 1;
+}
+
+.serve-sim-record-btn[data-busy="true"] .serve-sim-record-glyph {
+  opacity: 0;
+}
+
+.serve-sim-record-glyph__shape {
+  x: 1px;
+  y: 1px;
+  width: 16px;
+  height: 16px;
+  rx: 8px;
+  fill: transparent;
+  stroke: currentColor;
+  stroke-width: 2px;
+  transition:
+    x 240ms ease-out,
+    y 240ms ease-out,
+    width 240ms ease-out,
+    height 240ms ease-out,
+    rx 240ms ease-out,
+    fill 240ms ease-out,
+    stroke-width 240ms ease-out;
+}
+
+.serve-sim-record-btn[data-recording="true"] .serve-sim-record-glyph__shape {
+  x: 2px;
+  y: 2px;
+  width: 14px;
+  height: 14px;
+  rx: 3.5px;
+  fill: currentColor;
+  stroke-width: 0px;
+}
+
+.serve-sim-record-timer-slot {
+  display: grid;
+  grid-template-columns: 0fr;
+  transition: grid-template-columns 240ms ease-out;
+}
+
+.serve-sim-record-timer-slot[data-open="true"] {
+  grid-template-columns: 1fr;
+}
+
+.serve-sim-record-timer-clip {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.serve-sim-record-timer {
+  display: block;
+  width: max-content;
+  padding-left: 4px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  opacity: 0;
+  transform: translateX(-6px);
+  transition: opacity 240ms ease-out, transform 240ms ease-out;
+}
+
+.serve-sim-record-timer-slot[data-open="true"] .serve-sim-record-timer {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .serve-sim-record-glyph--morph {
+    display: none;
+  }
+
+  .serve-sim-record-glyph--fade {
+    display: block;
+  }
+
+  .serve-sim-record-glyph__shape,
+  .serve-sim-record-timer-slot {
+    transition: none;
+  }
+
+  .serve-sim-record-timer {
+    transform: none;
+    transition: opacity 240ms ease-out;
+  }
+
+  .serve-sim-record-spinner,
+  .serve-sim-record-glyph,
+  .serve-sim-record-glyph--fade > * {
+    transition: opacity 240ms ease-out;
+  }
+}
