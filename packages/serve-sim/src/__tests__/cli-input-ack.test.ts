@@ -19,13 +19,14 @@ const cli = join(import.meta.dir, "..", "index.ts");
 // ok/fail: advertises acks and replies. close: advertises, then drops the
 // socket without replying. hung: advertises but never replies. legacy: an
 // older server that neither advertises nor replies.
-type Mode = "ok" | "fail" | "close" | "hung" | "legacy";
+type Mode = "ok" | "fail" | "close" | "hung" | "legacy" | "shadow";
 const devices: Record<string, Mode> = {
   "ACK-OK": "ok",
   "ACK-FAIL": "fail",
   "ACK-CLOSE": "close",
   "ACK-HUNG": "hung",
   "ACK-LEGACY": "legacy",
+  "ACK-SHADOW": "shadow",
 };
 
 let PORT = 0;
@@ -56,7 +57,10 @@ beforeAll(async () => {
       if (mode === "hung" || mode === "legacy") return;
       const body = JSON.parse(frame.subarray(1).toString()) as { ack?: number };
       if (typeof body.ack !== "number") return;
-      ws.send(Buffer.concat([Buffer.from([ACK_TAG]), Buffer.from(JSON.stringify({ ack: body.ack, ok: mode === "ok" }))]));
+      const reply = mode === "shadow"
+        ? { ack: body.ack, ok: false, error: "Device Hub has disconnected legacy input. Run serve-sim repair-input -d ACK-SHADOW before using touch or keyboard." }
+        : { ack: body.ack, ok: mode === "ok" };
+      ws.send(Buffer.concat([Buffer.from([ACK_TAG]), Buffer.from(JSON.stringify(reply))]));
     }));
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -122,6 +126,14 @@ describe("input commands propagate HID delivery failures (#136)", () => {
       for (const f of frames) expect(JSON.parse(f.subarray(1).toString())).not.toHaveProperty("ack");
     }, 25_000);
   }
+
+  test("tap prints the server's Device Hub error and exits 1", async () => {
+    const r = await runCli(["tap", "0.5", "0.5", "-d", "ACK-SHADOW"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("serve-sim: Device Hub has disconnected legacy input");
+    expect(r.stderr).toContain("repair-input -d ACK-SHADOW");
+    expect(r.stderr).not.toContain("could not deliver");
+  }, 25_000);
 
   test("an advertising server that never acks exits 0 with a warning after the timeout", async () => {
     const r = await runCli(["button", "lock", "-d", "ACK-HUNG"]);

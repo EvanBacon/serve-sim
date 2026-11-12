@@ -18,7 +18,7 @@ import {
   writeServeSimState,
   type ServeSimDeviceState,
 } from "./state";
-import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
+import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs, type KeyEvent } from "./text-to-keys";
 import { PASTEBOARD_TEXT_LIMIT_BYTES, PASTE_KEY_EVENTS } from "./pasteboard";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
@@ -1015,6 +1015,21 @@ const INPUT_ACK_TIMEOUT_MS = 4_000;
  * that doesn't advertise acks gets the frames untagged and the socket closes
  * 50ms after the last one, as before #136.
  */
+/** Key events go through the same delivery-ack path as tap when the server advertises it. */
+function sendKeyedInput(
+  target: InputTarget,
+  what: string,
+  events: ReadonlyArray<KeyEvent>,
+  perEventDelayMs: number,
+): Promise<void> {
+  if (!target.inputAck) return sendKeyEventsToWs(target.wsUrl, events, perEventDelayMs, target.headers);
+  return sendAckedInput(target, what, events.map((payload, index) => ({
+    tag: 0x06,
+    payload,
+    delayMs: index === 0 ? 0 : perEventDelayMs,
+  })));
+}
+
 function sendAckedInput(
   target: InputTarget,
   what: string,
@@ -1518,7 +1533,7 @@ async function typeText(
   }
 
   const state = await resolveInputTarget(deviceArg);
-  await sendKeyEventsToWs(state.wsUrl, events, undefined, state.headers);
+  await sendKeyedInput(state, "keystrokes", events, 4);
 }
 
 /**
@@ -1595,7 +1610,7 @@ async function pasteText(
     return;
   }
   try {
-    await sendKeyEventsToWs(state.wsUrl, PASTE_KEY_EVENTS, 20, state.headers);
+    await sendKeyedInput(state, "paste", PASTE_KEY_EVENTS, 20);
   } catch (err) {
     console.error(`Pasteboard staged, but Cmd+V failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);

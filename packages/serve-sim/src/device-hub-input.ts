@@ -16,17 +16,6 @@ export function deviceHubInputShadowedMessage(udid: string): string {
   return `Device Hub has disconnected legacy input. Run serve-sim repair-input -d ${udid} before using touch or keyboard. Repair restarts SpringBoard and closes running apps.`;
 }
 
-/** Warns when shadowed. Resolves the guest flag, or undefined when the runtime does not publish it. */
-export async function warnDeviceHubInput(udid: string, invoke: Run = run): Promise<boolean | undefined> {
-  try {
-    const shadowed = isDeviceHubInputShadowed(await invoke(simctlArguments(["spawn", udid, "notifyutil", "-g", key])));
-    if (shadowed) {
-      console.warn(`[hid] ${deviceHubInputShadowedMessage(udid)}`);
-    }
-    return shadowed;
-  } catch { return undefined; /* Older runtimes do not publish this state. */ }
-}
-
 /** Raw guest flag for diagnostics: true/false, or null when unreadable. */
 export async function readDeviceHubInputShadowed(udid: string, invoke: Run = run): Promise<boolean | null> {
   try {
