@@ -159,6 +159,11 @@ actor HIDInjector {
         channel = HIDClientChannel(
             gate: gate,
             connect: {
+                // makeHIDClient (initWithDevice:) is unbounded and runs on
+                // this actor queue. A CoreSimulator lock during shutdown can
+                // stall the next ack; accepted for now (the 100ms state
+                // probe already bounds admit). Prefer moving this off-queue
+                // if the hang returns.
                 do { return try Self.makeHIDClient(device: device) } catch {
                     print("[hid] Could not create SimDeviceLegacyHIDClient: \(error.localizedDescription)")
                     return nil

@@ -62,7 +62,10 @@ public final class HIDDeliveryGate {
     public func admit() -> Decision {
         switch currentState() {
         case .timedOut:
-            needsReconnect = true
+            // A slow read on a still-Booted device is not a trip out of Booted.
+            // Rebuilding the client (and resetting the Duo helper) on timeout
+            // is reserved for a completed non-Booted read, a state
+            // notification, or HIDError 3.
             if loggedTimeout { return .drop(log: nil) }
             loggedTimeout = true
             return .drop(log: "[hid] Dropping input: simulator state could not be read in time")

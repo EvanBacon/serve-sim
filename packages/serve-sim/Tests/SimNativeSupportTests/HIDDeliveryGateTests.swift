@@ -136,8 +136,7 @@ final class HIDDeliveryGateTests: XCTestCase {
         XCTAssertEqual(gate.admit(), .drop(log: nil))
         hold.lock(); stuck = false; hold.broadcast(); hold.unlock()
         // After the stuck read finishes (Booted) the next admit delivers
-        // and asks for a reconnect, because the timeout was treated as a trip
-        // out of a known-good state.
+        // without a reconnect: a slow read is not a trip out of Booted.
         let deadline = Date().addingTimeInterval(1)
         var last: HIDDeliveryGate.Decision?
         while Date() < deadline {
@@ -145,7 +144,7 @@ final class HIDDeliveryGateTests: XCTestCase {
             if case .deliver = last { break }
             Thread.sleep(forTimeInterval: 0.01)
         }
-        XCTAssertEqual(last, .deliver(reconnect: true))
+        XCTAssertEqual(last, .deliver(reconnect: false))
     }
 
     func testIsClientNotReadyIsHIDError2() {

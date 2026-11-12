@@ -54,7 +54,7 @@ public final class BoundedStateReader: @unchecked Sendable {
                 self.lock.unlock()
             }
         } else if timedOutThisFlight && !finished {
-            // A earlier caller already waited out this flight; don't pile
+            // An earlier caller already waited out this flight; don't pile
             // another `timeout` onto every subsequent tap.
             return .timedOut
         }

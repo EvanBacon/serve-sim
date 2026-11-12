@@ -30,7 +30,8 @@ final class HIDClientChannelTests: XCTestCase {
                 log: { [unowned self] in self.logs.append($0) },
                 didReconnect: { [unowned self] in self.reconnectHooks += 1 },
                 now: { [unowned self] in self.now },
-                notReadyLimit: 30
+                notReadyLimit: 30,
+                notReadyProbeInterval: 0.5
             )
         }()
 
@@ -130,9 +131,10 @@ final class HIDClientChannelTests: XCTestCase {
         let h = Harness(); h.setup()
         h.channel.clientReported(h.channel.client!, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
         // Still the same client: error 2 means "not ready", not "disconnected".
+        // The first send is an unacked probe, not a reconnect.
         var sends = 0
         XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
-        XCTAssertEqual(sends, 0)
+        XCTAssertEqual(sends, 1)
         XCTAssertEqual(h.connects, 1)
     }
 
@@ -141,13 +143,34 @@ final class HIDClientChannelTests: XCTestCase {
         let client = h.channel.client!
         h.channel.clientReported(client, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
         var sends = 0
+        // First send is an unacked probe; a second send in the same interval
+        // does not transmit. A success from the probe re-enables delivery.
         XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
         XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
-        XCTAssertEqual(sends, 0)
+        XCTAssertEqual(sends, 1)
         XCTAssertEqual(h.logs, [HIDClientChannel<FakeClient>.notReadyMessage])
         h.channel.clientReportedSuccess(client)
         XCTAssertTrue(h.channel.send { _ in sends += 1; return true })
+        XCTAssertEqual(sends, 2)
+        XCTAssertEqual(h.connects, 1)
+    }
+
+    func testHIDError2ProbeRunsOncePerIntervalAndSuccessReenablesDelivery() {
+        let h = Harness(); h.setup()
+        let client = h.channel.client!
+        h.channel.clientReported(client, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
+        var sends = 0
+        XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
+        h.now = 0.4
+        XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
         XCTAssertEqual(sends, 1)
+        h.now = 0.5
+        XCTAssertFalse(h.channel.send { _ in sends += 1; return true })
+        XCTAssertEqual(sends, 2)
+        // Probe completion succeeds: later input is acked.
+        h.channel.clientReportedSuccess(client)
+        XCTAssertTrue(h.channel.send { _ in sends += 1; return true })
+        XCTAssertEqual(sends, 3)
         XCTAssertEqual(h.connects, 1)
     }
 

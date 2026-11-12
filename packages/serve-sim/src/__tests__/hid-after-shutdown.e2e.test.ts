@@ -102,6 +102,26 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     expect(down.stderr).not.toContain(NO_SERVER);
   }, 60_000);
 
+  test("after simctl boot, input is acked again well before the 30s not-ready limit", async () => {
+    // Don't wait for bootstatus: the not-ready window used to refuse every
+    // tap for a full 30s because admit() blocked transmit, so a success
+    // could never clear the flag. Probes every 0.5s should get an ack
+    // once the guest can take input, well under the backstop.
+    const issued = Date.now();
+    spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
+    let firstOk: number | undefined;
+    const deadline = Date.now() + 25_000;
+    while (Date.now() < deadline) {
+      const r = tap();
+      if (r.status === 0) { firstOk = Date.now() - issued; break; }
+      expect(r.stderr).not.toContain(NO_SERVER);
+      await sleep(400);
+    }
+    if (firstOk == null) throw new Error("no successful tap within 25s of simctl boot");
+    expect(firstOk).toBeLessThan(20_000);
+    expect(server!.exitCode).toBeNull();
+  }, 60_000);
+
   test("after the same simulator boots again, a tap on the guest lands", async () => {
     bootAndWait();
     const r = await tapUntilOk(30_000);
