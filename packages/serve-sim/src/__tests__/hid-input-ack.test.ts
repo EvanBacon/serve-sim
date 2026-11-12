@@ -120,6 +120,20 @@ describe("HID input acknowledgements (#136)", () => {
     expect(s.replies).toEqual([{ tag: ACK_TAG, body: { ack: 8, ok: false } }]);
   });
 
+  test("a multitouch the injector could not deliver is acked not-ok", async () => {
+    const s = session({ multiTouch: async () => false });
+    s.send(0x05, { type: "begin", x1: 0.2, y1: 0.2, x2: 0.8, y2: 0.8, ack: 9 });
+    await settle();
+    expect(s.replies).toEqual([{ tag: ACK_TAG, body: { ack: 9, ok: false } }]);
+  });
+
+  test("a key the injector could not deliver is acked not-ok and is not treated as forwarded typing", async () => {
+    const s = session({ key: async () => false });
+    s.send(0x06, { type: "down", usage: 4, ack: 10 });
+    await settle();
+    expect(s.replies).toEqual([{ tag: ACK_TAG, body: { ack: 10, ok: false } }]);
+  });
+
   test("the ack id is not forwarded to the injector", async () => {
     const s = session({});
     s.send(0x04, { button: "lock", ack: 2 });

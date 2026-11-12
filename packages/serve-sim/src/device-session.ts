@@ -263,12 +263,9 @@ function duoRendererErrorBody(error: DuoRendererError): { error: "duo_renderer_u
 /** Delivery-reporting sends resolve true only when the event reached the guest. */
 type ReportsDelivery<F> = F extends (...args: infer A) => Promise<boolean> ? (...args: A) => Promise<boolean | void> : never;
 type HidTransport = {
-  [K in "touch" | "multiTouch" | "button" | "buttonHid"]: ReportsDelivery<NativeHid[K]>;
+  [K in "touch" | "multiTouch" | "button" | "buttonHid" | "key" | "scroll" | "digitalCrown"]: ReportsDelivery<NativeHid[K]>;
 } & Pick<
   NativeHid,
-  | "key"
-  | "scroll"
-  | "digitalCrown"
   | "orientation"
   | "memoryWarning"
   | "softwareKeyboard"
@@ -1392,14 +1389,16 @@ export class DeviceSession {
         const raw = json<{ button: string; page?: number; usage?: number; phase?: string; ack?: number }>();
         if (!raw) return false;
         const m = withoutAck(raw);
-        this.recordHidEvent(tag, m);
         if (m.page != null && m.usage != null) {
           if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+          this.recordHidEvent(tag, m);
           return this.hid.buttonHid(m.page, m.usage, (m.phase as "down" | "up" | "press") ?? "press");
         }
         // SpringBoardLauncher home still reaches the guest when Device Hub
-        // has disconnected legacy mouse/keyboard HID.
+        // has disconnected legacy mouse/keyboard HID, so it is recorded even
+        // while other buttons are refused.
         if (m.button !== "home" && await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        this.recordHidEvent(tag, m);
         return this.hid.button(m.button);
       }
       case 0x05: {
@@ -1407,17 +1406,16 @@ export class DeviceSession {
         if (!m) break;
         if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
         this.recordHidEvent(tag, m);
-        this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H);
-        return true;
+        return (await this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H)) !== false;
       }
       case 0x06: {
         const m = json<{ type: string; usage: number }>();
         if (!m) break;
         if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
         this.recordHidEvent(tag, m);
-        this.hid.key(m.type as "down" | "up", m.usage);
-        if (m.type === "down" && !isModifierUsage(m.usage)) this.forwardedTypingKey = true;
-        return true;
+        const delivered = (await this.hid.key(m.type as "down" | "up", m.usage)) !== false;
+        if (delivered && m.type === "down" && !isModifierUsage(m.usage)) this.forwardedTypingKey = true;
+        return delivered;
       }
       case 0x07: {
         const m = json<{ orientation: string }>();
@@ -1455,8 +1453,7 @@ export class DeviceSession {
         if (!m) break;
         if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
         this.recordHidEvent(tag, m);
-        this.hid.digitalCrown(m.delta);
-        return true;
+        return (await this.hid.digitalCrown(m.delta)) !== false;
       }
       case 0x0b: {
         // Payload deltas are a fraction of the display; scale to device pixels.
@@ -1464,8 +1461,7 @@ export class DeviceSession {
         if (!m) break;
         if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
         this.recordHidEvent(tag, m);
-        this.hid.scroll(m.dx * W, m.dy * H, W, H, m.x, m.y);
-        return true;
+        return (await this.hid.scroll(m.dx * W, m.dy * H, W, H, m.x, m.y)) !== false;
       }
       case 0x0c:
         this.recordHidEvent(tag, {});

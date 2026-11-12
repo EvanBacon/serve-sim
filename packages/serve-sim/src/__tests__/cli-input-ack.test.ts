@@ -46,6 +46,18 @@ beforeAll(async () => {
         .end(JSON.stringify({ device, ...(advertises ? { inputAck: true } : {}), ...(keyAck ? { keyAck: true } : {}) }));
       return;
     }
+    if (url.pathname === "/pasteboard" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(Buffer.from(c)));
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks).toString();
+        let text = "";
+        try { text = String((JSON.parse(raw) as { text?: unknown }).text ?? ""); } catch { /* ignore */ }
+        res.writeHead(200, { "Content-Type": "application/json" })
+          .end(JSON.stringify({ ok: true, verified: true, bytes: Buffer.byteLength(text, "utf8") }));
+      });
+      return;
+    }
     res.writeHead(404).end();
   });
   server.on("upgrade", (req, socket, head) => {
@@ -77,19 +89,21 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-function runCli(args: string[]): Promise<{ status: number | null; stderr: string; ms: number }> {
+function runCli(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string; ms: number }> {
   const env = { ...process.env };
   delete env.SERVE_SIM_URL;
   delete env.SERVE_SIM_AUTH_TOKEN;
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn("bun", ["run", cli, ...args, "--url", `http://127.0.0.1:${PORT}`], { env });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
     const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
     child.on("close", (status) => {
       clearTimeout(timer);
-      resolve({ status, stderr, ms: Date.now() - started });
+      resolve({ status, stdout, stderr, ms: Date.now() - started });
     });
   });
 }
@@ -167,6 +181,34 @@ describe("input commands propagate HID delivery failures (#136)", () => {
     expect(r.status).toBe(0);
     expect(r.ms).toBeLessThan(3_500);
     expect(r.stderr).not.toContain("no delivery confirmation");
+    expect(frames.length).toBeGreaterThan(0);
+    for (const f of frames) expect(JSON.parse(f.subarray(1).toString())).not.toHaveProperty("ack");
+  }, 25_000);
+
+  test("paste reports success when the server acks Cmd+V", async () => {
+    const r = await runCli(["paste", "hi", "-d", "ACK-OK"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Pasted 2 bytes");
+    expect(r.stdout).toContain("Cmd+V sent");
+    expect(r.stderr).toBe("");
+  }, 25_000);
+
+  test("paste prints the server's Device Hub error and does not claim success", async () => {
+    const r = await runCli(["paste", "hi", "-d", "ACK-SHADOW"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("serve-sim: Device Hub has disconnected legacy input");
+    expect(r.stderr).toContain("repair-input -d ACK-SHADOW");
+    expect(r.stderr).toContain("Pasteboard staged, but Cmd+V was not delivered");
+    expect(r.stdout).not.toContain("Cmd+V sent");
+  }, 25_000);
+
+  test("paste does not wait for acks from a server that only advertised inputAck", async () => {
+    frames.length = 0;
+    const r = await runCli(["paste", "hi", "-d", "ACK-KEY-OLD"]);
+    expect(r.status).toBe(0);
+    expect(r.ms).toBeLessThan(3_500);
+    expect(r.stderr).not.toContain("no delivery confirmation");
+    expect(r.stdout).toContain("Cmd+V sent");
     expect(frames.length).toBeGreaterThan(0);
     for (const f of frames) expect(JSON.parse(f.subarray(1).toString())).not.toHaveProperty("ack");
   }, 25_000);

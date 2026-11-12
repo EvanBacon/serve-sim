@@ -1022,15 +1022,16 @@ function sendAckedInput(
   target: InputTarget,
   what: string,
   frames: Array<{ tag: number; payload: object; delayMs?: number }>,
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+): Promise<boolean> {
+  if (frames.length === 0) return Promise.resolve(true);
+  return new Promise<boolean>((resolve, reject) => {
     const ws = new WebSocket(target.wsUrl, { headers: target.headers });
     ws.binaryType = "arraybuffer";
     const pending = new Set<number>();
     let sentAll = false;
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (failure?: string) => {
+    const finish = (failure?: string, delivered = !failure) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
@@ -1040,7 +1041,7 @@ function sendAckedInput(
         console.error(failure);
         process.exitCode = 1;
       }
-      resolve();
+      resolve(delivered);
     };
     const undelivered = () => (
       `serve-sim could not deliver the ${what} to simulator ${target.device}: the HID injector ` +
@@ -1097,7 +1098,7 @@ function sendAckedInput(
             `serve-sim: no delivery confirmation within ${INPUT_ACK_TIMEOUT_MS / 1000}s; ` +
               `input may not have reached ${target.device}`,
           );
-          finish();
+          finish(undefined, false);
         }, INPUT_ACK_TIMEOUT_MS);
       };
       sendNext(0);
@@ -1111,8 +1112,11 @@ function sendKeyedInput(
   what: string,
   events: ReadonlyArray<KeyEvent>,
   perEventDelayMs: number,
-): Promise<void> {
-  if (!target.keyAck) return sendKeyEventsToWs(target.wsUrl, events, perEventDelayMs, target.headers);
+): Promise<boolean> {
+  if (events.length === 0) return Promise.resolve(true);
+  if (!target.keyAck) {
+    return sendKeyEventsToWs(target.wsUrl, events, perEventDelayMs, target.headers).then(() => true);
+  }
   return sendAckedInput(target, what, events.map((payload, index) => ({
     tag: 0x06,
     payload,
@@ -1613,7 +1617,11 @@ async function pasteText(
     return;
   }
   try {
-    await sendKeyedInput(state, "paste", PASTE_KEY_EVENTS, 20);
+    const delivered = await sendKeyedInput(state, "paste", PASTE_KEY_EVENTS, 20);
+    if (!delivered) {
+      console.error("Pasteboard staged, but Cmd+V was not delivered.");
+      return;
+    }
   } catch (err) {
     console.error(`Pasteboard staged, but Cmd+V failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
