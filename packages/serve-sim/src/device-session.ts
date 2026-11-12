@@ -31,6 +31,7 @@ import {
   axDescribeAsync,
   axFrontmostAsync,
   duoHidHelperPath,
+  homeButtonSessionRoute,
   type MjpegFrame,
 } from "./native";
 import { deviceSupportsHomeIndicatorFlick } from "./devicekit-chrome";
@@ -424,9 +425,9 @@ export class DeviceSession {
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.usesInjectedHid = dependencies?.hid != null;
     this.hid = dependencies?.hid ?? new NativeHid(udid, {
-      getOrientation: () => this.knownOrientation,
-      isInputShadowed: () => this.deviceHubShadowed !== false,
-      supportsHomeIndicator: () => this.homeIndicatorFlickSupported === true,
+      getOrientation: () => this.homeButtonRoute().orientation ?? undefined,
+      isInputShadowed: () => this.homeButtonRoute().inputShadowed === true,
+      supportsHomeIndicator: () => this.homeButtonRoute().supportsHomeIndicator === true,
     });
     if (!this.usesInjectedHid) void this.warmHomeIndicatorSupport();
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
@@ -1453,14 +1454,15 @@ export class DeviceSession {
         const value = ORIENTATION_BY_NAME[m.orientation];
         if (value != null && await this.hid.orientation(value)) {
           this.recordHidEvent(tag, m);
+          // Confirm orientation even when it matches the default "portrait"
+          // so a fresh session can flick. Do not overwrite a Duo monitor
+          // reading with view state.
+          if (this.duo.hinge == null) this.knownOrientation = m.orientation;
           if (m.orientation !== this.orientation || m.orientation !== this.duo.viewOrientationName) {
             // Duo physical orientation and the active panel's UI orientation
             // differ (the inner panel's natural axis is rotated). Let the
             // monitor report the guest UI; never overwrite it with view state.
-            if (this.duo.hinge == null) {
-              this.orientation = m.orientation;
-              this.knownOrientation = m.orientation;
-            }
+            if (this.duo.hinge == null) this.orientation = m.orientation;
             this.duo.animateRotation(m.orientation);
             this.duoMonitor?.refreshOrientation();
             this.broadcastConfig();
@@ -1831,7 +1833,14 @@ export class DeviceSession {
     return readDeviceHubInputShadowed;
   }
 
-  /** Single-flight probe. Callers that already have a reading must not await this. */
+  private homeButtonRoute() {
+    return homeButtonSessionRoute({
+      knownOrientation: this.knownOrientation,
+      deviceHubShadowed: this.deviceHubShadowed,
+      homeIndicatorFlickSupported: this.homeIndicatorFlickSupported,
+    });
+  }
+
   /** Resolve chrome and foldable off the Home hot path. Unknown stays false. */
   private async warmHomeIndicatorSupport(): Promise<void> {
     if (this.homeIndicatorFlickSupported != null || this.usesInjectedHid) return;
@@ -1848,6 +1857,7 @@ export class DeviceSession {
     }
   }
 
+  /** Single-flight probe. Callers that already have a reading must not await this. */
   private refreshDeviceHubInput(): Promise<void> {
     if (this.deviceHubProbe) return this.deviceHubProbe;
     const read = this.deviceHubInputReader();
