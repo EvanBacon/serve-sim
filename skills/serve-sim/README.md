@@ -18,7 +18,7 @@ Once installed, your agent knows how to:
 - Discover the running stream's URL and read the simulator's accessibility tree to find UI elements.
 - Hand the stream URL off to the host agent's preview pane (`preview_start` in Claude Code, equivalents elsewhere) so the user sees the simulator inline.
 
-It also teaches the agent the **gotchas** (use `tap`, not `gesture`, for plain taps), the **prerequisites** (macOS, Xcode CLI tools, Node 18+, macOS 14+ for camera), and **anti-patterns** to avoid.
+It also teaches the agent the **gotchas** (use `tap`, not `gesture`, for plain taps), the **prerequisites** (macOS, Xcode CLI tools, Node 20+, macOS 14+ for camera), and **anti-patterns** to avoid.
 
 ## Install
 
@@ -57,7 +57,7 @@ The agent checks these for you, but for reference:
 
 - macOS host (any recent version).
 - Xcode command line tools (`xcode-select --install`).
-- Node.js 18+.
+- Node.js 20+.
 - macOS 14+ if you want camera injection.
 - At least one booted iOS, iPad, or Apple Watch simulator.
 
@@ -73,6 +73,7 @@ serve-sim/
 │   ├── buttons-rotation.md           (the six buttons, the four orientations)
 │   ├── camera.md                     (camera injection: sources, mirroring, hot-swap)
 │   ├── ca-debug.md                   (CoreAnimation debug flags)
+│   ├── agent-guide.md                (agent playbook: attach, refs, control, repair-input)
 │   ├── endpoints.md                  (HTTP + WebSocket surface)
 │   └── workflows.md                  (end-to-end recipes incl. preview handoff)
 ├── scripts/
@@ -94,7 +95,7 @@ This keeps context usage low across hundreds of installed skills.
 
 ## Source of truth
 
-Every claim in this skill — the six button names, the four orientations, the gesture JSON shape, the edge values, the HTTP endpoints — was verified against the serve-sim source at the time of authoring. The skill does not invent behavior the CLI does not expose. When the CLI changes, update the skill and the `evals/` alongside it.
+Every claim in this skill — the six button names, the four orientations, the gesture JSON shape, the edge values, the HTTP endpoints, the control process, and `repair-input` — was verified against the serve-sim source at the time of authoring. The skill does not invent behavior the CLI does not expose. When the CLI changes, update the skill and the `evals/` alongside it.
 
 ## Evals
 

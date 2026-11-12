@@ -151,7 +151,7 @@ serve-sim camera --stop-webcam [-d udid]
 
 Options:
   -p, --port <port>   Starting port (preview default: 3200; helper default: 3100)
-  -d, --detach        Spawn helper and exit (daemon mode)
+      --detach        Spawn helper and exit (daemon mode)
       --allow-exec    Enable the host shell (/exec, {command} frames on
                       /exec-ws, `serve-sim exec`) and .ipa installs from
                       the preview. Off by default
@@ -407,6 +407,8 @@ The first call with no daemon running costs about 10 ms extra. That is the daemo
 
 ### Accessibility refs for agents
 
+The shorter agent playbook — attach vs. start a server, refs, the persistent control process, `repair-input`, recording and the rolling buffer, and what to do when a tap is not delivered — is in [`skills/serve-sim/references/agent-guide.md`](https://github.com/EvanBacon/serve-sim/blob/main/skills/serve-sim/references/agent-guide.md).
+
 `serve-sim ax --refs` prints a compact snapshot of the visible screen: each interesting element gets a short ref (`@e1`, `@e2`, …, in tree order), its role, label, value (when set), `enabled: false` (only when disabled), and its frame and center in device points. `--all` includes offscreen elements; `--text` prints one line per element.
 
 ```bash
@@ -447,7 +449,7 @@ The screen counts as settled when the captured framebuffer has stopped changing 
 
 ### Agent Skill
 
-An [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) ships in [`skills/serve-sim`](skills/serve-sim) — it teaches AI coding agents (Grok, Claude Code, Cursor, Codex CLI, Gemini CLI, and any host implementing the open Agent Skills standard) how to drive a simulator through the CLI: taps, gestures, hardware buttons, rotation, camera injection, and handing the stream off to the host's preview pane.
+An [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview) ships in [`skills/serve-sim`](skills/serve-sim) — it teaches AI coding agents (Grok, Claude Code, Cursor, Codex CLI, Gemini CLI, and any host implementing the open Agent Skills standard) how to drive a simulator through the CLI: taps, gestures, accessibility refs, hardware buttons, rotation, camera injection, recording and the rolling buffer, the persistent control process, `repair-input`, and handing the stream off to the host's preview pane. The playbook is [`skills/serve-sim/references/agent-guide.md`](https://github.com/EvanBacon/serve-sim/blob/main/skills/serve-sim/references/agent-guide.md).
 
 ```sh
 bunx add-skill EvanBacon/serve-sim
