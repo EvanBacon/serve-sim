@@ -1646,8 +1646,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // has not opened one yet — otherwise the first toolbar Home falls back
     // to `simctl launch springboard`. If the press fails or times out,
     // host-rpc still falls back to simctl.
-    pressHome: async (udid) => {
-      return getDeviceSession(udid).pressHome();
+    pressHome: async (udid, signal) => {
+      return getDeviceSession(udid).pressHome(signal);
     },
   });
 

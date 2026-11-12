@@ -113,5 +113,6 @@ export async function simulatorDeviceInfo(udid: string): Promise<SimulatorDevice
   const hit = simulatorDeviceInfoCache?.get(key);
   if (hit) return hit;
   const cache = await refreshSimulatorDeviceInfo();
-  return cache?.get(key) ?? null;
+  if (!cache) throw new Error("simctl list devices failed");
+  return cache.get(key) ?? null;
 }

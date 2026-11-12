@@ -56,7 +56,7 @@ export interface HostRpcOptions {
    * `serve-sim button home`. When it returns false, throws, or exceeds
    * `pressHomeTimeoutMs`, `home` falls back to `simctl launch springboard`.
    */
-  pressHome?: (udid: string) => Promise<boolean>;
+  pressHome?: (udid: string, signal?: AbortSignal) => Promise<boolean>;
   /** Bound on `pressHome`. Default `DEFAULT_PRESS_HOME_TIMEOUT_MS`. */
   pressHomeTimeoutMs?: number;
 }
@@ -65,14 +65,19 @@ export interface HostRpcOptions {
 export const DEFAULT_PRESS_HOME_TIMEOUT_MS = 2_000;
 
 async function racePressHome(
-  pressHome: (udid: string) => Promise<boolean>,
+  pressHome: (udid: string, signal?: AbortSignal) => Promise<boolean>,
   udid: string,
   timeoutMs: number,
 ): Promise<boolean> {
+  const controller = new AbortController();
   try {
     return await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), timeoutMs);
-      pressHome(udid).then(
+      const timer = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, timeoutMs);
+      timer.unref?.();
+      pressHome(udid, controller.signal).then(
         (ok) => {
           clearTimeout(timer);
           resolve(ok === true);
@@ -84,6 +89,7 @@ async function racePressHome(
       );
     });
   } catch {
+    controller.abort();
     return false;
   }
 }

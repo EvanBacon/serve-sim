@@ -397,17 +397,22 @@ export class NativeHid {
     return this.delivered("multiTouch", () => this.settled(() => this.handle.multiTouch(type, x1, y1, x2, y2, w, h)));
   }
 
-  async button(button: string): Promise<boolean> {
+  async button(button: string, signal?: AbortSignal): Promise<boolean> {
     if (button !== "home") {
       return this.delivered("button", () => this.settled(this.viaDuoHelper(() => this.handle.button(button))));
     }
     const name = await this.homeButtonName();
+    if (signal?.aborted) return false;
     const send = this.viaDuoHelper(() => this.handle.button(name));
+    const guarded = () => {
+      if (signal?.aborted) return Promise.resolve(false);
+      return send();
+    };
     // SpringBoardLauncher does not use the HID client, so a cold session
     // must not wait out GUEST_HID_SETTLE_MS and then trip the host-rpc
     // timeout (which would also fire a late flick after simctl fallback).
-    if (name === "home") return this.delivered("button", send);
-    return this.delivered("button", () => this.settled(send));
+    if (name === "home") return this.delivered("button", guarded);
+    return this.delivered("button", () => this.settled(guarded));
   }
 
   private async homeButtonName(): Promise<"home" | "flick_home"> {
@@ -433,7 +438,14 @@ export class NativeHid {
     } catch {
       return "home";
     }
-    return homeButtonForFrontmost({ bundleId, ...gates });
+    // Re-read gates after the probe: a rotation to landscape while we waited
+    // must not use the pre-probe portrait snapshot to send flick_home.
+    return homeButtonForFrontmost({
+      bundleId,
+      supportsHomeIndicator: this.supportsHomeIndicator(),
+      orientation: this.getOrientation(),
+      inputShadowed: this.isInputShadowed(),
+    });
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<boolean> {

@@ -379,6 +379,8 @@ export class DeviceSession {
   private knownOrientation?: string;
   /** True only after chrome says Face ID and the device is not foldable. */
   private homeIndicatorFlickSupported?: boolean;
+  private homeIndicatorWarmAttempts = 0;
+  private static readonly HOME_INDICATOR_WARM_MAX_ATTEMPTS = 3;
 
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
@@ -451,8 +453,9 @@ export class DeviceSession {
    * already frontmost (App Library, folders, inner pages), uses a short
    * home-indicator flick because the launch is a no-op there.
    */
-  async pressHome(): Promise<boolean> {
-    return (await this.hid.button("home")) !== false;
+  async pressHome(signal?: AbortSignal): Promise<boolean> {
+    if (this.homeIndicatorFlickSupported == null) void this.warmHomeIndicatorSupport();
+    return (await this.hid.button("home", signal)) !== false;
   }
 
   /**
@@ -1841,9 +1844,15 @@ export class DeviceSession {
     });
   }
 
-  /** Resolve chrome and foldable off the Home hot path. Unknown stays false. */
+  /** Resolve chrome and foldable off the Home hot path. A transient lookup
+   *  failure leaves the flag unset so a later warm can retry, up to a bound. */
   private async warmHomeIndicatorSupport(): Promise<void> {
     if (this.homeIndicatorFlickSupported != null || this.usesInjectedHid) return;
+    if (this.homeIndicatorWarmAttempts >= DeviceSession.HOME_INDICATOR_WARM_MAX_ATTEMPTS) {
+      this.homeIndicatorFlickSupported = false;
+      return;
+    }
+    this.homeIndicatorWarmAttempts += 1;
     try {
       if (await this.hid.isFoldable?.()) {
         this.homeIndicatorFlickSupported = false;
@@ -1853,7 +1862,9 @@ export class DeviceSession {
       if (this.isStopped()) return;
       this.homeIndicatorFlickSupported = info != null && deviceSupportsHomeIndicatorFlick(info);
     } catch {
-      this.homeIndicatorFlickSupported = false;
+      if (this.homeIndicatorWarmAttempts >= DeviceSession.HOME_INDICATOR_WARM_MAX_ATTEMPTS) {
+        this.homeIndicatorFlickSupported = false;
+      }
     }
   }
 

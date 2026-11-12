@@ -271,4 +271,34 @@ describe("NativeHid.button home routing", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
     expect(buttons).toEqual(["flick_home"]);
   });
+
+  test("re-reads flick gates after the frontmost probe", async () => {
+    let orientation = "portrait";
+    const { hid, buttons } = hidWith({
+      axFrontmost: async () => {
+        orientation = "landscape_left";
+        return JSON.stringify({ bundleId: SPRINGBOARD_BUNDLE_ID });
+      },
+      getOrientation: () => orientation,
+      supportsHomeIndicator: () => true,
+      isInputShadowed: () => false,
+    });
+    expect(await hid.button("home")).toBe(true);
+    expect(buttons).toEqual(["home"]);
+  });
+
+  test("does not dispatch a late home after the request is aborted", async () => {
+    const controller = new AbortController();
+    const { hid, buttons } = hidWith({
+      axFrontmost: async () => {
+        controller.abort();
+        return JSON.stringify({ bundleId: SPRINGBOARD_BUNDLE_ID });
+      },
+      getOrientation: () => "portrait",
+      supportsHomeIndicator: () => true,
+      isInputShadowed: () => false,
+    });
+    expect(await hid.button("home", controller.signal)).toBe(false);
+    expect(buttons).toEqual([]);
+  });
 });

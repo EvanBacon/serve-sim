@@ -9,7 +9,7 @@ const UDID = "11111111-2222-3333-4444-555555555555";
 
 function handler(opts: {
   known?: boolean;
-  pressHome?: (udid: string) => Promise<boolean>;
+  pressHome?: (udid: string, signal?: AbortSignal) => Promise<boolean>;
   pressHomeTimeoutMs?: number;
 } = {}) {
   const calls: Array<[string, string[]]> = [];
@@ -71,6 +71,20 @@ describe("home", () => {
     const t0 = performance.now();
     expect(await rpc({ method: "home", params: { udid: UDID } })).toMatchObject({ exitCode: 0 });
     expect(performance.now() - t0).toBeLessThan(400);
+    expect(calls).toEqual([["xcrun", ["simctl", "launch", UDID, "com.apple.springboard"]]]);
+  });
+
+  test("aborts a timed-out pressHome so a late native press cannot still fire", async () => {
+    let seen: AbortSignal | undefined;
+    const { rpc, calls } = handler({
+      pressHomeTimeoutMs: 30,
+      pressHome: (_udid: string, signal?: AbortSignal) => {
+        seen = signal;
+        return new Promise<boolean>(() => {});
+      },
+    });
+    expect(await rpc({ method: "home", params: { udid: UDID } })).toMatchObject({ exitCode: 0 });
+    expect(seen?.aborted).toBe(true);
     expect(calls).toEqual([["xcrun", ["simctl", "launch", UDID, "com.apple.springboard"]]]);
   });
 
