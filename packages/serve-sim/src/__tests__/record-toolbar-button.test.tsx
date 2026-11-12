@@ -1,4 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { Window } from "happy-dom";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RecordToolbarButton, formatRecordingElapsed } from "../client/components/record-toolbar-button";
 import { attachmentFileName, type ScreenRecordingState } from "../client/hooks/use-screen-recording";
@@ -6,12 +11,23 @@ import { SimulatorToolbar } from "../client/simulator/SimulatorToolbar";
 
 const exec = async () => ({ stdout: "", stderr: "", exitCode: 0 });
 
-function render(state: ScreenRecordingState) {
+function render(state: ScreenRecordingState, streaming = true) {
   return renderToStaticMarkup(
-    <SimulatorToolbar exec={exec} deviceUdid="booted" streaming>
+    <SimulatorToolbar exec={exec} deviceUdid="booted" streaming={streaming}>
       <RecordToolbarButton state={state} onToggle={() => {}} />
+      <SimulatorToolbar.Button aria-label="Sibling">x</SimulatorToolbar.Button>
     </SimulatorToolbar>,
   );
+}
+
+function buttonTag(html: string, pred: (tag: string) => boolean): string {
+  const tag = [...html.matchAll(/<button\b[^>]*>/g)].map((m) => m[0]).find(pred);
+  if (!tag) throw new Error("button not found");
+  return tag;
+}
+
+function styleColor(tag: string): string | undefined {
+  return tag.match(/color:([^;"]+)/)?.[1]?.trim();
 }
 
 describe("RecordToolbarButton", () => {
@@ -62,6 +78,23 @@ describe("RecordToolbarButton", () => {
     expect(saving).toContain('data-recording="false"');
     expect(saving).toContain('data-open="false"');
   });
+
+  test("keeps the themed and disabled color of a sibling toolbar button when idle", () => {
+    const idle = render({ status: "idle" });
+    expect(styleColor(buttonTag(idle, (t) => t.includes("serve-sim-record-btn")))).toBe(
+      styleColor(buttonTag(idle, (t) => t.includes('aria-label="Sibling"'))),
+    );
+    expect(styleColor(buttonTag(idle, (t) => t.includes("serve-sim-record-btn")))).toBeTruthy();
+
+    const disabled = render({ status: "idle" }, false);
+    expect(styleColor(buttonTag(disabled, (t) => t.includes("serve-sim-record-btn")))).toBe(
+      styleColor(buttonTag(disabled, (t) => t.includes('aria-label="Sibling"'))),
+    );
+    const saving = render({ status: "saving" });
+    expect(styleColor(buttonTag(saving, (t) => t.includes("serve-sim-record-btn")))).toBe(
+      styleColor(buttonTag(render({ status: "idle" }, false), (t) => t.includes('aria-label="Sibling"'))),
+    );
+  });
 });
 
 test("formatRecordingElapsed", () => {
@@ -75,4 +108,87 @@ test("attachmentFileName", () => {
   expect(attachmentFileName('attachment; filename="serve-sim-recording-2026.mp4"')).toBe("serve-sim-recording-2026.mp4");
   expect(attachmentFileName(null)).toBeNull();
   expect(attachmentFileName("inline")).toBeNull();
+});
+
+const GLOBALS = ["window", "document", "navigator", "HTMLElement", "Element", "Node"] as const;
+
+describe("RecordToolbarButton close animation", () => {
+  let dom: Window;
+  let root: Root | undefined;
+  let previous: Map<string, unknown>;
+  let host: HTMLElement;
+
+  beforeEach(() => {
+    dom = new Window({ url: "http://localhost/" });
+    previous = new Map();
+    for (const name of GLOBALS) {
+      previous.set(name, (globalThis as Record<string, unknown>)[name]);
+      (globalThis as Record<string, unknown>)[name] =
+        name === "window" ? dom : (dom as unknown as Record<string, unknown>)[name];
+    }
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    host = dom.document.createElement("div") as unknown as HTMLElement;
+    dom.document.body.appendChild(host as never);
+  });
+
+  afterEach(async () => {
+    await act(async () => { root?.unmount(); });
+    root = undefined;
+    await dom.happyDOM.abort();
+    for (const name of GLOBALS) {
+      const prior = previous.get(name);
+      if (prior === undefined) delete (globalThis as Record<string, unknown>)[name];
+      else (globalThis as Record<string, unknown>)[name] = prior;
+    }
+  });
+
+  test("keeps the last elapsed text on the first saving commit, never flashing 0:00", async () => {
+    const startedAt = Date.now() - 65_000;
+    await act(async () => {
+      root ??= createRoot(host);
+      root.render(
+        <SimulatorToolbar exec={exec} deviceUdid="booted" streaming>
+          <RecordToolbarButton state={{ status: "recording", startedAt }} onToggle={() => {}} />
+        </SimulatorToolbar>,
+      );
+    });
+    const elapsed = () => host.querySelector('[data-testid="recording-elapsed"]')?.textContent ?? "";
+    expect(elapsed()).toBe("1:05");
+
+    await act(async () => {
+      root!.render(
+        <SimulatorToolbar exec={exec} deviceUdid="booted" streaming>
+          <RecordToolbarButton state={{ status: "saving" }} onToggle={() => {}} />
+        </SimulatorToolbar>,
+      );
+    });
+    expect(elapsed()).toBe("1:05");
+    expect(elapsed()).not.toBe("0:00");
+  });
+});
+
+describe("record toolbar motion CSS", () => {
+  const clientDir = join(import.meta.dir, "../client");
+  const globalCss = readFileSync(join(clientDir, "global.css"), "utf8");
+  const motionCss = readFileSync(join(clientDir, "components/record-toolbar-button.css"), "utf8");
+
+  test("is imported from global.css so it lands in the client style bundle", () => {
+    expect(globalCss).toContain('@import "./components/record-toolbar-button.css";');
+  });
+
+  test("animates the timer slot from 0fr to 1fr and does not clip the button tooltip", () => {
+    expect(motionCss).toContain("grid-template-columns: 0fr;");
+    expect(motionCss).toContain("grid-template-columns: 1fr;");
+    expect(motionCss).not.toMatch(/\.serve-sim-record-btn\s*\{[^}]*overflow:\s*hidden/);
+  });
+
+  test("reduced motion hides the morph glyph and drops width/transform animation", () => {
+    const reduce = motionCss.slice(motionCss.indexOf("@media (prefers-reduced-motion: reduce)"));
+    expect(reduce).toContain(".serve-sim-record-glyph--morph");
+    expect(reduce).toContain("display: none");
+    expect(reduce).toContain(".serve-sim-record-glyph--fade");
+    expect(reduce).toContain(".serve-sim-record-timer-slot");
+    expect(reduce).toMatch(/transition:\s*none/);
+    expect(reduce).toContain("transform: none");
+  });
 });

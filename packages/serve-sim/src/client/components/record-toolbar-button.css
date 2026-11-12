@@ -26,6 +26,7 @@
 
 .serve-sim-record-glyph--morph {
   display: block;
+  transition: opacity 240ms ease-out;
 }
 
 .serve-sim-record-glyph--fade {
@@ -66,7 +67,8 @@
   width: 16px;
   height: 16px;
   rx: 8px;
-  fill: transparent;
+  fill: currentColor;
+  fill-opacity: 0;
   stroke: currentColor;
   stroke-width: 2px;
   transition:
@@ -75,7 +77,7 @@
     width 240ms ease-out,
     height 240ms ease-out,
     rx 240ms ease-out,
-    fill 240ms ease-out,
+    fill-opacity 240ms ease-out,
     stroke-width 240ms ease-out;
 }
 
@@ -85,7 +87,7 @@
   width: 14px;
   height: 14px;
   rx: 3.5px;
-  fill: currentColor;
+  fill-opacity: 1;
   stroke-width: 0px;
 }
 

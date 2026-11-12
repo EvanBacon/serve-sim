@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Circle, LoaderCircle, Square } from "lucide-react";
 import { SimulatorToolbar } from "../simulator";
 import type { ScreenRecordingState } from "../hooks/use-screen-recording";
+
 const RECORDING_RED = "#ff3b30";
 const MOTION_MS = 240;
 
@@ -30,17 +31,19 @@ export function RecordToolbarButton({
   const busy = state.status === "starting" || state.status === "saving";
   const startedAt = state.status === "recording" ? state.startedAt : null;
   const [now, setNow] = useState(() => Date.now());
-  const [frozenElapsed, setFrozenElapsed] = useState("0:00");
+  // Keep the last painted elapsed during render so the close animation
+  // never flashes "0:00" (effect cleanup would run after paint).
+  const lastElapsedRef = useRef("0:00");
   useEffect(() => {
     if (startedAt == null) return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 500);
-    return () => {
-      clearInterval(timer);
-      setFrozenElapsed(formatRecordingElapsed(Date.now() - startedAt));
-    };
+    return () => clearInterval(timer);
   }, [startedAt]);
-  const elapsed = startedAt != null ? formatRecordingElapsed(now - startedAt) : frozenElapsed;
+  if (startedAt != null) {
+    lastElapsedRef.current = formatRecordingElapsed(now - startedAt);
+  }
+  const elapsed = lastElapsedRef.current;
 
   const label = recording
     ? "Stop recording"
@@ -60,10 +63,11 @@ export function RecordToolbarButton({
       title={label}
       forceDisabled={busy}
       onClick={(e) => { e.preventDefault(); onToggle(); }}
-      style={{
-        color: recording ? RECORDING_RED : undefined,
-        transition: `background-color 0.15s, color ${MOTION_MS}ms ease-out`,
-      }}
+      style={
+        recording
+          ? { color: RECORDING_RED, transition: `background-color 0.15s, color ${MOTION_MS}ms ease-out` }
+          : { transition: `background-color 0.15s, color ${MOTION_MS}ms ease-out` }
+      }
     >
       <span className="serve-sim-record-icon" aria-hidden="true">
         <LoaderCircle size={18} strokeWidth={2} className="serve-sim-record-spinner animate-spin" />
@@ -74,6 +78,7 @@ export function RecordToolbarButton({
           viewBox="0 0 18 18"
           fill="none"
         >
+          {/* Presentation attrs match the CSS idle rule so a no-stylesheet fallback still looks idle. */}
           <rect className="serve-sim-record-glyph__shape" x="1" y="1" width="16" height="16" rx="8" />
         </svg>
         <span className="serve-sim-record-glyph serve-sim-record-glyph--fade">
