@@ -6,12 +6,15 @@
  * stays serial (`--max-concurrency=1`) just like sim-backed e2e. E2e files
  * run one at a time; a failure reboots the shared simulator and retries that
  * file once so a wedged finger / native crash does not force a full-tree rerun.
+ * The shutdown e2e goes last because it shuts the simulator down and boots it
+ * again; it is opted in here on the CI-owned simulator only.
  */
 import { spawnSync } from "child_process";
 import { resolve } from "path";
 import {
   DARWIN_INTEGRATION_TEST_FILES,
   SIM_E2E_TEST_FILES,
+  SIM_SHUTDOWN_E2E_TEST_FILE,
 } from "../src/ci-test-plan";
 
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -19,11 +22,15 @@ const udid = process.env.UDID ?? "";
 const serialArgs = ["--max-concurrency=1"];
 const failed: string[] = [];
 
-function runBunTest(files: readonly string[], extraArgs: string[] = []): number {
+function runBunTest(
+  files: readonly string[],
+  extraArgs: string[] = [],
+  env: NodeJS.ProcessEnv = process.env,
+): number {
   const result = spawnSync("bun", ["test", ...extraArgs, ...files], {
     cwd: repoRoot,
     stdio: "inherit",
-    env: process.env,
+    env,
   });
   return result.status ?? 1;
 }
@@ -83,6 +90,19 @@ for (const file of SIM_E2E_TEST_FILES) {
   }
   if (runBunTest([file], serialArgs) === 0) continue;
   failed.push(file);
+}
+
+// Last: it shuts the simulator down. A failure gets the same reboot + one retry.
+if (udid) {
+  const file = SIM_SHUTDOWN_E2E_TEST_FILE;
+  const env = { ...process.env, SERVE_SIM_E2E_SHUTDOWN_UDID: udid };
+  console.log(`\n=== sim e2e ${file} (shuts down ${udid}) ===`);
+  if (runBunTest([file], serialArgs, env) !== 0) {
+    console.warn(`::warning title=sim e2e retry::${file} failed; rebooting and retrying once`);
+    if (!rebootSimulator() || runBunTest([file], serialArgs, env) !== 0) failed.push(file);
+  }
+} else {
+  console.warn(`UDID unset; skipping ${SIM_SHUTDOWN_E2E_TEST_FILE}`);
 }
 
 if (failed.length > 0) {

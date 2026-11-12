@@ -39,6 +39,11 @@ Use [verification.md](verification.md) for historical validation; its earlier
   pose list; no tent/tabletop or other hinge presets appear as buttons.
 - [ ] Pinch must not change the hinge angle. Folding is controlled by pose
   buttons or the Alt slider; two-finger screen input remains available to apps.
+- [ ] While the Duo is shut down, touch, buttons, pose, hinge, and rotate
+  report failure instead of acking. After the same Duo boots again under a
+  server that stayed up, touch and pose work again without a restart: the
+  server logs `[hid] Simulator Booted again, reconnected HID client` once,
+  and the guest helper is respawned.
 - [ ] Named fold transitions render continuously between hinge-monitor samples.
   Start the visual clock only after confirmed guest movement; use the same
   800 ms cubic easing as the native sweep. Sparse or delayed samples must not

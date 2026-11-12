@@ -20,6 +20,10 @@ final class DuoHIDBridge {
 
     deinit { stop() }
 
+    /// Drop the guest helper so the next command spawns a fresh one, e.g.
+    /// after the device rebooted under a running server.
+    func reset() { stop() }
+
     private func stop() {
         try? input?.close()
         try? output?.close()
