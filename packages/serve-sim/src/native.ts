@@ -249,9 +249,73 @@ export interface NativeHidDeps {
   bundledDuoHelper?: () => string;
   /** The launchable helper; may run `codesign`, so it is only called for a Duo. */
   duoHelper?: () => string;
+  /** Frontmost-app probe; defaults to `axFrontmostAsync`. */
+  axFrontmost?: (udid: string) => Promise<string>;
+  /** Guest UI orientation name (`portrait`, `landscape_left`, …). */
+  getOrientation?: () => string | undefined;
+  /** True only for Face ID / home-indicator devices with known chrome. */
+  supportsHomeIndicator?: () => boolean;
+  /** Last known Device Hub legacy-input shadow flag. */
+  isInputShadowed?: () => boolean;
+}
+
+export const SPRINGBOARD_BUNDLE_ID = "com.apple.springboard";
+
+/** Bound on the frontmost probe that chooses launch vs flick. */
+export const HOME_FRONTMOST_PROBE_TIMEOUT_MS = 400;
+
+const PORTRAIT_ORIENTATIONS = new Set(["portrait", "portrait_upside_down"]);
+
+export type HomeButtonRoute = {
+  bundleId?: string | null;
+  supportsHomeIndicator?: boolean;
+  orientation?: string | null;
+  inputShadowed?: boolean;
+};
+
+/**
+ * `hid.button("home")` launches SpringBoard to leave a foreground app (the
+ * Indigo HID home press is dropped on Xcode 26+). That launch is a no-op when
+ * SpringBoard is already frontmost, so App Library, folders, and inner home
+ * pages on Face ID devices in portrait use a short home-indicator flick
+ * instead of `swipe_home` (a long swipe can open the app switcher on page 1).
+ * Home-button devices, landscape, Device Hub shadow, and an unknown
+ * frontmost/orientation all stay on the launch path: a bottom-edge swipe on
+ * those surfaces can open Control Center or miss the home indicator.
+ */
+export function homeButtonForFrontmost(route: HomeButtonRoute): "home" | "flick_home" {
+  if (route.bundleId !== SPRINGBOARD_BUNDLE_ID) return "home";
+  if (route.inputShadowed) return "home";
+  if (route.supportsHomeIndicator !== true) return "home";
+  if (route.orientation == null || !PORTRAIT_ORIENTATIONS.has(route.orientation)) return "home";
+  return "flick_home";
+}
+
+/** Session fields as NativeHid should see them. Unknown orientation, an
+ *  unsettled Device Hub probe (`undefined`), or an unconfirmed chrome/
+ *  foldable flag must not flick. */
+export function homeButtonSessionRoute(state: {
+  knownOrientation?: string;
+  deviceHubShadowed?: boolean;
+  homeIndicatorFlickSupported?: boolean;
+}): Pick<HomeButtonRoute, "supportsHomeIndicator" | "orientation" | "inputShadowed"> {
+  return {
+    supportsHomeIndicator: state.homeIndicatorFlickSupported === true,
+    orientation: state.knownOrientation,
+    inputShadowed: state.deviceHubShadowed !== false,
+  };
+}
+
+function canFlickHomeBeforeFrontmostProbe(route: Pick<HomeButtonRoute, "supportsHomeIndicator" | "orientation" | "inputShadowed">): boolean {
+  return homeButtonForFrontmost({ ...route, bundleId: SPRINGBOARD_BUNDLE_ID }) === "flick_home";
 }
 
 export class NativeHid {
+  private readonly udid: string;
+  private readonly axFrontmost: (udid: string) => Promise<string>;
+  private readonly getOrientation: () => string | undefined;
+  private readonly supportsHomeIndicator: () => boolean;
+  private readonly isInputShadowed: () => boolean;
   private readonly handle: SimHIDHandle;
   private readonly keys: KeySequencer;
   /**
@@ -269,6 +333,11 @@ export class NativeHid {
   private duoHelperSettled = false;
 
   constructor(udid: string, deps: NativeHidDeps = {}) {
+    this.udid = udid;
+    this.axFrontmost = deps.axFrontmost ?? axFrontmostAsync;
+    this.getOrientation = deps.getOrientation ?? (() => undefined);
+    this.supportsHomeIndicator = deps.supportsHomeIndicator ?? (() => false);
+    this.isInputShadowed = deps.isInputShadowed ?? (() => false);
     const bundled = (deps.bundledDuoHelper ?? bundledDuoHidHelperPath)();
     this.handle = new (deps.SimHID ?? load().SimHID)(udid, bundled);
     this.keys = new KeySequencer(this.handle);
@@ -328,8 +397,55 @@ export class NativeHid {
     return this.delivered("multiTouch", () => this.settled(() => this.handle.multiTouch(type, x1, y1, x2, y2, w, h)));
   }
 
-  button(button: string): Promise<boolean> {
-    return this.delivered("button", () => this.settled(this.viaDuoHelper(() => this.handle.button(button))));
+  async button(button: string, signal?: AbortSignal): Promise<boolean> {
+    if (button !== "home") {
+      return this.delivered("button", () => this.settled(this.viaDuoHelper(() => this.handle.button(button))));
+    }
+    const name = await this.homeButtonName();
+    if (signal?.aborted) return false;
+    const send = this.viaDuoHelper(() => this.handle.button(name));
+    const guarded = () => {
+      if (signal?.aborted) return Promise.resolve(false);
+      return send();
+    };
+    // SpringBoardLauncher does not use the HID client, so a cold session
+    // must not wait out GUEST_HID_SETTLE_MS and then trip the host-rpc
+    // timeout (which would also fire a late flick after simctl fallback).
+    if (name === "home") return this.delivered("button", guarded);
+    return this.delivered("button", () => this.settled(guarded));
+  }
+
+  private async homeButtonName(): Promise<"home" | "flick_home"> {
+    const gates = {
+      supportsHomeIndicator: this.supportsHomeIndicator(),
+      orientation: this.getOrientation(),
+      inputShadowed: this.isInputShadowed(),
+    };
+    // Sync gates already rule out a flick: skip the AX probe (up to 400 ms)
+    // on home-button devices, landscape, unknown orientation, and shadow.
+    if (!canFlickHomeBeforeFrontmostProbe(gates)) return "home";
+    let bundleId: string | null = null;
+    try {
+      const raw = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("axFrontmost timeout")), HOME_FRONTMOST_PROBE_TIMEOUT_MS);
+        timer.unref?.();
+        this.axFrontmost(this.udid).then(
+          (value) => { clearTimeout(timer); resolve(value); },
+          (error) => { clearTimeout(timer); reject(error); },
+        );
+      });
+      bundleId = (JSON.parse(raw) as { bundleId?: string }).bundleId ?? null;
+    } catch {
+      return "home";
+    }
+    // Re-read gates after the probe: a rotation to landscape while we waited
+    // must not use the pre-probe portrait snapshot to send flick_home.
+    return homeButtonForFrontmost({
+      bundleId,
+      supportsHomeIndicator: this.supportsHomeIndicator(),
+      orientation: this.getOrientation(),
+      inputShadowed: this.isInputShadowed(),
+    });
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<boolean> {

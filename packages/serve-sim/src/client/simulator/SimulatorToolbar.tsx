@@ -365,14 +365,13 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
 // Raises the watch window, sets Simulator as frontmost, then clicks the menu
 // item — this is the only mechanism that actually returns a watchOS simulator
 // to the watch face.
-// Pick the host command that returns a device to its home screen.
-//
-// The HID home-button press (`serve-sim button home`) is silently dropped by
-// Xcode 26+, which delivers the Indigo event but never routes it to
-// SpringBoard. Relaunching SpringBoard foregrounds the home screen reliably on
-// every Xcode version and is functionally identical to a single home press, so
-// it's the default whenever a udid is known. Watch simulators ignore both, so
-// they fall back to driving Simulator.app's Device > Home menu item.
+// Last-resort shell command for a Home click that wasn't intercepted.
+// The product toolbar preventDefault()s and sends host-rpc `home`, which
+// uses SpringBoardLauncher (and a short home-indicator flick when
+// SpringBoard is already frontmost on a Face ID device in portrait).
+// This fallback still relaunches SpringBoard via simctl when a udid is
+// known. Watch simulators ignore both, so they drive Simulator.app's
+// Device > Home menu item.
 export function homeButtonCommand(
   deviceType: DeviceType,
   deviceUdid?: string | null,

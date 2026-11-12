@@ -31,8 +31,11 @@ import {
   axDescribeAsync,
   axFrontmostAsync,
   duoHidHelperPath,
+  homeButtonSessionRoute,
   type MjpegFrame,
 } from "./native";
+import { deviceSupportsHomeIndicatorFlick } from "./devicekit-chrome";
+import { simulatorDeviceInfo } from "./device";
 import { createReadStream } from "fs";
 import type { Readable } from "stream";
 import { mkdir, rm, stat } from "fs/promises";
@@ -371,6 +374,13 @@ export class DeviceSession {
   private width = 0;
   private height = 0;
   private orientation = "portrait";
+  /** Guest UI orientation from a confirmed 0x07 or the Duo monitor. Unset
+   *  until then — a default of "portrait" must not authorize a flick. */
+  private knownOrientation?: string;
+  /** True only after chrome says Face ID and the device is not foldable. */
+  private homeIndicatorFlickSupported?: boolean;
+  private homeIndicatorWarmAttempts = 0;
+  private static readonly HOME_INDICATOR_WARM_MAX_ATTEMPTS = 3;
 
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
@@ -416,7 +426,12 @@ export class DeviceSession {
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.usesInjectedHid = dependencies?.hid != null;
-    this.hid = dependencies?.hid ?? new NativeHid(udid);
+    this.hid = dependencies?.hid ?? new NativeHid(udid, {
+      getOrientation: () => this.homeButtonRoute().orientation ?? undefined,
+      isInputShadowed: () => this.homeButtonRoute().inputShadowed === true,
+      supportsHomeIndicator: () => this.homeButtonRoute().supportsHomeIndicator === true,
+    });
+    if (!this.usesInjectedHid) void this.warmHomeIndicatorSupport();
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
     this.duo = new DuoPreview({
       createRenderer: (onFailure) => dependencies?.createDuoRenderer
@@ -429,6 +444,18 @@ export class DeviceSession {
       onRendererEvent: (event) => this.recordRendererEvent(event),
       onFrameDelivered: () => this.noteStreamFrame("3d"),
     });
+  }
+
+  /**
+   * Home button: the same path as `serve-sim button home`. Leaves a
+   * foreground app via SpringBoardLauncher (#192 direct launch, #208
+   * timeout, then the launcher's simctl fallback). When SpringBoard is
+   * already frontmost (App Library, folders, inner pages), uses a short
+   * home-indicator flick because the launch is a no-op there.
+   */
+  async pressHome(signal?: AbortSignal): Promise<boolean> {
+    if (this.homeIndicatorFlickSupported == null) void this.warmHomeIndicatorSupport();
+    return (await this.hid.button("home", signal)) !== false;
   }
 
   /**
@@ -461,6 +488,7 @@ export class DeviceSession {
       this.phase = "running";
       // Do not await: a wedged notifyutil must not delay the first stream frame.
       void this.refreshDeviceHubInput();
+      void this.warmHomeIndicatorSupport();
       const bufferDefault = this.dependencies?.rollingBuffer !== undefined
         ? this.dependencies.rollingBuffer
         : parseRollingBufferEnv();
@@ -559,7 +587,10 @@ export class DeviceSession {
       this.followedCover = panel === "cover";
     }
     const orientation = state.orientations[panel];
-    if (orientation) this.orientation = orientation;
+    if (orientation) {
+      this.orientation = orientation;
+      this.knownOrientation = orientation;
+    }
     this.duo.setPanel(panel);
     this.broadcastConfig();
     this.duo.requestFrame();
@@ -1396,7 +1427,10 @@ export class DeviceSession {
         }
         // SpringBoardLauncher home still reaches the guest when Device Hub
         // has disconnected legacy mouse/keyboard HID, so it is recorded even
-        // while other buttons are refused.
+        // while other buttons are refused. When SpringBoard is frontmost,
+        // NativeHid stays on the launch path if input is shadowed (a flick
+        // would be dropped) rather than acknowledging a touch that was not
+        // delivered.
         if (m.button !== "home" && await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
         this.recordHidEvent(tag, m);
         return this.hid.button(m.button);
@@ -1423,6 +1457,10 @@ export class DeviceSession {
         const value = ORIENTATION_BY_NAME[m.orientation];
         if (value != null && await this.hid.orientation(value)) {
           this.recordHidEvent(tag, m);
+          // Confirm orientation even when it matches the default "portrait"
+          // so a fresh session can flick. Do not overwrite a Duo monitor
+          // reading with view state.
+          if (this.duo.hinge == null) this.knownOrientation = m.orientation;
           if (m.orientation !== this.orientation || m.orientation !== this.duo.viewOrientationName) {
             // Duo physical orientation and the active panel's UI orientation
             // differ (the inner panel's natural axis is rotated). Let the
@@ -1796,6 +1834,38 @@ export class DeviceSession {
     // Tests inject a fake `hid` and must not spawn simctl on dummy UDIDs.
     if (this.usesInjectedHid) return null;
     return readDeviceHubInputShadowed;
+  }
+
+  private homeButtonRoute() {
+    return homeButtonSessionRoute({
+      knownOrientation: this.knownOrientation,
+      deviceHubShadowed: this.deviceHubShadowed,
+      homeIndicatorFlickSupported: this.homeIndicatorFlickSupported,
+    });
+  }
+
+  /** Resolve chrome and foldable off the Home hot path. A transient lookup
+   *  failure leaves the flag unset so a later warm can retry, up to a bound. */
+  private async warmHomeIndicatorSupport(): Promise<void> {
+    if (this.homeIndicatorFlickSupported != null || this.usesInjectedHid) return;
+    if (this.homeIndicatorWarmAttempts >= DeviceSession.HOME_INDICATOR_WARM_MAX_ATTEMPTS) {
+      this.homeIndicatorFlickSupported = false;
+      return;
+    }
+    this.homeIndicatorWarmAttempts += 1;
+    try {
+      if (await this.hid.isFoldable?.()) {
+        this.homeIndicatorFlickSupported = false;
+        return;
+      }
+      const info = await simulatorDeviceInfo(this.udid);
+      if (this.isStopped()) return;
+      this.homeIndicatorFlickSupported = info != null && deviceSupportsHomeIndicatorFlick(info);
+    } catch {
+      if (this.homeIndicatorWarmAttempts >= DeviceSession.HOME_INDICATOR_WARM_MAX_ATTEMPTS) {
+        this.homeIndicatorFlickSupported = false;
+      }
+    }
   }
 
   /** Single-flight probe. Callers that already have a reading must not await this. */
