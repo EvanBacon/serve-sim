@@ -156,14 +156,15 @@ actor HIDInjector {
         // Thrown errors here fail setup, as before.
         let firstClient = try Self.makeHIDClient(device: device)
         let duo = duoBridge
+        let maker = BoundedHIDClientMaker(device: device)
         channel = HIDClientChannel(
             gate: gate,
             connect: {
                 // initWithDevice: can block on a CoreSimulator lock during
-                // shutdown. Run it off this actor queue with a short
-                // timeout so a reconnect cannot stall the next tap ack
-                // past the 2s drop bound (or the 4s CLI ack timeout).
-                Self.makeHIDClientBounded(device: device)
+                // shutdown. The maker runs it off this actor queue, waits
+                // at most 150ms, and coalesces overlapping attempts so a
+                // slow post-boot init is adopted instead of discarded.
+                maker.make(timeout: Self.makeClientTimeout)
             },
             log: Self.logLine,
             // The Duo guest helper ran inside the old boot; start a new one.
@@ -191,42 +192,67 @@ actor HIDInjector {
         fflush(stdout)
     }
 
-    /// Upper bound for a reconnect's `initWithDevice:`. Matches the state
-    /// probe closely enough that a locked shutdown still drops inside the
-    /// 2s e2e window, including CLI startup.
+    /// Upper bound for waiting on a reconnect's `initWithDevice:`. Together
+    /// with the 100ms state-read cap this keeps a shutdown drop inside the
+    /// 2s e2e bound, including CLI startup. A still-running init is not
+    /// cancelled: the next reconnecting send adopts it if it has finished.
     private static let makeClientTimeout: TimeInterval = 0.15
 
-    /// Build a HID client off the injector's actor queue. Returns nil if
-    /// `initWithDevice:` does not finish in time; a late client is discarded
-    /// so it cannot be adopted after we have already reported a drop.
-    private static func makeHIDClientBounded(device: NSObject) -> NSObject? {
-        let box = MakeClientBox()
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInteractive).async {
-            do {
-                box.set(client: try makeHIDClient(device: device))
-            } catch {
-                logLine("[hid] Could not create SimDeviceLegacyHIDClient: \(error.localizedDescription)")
-                box.set(client: nil)
-            }
-            done.signal()
-        }
-        if done.wait(timeout: .now() + makeClientTimeout) == .timedOut {
-            logLine("[hid] Timed out creating SimDeviceLegacyHIDClient after \(makeClientTimeout)s")
-            return nil
-        }
-        return box.client
-    }
+    /// One in-flight `initWithDevice:` at a time, off the injector actor.
+    /// A send waits up to `timeout` and returns nil on expiry so the ack
+    /// cannot stall; the work keeps running and a later send can adopt the
+    /// result. `connect()` is only called after the gate has read Booted,
+    /// so a finished client is not adopted once the device has left Booted.
+    private final class BoundedHIDClientMaker: @unchecked Sendable {
+        private let device: NSObject
+        private let condition = NSCondition()
+        private var inFlight = false
+        private var finished = false
+        private var client: NSObject?
 
-    private final class MakeClientBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: NSObject?
-        var client: NSObject? {
-            lock.lock(); defer { lock.unlock() }
-            return value
+        init(device: NSObject) { self.device = device }
+
+        func make(timeout: TimeInterval) -> NSObject? {
+            condition.lock()
+            defer { condition.unlock() }
+            if finished {
+                return takeFinished()
+            }
+            if !inFlight {
+                inFlight = true
+                let device = self.device
+                DispatchQueue.global(qos: .userInteractive).async { [self] in
+                    let result: NSObject?
+                    do {
+                        result = try HIDInjector.makeHIDClient(device: device)
+                    } catch {
+                        HIDInjector.logLine("[hid] Could not create SimDeviceLegacyHIDClient: \(error.localizedDescription)")
+                        result = nil
+                    }
+                    self.condition.lock()
+                    self.client = result
+                    self.finished = true
+                    self.inFlight = false
+                    self.condition.broadcast()
+                    self.condition.unlock()
+                }
+            }
+            let deadline = Date().addingTimeInterval(timeout)
+            while !finished {
+                if !condition.wait(until: deadline) {
+                    HIDInjector.logLine("[hid] Timed out creating SimDeviceLegacyHIDClient after \(timeout)s")
+                    return nil
+                }
+            }
+            return takeFinished()
         }
-        func set(client: NSObject?) {
-            lock.lock(); value = client; lock.unlock()
+
+        /// Caller must hold `condition`.
+        private func takeFinished() -> NSObject? {
+            let value = client
+            client = nil
+            finished = false
+            return value
         }
     }
 
