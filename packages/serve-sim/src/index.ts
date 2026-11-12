@@ -743,8 +743,10 @@ interface InputTarget {
   url: string;
   wsUrl: string;
   headers: Record<string, string>;
-  /** The server sends input delivery acks (#136); older servers don't. */
+  /** The server sends input delivery acks (#136) for touch/button; older servers don't. */
   inputAck: boolean;
+  /** The server also acks key frames; pre-keyAck servers advertised only inputAck. */
+  keyAck: boolean;
 }
 
 /**
@@ -765,7 +767,7 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
       console.error("No serve-sim server running. Run `serve-sim` first.");
       process.exit(1);
     }
-    return { device: state.device, url: state.url, wsUrl: state.wsUrl, headers, inputAck: state.inputAck === true };
+    return { device: state.device, url: state.url, wsUrl: state.wsUrl, headers, inputAck: state.inputAck === true, keyAck: state.keyAck === true };
   }
 
   let base: URL;
@@ -795,7 +797,7 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
     console.error(`serve-sim at ${base.origin} returned HTTP ${res.status} for /api`);
     process.exit(1);
   }
-  const config = await res.json().catch(() => null) as { device?: string; inputAck?: unknown } | null;
+  const config = await res.json().catch(() => null) as { device?: string; inputAck?: unknown; keyAck?: unknown } | null;
   const device = config?.device;
   if (!device) {
     console.error(
@@ -813,6 +815,7 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
     wsUrl: ws.toString(),
     headers,
     inputAck: config.inputAck === true,
+    keyAck: config.keyAck === true,
   };
 }
 
@@ -1007,29 +1010,14 @@ const WS_MSG_INPUT_ACK = 0x84;
 const INPUT_ACK_TIMEOUT_MS = 4_000;
 
 /**
- * Send touch/button frames and wait for the server to say whether the HID
- * injector delivered them. Each frame goes out `delayMs` after the previous
- * one regardless of acks (a tap's begin/end spacing must not stretch into a
- * long-press). When the server reports a frame was not delivered, or closes
- * the socket before acknowledging, prints why and sets exit code 1. A server
- * that doesn't advertise acks gets the frames untagged and the socket closes
+ * Send input frames and wait for the server to say whether they were
+ * delivered. Each frame goes out `delayMs` after the previous one regardless
+ * of acks (a tap's begin/end spacing must not stretch into a long-press).
+ * When the server reports a frame was not delivered, or closes the socket
+ * before acknowledging, prints why and sets exit code 1. A server that
+ * doesn't advertise acks gets the frames untagged and the socket closes
  * 50ms after the last one, as before #136.
  */
-/** Key events go through the same delivery-ack path as tap when the server advertises it. */
-function sendKeyedInput(
-  target: InputTarget,
-  what: string,
-  events: ReadonlyArray<KeyEvent>,
-  perEventDelayMs: number,
-): Promise<void> {
-  if (!target.inputAck) return sendKeyEventsToWs(target.wsUrl, events, perEventDelayMs, target.headers);
-  return sendAckedInput(target, what, events.map((payload, index) => ({
-    tag: 0x06,
-    payload,
-    delayMs: index === 0 ? 0 : perEventDelayMs,
-  })));
-}
-
 function sendAckedInput(
   target: InputTarget,
   what: string,
@@ -1115,6 +1103,21 @@ function sendAckedInput(
       sendNext(0);
     };
   });
+}
+
+/** Key events use the delivery-ack path only when the server advertises `keyAck`. */
+function sendKeyedInput(
+  target: InputTarget,
+  what: string,
+  events: ReadonlyArray<KeyEvent>,
+  perEventDelayMs: number,
+): Promise<void> {
+  if (!target.keyAck) return sendKeyEventsToWs(target.wsUrl, events, perEventDelayMs, target.headers);
+  return sendAckedInput(target, what, events.map((payload, index) => ({
+    tag: 0x06,
+    payload,
+    delayMs: index === 0 ? 0 : perEventDelayMs,
+  })));
 }
 
 /** Print a failed `/ax/*` call to stderr (code: message) and exit 1. */

@@ -19,7 +19,7 @@ const cli = join(import.meta.dir, "..", "index.ts");
 // ok/fail: advertises acks and replies. close: advertises, then drops the
 // socket without replying. hung: advertises but never replies. legacy: an
 // older server that neither advertises nor replies.
-type Mode = "ok" | "fail" | "close" | "hung" | "legacy" | "shadow";
+type Mode = "ok" | "fail" | "close" | "hung" | "legacy" | "shadow" | "inputAckOnly";
 const devices: Record<string, Mode> = {
   "ACK-OK": "ok",
   "ACK-FAIL": "fail",
@@ -27,6 +27,7 @@ const devices: Record<string, Mode> = {
   "ACK-HUNG": "hung",
   "ACK-LEGACY": "legacy",
   "ACK-SHADOW": "shadow",
+  "ACK-KEY-OLD": "inputAckOnly",
 };
 
 let PORT = 0;
@@ -40,8 +41,9 @@ beforeAll(async () => {
     if (url.pathname === "/api") {
       const device = url.searchParams.get("device");
       const advertises = device !== null && devices[device] !== undefined && devices[device] !== "legacy";
+      const keyAck = advertises && devices[device] !== "inputAckOnly";
       res.writeHead(200, { "Content-Type": "application/json" })
-        .end(JSON.stringify({ device, ...(advertises ? { inputAck: true } : {}) }));
+        .end(JSON.stringify({ device, ...(advertises ? { inputAck: true } : {}), ...(keyAck ? { keyAck: true } : {}) }));
       return;
     }
     res.writeHead(404).end();
@@ -56,6 +58,8 @@ beforeAll(async () => {
       if (mode === "close") { ws.terminate(); return; }
       if (mode === "hung" || mode === "legacy") return;
       const body = JSON.parse(frame.subarray(1).toString()) as { ack?: number };
+      // Pre-keyAck servers advertised inputAck but never replied to key frames.
+      if (mode === "inputAckOnly" && frame[0] === 0x06) return;
       if (typeof body.ack !== "number") return;
       const reply = mode === "shadow"
         ? { ack: body.ack, ok: false, error: "Device Hub has disconnected legacy input. Run serve-sim repair-input -d ACK-SHADOW before using touch or keyboard." }
@@ -149,10 +153,30 @@ describe("input commands propagate HID delivery failures (#136)", () => {
     expect(bodies.map((b) => b.type)).toEqual(["begin", "end"]);
     expect(new Set(bodies.map((b) => b.ack)).size).toBe(2);
   }, 25_000);
+
+  test("type prints the server's Device Hub error and exits 1", async () => {
+    const r = await runCli(["type", "hi", "-d", "ACK-SHADOW"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("serve-sim: Device Hub has disconnected legacy input");
+    expect(r.stderr).toContain("repair-input -d ACK-SHADOW");
+  }, 25_000);
+
+  test("type does not wait for acks from a server that only advertised inputAck", async () => {
+    frames.length = 0;
+    const r = await runCli(["type", "hi", "-d", "ACK-KEY-OLD"]);
+    expect(r.status).toBe(0);
+    expect(r.ms).toBeLessThan(3_500);
+    expect(r.stderr).not.toContain("no delivery confirmation");
+    expect(frames.length).toBeGreaterThan(0);
+    for (const f of frames) expect(JSON.parse(f.subarray(1).toString())).not.toHaveProperty("ack");
+  }, 25_000);
 });
 
 test("servers advertise input acks in their state file and /api (#136)", () => {
   const state = inProcessServeSimState("ADVERTISE", 3999);
   expect(state.inputAck).toBe(true);
-  expect(previewConfigForState(state, "", "serve-sim", false).inputAck).toBe(true);
+  expect(state.keyAck).toBe(true);
+  const preview = previewConfigForState(state, "", "serve-sim", false);
+  expect(preview.inputAck).toBe(true);
+  expect(preview.keyAck).toBe(true);
 });

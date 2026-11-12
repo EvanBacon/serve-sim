@@ -107,8 +107,17 @@ describe("HID input acknowledgements (#136)", () => {
     const s = session({ touch: async () => false, button: async () => false });
     s.send(0x03, { type: "begin", x: 0.5, y: 0.5 });
     s.send(0x04, { button: "home" });
+    s.send(0x06, { type: "down", usage: 4 });
+    s.send(0x0b, { dx: 0, dy: 0.1 });
     await settle();
     expect(s.replies).toEqual([]);
+  });
+
+  test("a failed home press while shadowed is acked not-ok without a repair-input error", async () => {
+    const s = session({ button: async () => false }, async () => true);
+    s.send(0x04, { button: "home", ack: 8 });
+    await settle();
+    expect(s.replies).toEqual([{ tag: ACK_TAG, body: { ack: 8, ok: false } }]);
   });
 
   test("the ack id is not forwarded to the injector", async () => {
@@ -220,6 +229,32 @@ describe("HID input acknowledgements (#136)", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(s.replies[2]!.body).toEqual({ ack: 3, ok: true });
     expect(s.calls[0]!.slice(0, 4)).toEqual(["touch", "begin", 0.5, 0.5]);
+    expect(probes).toBe(2);
+  });
+
+  test("a sync throw in the probe does not pin the in-flight promise, so a later TTL refresh can run", async () => {
+    let now = 0;
+    let probes = 0;
+    let shadowed: boolean | "throw" = "throw";
+    const s = session({}, () => {
+      probes += 1;
+      if (shadowed === "throw") throw new Error("defaults missing");
+      return Promise.resolve(shadowed);
+    }, () => now);
+    s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 1 });
+    await settle();
+    // Unreadable first probe fails open (no prior true).
+    expect(s.replies[0]!.body.ok).toBe(true);
+    expect(probes).toBe(1);
+    shadowed = true;
+    now = 2_000;
+    s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 2 });
+    await settle();
+    // Cached unreadable still fails open; the refresh runs in the background.
+    expect(s.replies[1]!.body.ok).toBe(true);
+    s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 3 });
+    await settle();
+    expect(s.replies[2]!.body.ok).toBe(false);
     expect(probes).toBe(2);
   });
 });

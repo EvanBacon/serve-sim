@@ -1811,7 +1811,10 @@ export class DeviceSession {
       this.deviceHubShadowSettled = true;
       return Promise.resolve();
     }
-    this.deviceHubProbe = (async () => {
+    // Assign the promise before it can settle so a sync throw in `read`
+    // cannot leave a leftover in-flight probe. Attach `finally` after the
+    // assignment so it actually clears.
+    const probe = (async () => {
       try {
         const shadowed = await read(this.udid);
         this.deviceHubShadowedAt = this.now();
@@ -1828,11 +1831,13 @@ export class DeviceSession {
       } catch {
         this.deviceHubShadowedAt = this.now();
         this.deviceHubShadowSettled = true;
-      } finally {
-        this.deviceHubProbe = undefined;
       }
     })();
-    return this.deviceHubProbe;
+    this.deviceHubProbe = probe;
+    void probe.finally(() => {
+      if (this.deviceHubProbe === probe) this.deviceHubProbe = undefined;
+    });
+    return probe;
   }
 
   private maybeRefreshDeviceHubInput(): void {
