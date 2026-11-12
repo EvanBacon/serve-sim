@@ -59,3 +59,38 @@ export function resolveDevice(nameOrUDID: string): string {
   console.error(`Could not resolve device: ${nameOrUDID}`);
   process.exit(1);
 }
+
+export type SimulatorDeviceInfo = {
+  udid: string;
+  name: string;
+  deviceTypeIdentifier?: string;
+};
+
+let simulatorDeviceInfoCache: Map<string, SimulatorDeviceInfo> | undefined;
+
+/** Name and device type for `udid` from `simctl list`, cached for the process. */
+export function simulatorDeviceInfo(udid: string): SimulatorDeviceInfo | null {
+  if (!simulatorDeviceInfoCache) {
+    simulatorDeviceInfoCache = new Map();
+    try {
+      const output = execFileSync("xcrun", simctlArguments(["list", "devices", "-j"]), { encoding: "utf-8" });
+      const data = JSON.parse(output) as {
+        devices: Record<string, Array<{ udid: string; name: string; deviceTypeIdentifier?: string }>>;
+      };
+      for (const devices of Object.values(data.devices)) {
+        for (const device of devices) {
+          simulatorDeviceInfoCache.set(device.udid.toUpperCase(), {
+            udid: device.udid,
+            name: device.name,
+            deviceTypeIdentifier: device.deviceTypeIdentifier,
+          });
+        }
+      }
+    } catch {
+      // Leave the cache empty so a later call can retry after simctl recovers.
+      simulatorDeviceInfoCache = undefined;
+      return null;
+    }
+  }
+  return simulatorDeviceInfoCache.get(udid.toUpperCase()) ?? null;
+}

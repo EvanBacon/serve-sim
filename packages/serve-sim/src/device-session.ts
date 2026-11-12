@@ -33,6 +33,8 @@ import {
   duoHidHelperPath,
   type MjpegFrame,
 } from "./native";
+import { deviceSupportsHomeIndicatorFlick } from "./devicekit-chrome";
+import { simulatorDeviceInfo } from "./device";
 import { createReadStream } from "fs";
 import type { Readable } from "stream";
 import { mkdir, rm, stat } from "fs/promises";
@@ -416,7 +418,14 @@ export class DeviceSession {
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.usesInjectedHid = dependencies?.hid != null;
-    this.hid = dependencies?.hid ?? new NativeHid(udid);
+    this.hid = dependencies?.hid ?? new NativeHid(udid, {
+      getOrientation: () => this.orientation,
+      isInputShadowed: () => this.deviceHubShadowed === true,
+      supportsHomeIndicator: () => {
+        const info = simulatorDeviceInfo(udid);
+        return info != null && deviceSupportsHomeIndicatorFlick(info);
+      },
+    });
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
     this.duo = new DuoPreview({
       createRenderer: (onFailure) => dependencies?.createDuoRenderer
@@ -1407,7 +1416,10 @@ export class DeviceSession {
         }
         // SpringBoardLauncher home still reaches the guest when Device Hub
         // has disconnected legacy mouse/keyboard HID, so it is recorded even
-        // while other buttons are refused.
+        // while other buttons are refused. When SpringBoard is frontmost,
+        // NativeHid stays on the launch path if input is shadowed (a flick
+        // would be dropped) rather than acknowledging a touch that was not
+        // delivered.
         if (m.button !== "home" && await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
         this.recordHidEvent(tag, m);
         return this.hid.button(m.button);

@@ -216,6 +216,18 @@ export function resolveDeviceDisplays(device: {
   return resolved;
 }
 
+/** Face ID / home-indicator devices have chrome with no physical Home button.
+ *  Missing chrome is treated as unknown: do not send a bottom-edge flick
+ *  (on a home-button device that opens Control Center). */
+export function deviceSupportsHomeIndicatorFlick(device: {
+  name: string;
+  deviceTypeIdentifier?: string;
+}): boolean {
+  const chrome = resolveDeviceKitChrome(device);
+  if (!chrome) return false;
+  return !chrome.buttons.some((button) => button.name === "home");
+}
+
 export function resolveDeviceKitChrome(device: {
   name: string;
   deviceTypeIdentifier?: string;
