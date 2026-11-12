@@ -112,19 +112,31 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     // clear that flag once the guest can take input. Guest boot itself
     // can exceed 20s on a slow CI runner, so the 20s bound is measured
     // from the first not-ready log, not from `simctl boot`.
+    const NOT_READY_LOG = "[hid] Dropping input: HID client is not ready";
     const logAtStart = serverLog.length;
+    let notReadyAt: number | undefined;
+    const stampNotReady = (chunk?: string) => {
+      if (notReadyAt != null) return;
+      const text = chunk ?? serverLog.slice(logAtStart);
+      if (text.includes(NOT_READY_LOG)) notReadyAt = Date.now();
+    };
+    const onData = (d: Buffer | string) => { stampNotReady(String(d)); };
+    stampNotReady();
+    server!.stdout!.on("data", onData);
+    server!.stderr!.on("data", onData);
     spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
     let firstOkAt: number | undefined;
-    let notReadyAt: number | undefined;
     const deadline = Date.now() + 45_000;
-    while (Date.now() < deadline) {
-      const r = tap();
-      if (notReadyAt == null && serverLog.slice(logAtStart).includes("[hid] Dropping input: HID client is not ready")) {
-        notReadyAt = Date.now();
+    try {
+      while (Date.now() < deadline) {
+        const r = tap();
+        if (r.status === 0) { firstOkAt = Date.now(); break; }
+        expect(r.stderr).not.toContain(NO_SERVER);
+        await sleep(400);
       }
-      if (r.status === 0) { firstOkAt = Date.now(); break; }
-      expect(r.stderr).not.toContain(NO_SERVER);
-      await sleep(400);
+    } finally {
+      server!.stdout!.off("data", onData);
+      server!.stderr!.off("data", onData);
     }
     if (firstOkAt == null) throw new Error("no successful tap within 45s of simctl boot");
     if (notReadyAt != null) {

@@ -53,7 +53,9 @@ final class BoundedStateReaderTests: XCTestCase {
         let started = DispatchSemaphore(value: 0)
         let hold = DispatchSemaphore(value: 0)
         var calls = 0
-        let reader = BoundedStateReader(timeout: 1) {
+        // Timeout must outlast the 1s join deadline so a late second
+        // caller cannot let the first probe expire before hold.signal().
+        let reader = BoundedStateReader(timeout: 5) {
             calls += 1
             started.signal()
             hold.wait()

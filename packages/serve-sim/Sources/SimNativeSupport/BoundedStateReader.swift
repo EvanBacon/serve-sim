@@ -31,9 +31,14 @@ public final class BoundedStateReader: @unchecked Sendable {
         var timedOut = false
     }
     private var inFlight: Flight?
-    /// Callers currently inside `probe()` for tests that need to wait until
-    /// an overlapping caller has joined the in-flight read.
-    private(set) var waiterCount = 0
+    /// Callers currently inside `probe()`. Tests read this through the
+    /// locked getter so they do not race the probe threads.
+    private var waiterCountStorage = 0
+    var waiterCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return waiterCountStorage
+    }
 
     public init(timeout: TimeInterval = BoundedStateReader.defaultTimeout, read: @escaping () -> Int?) {
         self.timeout = timeout
@@ -44,8 +49,8 @@ public final class BoundedStateReader: @unchecked Sendable {
     public func probe() -> Probe {
         lock.lock()
         defer { lock.unlock() }
-        waiterCount += 1
-        defer { waiterCount -= 1 }
+        waiterCountStorage += 1
+        defer { waiterCountStorage -= 1 }
 
         let flight: Flight
         if let current = inFlight {
