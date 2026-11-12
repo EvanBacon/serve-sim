@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
+import { deviceHubInputShadowedMessage } from "../device-hub-input";
 
 // #136: `serve-sim tap/button/gesture` exited 0 even when the HID injector
 // could not deliver the event (injector not set up, device gone, unknown
@@ -11,7 +12,7 @@ const ACK_TAG = 0x84;
 
 type Hid = DeviceSessionDependencies["hid"];
 
-function session(hid: Partial<Hid>): {
+function session(hid: Partial<Hid>, readDeviceHubInputShadowed: () => Promise<boolean | null> = async () => null): {
   send: (tag: number, payload: unknown) => void;
   replies: Array<{ tag: number; body: Record<string, unknown> }>;
   calls: unknown[][];
@@ -44,6 +45,7 @@ function session(hid: Partial<Hid>): {
       setPreferredScreenSize: async () => {},
     },
     hid: { ...base, ...hid },
+    readDeviceHubInputShadowed,
   });
   const replies: Array<{ tag: number; body: Record<string, unknown> }> = [];
   let receive!: (data: Buffer) => void;
@@ -115,5 +117,24 @@ describe("HID input acknowledgements (#136)", () => {
     await settle();
     expect(s.calls[0]).toEqual(["button", "lock"]);
     expect(s.calls[1]!.slice(0, 4)).toEqual(["touch", "begin", 0.25, 0.75]);
+  });
+
+  test("a touch is not acked as delivered when Device Hub has shadowed legacy input", async () => {
+    const s = session({}, async () => true);
+    s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 1 });
+    await settle();
+    expect(s.calls).toEqual([]);
+    expect(s.replies).toEqual([{
+      tag: ACK_TAG,
+      body: { ack: 1, ok: false, error: deviceHubInputShadowedMessage("ACK-UDID") },
+    }]);
+  });
+
+  test("SpringBoard home is still sent when Device Hub has shadowed legacy input", async () => {
+    const s = session({}, async () => true);
+    s.send(0x04, { button: "home", ack: 2 });
+    await settle();
+    expect(s.calls).toEqual([["button", "home"]]);
+    expect(s.replies).toEqual([{ tag: ACK_TAG, body: { ack: 2, ok: true } }]);
   });
 });

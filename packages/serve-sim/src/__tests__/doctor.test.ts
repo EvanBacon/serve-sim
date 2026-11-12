@@ -103,6 +103,25 @@ describe("serve-sim doctor bundle", () => {
     expect(summary).toContain("xcode-select -p: /Applications/Xcode.app/Contents/Developer");
     expect(summary).toContain("duo renderer=absent hinge=unknown panel=inner");
   });
+
+  test("verdicts tell you to repair-input when Device Hub has shadowed legacy input", async () => {
+    const bundle = buildDiagnosticsBundle({
+      host: await host(),
+      devices: [{
+        udid: "7F44677F-3FCF-4935-B945-A5DB8C6BE91D",
+        name: "cut-scrub iPhone",
+        device_hub_input_shadowed: true,
+      }],
+      sessions: [{
+        udid: "7F44677F-3FCF-4935-B945-A5DB8C6BE91D",
+        hid: { device_hub_input_shadowed: null, sockets: 0 },
+        streams: {},
+      }],
+      home: HOME,
+    });
+    const verdicts = diagnosticsVerdicts(bundle);
+    expect(verdicts.some((line) => line.includes("cut-scrub iPhone") && line.includes("repair-input -d 7F44677F-3FCF-4935-B945-A5DB8C6BE91D"))).toBe(true);
+  });
 });
 
 describe("doctor diagnostics URL", () => {

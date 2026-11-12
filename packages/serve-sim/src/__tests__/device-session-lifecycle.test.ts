@@ -831,6 +831,7 @@ function dependencies(
       pose: async () => false,
       hinge: async () => false,
     },
+    readDeviceHubInputShadowed: async () => null,
   };
 }
 
@@ -884,4 +885,22 @@ test.each([true, false])("fold frames advance between sparse readbacks and settl
     await waitFor(() => angles.at(-1) === (accepted ? 180 : 141));
     expect(session.screenConfig().hingeDegrees).toBe(accepted ? 180 : 141);
   } finally { release?.(false); session.close(); }
+});
+
+describe("DeviceSession Device Hub input shadow", () => {
+  test("probes the guest flag on a non-foldable iPhone and reports it in diagnostics", async () => {
+    const probed: string[] = [];
+    const session = new DeviceSession("PHONE-UDID", {
+      ...dependencies(),
+      readDeviceHubInputShadowed: async (udid) => {
+        probed.push(udid);
+        return true;
+      },
+    });
+    await session.start();
+    const hid = (await session.diagnostics()).hid as { device_hub_input_shadowed: boolean | null };
+    expect(probed).toEqual(["PHONE-UDID"]);
+    expect(hid.device_hub_input_shadowed).toBe(true);
+    session.close();
+  });
 });

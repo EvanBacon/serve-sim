@@ -1,4 +1,4 @@
-import { warnDeviceHubInput } from "./device-hub-input";
+import { deviceHubInputShadowedMessage, readDeviceHubInputShadowed } from "./device-hub-input";
 import { axTreeHasSoftwareKeyboard, readHardwareKeyboardState, writeHardwareKeyboardState } from "./hardware-keyboard-state";
 import { isModifierUsage } from "./keyboard-modifiers";
 import { DuoRenderer, DuoRendererError, logDuoRendererFailure } from "./duo-renderer";
@@ -299,6 +299,12 @@ export interface DeviceSessionDependencies {
    * Defaults to `SERVE_SIM_BUFFER` (`serve-sim --buffer`), which is unset/off.
    */
   rollingBuffer?: RollingBufferOptions | null;
+  /**
+   * Guest Device Hub input-shadow flag (`com.apple.coredevice.dtuhidd.active`).
+   * Defaults to a live `notifyutil` probe on production sessions. Tests inject
+   * this so they never spawn simctl.
+   */
+  readDeviceHubInputShadowed?: (udid: string) => Promise<boolean | null>;
 }
 
 type ActiveRecording = {
@@ -378,6 +384,11 @@ export class DeviceSession {
     "3d": newStreamHealth(),
   };
   private deviceHubShadowed?: boolean;
+  /** Epoch ms of the last shadow-flag probe; used to re-check with a short TTL. */
+  private deviceHubShadowedAt = 0;
+  private deviceHubShadowWarned = false;
+  /** Tests inject `hid`; production constructs `NativeHid` and must probe live. */
+  private readonly usesInjectedHid: boolean;
   /** Active screen recording (one per session), or a start/stop in flight. */
   private recording?: ActiveRecording;
   /** Indexes of collected recordings, by start token (oldest first). */
@@ -389,6 +400,7 @@ export class DeviceSession {
   private rollingBuffer?: RollingBufferSampler;
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
+    this.usesInjectedHid = dependencies?.hid != null;
     this.hid = dependencies?.hid ?? new NativeHid(udid);
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
     this.duo = new DuoPreview({
@@ -432,6 +444,8 @@ export class DeviceSession {
       }
       this.unsubscribeSize = unsubscribeSize;
       this.phase = "running";
+      await this.probeDeviceHubInput();
+      if (this.isStopped()) return;
       const bufferDefault = this.dependencies?.rollingBuffer !== undefined
         ? this.dependencies.rollingBuffer
         : parseRollingBufferEnv();
@@ -443,9 +457,6 @@ export class DeviceSession {
           return;
         }
         this.unsubscribeMjpeg = unsubscribe;
-        if (!this.dependencies?.createDuoMonitor) {
-          void warnDeviceHubInput(this.udid).then((shadowed) => { this.deviceHubShadowed = shadowed; });
-        }
         const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState, duoHelper) => new DuoStateMonitor(udid, onState, { duoHelper }));
         this.duoMonitor = createMonitor(this.udid, (state) => {
           void this.followDuoState(state).catch((error) => {
@@ -769,6 +780,7 @@ export class DeviceSession {
    */
   private async injectTap(point: { x: number; y: number }, holdMs: number): Promise<void> {
     await this.start();
+    if (await this.legacyInputShadowed()) throw new Error(deviceHubInputShadowedMessage(this.udid));
     if (this.width === 0 || this.height === 0) throw new Error("Screen size is not known yet; retry in a moment.");
     const orientation = cliInputOrientation(this.screenConfig());
     const touch = async (type: "begin" | "end") => {
@@ -1317,7 +1329,12 @@ export class DeviceSession {
             })
             .then((ok) => {
               if (this.hidSockets.has(ws)) {
-                ws.send(Buffer.concat([Buffer.from([WS_MSG_INPUT_ACK]), Buffer.from(JSON.stringify({ ack, ok }))]));
+                const body: { ack: number; ok: boolean; error?: string } = { ack, ok };
+                if (!ok) {
+                  const error = this.legacyInputAckError();
+                  if (error) body.error = error;
+                }
+                ws.send(Buffer.concat([Buffer.from([WS_MSG_INPUT_ACK]), Buffer.from(JSON.stringify(body))]));
               }
             });
         }
@@ -1348,6 +1365,7 @@ export class DeviceSession {
       case 0x03: {
         const raw = json<{ type: string; x: number; y: number; edge?: number; ack?: number }>();
         if (!raw) return false;
+        if (await this.legacyInputShadowed()) return false;
         const m = withoutAck(raw);
         this.recordTouchEvent(m);
         return this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
@@ -1358,13 +1376,18 @@ export class DeviceSession {
         const m = withoutAck(raw);
         this.recordHidEvent(tag, m);
         if (m.page != null && m.usage != null) {
+          if (await this.legacyInputShadowed()) return false;
           return this.hid.buttonHid(m.page, m.usage, (m.phase as "down" | "up" | "press") ?? "press");
         }
+        // SpringBoardLauncher home still reaches the guest when Device Hub
+        // has disconnected legacy mouse/keyboard HID.
+        if (m.button !== "home" && await this.legacyInputShadowed()) return false;
         return this.hid.button(m.button);
       }
       case 0x05: {
         const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number }>();
         if (m) {
+          if (await this.legacyInputShadowed()) return false;
           this.recordHidEvent(tag, m);
           this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H);
         }
@@ -1373,6 +1396,7 @@ export class DeviceSession {
       case 0x06: {
         const m = json<{ type: string; usage: number }>();
         if (m) {
+          if (await this.legacyInputShadowed()) return false;
           this.recordHidEvent(tag, m);
           this.hid.key(m.type as "down" | "up", m.usage);
           if (m.type === "down" && !isModifierUsage(m.usage)) this.forwardedTypingKey = true;
@@ -1413,6 +1437,7 @@ export class DeviceSession {
       case 0x0a: {
         const m = json<{ delta: number }>();
         if (m) {
+          if (await this.legacyInputShadowed()) return false;
           this.recordHidEvent(tag, m);
           this.hid.digitalCrown(m.delta);
         }
@@ -1422,6 +1447,7 @@ export class DeviceSession {
         // Payload deltas are a fraction of the display; scale to device pixels.
         const m = json<{ dx: number; dy: number; x?: number; y?: number }>();
         if (m) {
+          if (await this.legacyInputShadowed()) return false;
           this.recordHidEvent(tag, m);
           this.hid.scroll(m.dx * W, m.dy * H, W, H, m.x, m.y);
         }
@@ -1747,6 +1773,44 @@ export class DeviceSession {
       details: { ...details, count: 1 },
     });
     this.rendererFailureEvent = { id: entry.id, key, count: 1 };
+  }
+
+  private static readonly DEVICE_HUB_SHADOW_RECHECK_MS = 2_000;
+
+  private deviceHubInputReader(): ((udid: string) => Promise<boolean | null>) | null {
+    if (this.dependencies?.readDeviceHubInputShadowed) return this.dependencies.readDeviceHubInputShadowed;
+    // Tests inject a fake `hid` and must not spawn simctl on dummy UDIDs.
+    if (this.usesInjectedHid) return null;
+    return readDeviceHubInputShadowed;
+  }
+
+  private async probeDeviceHubInput(): Promise<void> {
+    const read = this.deviceHubInputReader();
+    if (!read) return;
+    try {
+      const shadowed = await read(this.udid);
+      this.deviceHubShadowedAt = Date.now();
+      if (shadowed == null) return;
+      this.deviceHubShadowed = shadowed;
+      if (shadowed && !this.deviceHubShadowWarned) {
+        this.deviceHubShadowWarned = true;
+        console.warn(`[hid] ${deviceHubInputShadowedMessage(this.udid)}`);
+      }
+      if (!shadowed) this.deviceHubShadowWarned = false;
+    } catch {
+      this.deviceHubShadowedAt = Date.now();
+    }
+  }
+
+  /** True when Device Hub has disconnected legacy HID and the event must not be acked as delivered. */
+  private async legacyInputShadowed(): Promise<boolean> {
+    const stale = this.deviceHubShadowedAt === 0 || Date.now() - this.deviceHubShadowedAt >= DeviceSession.DEVICE_HUB_SHADOW_RECHECK_MS;
+    if (stale) await this.probeDeviceHubInput();
+    return this.deviceHubShadowed === true;
+  }
+
+  private legacyInputAckError(): string | undefined {
+    if (this.deviceHubShadowed) return deviceHubInputShadowedMessage(this.udid);
   }
 
   /** JSON-safe live state for `/api/diagnostics` / `serve-sim doctor`. */

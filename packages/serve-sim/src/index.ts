@@ -1047,10 +1047,13 @@ function sendAckedInput(
     ws.onmessage = ({ data }) => {
       const frame = Buffer.from(data as ArrayBuffer);
       if (frame[0] !== WS_MSG_INPUT_ACK) return;
-      let reply: { ack?: unknown; ok?: unknown };
+      let reply: { ack?: unknown; ok?: unknown; error?: unknown };
       try { reply = JSON.parse(frame.subarray(1).toString()); } catch { return; }
       if (typeof reply.ack !== "number" || !pending.delete(reply.ack)) return;
-      if (reply.ok !== true) return finish(undelivered());
+      if (reply.ok !== true) {
+        const detail = typeof reply.error === "string" && reply.error.trim() ? reply.error.trim() : undelivered();
+        return finish(detail.startsWith("serve-sim") ? detail : `serve-sim: ${detail}`);
+      }
       if (sentAll && pending.size === 0) finish();
     };
     ws.onclose = () => {
