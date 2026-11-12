@@ -136,4 +136,71 @@ describe("normalizeAxTree", () => {
     expect(tree.elements.map((element) => element.path)).toEqual(["0.0", "0.1"]);
     expect(tree.elements[1]?.label).toBe("Sidebar");
   });
+
+  test("keeps a full-height group that has an accessibility identifier", () => {
+    const tree = normalizeAxTree([
+      node({
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        role_description: "application",
+        type: "Application",
+        children: [
+          node({
+            AXUniqueId: "drawer",
+            frame: { x: 0, y: 0, width: 250, height: 874 },
+          }),
+        ],
+      }),
+    ]);
+
+    expect(tree.elements.map((element) => element.path)).toEqual(["0.0"]);
+    expect(tree.elements[0]?.id).toBe("drawer");
+  });
+
+  test("pins the 95% height boundary and still filters a tall content wrapper", () => {
+    const screenHeight = 874;
+    const threshold = screenHeight * 0.95;
+    const tree = normalizeAxTree([
+      node({
+        frame: { x: 0, y: 0, width: 402, height: screenHeight },
+        role_description: "application",
+        type: "Application",
+        children: [
+          node({ frame: { x: 0, y: 0, width: 250, height: threshold } }),
+          node({ frame: { x: 0, y: 0, width: 250, height: threshold - 0.01 } }),
+          node({
+            frame: { x: 0, y: 0, width: 402, height: 3000 },
+            children: [
+              node({
+                AXLabel: "Row",
+                frame: { x: 0, y: 2900, width: 402, height: 44 },
+                role_description: "cell",
+                type: "Cell",
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]);
+
+    expect(tree.elements.map((element) => element.path)).toEqual(["0.1", "0.2.0"]);
+    expect(tree.elements[1]?.label).toBe("Row");
+  });
+
+  test("keeps a full-height node that is not a Group, and a valued or whitespace-labeled wrapper follows the new height rule", () => {
+    const full = { x: 0, y: 0, width: 250, height: 873.99 };
+    const tree = normalizeAxTree([
+      node({
+        frame: { x: 0, y: 0, width: 402, height: 874 },
+        role_description: "application",
+        type: "Application",
+        children: [
+          node({ frame: full, role_description: "group", type: "Button" }),
+          node({ AXValue: "Page 1 of 3", frame: full }),
+          node({ AXLabel: "   ", frame: full }),
+        ],
+      }),
+    ]);
+
+    expect(tree.elements.map((element) => element.path)).toEqual(["0.0", "0.1"]);
+  });
 });

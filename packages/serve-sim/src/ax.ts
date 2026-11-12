@@ -43,9 +43,17 @@ function isIgnoredAnonymousGroup(node: RawAxeNode, screen: AxRect) {
   const frame = node.frame;
   const label = node.AXLabel?.trim() ?? "";
   const value = node.AXValue?.trim() ?? "";
+  const uniqueId = node.AXUniqueId?.trim() ?? "";
   const role = node.role_description.trim().toLowerCase();
 
-  return role === "group" && !label && !value && frame.height >= screen.height * 0.95;
+  return (
+    role === "group" &&
+    node.type === "Group" &&
+    !label &&
+    !value &&
+    !uniqueId &&
+    frame.height >= screen.height * 0.95
+  );
 }
 
 export function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
@@ -57,9 +65,9 @@ export function normalizeAxTree(roots: RawAxeNode[]): AxSnapshot {
 
     const frame = node.frame;
     const isScreenSized = sameRect(frame, screen);
-    const isIgnoredOverlayGroup = isIgnoredAnonymousGroup(node, screen);
+    const isIgnoredAnonymous = isIgnoredAnonymousGroup(node, screen);
 
-    if (!isScreenSized && !isIgnoredOverlayGroup) {
+    if (!isScreenSized && !isIgnoredAnonymous) {
       elements.push({
         id: node.AXUniqueId ?? path,
         path,
