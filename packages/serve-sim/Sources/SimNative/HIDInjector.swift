@@ -489,13 +489,17 @@ actor HIDInjector {
         case "home":
             // Xcode 26+ silently drops the Indigo HID home-button press, so the
             // press is delivered but never reaches SpringBoard. Relaunching
-            // SpringBoard foregrounds the home screen reliably on every Xcode
-            // version (it's what the buttonFunc-missing fallback always used),
-            // and is functionally identical to a single home press, so use it
-            // unconditionally rather than depending on whether the HID symbol
-            // resolved.
+            // SpringBoard leaves a foreground app on every Xcode version (it's
+            // what the buttonFunc-missing fallback always used). It is a no-op
+            // when SpringBoard is already frontmost (App Library, folders,
+            // inner home pages); NativeHid routes those to flick_home.
             await launchSpringBoard(deviceUDID: deviceUDID)
             return true
+
+        case "flick_home":
+            // Short home-indicator flick. Long swipe_home (yEnd 0.35) can open
+            // the app switcher when already on the first home page.
+            return sendSwipeHome(yEnd: 0.70)
 
         case "swipe_home":
             return sendSwipeHome()
@@ -661,10 +665,13 @@ actor HIDInjector {
     /// Synthesize a swipe-up-from-bottom gesture (Face ID "go home" gesture).
     /// Uses IndigoHIDEdge.bottom to flag touches as system edge gestures,
     /// which iOS interprets as the home indicator swipe.
-    private func sendSwipeHome() -> Bool {
+    ///
+    /// Default `yEnd` 0.35 is a long swipe (legacy `swipe_home`). A shorter
+    /// flick (`yEnd` 0.70) leaves apps, dismisses App Library and folders, and
+    /// returns to page 1, without opening the app switcher on page 1.
+    private func sendSwipeHome(yEnd: Double = 0.35) -> Bool {
         let xPos = 0.5
         let yStart = 0.95
-        let yEnd = 0.35
         let steps = 10
         let stepDelay: TimeInterval = 0.016  // ~16ms per step
         let edge = Self.edgeBottom

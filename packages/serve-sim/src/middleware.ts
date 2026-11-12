@@ -1641,6 +1641,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     allowExec,
     isKnownDevice: options?.isKnownDevice ?? (async (udid) => (await getBootedUdids())?.has(udid) ?? false),
     onCommandResult: (command, result) => recordCommandEvent(command, result),
+    // Prefer the in-process HID / SpringBoardLauncher path (same as
+    // `serve-sim button home`). Create the device session if the preview
+    // has not opened one yet — otherwise the first toolbar Home falls back
+    // to `simctl launch springboard`. If the press fails or times out,
+    // host-rpc still falls back to simctl.
+    pressHome: async (udid) => {
+      return getDeviceSession(udid).pressHome();
+    },
   });
 
   // Unicode text → guest pasteboard via CoreDevice, verified by readback.

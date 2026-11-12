@@ -51,6 +51,41 @@ export interface HostRpcOptions {
    * Required for `installApp` and for staging `serve-sim-install-*` uploads.
    */
   allowExec?: boolean;
+  /**
+   * Preferred Home path: the in-process HID / SpringBoardLauncher used by
+   * `serve-sim button home`. When it returns false, throws, or exceeds
+   * `pressHomeTimeoutMs`, `home` falls back to `simctl launch springboard`.
+   */
+  pressHome?: (udid: string) => Promise<boolean>;
+  /** Bound on `pressHome`. Default `DEFAULT_PRESS_HOME_TIMEOUT_MS`. */
+  pressHomeTimeoutMs?: number;
+}
+
+/** Cap on the native Home path so a stuck launch cannot hang the toolbar. */
+export const DEFAULT_PRESS_HOME_TIMEOUT_MS = 2_000;
+
+async function racePressHome(
+  pressHome: (udid: string) => Promise<boolean>,
+  udid: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      pressHome(udid).then(
+        (ok) => {
+          clearTimeout(timer);
+          resolve(ok === true);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(false);
+        },
+      );
+    });
+  } catch {
+    return false;
+  }
 }
 
 export type HostRpcHandler = (payload: unknown) => Promise<Record<string, unknown>>;
@@ -249,6 +284,22 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       const watch = p.watch === true;
       await requireDevice(udid);
       if (watch) return { ...(await run("osascript", WATCH_HOME_SCRIPT.flatMap((line) => ["-e", line]))) };
+      if (opts.pressHome) {
+        const delivered = await racePressHome(
+          opts.pressHome,
+          udid,
+          opts.pressHomeTimeoutMs ?? DEFAULT_PRESS_HOME_TIMEOUT_MS,
+        );
+        if (delivered) {
+          const result: RunResult = { stdout: "", stderr: "", exitCode: 0 };
+          try {
+            opts.onCommandResult?.(`serve-sim button home -d ${udid}`, result);
+          } catch {
+            // Diagnostic side-channel only.
+          }
+          return { ...result };
+        }
+      }
       return { ...(await run("xcrun", simctlArguments(["launch", udid, "com.apple.springboard"]))) };
     },
 

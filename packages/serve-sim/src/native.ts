@@ -249,9 +249,26 @@ export interface NativeHidDeps {
   bundledDuoHelper?: () => string;
   /** The launchable helper; may run `codesign`, so it is only called for a Duo. */
   duoHelper?: () => string;
+  /** Frontmost-app probe; defaults to `axFrontmostAsync`. */
+  axFrontmost?: (udid: string) => Promise<string>;
+}
+
+export const SPRINGBOARD_BUNDLE_ID = "com.apple.springboard";
+
+/**
+ * `hid.button("home")` launches SpringBoard to leave a foreground app (the
+ * Indigo HID home press is dropped on Xcode 26+). That launch is a no-op when
+ * SpringBoard is already frontmost, so App Library, folders, and inner home
+ * pages use a short home-indicator flick instead of `swipe_home` (a long
+ * swipe can open the app switcher on page 1).
+ */
+export function homeButtonForFrontmost(bundleId: string | null | undefined): "home" | "flick_home" {
+  return bundleId === SPRINGBOARD_BUNDLE_ID ? "flick_home" : "home";
 }
 
 export class NativeHid {
+  private readonly udid: string;
+  private readonly axFrontmost: (udid: string) => Promise<string>;
   private readonly handle: SimHIDHandle;
   private readonly keys: KeySequencer;
   /**
@@ -269,6 +286,8 @@ export class NativeHid {
   private duoHelperSettled = false;
 
   constructor(udid: string, deps: NativeHidDeps = {}) {
+    this.udid = udid;
+    this.axFrontmost = deps.axFrontmost ?? axFrontmostAsync;
     const bundled = (deps.bundledDuoHelper ?? bundledDuoHidHelperPath)();
     this.handle = new (deps.SimHID ?? load().SimHID)(udid, bundled);
     this.keys = new KeySequencer(this.handle);
@@ -328,8 +347,18 @@ export class NativeHid {
     return this.delivered("multiTouch", () => this.settled(() => this.handle.multiTouch(type, x1, y1, x2, y2, w, h)));
   }
 
-  button(button: string): Promise<boolean> {
-    return this.delivered("button", () => this.settled(this.viaDuoHelper(() => this.handle.button(button))));
+  async button(button: string): Promise<boolean> {
+    const name = button === "home" ? await this.homeButtonName() : button;
+    return this.delivered("button", () => this.settled(this.viaDuoHelper(() => this.handle.button(name))));
+  }
+
+  private async homeButtonName(): Promise<"home" | "flick_home"> {
+    try {
+      const info = JSON.parse(await this.axFrontmost(this.udid)) as { bundleId?: string };
+      return homeButtonForFrontmost(info.bundleId);
+    } catch {
+      return "home";
+    }
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<boolean> {

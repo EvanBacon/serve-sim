@@ -432,6 +432,17 @@ export class DeviceSession {
   }
 
   /**
+   * Home button: the same path as `serve-sim button home`. Leaves a
+   * foreground app via SpringBoardLauncher (#192 direct launch, #208
+   * timeout, then the launcher's simctl fallback). When SpringBoard is
+   * already frontmost (App Library, folders, inner pages), uses a short
+   * home-indicator flick because the launch is a no-op there.
+   */
+  async pressHome(): Promise<boolean> {
+    return (await this.hid.button("home")) !== false;
+  }
+
+  /**
    * Begin capture and track the screen size. Idempotent.
    *
    * Only foldables keep a shared per-frame JPEG subscription (the Duo 3D
