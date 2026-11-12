@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Window } from "happy-dom";
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RecordToolbarButton, formatRecordingElapsed } from "../client/components/record-toolbar-button";
@@ -27,7 +27,20 @@ function buttonTag(html: string, pred: (tag: string) => boolean): string {
 }
 
 function styleColor(tag: string): string | undefined {
-  return tag.match(/color:([^;"]+)/)?.[1]?.trim();
+  const style = tag.match(/style="([^"]*)"/)?.[1];
+  if (!style) return undefined;
+  for (const part of style.split(";")) {
+    const [prop, ...rest] = part.split(":");
+    if (prop?.trim() === "color") return rest.join(":").trim();
+  }
+  return undefined;
+}
+
+function ElapsedProbe({ seen }: { seen: string[] }) {
+  useLayoutEffect(() => {
+    seen.push(document.querySelector('[data-testid="recording-elapsed"]')?.textContent ?? "");
+  });
+  return null;
 }
 
 describe("RecordToolbarButton", () => {
@@ -144,26 +157,30 @@ describe("RecordToolbarButton close animation", () => {
 
   test("keeps the last elapsed text on the first saving commit, never flashing 0:00", async () => {
     const startedAt = Date.now() - 65_000;
+    const seen: string[] = [];
     await act(async () => {
       root ??= createRoot(host);
       root.render(
         <SimulatorToolbar exec={exec} deviceUdid="booted" streaming>
           <RecordToolbarButton state={{ status: "recording", startedAt }} onToggle={() => {}} />
+          <ElapsedProbe seen={seen} />
         </SimulatorToolbar>,
       );
     });
-    const elapsed = () => host.querySelector('[data-testid="recording-elapsed"]')?.textContent ?? "";
-    expect(elapsed()).toBe("1:05");
+    expect(seen.at(-1)).toBe("1:05");
 
     await act(async () => {
       root!.render(
         <SimulatorToolbar exec={exec} deviceUdid="booted" streaming>
           <RecordToolbarButton state={{ status: "saving" }} onToggle={() => {}} />
+          <ElapsedProbe seen={seen} />
         </SimulatorToolbar>,
       );
     });
-    expect(elapsed()).toBe("1:05");
-    expect(elapsed()).not.toBe("0:00");
+    // useLayoutEffect runs after the saving DOM commit and before paint /
+    // passive effect cleanup, so this would have been "0:00" on 015e773.
+    expect(seen.at(-1)).toBe("1:05");
+    expect(seen).not.toContain("0:00");
   });
 });
 

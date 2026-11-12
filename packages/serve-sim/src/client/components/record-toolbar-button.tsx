@@ -63,11 +63,10 @@ export function RecordToolbarButton({
       title={label}
       forceDisabled={busy}
       onClick={(e) => { e.preventDefault(); onToggle(); }}
-      style={
-        recording
-          ? { color: RECORDING_RED, transition: `background-color 0.15s, color ${MOTION_MS}ms ease-out` }
-          : { transition: `background-color 0.15s, color ${MOTION_MS}ms ease-out` }
-      }
+      style={{
+        transition: `background-color 0.15s, color ${MOTION_MS}ms ease-out`,
+        ...(recording ? { color: RECORDING_RED } : {}),
+      }}
     >
       <span className="serve-sim-record-icon" aria-hidden="true">
         <LoaderCircle size={18} strokeWidth={2} className="serve-sim-record-spinner animate-spin" />
@@ -78,8 +77,17 @@ export function RecordToolbarButton({
           viewBox="0 0 18 18"
           fill="none"
         >
-          {/* Presentation attrs match the CSS idle rule so a no-stylesheet fallback still looks idle. */}
-          <rect className="serve-sim-record-glyph__shape" x="1" y="1" width="16" height="16" rx="8" />
+          {/* Geometry + stroke match the CSS idle rule so a no-stylesheet fallback still looks idle. */}
+          <rect
+            className="serve-sim-record-glyph__shape"
+            x="1"
+            y="1"
+            width="16"
+            height="16"
+            rx="8"
+            stroke="currentColor"
+            strokeWidth="2"
+          />
         </svg>
         <span className="serve-sim-record-glyph serve-sim-record-glyph--fade">
           <Circle size={18} strokeWidth={2} className="serve-sim-record-glyph--idle" />
