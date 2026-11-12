@@ -11,45 +11,38 @@ Recipes for common end-to-end agent tasks. These compose the primitives document
 - Workflow 5: Reset and re-test (clean slate)
 - Workflow 6: Drive a multi-step gesture reliably
 - Workflow 7: Show the simulator stream in the host's preview
+- Workflow 8: Repair Device Hub input
+- Workflow 9: Look back at what just happened
 
 ## Workflow 1: Tap on a UI element by accessibility label
 
-Pixel-hunting is fragile across device sizes. Prefer driving taps from the accessibility tree.
+Pixel-hunting is fragile across device sizes. Prefer element refs from a compact snapshot. See [agent-guide.md](agent-guide.md) for the full playbook.
 
 ```sh
-# 1. Ensure serve-sim is running and discover the stream port
-URL=$(npx serve-sim --list -q | jq -r '.[0].streamUrl')
-PORT=$(echo "$URL" | sed -E 's|.*://[^:]+:([0-9]+).*|\1|')
+# 1. Ensure serve-sim is running (attach to an existing helper; do not assume :3200)
+npx serve-sim --list -q
 
-# 2. Fetch the accessibility tree
-AX=$(curl -s "http://localhost:${PORT}/ax")
+# 2. Compact snapshot with @eN refs (visible elements by default)
+npx serve-sim ax --refs > /tmp/ax-refs.json
 
-# 3. Find the element by label (use jq with a query that matches your tree shape)
-TARGET=$(echo "$AX" | jq '.[] | select(.label == "Submit")')
+# 3. Pick the element by label
+REF=$(jq -r '.nodes[] | select(.label == "Submit") | .ref' /tmp/ax-refs.json | head -n 1)
 
 # Guard: if no element matched, fail loudly. Never guess coordinates when the
-# AX tree didn't contain the target — tapping a random spot is almost always
+# snapshot didn't contain the target — tapping a random spot is almost always
 # worse than reporting the failure.
-if [ -z "$TARGET" ] || [ "$TARGET" = "null" ]; then
-  echo "ERROR: no element with label 'Submit' found in accessibility tree" >&2
+if [ -z "$REF" ] || [ "$REF" = "null" ]; then
+  echo "ERROR: no element with label 'Submit' found in accessibility snapshot" >&2
   exit 2
 fi
 
-CX=$(echo "$TARGET" | jq '.frame.x + .frame.width / 2')
-CY=$(echo "$TARGET" | jq '.frame.y + .frame.height / 2')
-
-# 4. Normalize coordinates against the display
-CONFIG=$(curl -s "http://localhost:${PORT}/config")
-W=$(echo "$CONFIG" | jq '.width')
-H=$(echo "$CONFIG" | jq '.height')
-NX=$(echo "scale=4; $CX / $W" | bc)
-NY=$(echo "scale=4; $CY / $H" | bc)
-
-# 5. Tap
-npx serve-sim tap "$NX" "$NY"
+# 4. Tap the ref where it is now, wait for the screen to settle, print the diff
+npx serve-sim tap "$REF" --settle
 ```
 
-The exact `jq` query depends on your tree shape — inspect with `curl /ax | jq` and adapt.
+If the command exits 1 with `stale_ref`, `unknown_ref`, or `offscreen`, take a new snapshot and retry. Do not fall back to a guessed `tap x y`.
+
+The HTTP equivalents are `GET /ax/snapshot`, `POST /ax/act`, and `GET /ax/settle` (see [endpoints.md](endpoints.md)). Raw `GET /ax` is still available when you need the axe-style tree; prefer refs for driving taps.
 
 ## Workflow 2: Deep-link into an app and verify the screen
 
@@ -218,3 +211,42 @@ The skill knows how to make a URL exist (`serve-sim --detach`). The host knows h
 - Is there a `preview_start`-like tool in your current toolset? Call it.
 - No such tool? Print the URL plainly and instruct the user how to open it.
 - Did the preview tool reject the URL or fail? Fall back to printing.
+
+## Workflow 8: Repair Device Hub input
+
+Only when serve-sim or `doctor` says Device Hub has disconnected legacy input (touch and keyboard refused, with a `repair-input` hint). Do not use this for a tap that failed after `simctl shutdown`, or as a first response to a missed tap.
+
+```sh
+# Warn the user: this restarts SpringBoard and closes running apps.
+npx serve-sim repair-input -d "$UDID"
+# "Input repaired. Restart serve-sim to reconnect its guest services, then reopen your app."
+# or "Input is not shadowed by Device Hub; no restart needed." — stop there.
+
+# If it repaired, restart the helper *you* are using, reopen the app, and snapshot again.
+npx serve-sim --kill "$UDID"
+npx serve-sim --detach -q -d "$UDID" --port "$PORT"   # keep their existing port if you can
+xcrun simctl launch booted com.acme.MyApp
+npx serve-sim ax --refs
+```
+
+Home may still work while touch is shadowed; a working Home press does not mean you should skip the repair message.
+
+## Workflow 9: Look back at what just happened
+
+```sh
+# Rolling buffer (opt-in; off by default). Start it before the action you want to inspect.
+npx serve-sim buffer start
+npx serve-sim tap @e2 --settle
+npx serve-sim buffer list --since 5
+npx serve-sim buffer frame --ago 2 -o /tmp/before.jpg
+npx serve-sim buffer stop
+
+# Or record, then inspect offline (no server required):
+npx serve-sim record -o rec.mp4 -t 8
+npx serve-sim record changes rec.mp4 --from 2.0 --to 4.0
+npx serve-sim record frame rec.mp4 -t 2.3 -o /tmp/frame.png
+npx serve-sim record diff rec.mp4 --from 2.2 --to 2.5
+```
+
+There is no scrub timeline in the preview. Use these commands (and the recording-saved toast in the UI) instead.
+

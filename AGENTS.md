@@ -1,3 +1,5 @@
+For driving a simulator with the serve-sim CLI (attach, accessibility refs, the persistent control process, `repair-input`, recording and the rolling buffer, delivery failures), see [skills/serve-sim/references/agent-guide.md](skills/serve-sim/references/agent-guide.md). The notes below are for contributing to this repo.
+
 - Test-driven development where possible.
 - Prefer kebab-case for all TS/JS files.
 - Avoid low-opacity for icons.

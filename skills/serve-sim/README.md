@@ -73,6 +73,7 @@ serve-sim/
 │   ├── buttons-rotation.md           (the six buttons, the four orientations)
 │   ├── camera.md                     (camera injection: sources, mirroring, hot-swap)
 │   ├── ca-debug.md                   (CoreAnimation debug flags)
+│   ├── agent-guide.md                (agent playbook: attach, refs, control, repair-input)
 │   ├── endpoints.md                  (HTTP + WebSocket surface)
 │   └── workflows.md                  (end-to-end recipes incl. preview handoff)
 ├── scripts/
@@ -94,7 +95,7 @@ This keeps context usage low across hundreds of installed skills.
 
 ## Source of truth
 
-Every claim in this skill — the six button names, the four orientations, the gesture JSON shape, the edge values, the HTTP endpoints — was verified against the serve-sim source at the time of authoring. The skill does not invent behavior the CLI does not expose. When the CLI changes, update the skill and the `evals/` alongside it.
+Every claim in this skill — the six button names, the four orientations, the gesture JSON shape, the edge values, the HTTP endpoints, the control process, and `repair-input` — was verified against the serve-sim source at the time of authoring. The skill does not invent behavior the CLI does not expose. When the CLI changes, update the skill and the `evals/` alongside it.
 
 ## Evals
 

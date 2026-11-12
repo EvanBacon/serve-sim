@@ -32,7 +32,7 @@
       "prompt": "Stream my simulator so I can share the URL remotely. Then drag down from the top edge to open Notification Center.",
       "expected_behavior": [
         "Runs `npx serve-sim --detach -q` and surfaces the returned URL to the user.",
-        "Issues a gesture sequence (begin → move → end) with `edge: 2` (top), starting at low y (~0.02) and dragging down to y ~0.4.",
+        "Issues a gesture sequence (begin \u2192 move \u2192 end) with `edge: 2` (top), starting at low y (~0.02) and dragging down to y ~0.4.",
         "Each gesture call uses `npx serve-sim gesture '<json>'` with valid normalized coordinates.",
         "Does NOT use `tap` for this multi-step gesture."
       ],
@@ -41,7 +41,7 @@
     {
       "id": 4,
       "name": "blended-layers-debug",
-      "prompt": "I think my settings screen has too many blended layers — can you turn on the CoreAnimation blended overlay, grab a screenshot from the stream, and turn it off again?",
+      "prompt": "I think my settings screen has too many blended layers \u2014 can you turn on the CoreAnimation blended overlay, grab a screenshot from the stream, and turn it off again?",
       "expected_behavior": [
         "Runs `npx serve-sim ca-debug blended on` (alias accepted; `debug_color_blended` also valid).",
         "Captures a JPEG from `http://localhost:<port>/stream.mjpeg?raw=1` with a short curl timeout, or from the preview UI.",
@@ -58,21 +58,45 @@
         "Fetches the accessibility tree from `/ax` on the stream server.",
         "Locates an element whose label matches 'Submit' (case-insensitive).",
         "Computes the element center, normalizes against `/config` width/height, and calls `npx serve-sim tap <nx> <ny>`.",
-        "If no matching element is found, reports that — does not guess coordinates."
+        "If no matching element is found, reports that \u2014 does not guess coordinates."
       ],
       "files": []
     },
     {
       "id": 6,
       "name": "preview-handoff",
-      "prompt": "I've got my app running in the iPhone 16 Pro simulator. Stream it and show me the preview right here in this agent — don't make me open another window.",
+      "prompt": "I've got my app running in the iPhone 16 Pro simulator. Stream it and show me the preview right here in this agent \u2014 don't make me open another window.",
       "expected_behavior": [
         "Runs `npx serve-sim --detach -q` and parses the returned JSON to extract the `url` field.",
         "Surfaces the URL plainly in the response so the user has a manual fallback.",
         "Inspects available tools for a preview/URL-opening capability (`preview_start`, `mcp__Claude_Preview__preview_start`, `browser_open`, etc.) and calls it with the URL if found.",
         "If no such tool is available, explicitly tells the user that and instructs them to open the URL in their host's browser/preview pane.",
-        "Does NOT try to install, build, or launch the app — assumes the simulator + app are already running per the prompt.",
+        "Does NOT try to install, build, or launch the app \u2014 assumes the simulator + app are already running per the prompt.",
         "Does NOT invent a host-specific tool name that doesn't exist in the current session."
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "tap-by-ref",
+      "prompt": "In the booted simulator, open Settings and tap General using the accessibility tree, then tell me what appeared.",
+      "expected_behavior": [
+        "Uses `serve-sim ax --refs` (or GET /ax/snapshot) rather than guessing pixel coordinates or hand-parsing GET /ax frames.",
+        "Taps with `serve-sim tap @eN --settle` (or POST /ax/act) using a ref from the snapshot.",
+        "On stale_ref / unknown_ref / offscreen, takes a new snapshot and retries instead of guessing coordinates.",
+        "Does not use `gesture` for the tap."
+      ],
+      "files": []
+    },
+    {
+      "id": 8,
+      "name": "repair-input-when-shadowed",
+      "prompt": "Taps and typing have stopped working on my iPhone simulator. serve-sim printed that Device Hub has disconnected legacy input and I should run repair-input.",
+      "expected_behavior": [
+        "Runs `serve-sim repair-input -d <udid>` only because the error asked for it, and warns that this restarts SpringBoard and closes running apps.",
+        "Does not run repair-input prophylactically or in a loop.",
+        "After a successful repair, restarts serve-sim to reconnect guest HID services, then reopens the app and takes a fresh `ax --refs` snapshot.",
+        "Does not treat a later `could not deliver the tap` after simctl shutdown as a reason to run repair-input."
       ],
       "files": []
     }

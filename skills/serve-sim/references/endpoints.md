@@ -1,6 +1,6 @@
 # HTTP and WebSocket endpoints reference
 
-For agents that want to bypass the CLI — for example to drive gestures from a long-running process without forking `npx` per call — serve-sim exposes two surfaces over HTTP.
+For agents that want to bypass the CLI — for example to drive gestures from a long-running process without forking `npx` per call — serve-sim exposes two surfaces over HTTP. The agent playbook (when to use the CLI vs these endpoints, refs, delivery failures) is [agent-guide.md](agent-guide.md).
 
 ## Contents
 

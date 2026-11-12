@@ -1,6 +1,6 @@
 ---
 name: serve-sim
-description: Control and stream a running iOS, iPad, or Apple Watch Simulator with npx serve-sim. Use for simulator preview, taps, gestures, hardware buttons, rotation, camera injection, permissions, accessibility, and CoreAnimation debug.
+description: Control and stream a running iOS, iPad, or Apple Watch Simulator with npx serve-sim. Use for simulator preview, accessibility refs (ax --refs, tap @eN --settle), taps, gestures, hardware buttons, rotation, camera injection, permissions, recording and the rolling buffer, the persistent control process, repair-input, and CoreAnimation debug.
 license: Apache-2.0
 ---
 
@@ -17,6 +17,8 @@ Drive an Apple Simulator (iOS, iPad, Apple Watch) from an agent using the [serve
 - The user wants to **simulate a memory warning** or **rotate the device** programmatically.
 - The user wants to **read the simulator's accessibility tree** to find UI elements without pixel hunting.
 - The user wants to **grant, revoke, or reset an app's privacy permissions** — camera, photos, location, contacts, or **push notifications**.
+- The user wants to **record the screen or inspect what just happened** (`serve-sim record` / `buffer`) without opening a video by hand.
+- Taps or typing have **stopped working** and serve-sim or `doctor` pointed at `repair-input`.
 
 ## When NOT to use
 
@@ -33,7 +35,7 @@ Before any other action, verify the host satisfies these. If something is missin
 |---|---|---|
 | macOS host | `uname -s` returns `Darwin` | serve-sim only runs on macOS |
 | Xcode CLI tools | `xcrun --version` exits 0 | `simctl` is the underlying simulator driver |
-| Node.js ≥18 | `node --version` ≥18 | serve-sim is an npm package run via `npx` |
+| Node.js ≥20 | `node --version` ≥20 | serve-sim is an npm package run via `npx` |
 | macOS 14+ (optional) | `sw_vers -productVersion` ≥14 | Required ONLY for `camera` subcommand |
 
 A bundled helper script is available: `scripts/check-prereqs.sh`. Run it; if it exits non-zero, surface the message to the user.
@@ -81,7 +83,14 @@ Key invariants the agent must respect:
 | Inject camera feed | `npx serve-sim camera <bundle-id> [--file <path>\|--webcam [name]]` | (Re)launches the app with the camera dylib attached. macOS 14+ only. See [references/camera.md](references/camera.md). |
 | Hot-swap camera source | `npx serve-sim camera switch <placeholder\|webcam\|file> [arg]` | No app relaunch. |
 | Manage app permissions | `npx serve-sim permissions <grant\|revoke\|reset\|list> <permission> <bundle-id>` | Camera, photos, location, **push notifications**, contacts, etc. See [references/permissions.md](references/permissions.md). |
-| Read accessibility tree | `curl http://localhost:3100/ax` | Returns axe-style JSON. See [references/endpoints.md](references/endpoints.md) for all endpoints. |
+| Compact AX snapshot | `npx serve-sim ax --refs` | Visible elements with `@eN` refs. Prefer this over raw `GET /ax` plus frame math. See [references/agent-guide.md](references/agent-guide.md). |
+| Tap an element ref | `npx serve-sim tap @e2 [--settle]` | Resolves the last snapshot; refuses stale/unknown/offscreen refs instead of guessing. |
+| Wait for the screen to settle | `npx serve-sim settle [--timeout ms]` | Diff vs the last state you were shown. |
+| Repair Device Hub input | `npx serve-sim repair-input [-d udid]` | **Explicit only.** Restarts SpringBoard and closes running apps. Then restart serve-sim and reopen the app. |
+| Control process | `npx serve-sim control [status\|start\|stop]` | Optional. Short commands auto-start a warm daemon; you usually do not need to manage it. |
+| Record / inspect | `npx serve-sim record` / `record frame` / `diff` / `changes` | MP4 plus an index sidecar. Offline inspection needs no server. |
+| Rolling buffer | `npx serve-sim buffer start` then `list` / `frame` | Opt-in recent frames + input. Off by default. |
+| Raw accessibility tree | `curl <streamUrl>/ax` | axe-style JSON. Discover `streamUrl` with `--list -q`; do not hardcode :3100. See [references/endpoints.md](references/endpoints.md). |
 
 Most subcommands accept `-d <udid|name>` to target a specific device when several are booted.
 
@@ -143,7 +152,7 @@ See [references/workflows.md](references/workflows.md) workflow "Show the simula
 
 ## Workflows
 
-For complete end-to-end recipes (UI automation, camera testing, accessibility-driven taps, deep-link flows, preview handoff), see [references/workflows.md](references/workflows.md). The reference covers the patterns documented in serve-sim's own `AGENTS.md`.
+The agent playbook (attach vs. start, refs, the control process, `repair-input`, recording and the buffer, delivery failures) is [references/agent-guide.md](references/agent-guide.md). End-to-end recipes (UI automation, camera testing, deep-link flows, preview handoff) are in [references/workflows.md](references/workflows.md).
 
 ## Cleanup
 
@@ -154,7 +163,7 @@ npx serve-sim --kill            # stop all
 npx serve-sim --kill "iPhone 16 Pro"  # stop one
 ```
 
-Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
+Helpers occupy the ports they were started on (3200/3100 only if those defaults were free). Do not kill a helper you did not start.
 
 ## Anti-patterns
 
@@ -165,10 +174,13 @@ Orphan helpers occupy ports 3200/3100 and prevent fresh starts.
 - **Do not invent button names.** Only these six are valid: `home`, `swipe_home`, `app_switcher`, `lock`, `siri`, `side_button`. See [references/buttons-rotation.md](references/buttons-rotation.md) for the source-of-truth list.
 - **Do not parse the non-quiet human output.** Use `-q` for JSON.
 - **Do not leave camera helpers running** across unrelated tasks. Stop them with `npx serve-sim camera --stop-webcam` when done.
-- **Do not guess coordinates when an accessibility lookup returns no match.** If you fetched the AX tree (e.g. `GET /ax`) to find a target element and the query returned no result, fail loudly — tapping a guessed spot is almost always worse than reporting "target not found" back to the user. See [references/workflows.md](references/workflows.md) workflow 1 for the guard pattern.
+- **Do not guess coordinates when an accessibility lookup returns no match.** Prefer `serve-sim ax --refs` and `tap @eN`. If the ref is stale, unknown, or offscreen, or a raw `GET /ax` query missed, fail loudly and re-snapshot — tapping a guessed spot is almost always worse than reporting "target not found." See [references/agent-guide.md](references/agent-guide.md) and [references/workflows.md](references/workflows.md) workflow 1.
+- **Do not run `repair-input` unless the error or `doctor` says Device Hub has disconnected legacy input.** It restarts SpringBoard and closes running apps. A tap that failed because the simulator is not Booted (`could not deliver the tap`) is a different failure; boot the sim instead.
+- **Do not start a second preview on port 3200, or `--kill` an existing one, when someone is already using it.** `--list -q` first; attach with `-d` / `--url`, or start on a free `--port`.
 
 ## Reference index
 
+- [references/agent-guide.md](references/agent-guide.md) — agent playbook: attach, refs, control process, `repair-input`, recording/buffer, delivery failures.
 - [references/gestures.md](references/gestures.md) — exact gesture JSON shapes, edge values, multi-touch, drag/swipe recipes.
 - [references/buttons-rotation.md](references/buttons-rotation.md) — the six valid buttons and the four orientations, with behavioral notes.
 - [references/camera.md](references/camera.md) — synthetic camera injection: placeholder, file, webcam, mirror modes, hot-swap.
