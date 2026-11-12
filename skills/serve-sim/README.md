@@ -18,7 +18,7 @@ Once installed, your agent knows how to:
 - Discover the running stream's URL and read the simulator's accessibility tree to find UI elements.
 - Hand the stream URL off to the host agent's preview pane (`preview_start` in Claude Code, equivalents elsewhere) so the user sees the simulator inline.
 
-It also teaches the agent the **gotchas** (use `tap`, not `gesture`, for plain taps), the **prerequisites** (macOS, Xcode CLI tools, Node 18+, macOS 14+ for camera), and **anti-patterns** to avoid.
+It also teaches the agent the **gotchas** (use `tap`, not `gesture`, for plain taps), the **prerequisites** (macOS, Xcode CLI tools, Node 20+, macOS 14+ for camera), and **anti-patterns** to avoid.
 
 ## Install
 
@@ -57,7 +57,7 @@ The agent checks these for you, but for reference:
 
 - macOS host (any recent version).
 - Xcode command line tools (`xcode-select --install`).
-- Node.js 18+.
+- Node.js 20+.
 - macOS 14+ if you want camera injection.
 - At least one booted iOS, iPad, or Apple Watch simulator.
 

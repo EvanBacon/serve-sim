@@ -222,10 +222,15 @@ npx serve-sim repair-input -d "$UDID"
 # "Input repaired. Restart serve-sim to reconnect its guest services, then reopen your app."
 # or "Input is not shadowed by Device Hub; no restart needed." — stop there.
 
-# If it repaired, restart the helper *you* are using, reopen the app, and snapshot again.
+# If it repaired, restart serve-sim so it can reconnect guest HID, then reopen the app
+# and take a new snapshot. Only `--kill` a helper you started; if this is someone
+# else's preview, ask first. The start command takes the device as a positional
+# argument (not `-d`; on the root command `-d` is not a valid flag). Reuse the
+# `port` from `serve-sim --list -q` when restarting that same helper; otherwise
+# omit `--port` and let it pick a free one (do not assume 3200).
 npx serve-sim --kill "$UDID"
-npx serve-sim --detach -q -d "$UDID" --port "$PORT"   # keep their existing port if you can
-xcrun simctl launch booted com.acme.MyApp
+npx serve-sim --detach -q --port "$PORT" "$UDID"
+xcrun simctl launch "$UDID" com.acme.MyApp
 npx serve-sim ax --refs
 ```
 
@@ -248,5 +253,5 @@ npx serve-sim record frame rec.mp4 -t 2.3 -o /tmp/frame.png
 npx serve-sim record diff rec.mp4 --from 2.2 --to 2.5
 ```
 
-There is no scrub timeline in the preview. Use these commands (and the recording-saved toast in the UI) instead.
+There is no scrub timeline in the preview. Use these commands (and the preview's “Recording Saved” card) instead.
 

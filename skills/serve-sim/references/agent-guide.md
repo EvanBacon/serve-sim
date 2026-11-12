@@ -1,6 +1,6 @@
 # Agent guide
 
-How to drive an Apple Simulator with serve-sim. The [package README](../../../packages/serve-sim/README.md) is the full CLI contract; this page is the agent loop: attach, act, check, recover. Contributor notes for working on this repo live in the root [`AGENTS.md`](../../../AGENTS.md).
+How to drive an Apple Simulator with serve-sim. The [package README](https://github.com/EvanBacon/serve-sim/blob/main/packages/serve-sim/README.md) is the full CLI contract; this page is the agent loop: attach, act, check, recover. Contributor notes for working on this repo live in the root [`AGENTS.md`](https://github.com/EvanBacon/serve-sim/blob/main/AGENTS.md).
 
 ## Attach, don't steal
 
@@ -48,11 +48,11 @@ serve-sim settle                    # after openurl or any other action: wait, d
 
 `--all` includes offscreen elements; `--text` prints one line per element. The server remembers the last snapshot per device. Before tapping it looks the element up in the live tree and taps it where it is now.
 
-If the ref is unknown, stale, or offscreen, the command exits 1 (`unknown_ref` / `stale_ref` / `offscreen` on stderr) and **nothing is tapped**. Take a new snapshot and retry. Never guess a coordinate because a lookup missed.
+If the ref is unknown, stale, or offscreen, the command exits 1 (`unknown_ref` / `stale_ref` / `offscreen` on stderr) and **nothing is tapped**. Take a new snapshot and retry. Never guess a coordinate because a lookup missed. A `503 input_shadowed` means Device Hub has disconnected legacy input: follow the `repair-input` path below, not a re-snapshot loop.
 
 Use `serve-sim tap <x> <y>` only when there is no accessibility target (a game canvas, a raw screenshot point). Coordinates are normalized 0..1, origin top-left. Prefer `tap` over `gesture` for a single-shot tap: two separate `gesture` begin/end calls open two WebSockets and often register as a long-press. Use `gesture` only for a drag or a multi-step sequence that must share one socket.
 
-`--timeout` (default 3000 ms, max 30000) is a hard limit on settle. `settled: false` with `reason: "timeout"` still returns the current tree and exits 0. After a reboot, a SpringBoard restart, or an app relaunch, take a fresh `ax --refs` — old refs do not survive that.
+`--timeout` (default 3000 ms, max 30000) is a hard limit on settle. `settled: false` with `reason: "timeout"` still returns the current tree and exits 0. After a reboot, a SpringBoard restart, or an app relaunch, do not rely on old refs; take a fresh `ax --refs`.
 
 HTTP equivalents, busy/429 behavior, and the identity rules that decide when a ref carries over are in the README's "Accessibility refs for agents" section and in [endpoints.md](endpoints.md).
 
@@ -62,7 +62,7 @@ These are different failures. Do not treat them as the same, and do not retry as
 
 **Device Hub has disconnected legacy input.** Touch and keyboard (not Home) are refused, and the error tells you to run `serve-sim repair-input -d <udid>`. That command is **explicit, never automatic**: it restarts SpringBoard and closes running apps. After a successful repair, restart serve-sim so it can reconnect guest HID services, then reopen the app and take a new snapshot. If it prints `Input is not shadowed by Device Hub; no restart needed.`, stop — do not repair in a loop. `serve-sim doctor` can also recommend this.
 
-**The simulator is not Booted, or HID could not send.** `tap`, `button`, and `gesture` exit 1 with `could not deliver the tap` (or button/gesture). That means the input was not handed to a booted guest — for example after `simctl shutdown` — not that it landed. Boot the simulator, wait until it is Booted, and retry. Right after boot, input can be withheld until the HID client is ready; a refused or failed call is not a delivered one. `no delivery confirmation within 4s` is also not success: the ack never arrived (the injector may have been stuck). Check the server log, and restart the serve-sim server for that device if you started it.
+**The simulator is not Booted, or HID could not send.** `tap`, `button`, and `gesture` exit 1 with `could not deliver the tap` (or button/gesture). That means the input was not handed to a booted guest — for example after `simctl shutdown` — not that it landed. Boot the simulator, wait until it is Booted, and retry. Right after boot, input can be withheld until the HID client is ready; a refused or failed call is not a delivered one. `no delivery confirmation within 4s` is also not success: the ack never arrived (the injector may have been stuck). The command exits 0, so check stderr, not just the exit code. Check the server log, and restart the serve-sim server for that device if you started it.
 
 **The server is gone.** A closed or failed WebSocket means you are not talking to a running helper. `serve-sim --list -q`, then start or restart only a server you are responsible for.
 
@@ -102,4 +102,4 @@ serve-sim buffer stop               # if you started the buffer
 - [workflows.md](workflows.md) — end-to-end recipes.
 - [endpoints.md](endpoints.md) — HTTP and WebSocket surfaces, including `/ax/snapshot`, `/ax/act`, `/ax/settle`.
 - [gestures.md](gestures.md), [buttons-rotation.md](buttons-rotation.md), [camera.md](camera.md), [permissions.md](permissions.md), [ca-debug.md](ca-debug.md).
-- [Package README](../../../packages/serve-sim/README.md) — control process, accessibility ref identity rules, recording index, rolling buffer, Duo / `repair-input`.
+- [Package README](https://github.com/EvanBacon/serve-sim/blob/main/packages/serve-sim/README.md) — control process, accessibility ref identity rules, recording index, rolling buffer, Duo / `repair-input`.
