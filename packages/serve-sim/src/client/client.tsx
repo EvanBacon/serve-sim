@@ -545,11 +545,11 @@ function AppWithConfig({
   useEffect(() => {
     window.localStorage.setItem(CODEC_PREFERENCE_STORAGE_KEY, codecPreference);
   }, [codecPreference]);
-  // Viewer opt-out for DeviceKit chrome. Default stays framed; `?chrome=0`
-  // (and the toolbar / tools toggle) hide the bezel without restarting the helper.
+  // Viewer opt-out for DeviceKit chrome. Default stays framed; the toolbar /
+  // tools toggle hides the bezel without restarting the helper. A leftover
+  // `?chrome=0` is stripped and ignored so it cannot keep the frame off.
   const [hideChrome, setHideChrome] = useState(() =>
     readChromeHiddenPreference({
-      search: window.location.search,
       storage: window.localStorage,
     }),
   );
@@ -617,7 +617,7 @@ function AppWithConfig({
   // working hardware buttons). It's authored portrait, so other orientations
   // turn the whole device (bezel + screen) on the page — the same thing
   // Simulator.app shows — and animate that turn (see DeviceRotor). Viewers can
-  // also hide it (toolbar, tools panel, or `?chrome=0`) — default stays framed
+  // also hide it (toolbar or tools panel) — default stays framed
   // so desktop previews match Simulator.app. Foldables never ask: the 3D model
   // is their frame.
   // When chromed, the on-screen container is the full frame (bezel + screen):

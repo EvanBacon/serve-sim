@@ -1,36 +1,25 @@
 // Viewer preference for DeviceKit chrome (the real-device bezel around the
-// live stream). Default is framed whenever chrome data exists; hiding is
-// opt-in so a phone viewing the preview over Tailscale can drop the nested
-// bezel without restarting the helper.
+// live stream). Default is framed whenever chrome data exists. Hiding is
+// opt-in via the toolbar / tools panel and is stored in localStorage so a
+// phone viewing the preview over Tailscale can drop the nested bezel
+// without restarting the helper.
+//
+// The URL is not a persistence store. An earlier persist path wrote
+// `?chrome=0` whenever hide was set (including on mount from leftover
+// localStorage), so a one-time hide — or a leftover storage value — stuck
+// in the address bar and kept the frame off after reload. We never write
+// `chrome` now, we strip a leftover `?chrome=` (0, 1, or any other value)
+// so it cannot keep the bezel off, and we ignore the previous
+// `serve-sim:chrome` key for the same reason. Hiding is no longer shareable
+// as a URL; use the toolbar toggle.
 
-export const CHROME_VISIBILITY_STORAGE_KEY = "serve-sim:chrome";
-
-const HIDE_QUERY_VALUES = new Set(["0", "off", "false", "hide", "bare"]);
-const SHOW_QUERY_VALUES = new Set(["1", "on", "true", "show"]);
-
-/** Parse `?chrome=` into "user wants chrome hidden", or null if unset/unknown. */
-export function parseChromeHiddenQuery(
-  search: string | URLSearchParams | null | undefined,
-): boolean | null {
-  if (search == null) return null;
-  const params = typeof search === "string" ? new URLSearchParams(search.startsWith("?") ? search.slice(1) : search) : search;
-  const raw = params.get("chrome");
-  if (raw == null) return null;
-  const value = raw.trim().toLowerCase();
-  if (HIDE_QUERY_VALUES.has(value)) return true;
-  if (SHOW_QUERY_VALUES.has(value)) return false;
-  return null;
-}
+export const CHROME_VISIBILITY_STORAGE_KEY = "serve-sim:chrome-v2";
 
 export function readChromeHiddenPreference({
-  search,
   storage,
 }: {
-  search?: string | URLSearchParams | null;
   storage?: Pick<Storage, "getItem"> | null;
 } = {}): boolean {
-  const fromQuery = parseChromeHiddenQuery(search);
-  if (fromQuery != null) return fromQuery;
   try {
     return storage?.getItem(CHROME_VISIBILITY_STORAGE_KEY) === "hidden";
   } catch {
@@ -53,13 +42,13 @@ export function persistChromeHiddenPreference(
   try {
     storage?.setItem(CHROME_VISIBILITY_STORAGE_KEY, hideChrome ? "hidden" : "shown");
   } catch {}
+  // Always drop `chrome` from the URL: we never write it, and a leftover
+  // `?chrome=0` from the old persist path must not stick.
   if (!location || !replaceState) return;
   try {
     const url = new URL(location.href);
-    const previousSearch = url.search;
-    if (hideChrome) url.searchParams.set("chrome", "0");
-    else url.searchParams.delete("chrome");
-    if (url.search === previousSearch) return;
+    if (!url.searchParams.has("chrome")) return;
+    url.searchParams.delete("chrome");
     replaceState(`${url.pathname}${url.search}${url.hash}`);
   } catch {}
 }
