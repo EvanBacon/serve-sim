@@ -115,12 +115,14 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     const NOT_READY_LOG = "[hid] Dropping input: HID client is not ready";
     const logAtStart = serverLog.length;
     let notReadyAt: number | undefined;
-    const stampNotReady = (chunk?: string) => {
+    // Search accumulated serverLog so a message split across `data` chunks
+    // still matches. `tap()` uses spawnSync and blocks the event loop, so
+    // yield after each tap to let queued stdout/stderr handlers append.
+    const stampNotReady = () => {
       if (notReadyAt != null) return;
-      const text = chunk ?? serverLog.slice(logAtStart);
-      if (text.includes(NOT_READY_LOG)) notReadyAt = Date.now();
+      if (serverLog.slice(logAtStart).includes(NOT_READY_LOG)) notReadyAt = Date.now();
     };
-    const onData = (d: Buffer | string) => { stampNotReady(String(d)); };
+    const onData = () => { stampNotReady(); };
     stampNotReady();
     server!.stdout!.on("data", onData);
     server!.stderr!.on("data", onData);
@@ -130,6 +132,8 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     try {
       while (Date.now() < deadline) {
         const r = tap();
+        await sleep(0);
+        stampNotReady();
         if (r.status === 0) { firstOkAt = Date.now(); break; }
         expect(r.stderr).not.toContain(NO_SERVER);
         await sleep(400);
