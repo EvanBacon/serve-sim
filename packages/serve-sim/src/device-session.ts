@@ -1,4 +1,4 @@
-import { warnDeviceHubInput } from "./device-hub-input";
+import { deviceHubInputShadowedMessage, readDeviceHubInputShadowed } from "./device-hub-input";
 import { axTreeHasSoftwareKeyboard, readHardwareKeyboardState, writeHardwareKeyboardState } from "./hardware-keyboard-state";
 import { isModifierUsage } from "./keyboard-modifiers";
 import { DuoRenderer, DuoRendererError, logDuoRendererFailure } from "./duo-renderer";
@@ -48,7 +48,7 @@ import {
   recordingRotation,
 } from "./recording";
 import { collectAxSnapshot } from "./ax";
-import { AxAgent } from "./ax-agent";
+import { AxAgent, AxAgentError } from "./ax-agent";
 import { serveAxAgent, type AxAgentEndpoint } from "./ax-agent-http";
 import { cliInputOrientation, displayTouchToRaw } from "./touch-remap";
 import {
@@ -98,12 +98,24 @@ const AVCC_SEED_TAG = 0x04;
 // WS server→client screen-config push (ClientManager.wsMsgConfig).
 const WS_MSG_CONFIG = 0x82;
 // WS server→client input acknowledgement: [0x84]{ ack, ok }. Sent only for
-// touch/button frames whose JSON carries a numeric `ack` id (the CLI's
-// tap/button/gesture), so the browser viewer's protocol is unchanged (#136).
+// input frames whose JSON carries a numeric `ack` id (the CLI's
+// tap/button/gesture/type), so the browser viewer's protocol is unchanged (#136).
 const WS_MSG_INPUT_ACK = 0x84;
-const ACKABLE_INPUT_TAGS = new Set([0x03, 0x04]);
+const ACKABLE_INPUT_TAGS = new Set([0x03, 0x04, 0x05, 0x06, 0x0a, 0x0b]);
 
-/** The CLI's `ack` id on a touch/button frame, if it asked for one. */
+type ShadowedInputResult = { ok: false; error: string };
+
+function shadowedInputResult(udid: string): ShadowedInputResult {
+  return { ok: false, error: deviceHubInputShadowedMessage(udid) };
+}
+
+function isShadowedInputResult(result: unknown): result is ShadowedInputResult {
+  return typeof result === "object" && result != null
+    && (result as ShadowedInputResult).ok === false
+    && typeof (result as ShadowedInputResult).error === "string";
+}
+
+/** The CLI's `ack` id on an input frame, if it asked for one. */
 function inputAckId(frame: Buffer): number | undefined {
   if (!ACKABLE_INPUT_TAGS.has(frame[0]!) || !frame.includes('"ack"', 1)) return undefined;
   try {
@@ -251,12 +263,9 @@ function duoRendererErrorBody(error: DuoRendererError): { error: "duo_renderer_u
 /** Delivery-reporting sends resolve true only when the event reached the guest. */
 type ReportsDelivery<F> = F extends (...args: infer A) => Promise<boolean> ? (...args: A) => Promise<boolean | void> : never;
 type HidTransport = {
-  [K in "touch" | "multiTouch" | "button" | "buttonHid"]: ReportsDelivery<NativeHid[K]>;
+  [K in "touch" | "multiTouch" | "button" | "buttonHid" | "key" | "scroll" | "digitalCrown"]: ReportsDelivery<NativeHid[K]>;
 } & Pick<
   NativeHid,
-  | "key"
-  | "scroll"
-  | "digitalCrown"
   | "orientation"
   | "memoryWarning"
   | "softwareKeyboard"
@@ -299,6 +308,14 @@ export interface DeviceSessionDependencies {
    * Defaults to `SERVE_SIM_BUFFER` (`serve-sim --buffer`), which is unset/off.
    */
   rollingBuffer?: RollingBufferOptions | null;
+  /**
+   * Guest Device Hub input-shadow flag (`com.apple.coredevice.dtuhidd.active`).
+   * Defaults to a live `notifyutil` probe on production sessions. Tests inject
+   * this so they never spawn simctl.
+   */
+  readDeviceHubInputShadowed?: (udid: string) => Promise<boolean | null>;
+  /** Clock for the shadow-flag TTL; defaults to `Date.now`. */
+  now?: () => number;
 }
 
 type ActiveRecording = {
@@ -378,6 +395,15 @@ export class DeviceSession {
     "3d": newStreamHealth(),
   };
   private deviceHubShadowed?: boolean;
+  /** Epoch ms of the last shadow-flag probe; used to re-check with a short TTL. */
+  private deviceHubShadowedAt = 0;
+  private deviceHubShadowWarned = false;
+  /** Set once a probe has finished, even if `now()` was 0. */
+  private deviceHubShadowSettled = false;
+  /** Single-flight probe; reused so a burst of events cannot spawn overlapping simctl. */
+  private deviceHubProbe?: Promise<void>;
+  /** Tests inject `hid`; production constructs `NativeHid` and must probe live. */
+  private readonly usesInjectedHid: boolean;
   /** Active screen recording (one per session), or a start/stop in flight. */
   private recording?: ActiveRecording;
   /** Indexes of collected recordings, by start token (oldest first). */
@@ -389,6 +415,7 @@ export class DeviceSession {
   private rollingBuffer?: RollingBufferSampler;
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
+    this.usesInjectedHid = dependencies?.hid != null;
     this.hid = dependencies?.hid ?? new NativeHid(udid);
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
     this.duo = new DuoPreview({
@@ -432,6 +459,8 @@ export class DeviceSession {
       }
       this.unsubscribeSize = unsubscribeSize;
       this.phase = "running";
+      // Do not await: a wedged notifyutil must not delay the first stream frame.
+      void this.refreshDeviceHubInput();
       const bufferDefault = this.dependencies?.rollingBuffer !== undefined
         ? this.dependencies.rollingBuffer
         : parseRollingBufferEnv();
@@ -443,9 +472,6 @@ export class DeviceSession {
           return;
         }
         this.unsubscribeMjpeg = unsubscribe;
-        if (!this.dependencies?.createDuoMonitor) {
-          void warnDeviceHubInput(this.udid).then((shadowed) => { this.deviceHubShadowed = shadowed; });
-        }
         const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState, duoHelper) => new DuoStateMonitor(udid, onState, { duoHelper }));
         this.duoMonitor = createMonitor(this.udid, (state) => {
           void this.followDuoState(state).catch((error) => {
@@ -769,6 +795,9 @@ export class DeviceSession {
    */
   private async injectTap(point: { x: number; y: number }, holdMs: number): Promise<void> {
     await this.start();
+    if (await this.legacyInputShadowed()) {
+      throw new AxAgentError(503, "input_shadowed", deviceHubInputShadowedMessage(this.udid));
+    }
     if (this.width === 0 || this.height === 0) throw new Error("Screen size is not known yet; retry in a moment.");
     const orientation = cliInputOrientation(this.screenConfig());
     const touch = async (type: "begin" | "end") => {
@@ -1311,13 +1340,16 @@ export class DeviceSession {
           void handled.catch((error) => { console.error("[hid] Input failed:", error); });
         } else {
           void handled
-            .then((result) => result === true, (error) => {
+            .then((result) => {
+              if (isShadowedInputResult(result)) return { ok: false as const, error: result.error };
+              return { ok: result === true };
+            }, (error) => {
               console.error("[hid] Input failed:", error);
-              return false;
+              return { ok: false as const };
             })
-            .then((ok) => {
+            .then((body) => {
               if (this.hidSockets.has(ws)) {
-                ws.send(Buffer.concat([Buffer.from([WS_MSG_INPUT_ACK]), Buffer.from(JSON.stringify({ ack, ok }))]));
+                ws.send(Buffer.concat([Buffer.from([WS_MSG_INPUT_ACK]), Buffer.from(JSON.stringify({ ack, ...body }))]));
               }
             });
         }
@@ -1327,7 +1359,7 @@ export class DeviceSession {
     ws.on("error", () => this.hidSockets.delete(ws));
   }
 
-  private async handleHidMessage(data: Buffer): Promise<boolean | void> {
+  private async handleHidMessage(data: Buffer): Promise<boolean | void | ShadowedInputResult> {
     if (data.length < 1) return;
     const tag = data[0];
     const body = data.length > 1 ? data.subarray(1) : null;
@@ -1348,6 +1380,7 @@ export class DeviceSession {
       case 0x03: {
         const raw = json<{ type: string; x: number; y: number; edge?: number; ack?: number }>();
         if (!raw) return false;
+        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
         const m = withoutAck(raw);
         this.recordTouchEvent(m);
         return this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
@@ -1356,28 +1389,33 @@ export class DeviceSession {
         const raw = json<{ button: string; page?: number; usage?: number; phase?: string; ack?: number }>();
         if (!raw) return false;
         const m = withoutAck(raw);
-        this.recordHidEvent(tag, m);
         if (m.page != null && m.usage != null) {
+          if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+          this.recordHidEvent(tag, m);
           return this.hid.buttonHid(m.page, m.usage, (m.phase as "down" | "up" | "press") ?? "press");
         }
+        // SpringBoardLauncher home still reaches the guest when Device Hub
+        // has disconnected legacy mouse/keyboard HID, so it is recorded even
+        // while other buttons are refused.
+        if (m.button !== "home" && await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        this.recordHidEvent(tag, m);
         return this.hid.button(m.button);
       }
       case 0x05: {
         const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number }>();
-        if (m) {
-          this.recordHidEvent(tag, m);
-          this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H);
-        }
-        break;
+        if (!m) break;
+        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        this.recordHidEvent(tag, m);
+        return (await this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H)) !== false;
       }
       case 0x06: {
         const m = json<{ type: string; usage: number }>();
-        if (m) {
-          this.recordHidEvent(tag, m);
-          this.hid.key(m.type as "down" | "up", m.usage);
-          if (m.type === "down" && !isModifierUsage(m.usage)) this.forwardedTypingKey = true;
-        }
-        break;
+        if (!m) break;
+        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        this.recordHidEvent(tag, m);
+        const delivered = (await this.hid.key(m.type as "down" | "up", m.usage)) !== false;
+        if (delivered && m.type === "down" && !isModifierUsage(m.usage)) this.forwardedTypingKey = true;
+        return delivered;
       }
       case 0x07: {
         const m = json<{ orientation: string }>();
@@ -1412,20 +1450,18 @@ export class DeviceSession {
         break;
       case 0x0a: {
         const m = json<{ delta: number }>();
-        if (m) {
-          this.recordHidEvent(tag, m);
-          this.hid.digitalCrown(m.delta);
-        }
-        break;
+        if (!m) break;
+        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        this.recordHidEvent(tag, m);
+        return (await this.hid.digitalCrown(m.delta)) !== false;
       }
       case 0x0b: {
         // Payload deltas are a fraction of the display; scale to device pixels.
         const m = json<{ dx: number; dy: number; x?: number; y?: number }>();
-        if (m) {
-          this.recordHidEvent(tag, m);
-          this.hid.scroll(m.dx * W, m.dy * H, W, H, m.x, m.y);
-        }
-        break;
+        if (!m) break;
+        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        this.recordHidEvent(tag, m);
+        return (await this.hid.scroll(m.dx * W, m.dy * H, W, H, m.x, m.y)) !== false;
       }
       case 0x0c:
         this.recordHidEvent(tag, {});
@@ -1747,6 +1783,72 @@ export class DeviceSession {
       details: { ...details, count: 1 },
     });
     this.rendererFailureEvent = { id: entry.id, key, count: 1 };
+  }
+
+  private static readonly DEVICE_HUB_SHADOW_RECHECK_MS = 2_000;
+
+  private now(): number {
+    return this.dependencies?.now?.() ?? Date.now();
+  }
+
+  private deviceHubInputReader(): ((udid: string) => Promise<boolean | null>) | null {
+    if (this.dependencies?.readDeviceHubInputShadowed) return this.dependencies.readDeviceHubInputShadowed;
+    // Tests inject a fake `hid` and must not spawn simctl on dummy UDIDs.
+    if (this.usesInjectedHid) return null;
+    return readDeviceHubInputShadowed;
+  }
+
+  /** Single-flight probe. Callers that already have a reading must not await this. */
+  private refreshDeviceHubInput(): Promise<void> {
+    if (this.deviceHubProbe) return this.deviceHubProbe;
+    const read = this.deviceHubInputReader();
+    if (!read) {
+      this.deviceHubShadowedAt = this.now();
+      this.deviceHubShadowSettled = true;
+      return Promise.resolve();
+    }
+    // Assign the promise before it can settle so a sync throw in `read`
+    // cannot leave a leftover in-flight probe. Attach `finally` after the
+    // assignment so it actually clears.
+    const probe = (async () => {
+      try {
+        const shadowed = await read(this.udid);
+        this.deviceHubShadowedAt = this.now();
+        this.deviceHubShadowSettled = true;
+        // A null (unreadable) reading keeps the last known value, failing
+        // closed if we have already seen the flag as true.
+        if (shadowed == null) return;
+        this.deviceHubShadowed = shadowed;
+        if (shadowed && !this.deviceHubShadowWarned) {
+          this.deviceHubShadowWarned = true;
+          console.warn(`[hid] ${deviceHubInputShadowedMessage(this.udid)}`);
+        }
+        if (!shadowed) this.deviceHubShadowWarned = false;
+      } catch {
+        this.deviceHubShadowedAt = this.now();
+        this.deviceHubShadowSettled = true;
+      }
+    })();
+    this.deviceHubProbe = probe;
+    void probe.finally(() => {
+      if (this.deviceHubProbe === probe) this.deviceHubProbe = undefined;
+    });
+    return probe;
+  }
+
+  private maybeRefreshDeviceHubInput(): void {
+    if (this.deviceHubProbe) return;
+    if (this.deviceHubShadowSettled && this.now() - this.deviceHubShadowedAt < DeviceSession.DEVICE_HUB_SHADOW_RECHECK_MS) return;
+    void this.refreshDeviceHubInput();
+  }
+
+  /** True when Device Hub has disconnected legacy HID and the event must not be acked as delivered. */
+  private async legacyInputShadowed(): Promise<boolean> {
+    // Await only when we have no reading yet, and then only the shared probe,
+    // so a burst of events cannot spawn overlapping simctl or complete out of order.
+    if (!this.deviceHubShadowSettled) await this.refreshDeviceHubInput();
+    else this.maybeRefreshDeviceHubInput();
+    return this.deviceHubShadowed === true;
   }
 
   /** JSON-safe live state for `/api/diagnostics` / `serve-sim doctor`. */

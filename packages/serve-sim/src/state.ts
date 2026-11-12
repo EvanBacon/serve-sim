@@ -56,9 +56,17 @@ export interface ServeSimDeviceState {
   /**
    * The server replies to input frames carrying an `ack` id with a delivery
    * report (#136). Absent on servers older than that, which never reply, so
-   * the input subcommands only wait for acks when this is set.
+   * the input subcommands only wait for acks when this is set. Covers touch
+   * and button (tags 0x03/0x04) only.
    */
   inputAck?: boolean;
+  /**
+   * The server also acks key/scroll/crown/multitouch frames (tags
+   * 0x05/0x06/0x0a/0x0b). Absent on servers that only advertised `inputAck`,
+   * which would otherwise leave `type`/`paste` waiting 4s for a reply that
+   * never comes.
+   */
+  keyAck?: boolean;
 }
 
 /**
@@ -88,6 +96,7 @@ export function inProcessServeSimState(
     streamUrl: `http://${h}:${port}${prefix}/helper/${udid}/stream.mjpeg`,
     wsUrl: `ws://${h}:${port}${prefix}/helper/${udid}/ws`,
     inputAck: true,
+    keyAck: true,
   };
 }
 

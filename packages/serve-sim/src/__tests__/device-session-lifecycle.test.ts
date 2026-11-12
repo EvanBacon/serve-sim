@@ -831,6 +831,7 @@ function dependencies(
       pose: async () => false,
       hinge: async () => false,
     },
+    readDeviceHubInputShadowed: async () => null,
   };
 }
 
@@ -884,4 +885,38 @@ test.each([true, false])("fold frames advance between sparse readbacks and settl
     await waitFor(() => angles.at(-1) === (accepted ? 180 : 141));
     expect(session.screenConfig().hingeDegrees).toBe(accepted ? 180 : 141);
   } finally { release?.(false); session.close(); }
+});
+
+describe("DeviceSession Device Hub input shadow", () => {
+  test("probes the guest flag on a non-foldable iPhone and reports it in diagnostics", async () => {
+    const probed: string[] = [];
+    let probedDone!: () => void;
+    const seen = new Promise<void>((resolve) => { probedDone = resolve; });
+    const session = new DeviceSession("PHONE-UDID", {
+      ...dependencies(),
+      readDeviceHubInputShadowed: async (udid) => {
+        probed.push(udid);
+        probedDone();
+        return true;
+      },
+    });
+    await session.start();
+    await seen;
+    const hid = (await session.diagnostics()).hid as { device_hub_input_shadowed: boolean | null };
+    expect(probed).toEqual(["PHONE-UDID"]);
+    expect(hid.device_hub_input_shadowed).toBe(true);
+    session.close();
+  });
+
+  test("start resolves even when the Device Hub probe never settles", async () => {
+    const session = new DeviceSession("PHONE-UDID", {
+      ...dependencies(),
+      readDeviceHubInputShadowed: () => new Promise(() => {}),
+    });
+    await Promise.race([
+      session.start(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("start hung on the Device Hub probe")), 50)),
+    ]);
+    session.close();
+  });
 });

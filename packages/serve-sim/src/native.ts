@@ -316,9 +316,9 @@ export class NativeHid {
     }
   }
 
-  // The four sends below resolve whether the injector handed the event to the
+  // The sends below resolve whether the injector handed the event to the
   // guest: false when it couldn't (HID setup failed, message builder missing,
-  // unknown button) so `serve-sim tap/button/gesture` can exit non-zero (#136).
+  // unknown button) so `serve-sim tap/button/gesture/type` can exit non-zero (#136).
 
   touch(type: TouchType, x: number, y: number, w: number, h: number, edge = 0): Promise<boolean> {
     return this.delivered("touch", () => this.settled(() => this.handle.touch(type, x, y, w, h, edge)));
@@ -340,17 +340,17 @@ export class NativeHid {
     return (await this.guard<boolean | void>(op, fn, false)) !== false;
   }
 
-  key(type: KeyType, usage: number): Promise<void> {
-    return this.guard("key", () => this.keys.key(type, usage), undefined);
+  key(type: KeyType, usage: number): Promise<boolean> {
+    return this.delivered("key", () => this.keys.key(type, usage));
   }
 
   /** anchorX/anchorY default to screen center when omitted. */
-  scroll(dx: number, dy: number, w: number, h: number, anchorX?: number, anchorY?: number): Promise<void> {
-    return this.guard("scroll", () => this.settled(() => this.handle.scroll(dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h)), undefined);
+  scroll(dx: number, dy: number, w: number, h: number, anchorX?: number, anchorY?: number): Promise<boolean> {
+    return this.delivered("scroll", () => this.settled(() => this.handle.scroll(dx, dy, anchorX ?? NaN, anchorY ?? NaN, w, h)));
   }
 
-  digitalCrown(delta: number): Promise<void> {
-    return this.guard("digitalCrown", () => this.settled(() => this.handle.digitalCrown(delta)), undefined);
+  digitalCrown(delta: number): Promise<boolean> {
+    return this.delivered("digitalCrown", () => this.settled(() => this.handle.digitalCrown(delta)));
   }
 
   orientation(orientation: number): Promise<boolean> {

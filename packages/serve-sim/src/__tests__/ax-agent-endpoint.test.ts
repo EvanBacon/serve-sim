@@ -159,6 +159,20 @@ describe("GET /ax/snapshot", () => {
 });
 
 describe("POST /ax/act", () => {
+  test("returns 503 input_shadowed and does not tap when Device Hub has shadowed legacy input", async () => {
+    const touches: Touch[] = [];
+    const deps = fakeDeps({ current: HOME }, touches);
+    deps.readDeviceHubInputShadowed = async () => true;
+    const base = await serve(new DeviceSession("UDID-AX", deps));
+    await fetch(`${base}/ax/snapshot`);
+    const res = await act(base, { ref: "@e2" });
+    expect(res.status).toBe(503);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.error).toBe("input_shadowed");
+    expect(body.message).toContain("repair-input -d UDID-AX");
+    expect(touches).toEqual([]);
+  });
+
   test("taps the element center via HID and, with settle, returns the diff to the new screen", async () => {
     const touches: Touch[] = [];
     const screens = { current: HOME };

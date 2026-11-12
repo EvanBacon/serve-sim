@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { duoModelPath, resolveDuoModel, resolveDuoRendererExecutable } from "./duo-renderer";
 import { simctlArguments } from "./simctl";
-import { readDeviceHubInputShadowed } from "./device-hub-input";
+import { deviceHubInputShadowedMessage, readDeviceHubInputShadowed } from "./device-hub-input";
 import { redactHome } from "./diagnostics-redact";
 
 const DIAGNOSTICS_SCHEMA_VERSION = 1;
@@ -336,6 +336,22 @@ export function buildDiagnosticsBundle(parts: {
 /** One-line verdicts for the human summary, most actionable first. */
 export function diagnosticsVerdicts(bundle: DiagnosticsBundle): string[] {
   const out: string[] = [];
+  const shadowedDevices = new Map<string, string | undefined>();
+  for (const device of bundle.devices) {
+    if (device.device_hub_input_shadowed === true && typeof device.udid === "string") {
+      shadowedDevices.set(device.udid, typeof device.name === "string" ? device.name : undefined);
+    }
+  }
+  for (const session of bundle.sessions) {
+    const hid = session.hid as { device_hub_input_shadowed?: boolean | null } | undefined;
+    if (hid?.device_hub_input_shadowed === true && typeof session.udid === "string") {
+      shadowedDevices.set(session.udid, shadowedDevices.get(session.udid));
+    }
+  }
+  for (const [udid, name] of shadowedDevices) {
+    const who = name ? `${name} (${udid})` : udid;
+    out.push(`${who}: ${deviceHubInputShadowedMessage(udid)}`);
+  }
   const host = bundle.host as {
     duo_renderer?: { model_found?: boolean; model_path?: string | null };
     device_hub?: { processes?: Array<{ xcode: string | null; matches_selected: boolean }> };

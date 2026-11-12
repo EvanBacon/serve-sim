@@ -19,13 +19,15 @@ const cli = join(import.meta.dir, "..", "index.ts");
 // ok/fail: advertises acks and replies. close: advertises, then drops the
 // socket without replying. hung: advertises but never replies. legacy: an
 // older server that neither advertises nor replies.
-type Mode = "ok" | "fail" | "close" | "hung" | "legacy";
+type Mode = "ok" | "fail" | "close" | "hung" | "legacy" | "shadow" | "inputAckOnly";
 const devices: Record<string, Mode> = {
   "ACK-OK": "ok",
   "ACK-FAIL": "fail",
   "ACK-CLOSE": "close",
   "ACK-HUNG": "hung",
   "ACK-LEGACY": "legacy",
+  "ACK-SHADOW": "shadow",
+  "ACK-KEY-OLD": "inputAckOnly",
 };
 
 let PORT = 0;
@@ -39,8 +41,21 @@ beforeAll(async () => {
     if (url.pathname === "/api") {
       const device = url.searchParams.get("device");
       const advertises = device !== null && devices[device] !== undefined && devices[device] !== "legacy";
+      const keyAck = advertises && devices[device] !== "inputAckOnly";
       res.writeHead(200, { "Content-Type": "application/json" })
-        .end(JSON.stringify({ device, ...(advertises ? { inputAck: true } : {}) }));
+        .end(JSON.stringify({ device, ...(advertises ? { inputAck: true } : {}), ...(keyAck ? { keyAck: true } : {}) }));
+      return;
+    }
+    if (url.pathname === "/pasteboard" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(Buffer.from(c)));
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks).toString();
+        let text = "";
+        try { text = String((JSON.parse(raw) as { text?: unknown }).text ?? ""); } catch { /* ignore */ }
+        res.writeHead(200, { "Content-Type": "application/json" })
+          .end(JSON.stringify({ ok: true, verified: true, bytes: Buffer.byteLength(text, "utf8") }));
+      });
       return;
     }
     res.writeHead(404).end();
@@ -55,8 +70,13 @@ beforeAll(async () => {
       if (mode === "close") { ws.terminate(); return; }
       if (mode === "hung" || mode === "legacy") return;
       const body = JSON.parse(frame.subarray(1).toString()) as { ack?: number };
+      // Pre-keyAck servers advertised inputAck but never replied to key frames.
+      if (mode === "inputAckOnly" && frame[0] === 0x06) return;
       if (typeof body.ack !== "number") return;
-      ws.send(Buffer.concat([Buffer.from([ACK_TAG]), Buffer.from(JSON.stringify({ ack: body.ack, ok: mode === "ok" }))]));
+      const reply = mode === "shadow"
+        ? { ack: body.ack, ok: false, error: "Device Hub has disconnected legacy input. Run serve-sim repair-input -d ACK-SHADOW before using touch or keyboard." }
+        : { ack: body.ack, ok: mode === "ok" };
+      ws.send(Buffer.concat([Buffer.from([ACK_TAG]), Buffer.from(JSON.stringify(reply))]));
     }));
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -69,19 +89,21 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-function runCli(args: string[]): Promise<{ status: number | null; stderr: string; ms: number }> {
+function runCli(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string; ms: number }> {
   const env = { ...process.env };
   delete env.SERVE_SIM_URL;
   delete env.SERVE_SIM_AUTH_TOKEN;
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn("bun", ["run", cli, ...args, "--url", `http://127.0.0.1:${PORT}`], { env });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
     const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
     child.on("close", (status) => {
       clearTimeout(timer);
-      resolve({ status, stderr, ms: Date.now() - started });
+      resolve({ status, stdout, stderr, ms: Date.now() - started });
     });
   });
 }
@@ -123,6 +145,14 @@ describe("input commands propagate HID delivery failures (#136)", () => {
     }, 25_000);
   }
 
+  test("tap prints the server's Device Hub error and exits 1", async () => {
+    const r = await runCli(["tap", "0.5", "0.5", "-d", "ACK-SHADOW"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("serve-sim: Device Hub has disconnected legacy input");
+    expect(r.stderr).toContain("repair-input -d ACK-SHADOW");
+    expect(r.stderr).not.toContain("could not deliver");
+  }, 25_000);
+
   test("an advertising server that never acks exits 0 with a warning after the timeout", async () => {
     const r = await runCli(["button", "lock", "-d", "ACK-HUNG"]);
     expect(r.status).toBe(0);
@@ -137,10 +167,58 @@ describe("input commands propagate HID delivery failures (#136)", () => {
     expect(bodies.map((b) => b.type)).toEqual(["begin", "end"]);
     expect(new Set(bodies.map((b) => b.ack)).size).toBe(2);
   }, 25_000);
+
+  test("type prints the server's Device Hub error and exits 1", async () => {
+    const r = await runCli(["type", "hi", "-d", "ACK-SHADOW"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("serve-sim: Device Hub has disconnected legacy input");
+    expect(r.stderr).toContain("repair-input -d ACK-SHADOW");
+  }, 25_000);
+
+  test("type does not wait for acks from a server that only advertised inputAck", async () => {
+    frames.length = 0;
+    const r = await runCli(["type", "hi", "-d", "ACK-KEY-OLD"]);
+    expect(r.status).toBe(0);
+    expect(r.ms).toBeLessThan(3_500);
+    expect(r.stderr).not.toContain("no delivery confirmation");
+    expect(frames.length).toBeGreaterThan(0);
+    for (const f of frames) expect(JSON.parse(f.subarray(1).toString())).not.toHaveProperty("ack");
+  }, 25_000);
+
+  test("paste reports success when the server acks Cmd+V", async () => {
+    const r = await runCli(["paste", "hi", "-d", "ACK-OK"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Pasted 2 bytes");
+    expect(r.stdout).toContain("Cmd+V sent");
+    expect(r.stderr).toBe("");
+  }, 25_000);
+
+  test("paste prints the server's Device Hub error and does not claim success", async () => {
+    const r = await runCli(["paste", "hi", "-d", "ACK-SHADOW"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("serve-sim: Device Hub has disconnected legacy input");
+    expect(r.stderr).toContain("repair-input -d ACK-SHADOW");
+    expect(r.stderr).toContain("Pasteboard staged, but Cmd+V was not delivered");
+    expect(r.stdout).not.toContain("Cmd+V sent");
+  }, 25_000);
+
+  test("paste does not wait for acks from a server that only advertised inputAck", async () => {
+    frames.length = 0;
+    const r = await runCli(["paste", "hi", "-d", "ACK-KEY-OLD"]);
+    expect(r.status).toBe(0);
+    expect(r.ms).toBeLessThan(3_500);
+    expect(r.stderr).not.toContain("no delivery confirmation");
+    expect(r.stdout).toContain("Cmd+V sent");
+    expect(frames.length).toBeGreaterThan(0);
+    for (const f of frames) expect(JSON.parse(f.subarray(1).toString())).not.toHaveProperty("ack");
+  }, 25_000);
 });
 
 test("servers advertise input acks in their state file and /api (#136)", () => {
   const state = inProcessServeSimState("ADVERTISE", 3999);
   expect(state.inputAck).toBe(true);
-  expect(previewConfigForState(state, "", "serve-sim", false).inputAck).toBe(true);
+  expect(state.keyAck).toBe(true);
+  const preview = previewConfigForState(state, "", "serve-sim", false);
+  expect(preview.inputAck).toBe(true);
+  expect(preview.keyAck).toBe(true);
 });
