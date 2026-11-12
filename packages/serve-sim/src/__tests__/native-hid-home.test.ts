@@ -5,6 +5,7 @@ import {
   NativeHid,
   SPRINGBOARD_BUNDLE_ID,
   homeButtonForFrontmost,
+  homeButtonSessionRoute,
   type NativeHidDeps,
 } from "../native";
 import { deviceSupportsHomeIndicatorFlick } from "../devicekit-chrome";
@@ -68,7 +69,16 @@ describe("homeButtonForFrontmost", () => {
 });
 
 describe("deviceSupportsHomeIndicatorFlick", () => {
-  test("is true for Face ID chrome and false for a physical Home button or missing chrome", () => {
+  test("treats missing chrome as unknown and does not flick", () => {
+    expect(
+      deviceSupportsHomeIndicatorFlick({
+        name: "unknown box",
+        deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.Does-Not-Exist",
+      }),
+    ).toBe(false);
+  });
+
+  test("is true for Face ID chrome and false for a physical Home button", () => {
     if (!existsSync("/Library/Developer/DeviceKit/Chrome/phone.devicechrome")) return;
     expect(
       deviceSupportsHomeIndicatorFlick({
@@ -88,12 +98,60 @@ describe("deviceSupportsHomeIndicatorFlick", () => {
         deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPad-Pro--9-7-inch-",
       }),
     ).toBe(false);
+  });
+});
+
+describe("homeButtonSessionRoute", () => {
+  test("a fresh session does not flick: orientation unset, shadow unknown, chrome unconfirmed", () => {
     expect(
-      deviceSupportsHomeIndicatorFlick({
-        name: "unknown box",
-        deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.Does-Not-Exist",
+      homeButtonForFrontmost({
+        bundleId: SPRINGBOARD_BUNDLE_ID,
+        ...homeButtonSessionRoute({}),
       }),
-    ).toBe(false);
+    ).toBe("home");
+  });
+
+  test("flicks only after orientation, shadow, and chrome are all confirmed safe", () => {
+    expect(
+      homeButtonForFrontmost({
+        bundleId: SPRINGBOARD_BUNDLE_ID,
+        ...homeButtonSessionRoute({
+          knownOrientation: "portrait",
+          deviceHubShadowed: false,
+          homeIndicatorFlickSupported: true,
+        }),
+      }),
+    ).toBe("flick_home");
+    expect(
+      homeButtonForFrontmost({
+        bundleId: SPRINGBOARD_BUNDLE_ID,
+        ...homeButtonSessionRoute({
+          knownOrientation: "portrait",
+          deviceHubShadowed: undefined,
+          homeIndicatorFlickSupported: true,
+        }),
+      }),
+    ).toBe("home");
+    expect(
+      homeButtonForFrontmost({
+        bundleId: SPRINGBOARD_BUNDLE_ID,
+        ...homeButtonSessionRoute({
+          knownOrientation: undefined,
+          deviceHubShadowed: false,
+          homeIndicatorFlickSupported: true,
+        }),
+      }),
+    ).toBe("home");
+    expect(
+      homeButtonForFrontmost({
+        bundleId: SPRINGBOARD_BUNDLE_ID,
+        ...homeButtonSessionRoute({
+          knownOrientation: "portrait",
+          deviceHubShadowed: false,
+          homeIndicatorFlickSupported: false,
+        }),
+      }),
+    ).toBe("home");
   });
 });
 
@@ -179,5 +237,38 @@ describe("NativeHid.button home routing", () => {
       expect(await hid.button("home")).toBe(true);
       expect(buttons).toEqual(["home"]);
     }
+  });
+
+  test("does not probe frontmost when a sync gate already rules out a flick", async () => {
+    let probed = 0;
+    const probe = async () => {
+      probed += 1;
+      return JSON.stringify({ bundleId: SPRINGBOARD_BUNDLE_ID });
+    };
+    for (const deps of [
+      { getOrientation: () => undefined, supportsHomeIndicator: () => true, isInputShadowed: () => false },
+      { getOrientation: () => "portrait", supportsHomeIndicator: () => false, isInputShadowed: () => false },
+      { getOrientation: () => "portrait", supportsHomeIndicator: () => true, isInputShadowed: () => true },
+    ]) {
+      probed = 0;
+      const { hid, buttons } = hidWith({ axFrontmost: probe, ...deps });
+      expect(await hid.button("home")).toBe(true);
+      expect(probed).toBe(0);
+      expect(buttons).toEqual(["home"]);
+    }
+  });
+
+  test("the flick path still waits for HID settle", async () => {
+    const { hid, buttons } = hidWith({
+      isFoldable: async () => false,
+      axFrontmost: async () => JSON.stringify({ bundleId: SPRINGBOARD_BUNDLE_ID }),
+      getOrientation: () => "portrait",
+      supportsHomeIndicator: () => true,
+      isInputShadowed: () => false,
+    });
+    const started = Date.now();
+    expect(await hid.button("home")).toBe(true);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
+    expect(buttons).toEqual(["flick_home"]);
   });
 });

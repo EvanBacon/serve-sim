@@ -373,6 +373,11 @@ export class DeviceSession {
   private width = 0;
   private height = 0;
   private orientation = "portrait";
+  /** Guest UI orientation from a confirmed 0x07 or the Duo monitor. Unset
+   *  until then — a default of "portrait" must not authorize a flick. */
+  private knownOrientation?: string;
+  /** True only after chrome says Face ID and the device is not foldable. */
+  private homeIndicatorFlickSupported?: boolean;
 
   private latestJpegBuffer: Buffer | null = null;
   private latestJpegLength = 0;
@@ -419,13 +424,11 @@ export class DeviceSession {
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.usesInjectedHid = dependencies?.hid != null;
     this.hid = dependencies?.hid ?? new NativeHid(udid, {
-      getOrientation: () => this.orientation,
-      isInputShadowed: () => this.deviceHubShadowed === true,
-      supportsHomeIndicator: () => {
-        const info = simulatorDeviceInfo(udid);
-        return info != null && deviceSupportsHomeIndicatorFlick(info);
-      },
+      getOrientation: () => this.knownOrientation,
+      isInputShadowed: () => this.deviceHubShadowed !== false,
+      supportsHomeIndicator: () => this.homeIndicatorFlickSupported === true,
     });
+    if (!this.usesInjectedHid) void this.warmHomeIndicatorSupport();
     this.capture = dependencies?.capture ?? new NativeCapture(udid);
     this.duo = new DuoPreview({
       createRenderer: (onFailure) => dependencies?.createDuoRenderer
@@ -481,6 +484,7 @@ export class DeviceSession {
       this.phase = "running";
       // Do not await: a wedged notifyutil must not delay the first stream frame.
       void this.refreshDeviceHubInput();
+      void this.warmHomeIndicatorSupport();
       const bufferDefault = this.dependencies?.rollingBuffer !== undefined
         ? this.dependencies.rollingBuffer
         : parseRollingBufferEnv();
@@ -579,7 +583,10 @@ export class DeviceSession {
       this.followedCover = panel === "cover";
     }
     const orientation = state.orientations[panel];
-    if (orientation) this.orientation = orientation;
+    if (orientation) {
+      this.orientation = orientation;
+      this.knownOrientation = orientation;
+    }
     this.duo.setPanel(panel);
     this.broadcastConfig();
     this.duo.requestFrame();
@@ -1450,7 +1457,10 @@ export class DeviceSession {
             // Duo physical orientation and the active panel's UI orientation
             // differ (the inner panel's natural axis is rotated). Let the
             // monitor report the guest UI; never overwrite it with view state.
-            if (this.duo.hinge == null) this.orientation = m.orientation;
+            if (this.duo.hinge == null) {
+              this.orientation = m.orientation;
+              this.knownOrientation = m.orientation;
+            }
             this.duo.animateRotation(m.orientation);
             this.duoMonitor?.refreshOrientation();
             this.broadcastConfig();
@@ -1822,6 +1832,22 @@ export class DeviceSession {
   }
 
   /** Single-flight probe. Callers that already have a reading must not await this. */
+  /** Resolve chrome and foldable off the Home hot path. Unknown stays false. */
+  private async warmHomeIndicatorSupport(): Promise<void> {
+    if (this.homeIndicatorFlickSupported != null || this.usesInjectedHid) return;
+    try {
+      if (await this.hid.isFoldable?.()) {
+        this.homeIndicatorFlickSupported = false;
+        return;
+      }
+      const info = await simulatorDeviceInfo(this.udid);
+      if (this.isStopped()) return;
+      this.homeIndicatorFlickSupported = info != null && deviceSupportsHomeIndicatorFlick(info);
+    } catch {
+      this.homeIndicatorFlickSupported = false;
+    }
+  }
+
   private refreshDeviceHubInput(): Promise<void> {
     if (this.deviceHubProbe) return this.deviceHubProbe;
     const read = this.deviceHubInputReader();

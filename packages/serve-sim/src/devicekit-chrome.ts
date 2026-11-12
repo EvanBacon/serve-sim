@@ -87,6 +87,8 @@ export type DeviceKitChromeDescriptor = {
   slice: DeviceKitChromeSlice | null;
   corner: Size | null;
   buttons: DeviceKitChromeButton[];
+  /** Raw chrome.json input names, including buttons dropped for a missing PDF. */
+  inputNames?: string[];
 };
 
 export type DeviceKitChromeButton = {
@@ -218,14 +220,15 @@ export function resolveDeviceDisplays(device: {
 
 /** Face ID / home-indicator devices have chrome with no physical Home button.
  *  Missing chrome is treated as unknown: do not send a bottom-edge flick
- *  (on a home-button device that opens Control Center). */
+ *  (on a home-button device that opens Control Center). Uses raw input names
+ *  so a missing Home-button PDF cannot fail open to a flick. */
 export function deviceSupportsHomeIndicatorFlick(device: {
   name: string;
   deviceTypeIdentifier?: string;
 }): boolean {
   const chrome = resolveDeviceKitChrome(device);
   if (!chrome) return false;
-  return !chrome.buttons.some((button) => button.name === "home");
+  return !(chrome.inputNames ?? []).includes("home") && !chrome.buttons.some((button) => button.name === "home");
 }
 
 export function resolveDeviceKitChrome(device: {
@@ -510,6 +513,7 @@ function resolveChromeDescriptor(
     slice: chrome.slice,
     corner,
     buttons,
+    inputNames: chrome.buttons.map((button) => button.name),
   };
 }
 

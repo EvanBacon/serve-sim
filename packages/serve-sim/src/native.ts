@@ -291,6 +291,25 @@ export function homeButtonForFrontmost(route: HomeButtonRoute): "home" | "flick_
   return "flick_home";
 }
 
+/** Session fields as NativeHid should see them. Unknown orientation, an
+ *  unsettled Device Hub probe (`undefined`), or an unconfirmed chrome/
+ *  foldable flag must not flick. */
+export function homeButtonSessionRoute(state: {
+  knownOrientation?: string;
+  deviceHubShadowed?: boolean;
+  homeIndicatorFlickSupported?: boolean;
+}): Pick<HomeButtonRoute, "supportsHomeIndicator" | "orientation" | "inputShadowed"> {
+  return {
+    supportsHomeIndicator: state.homeIndicatorFlickSupported === true,
+    orientation: state.knownOrientation,
+    inputShadowed: state.deviceHubShadowed !== false,
+  };
+}
+
+function canFlickHomeBeforeFrontmostProbe(route: Pick<HomeButtonRoute, "supportsHomeIndicator" | "orientation" | "inputShadowed">): boolean {
+  return homeButtonForFrontmost({ ...route, bundleId: SPRINGBOARD_BUNDLE_ID }) === "flick_home";
+}
+
 export class NativeHid {
   private readonly udid: string;
   private readonly axFrontmost: (udid: string) => Promise<string>;
@@ -392,6 +411,14 @@ export class NativeHid {
   }
 
   private async homeButtonName(): Promise<"home" | "flick_home"> {
+    const gates = {
+      supportsHomeIndicator: this.supportsHomeIndicator(),
+      orientation: this.getOrientation(),
+      inputShadowed: this.isInputShadowed(),
+    };
+    // Sync gates already rule out a flick: skip the AX probe (up to 400 ms)
+    // on home-button devices, landscape, unknown orientation, and shadow.
+    if (!canFlickHomeBeforeFrontmostProbe(gates)) return "home";
     let bundleId: string | null = null;
     try {
       const raw = await new Promise<string>((resolve, reject) => {
@@ -406,12 +433,7 @@ export class NativeHid {
     } catch {
       return "home";
     }
-    return homeButtonForFrontmost({
-      bundleId,
-      supportsHomeIndicator: this.supportsHomeIndicator(),
-      orientation: this.getOrientation(),
-      inputShadowed: this.isInputShadowed(),
-    });
+    return homeButtonForFrontmost({ bundleId, ...gates });
   }
 
   buttonHid(page: number, usage: number, phase: ButtonPhase = "press"): Promise<boolean> {
