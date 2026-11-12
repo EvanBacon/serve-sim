@@ -159,15 +159,11 @@ actor HIDInjector {
         channel = HIDClientChannel(
             gate: gate,
             connect: {
-                // makeHIDClient (initWithDevice:) is unbounded and runs on
-                // this actor queue. A CoreSimulator lock during shutdown can
-                // stall the next ack; accepted for now (the 100ms state
-                // probe already bounds admit). Prefer moving this off-queue
-                // if the hang returns.
-                do { return try Self.makeHIDClient(device: device) } catch {
-                    print("[hid] Could not create SimDeviceLegacyHIDClient: \(error.localizedDescription)")
-                    return nil
-                }
+                // initWithDevice: can block on a CoreSimulator lock during
+                // shutdown. Run it off this actor queue with a short
+                // timeout so a reconnect cannot stall the next tap ack
+                // past the 2s drop bound (or the 4s CLI ack timeout).
+                Self.makeHIDClientBounded(device: device)
             },
             log: Self.logLine,
             // The Duo guest helper ran inside the old boot; start a new one.
@@ -193,6 +189,45 @@ actor HIDInjector {
     private static func logLine(_ line: String) {
         print(line)
         fflush(stdout)
+    }
+
+    /// Upper bound for a reconnect's `initWithDevice:`. Matches the state
+    /// probe closely enough that a locked shutdown still drops inside the
+    /// 2s e2e window, including CLI startup.
+    private static let makeClientTimeout: TimeInterval = 0.15
+
+    /// Build a HID client off the injector's actor queue. Returns nil if
+    /// `initWithDevice:` does not finish in time; a late client is discarded
+    /// so it cannot be adopted after we have already reported a drop.
+    private static func makeHIDClientBounded(device: NSObject) -> NSObject? {
+        let box = MakeClientBox()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInteractive).async {
+            do {
+                box.set(client: try makeHIDClient(device: device))
+            } catch {
+                logLine("[hid] Could not create SimDeviceLegacyHIDClient: \(error.localizedDescription)")
+                box.set(client: nil)
+            }
+            done.signal()
+        }
+        if done.wait(timeout: .now() + makeClientTimeout) == .timedOut {
+            logLine("[hid] Timed out creating SimDeviceLegacyHIDClient after \(makeClientTimeout)s")
+            return nil
+        }
+        return box.client
+    }
+
+    private final class MakeClientBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: NSObject?
+        var client: NSObject? {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+        func set(client: NSObject?) {
+            lock.lock(); value = client; lock.unlock()
+        }
     }
 
     /// A new SimDeviceLegacyHIDClient for the device's current boot.

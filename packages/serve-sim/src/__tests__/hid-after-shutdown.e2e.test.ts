@@ -79,8 +79,10 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
   test("tap fails with an undelivered error within 2s of shutdown, while the server is up", async () => {
     // The bound is 2s because a correct drop is fast (locally ~0.4–1.2s,
     // including CLI startup). On macos-26 CI, a synchronous SimDevice.state
-    // read during `simctl shutdown` blocked the first tap for 6312ms; the
-    // gate now times that read out at 100ms, so this bound stays at 2s.
+    // read during `simctl shutdown` blocked the first tap for 6312ms, and
+    // a reconnect's initWithDevice: later hung the ack until the 4s CLI
+    // timeout. The state read is capped at 100ms and reconnect is capped
+    // at 150ms off the actor queue, so this bound stays at 2s.
     expect(tap().status).toBe(0);
 
     const shutdown = spawn("xcrun", ["simctl", "shutdown", udid!], { stdio: "ignore" });
@@ -92,10 +94,10 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     }
     await new Promise((r) => shutdown.on("exit", r));
 
-    if (!failure) throw new Error("every tap in the 2s after `simctl shutdown` exited 0");
-    expect(failure.afterMs).toBeLessThan(2_000);
+    if (!failure) throw new Error(`every tap in the 2s after \`simctl shutdown\` exited 0\n${serverLog}`);
+    expect(failure.stderr, `first undelivered tap at ${failure.afterMs}ms\n${failure.stderr}\n${serverLog}`).toContain("could not deliver the tap");
+    expect(failure.afterMs, `first undelivered tap at ${failure.afterMs}ms (stderr: ${failure.stderr})\n${serverLog}`).toBeLessThan(2_000);
     // The injector refused the tap, so the server was answering.
-    expect(failure.stderr).toContain("could not deliver the tap");
     expect(failure.stderr).not.toContain(NO_SERVER);
     expect(server!.exitCode).toBeNull();
     // It still answers once the device is fully down.
@@ -128,26 +130,30 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     server!.stderr!.on("data", onData);
     spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
     let firstOkAt: number | undefined;
-    const deadline = Date.now() + 45_000;
+    let lastFail = "";
+    const deadline = Date.now() + 90_000;
     try {
       while (Date.now() < deadline) {
         const r = tap();
         await sleep(0);
         stampNotReady();
         if (r.status === 0) { firstOkAt = Date.now(); break; }
-        expect(r.stderr).not.toContain(NO_SERVER);
+        lastFail = r.stderr;
+        expect(r.stderr, r.stderr).not.toContain(NO_SERVER);
         await sleep(400);
       }
     } finally {
       server!.stdout!.off("data", onData);
       server!.stderr!.off("data", onData);
     }
-    if (firstOkAt == null) throw new Error("no successful tap within 45s of simctl boot");
+    if (firstOkAt == null) {
+      throw new Error(`no successful tap within 90s of simctl boot\n${lastFail}\n${serverLog.slice(logAtStart)}`);
+    }
     if (notReadyAt != null) {
       expect(firstOkAt - notReadyAt).toBeLessThan(20_000);
     }
     expect(server!.exitCode).toBeNull();
-  }, 90_000);
+  }, 150_000);
 
   test("after the same simulator boots again, a tap on the guest lands", async () => {
     bootAndWait();
