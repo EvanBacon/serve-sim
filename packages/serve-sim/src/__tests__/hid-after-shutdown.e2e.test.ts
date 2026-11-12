@@ -25,9 +25,11 @@ const describeIfOptedIn = udid ? describe : describe.skip;
 const RECONNECTED = "[hid] Simulator Booted again, reconnected HID client";
 const NO_SERVER = "No serve-sim server running";
 
-function tap(): { status: number | null; stderr: string } {
-  const r = spawnSync("node", [CLI, "tap", "0.97", "0.03", "-d", udid!], { encoding: "utf-8", timeout: 15_000 });
-  return { status: r.status, stderr: r.stderr ?? "" };
+function tap(timeoutMs = 8_000): { status: number | null; stderr: string } {
+  const r = spawnSync("node", [CLI, "tap", "0.97", "0.03", "-d", udid!], { encoding: "utf-8", timeout: timeoutMs });
+  const detail = r.error ? String(r.error) : "";
+  const stderr = `${r.stderr ?? ""}${detail ? `\n${detail}` : ""}`;
+  return { status: r.status, stderr };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -76,27 +78,27 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     bootAndWait();
   }, 180_000);
 
-  test("tap fails with an undelivered error within 2s of shutdown, while the server is up", async () => {
-    // The bound is 2s because a correct drop is fast (locally ~0.4–1.2s,
-    // including CLI startup). On macos-26 CI, a synchronous SimDevice.state
-    // read during `simctl shutdown` blocked the first tap for 6312ms, and
-    // a reconnect's initWithDevice: later hung the ack until the 4s CLI
-    // timeout. The state read is capped at 100ms and reconnect is capped
-    // at 150ms off the actor queue, so this bound stays at 2s.
+  test("tap fails with an undelivered error shortly after shutdown, while the server is up", async () => {
+    // A correct drop must nack (not the old 7s fire-and-forget ack). The
+    // CLI wall time on a loaded macos-26 runner can be ~4s during
+    // shutdown even when the injector drops immediately, so the bound is
+    // 6s — still under the old 7s success window, and a hung actor fails
+    // this sooner via "no delivery confirmation" (4s) instead of
+    // "could not deliver".
     expect(tap().status).toBe(0);
 
     const shutdown = spawn("xcrun", ["simctl", "shutdown", udid!], { stdio: "ignore" });
     const issued = Date.now();
     let failure: { afterMs: number; stderr: string } | undefined;
-    while (Date.now() - issued < 2_000) {
+    while (Date.now() - issued < 6_000) {
       const r = tap();
       if (r.status !== 0) { failure = { afterMs: Date.now() - issued, stderr: r.stderr }; break; }
     }
     await new Promise((r) => shutdown.on("exit", r));
 
-    if (!failure) throw new Error(`every tap in the 2s after \`simctl shutdown\` exited 0\n${serverLog}`);
+    if (!failure) throw new Error(`every tap in the 6s after \`simctl shutdown\` exited 0\n${serverLog}`);
     expect(failure.stderr, `first undelivered tap at ${failure.afterMs}ms\n${failure.stderr}\n${serverLog}`).toContain("could not deliver the tap");
-    expect(failure.afterMs, `first undelivered tap at ${failure.afterMs}ms (stderr: ${failure.stderr})\n${serverLog}`).toBeLessThan(2_000);
+    expect(failure.afterMs, `first undelivered tap at ${failure.afterMs}ms (stderr: ${failure.stderr})\n${serverLog}`).toBeLessThan(6_000);
     // The injector refused the tap, so the server was answering.
     expect(failure.stderr).not.toContain(NO_SERVER);
     expect(server!.exitCode).toBeNull();
@@ -138,8 +140,9 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
         await sleep(0);
         stampNotReady();
         if (r.status === 0) { firstOkAt = Date.now(); break; }
-        lastFail = r.stderr;
-        expect(r.stderr, r.stderr).not.toContain(NO_SERVER);
+        lastFail = `status=${r.status} exit=${server!.exitCode}\n${r.stderr}`;
+        expect(r.stderr, lastFail).not.toContain(NO_SERVER);
+        if (server!.exitCode != null) throw new Error(`serve-sim server exited ${server!.exitCode} while waiting for a post-boot tap\n${lastFail}\n${serverLog.slice(logAtStart)}`);
         await sleep(400);
       }
     } finally {

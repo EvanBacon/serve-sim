@@ -50,6 +50,7 @@ actor HIDInjector {
     private var channel = HIDClientChannel<NSObject>(
         gate: HIDDeliveryGate { nil }, connect: { nil }, log: HIDInjector.logLine
     )
+    private var clientMaker: BoundedHIDClientMaker?
     private static let sendSel = NSSelectorFromString("sendWithMessage:freeWhenDone:completionQueue:completion:")
     /// Send completion for `completionClient`. It is built once per client, not per send,
     /// and runs on `queue`, which is this actor's executor.
@@ -157,6 +158,7 @@ actor HIDInjector {
         let firstClient = try Self.makeHIDClient(device: device)
         let duo = duoBridge
         let maker = BoundedHIDClientMaker(device: device)
+        clientMaker = maker
         channel = HIDClientChannel(
             gate: gate,
             connect: {
@@ -208,9 +210,20 @@ actor HIDInjector {
         private let condition = NSCondition()
         private var inFlight = false
         private var finished = false
+        private var timedOutThisFlight = false
         private var client: NSObject?
+        private var epoch: UInt64 = 0
+        private var flightEpoch: UInt64 = 0
 
         init(device: NSObject) { self.device = device }
+
+        /// Drop a stored or in-flight result from an earlier boot so the
+        /// next reconnect cannot adopt a dead client after a later boot.
+        func invalidate() {
+            condition.lock()
+            epoch += 1
+            condition.unlock()
+        }
 
         func make(timeout: TimeInterval) -> NSObject? {
             condition.lock()
@@ -220,6 +233,8 @@ actor HIDInjector {
             }
             if !inFlight {
                 inFlight = true
+                timedOutThisFlight = false
+                flightEpoch = epoch
                 let device = self.device
                 DispatchQueue.global(qos: .userInteractive).async { [self] in
                     let result: NSObject?
@@ -236,10 +251,15 @@ actor HIDInjector {
                     self.condition.broadcast()
                     self.condition.unlock()
                 }
+            } else if timedOutThisFlight {
+                // An earlier send already waited out this flight; don't
+                // pile another timeout onto every subsequent event.
+                return nil
             }
             let deadline = Date().addingTimeInterval(timeout)
             while !finished {
                 if !condition.wait(until: deadline) {
+                    timedOutThisFlight = true
                     HIDInjector.logLine("[hid] Timed out creating SimDeviceLegacyHIDClient after \(timeout)s")
                     return nil
                 }
@@ -249,9 +269,10 @@ actor HIDInjector {
 
         /// Caller must hold `condition`.
         private func takeFinished() -> NSObject? {
-            let value = client
+            let value = flightEpoch == epoch ? client : nil
             client = nil
             finished = false
+            timedOutThisFlight = false
             return value
         }
     }
@@ -315,9 +336,15 @@ actor HIDInjector {
         let sel = NSSelectorFromString("registerNotificationHandlerOnQueue:handler:")
         guard device.responds(to: sel) else { return }
         let channel = self.channel
-        let handler: @convention(block) (NSDictionary?) -> Void = { [weak channel] info in
+        let maker = self.clientMaker
+        let handler: @convention(block) (NSDictionary?) -> Void = { [weak channel, weak maker] info in
             guard let info = info as? [AnyHashable: Any] else { return }
             channel?.noteDeviceNotification(info)
+            if info["notification"] as? String == "device_state",
+               let state = (info["new_state"] as? NSNumber)?.intValue,
+               state != HIDDeliveryGate.bootedState {
+                maker?.invalidate()
+            }
         }
         let sub = NotificationSubscription(device: device)
         typealias RegisterFunc = @convention(c) (AnyObject, Selector, AnyObject, AnyObject) -> UInt
