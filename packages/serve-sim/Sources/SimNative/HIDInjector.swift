@@ -196,15 +196,16 @@ actor HIDInjector {
 
     /// Upper bound for waiting on a reconnect's `initWithDevice:`. Together
     /// with the 100ms state-read cap this keeps a shutdown drop inside the
-    /// 2s e2e bound, including CLI startup. A still-running init is not
+    /// 6s e2e CLI bound, including startup. A still-running init is not
     /// cancelled: the next reconnecting send adopts it if it has finished.
     private static let makeClientTimeout: TimeInterval = 0.15
 
     /// One in-flight `initWithDevice:` at a time, off the injector actor.
     /// A send waits up to `timeout` and returns nil on expiry so the ack
     /// cannot stall; the work keeps running and a later send can adopt the
-    /// result. `connect()` is only called after the gate has read Booted,
-    /// so a finished client is not adopted once the device has left Booted.
+    /// result if it is still from the current boot epoch. A stale in-flight
+    /// init (epoch moved by a non-Booted notification) does not block a
+    /// fresh one. `connect()` is only called after the gate has read Booted.
     private final class BoundedHIDClientMaker: @unchecked Sendable {
         private let device: NSObject
         private let condition = NSCondition()
@@ -229,12 +230,15 @@ actor HIDInjector {
             condition.lock()
             defer { condition.unlock() }
             if finished {
-                return takeFinished()
+                if let client = takeFinished() { return client }
+                // Stale or failed result: start a fresh init below.
             }
-            if !inFlight {
+            let staleFlight = inFlight && flightEpoch != epoch
+            if !inFlight || staleFlight {
                 inFlight = true
                 timedOutThisFlight = false
                 flightEpoch = epoch
+                let startedEpoch = epoch
                 let device = self.device
                 DispatchQueue.global(qos: .userInteractive).async { [self] in
                     let result: NSObject?
@@ -245,14 +249,17 @@ actor HIDInjector {
                         result = nil
                     }
                     self.condition.lock()
-                    self.client = result
-                    self.finished = true
-                    self.inFlight = false
-                    self.condition.broadcast()
+                    // A newer flight owns the flags; a stale completion must not overwrite it.
+                    if self.flightEpoch == startedEpoch && self.epoch == startedEpoch {
+                        self.client = result
+                        self.finished = true
+                        self.inFlight = false
+                        self.condition.broadcast()
+                    }
                     self.condition.unlock()
                 }
             } else if timedOutThisFlight {
-                // An earlier send already waited out this flight; don't
+                // An earlier send already waited out this (current) flight; don't
                 // pile another timeout onto every subsequent event.
                 return nil
             }
