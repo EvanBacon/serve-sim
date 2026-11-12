@@ -27,6 +27,25 @@ export interface CameraStatusReply extends CameraHelperReply {
   bundleIds?: string[];
 }
 
+/**
+ * Environment for `simctl launch` of a camera-injected app. simctl forwards
+ * `SIMCTL_CHILD_*` variables into the guest process with the prefix
+ * stripped, which is how the dylib and its shm region reach the app.
+ */
+export function cameraLaunchEnv(
+  base: NodeJS.ProcessEnv,
+  dylib: string,
+  shmName: string,
+  mirror: "auto" | "on" | "off",
+) {
+  return {
+    ...base,
+    SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: dylib,
+    SIMCTL_CHILD_SIMCAM_SHM_NAME: shmName,
+    ...(mirror !== "auto" ? { SIMCTL_CHILD_SIMCAM_MIRROR_MODE: mirror } : {}),
+  };
+}
+
 export function cameraHelperPidFile(udid: string): string {
   return join(CAMERA_STATE_DIR, `${udid}.pid`);
 }

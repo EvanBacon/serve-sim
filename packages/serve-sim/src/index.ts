@@ -84,6 +84,7 @@ import {
 } from "./preview-initial-state";
 import {
   CAMERA_STATE_DIR as SIMCAM_STATE_DIR,
+  cameraLaunchEnv,
   cameraHelperBundlesFile as helperBundlesFile,
   cameraHelperPidFile as helperPidFile,
   cameraHelperSocketFile as helperSocketFile,
@@ -2325,12 +2326,7 @@ Examples:
     execFileSync("xcrun", simctlArguments(["terminate", udid, bundleId]), { stdio: "ignore" });
   } catch {}
 
-  const env = {
-    ...process.env,
-    SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: dylib,
-    SIMCTL_CHILD_SIMCAM_SHM_NAME: shmName,
-    ...(mirror !== "auto" ? { SIMCTL_CHILD_SIMCAM_MIRROR_MODE: mirror } : {}),
-  };
+  const env = cameraLaunchEnv(process.env, dylib, shmName, mirror);
 
   let stdoutBuf = "";
   try {
