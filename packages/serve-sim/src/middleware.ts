@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, existsSync, unlinkSync, watch, type FSWatcher } from "fs";
-import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
+import { spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -47,6 +47,7 @@ import {
   resolveDevicePlaceholderAsset,
   resolveDeviceDisplays,
   resolveDeviceKitChrome,
+  primeDeviceProfilePlists,
   serveDeviceKitChromeAsset,
   serveDevicePlaceholderAsset,
 } from "./devicekit-chrome";
@@ -313,21 +314,20 @@ async function getBootedUdids(): Promise<Set<string> | null> {
 // which tool launched it. Simulator.app persists this as CurrentDeviceUDID, so
 // it's the best signal for "the device this user actually cares about" — we
 // surface it near the top of the grid the way Xcode's Devices window does.
+// Read asynchronously: the grid polls every 0.75–3 s, so a blocking spawn here
+// stalled the event loop (and every stream it carries) on most polls.
 let preferredSnapshot: { at: number; udid: string | null } = { at: 0, udid: null };
-function getPreferredDeviceUdid(): string | null {
+export async function getPreferredDeviceUdid(): Promise<string | null> {
   const now = Date.now();
   if (now - preferredSnapshot.at < 1500) return preferredSnapshot.udid;
-  let udid: string | null = null;
-  try {
-    udid =
-      execSync("defaults read com.apple.iphonesimulator CurrentDeviceUDID", {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 1500,
-      }).trim() || null;
-  } catch {
-    udid = null;
-  }
+  const udid = await new Promise<string | null>((resolve) => {
+    execFile(
+      "defaults",
+      ["read", "com.apple.iphonesimulator", "CurrentDeviceUDID"],
+      { encoding: "utf-8", timeout: 1500 },
+      (err, stdout) => resolve(err ? null : stdout.trim() || null),
+    );
+  });
   preferredSnapshot = { at: now, udid };
   return udid;
 }
@@ -1872,7 +1872,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       // wall of near-identical names. Sort on the cheap metadata BEFORE
       // resolving the DeviceKit chrome descriptor, so pagination resolves chrome
       // only for the page actually returned.
-      const preferredUdid = getPreferredDeviceUdid();
+      const preferredUdid = await getPreferredDeviceUdid();
       const familyRank = (name: string): number => {
         if (/iphone/i.test(name)) return 0;
         if (/ipad/i.test(name)) return 1;
@@ -1910,6 +1910,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       const total = sims.length;
       const { limit, offset } = parseGridPaging(rawUrl);
       const page = limit == null ? sims : sims.slice(offset, offset + limit);
+      primeDeviceProfilePlists(page);
       const devices = page.map((d) => {
         const helper = helperByUdid.get(d.udid);
         const remoteHelper = helper ? rewriteStateForRequestHost(helper, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
