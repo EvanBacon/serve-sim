@@ -786,21 +786,111 @@ function deviceTypeNameForIdentifier(identifier: string | undefined): string | n
   return deviceTypeNameByIdentifier.get(identifier) ?? null;
 }
 
-function buildDeviceTypeNameMap(): Map<string, string> {
-  const out = new Map<string, string>();
+export function buildDeviceTypeNameMap(): Map<string, string> {
+  let entries: string[];
   try {
-    for (const entry of readdirSync(DEVICE_TYPES_ROOT)) {
-      if (!entry.endsWith(".simdevicetype")) continue;
-      const bundlePath = join(DEVICE_TYPES_ROOT, entry);
-      const info = readPlist(join(bundlePath, "Contents", "Info.plist"));
-      const identifier = typeof info?.CFBundleIdentifier === "string" ? info.CFBundleIdentifier : null;
-      const name = typeof info?.CFBundleName === "string"
-        ? info.CFBundleName
-        : basename(entry, ".simdevicetype");
-      if (identifier) out.set(identifier, name);
-    }
-  } catch {}
+    entries = readdirSync(DEVICE_TYPES_ROOT).filter((entry) => entry.endsWith(".simdevicetype"));
+  } catch {
+    return new Map();
+  }
+  return deviceTypeNameMapFromBundles(
+    entries,
+    (entry) => join(DEVICE_TYPES_ROOT, entry, "Contents", "Info.plist"),
+    readPlistBatch,
+    readPlist,
+  );
+}
+
+/**
+ * Map device type identifier → bundle name for every `.simdevicetype` bundle.
+ *
+ * This runs synchronously inside the first `/grid/api` request, i.e. on the
+ * event loop that also carries the MJPEG stream. Spawning `plutil` once per
+ * bundle (~130 on a current Xcode) froze the server for 0.4–2 s and delayed the
+ * preview's first frame by the same amount, so all Info.plists are converted
+ * in one `plutil` call. If that batch doesn't yield one record per bundle (an
+ * unreadable plist, plutil missing), fall back to reading each file.
+ */
+export function deviceTypeNameMapFromBundles(
+  entries: string[],
+  infoPlistPath: (entry: string) => string,
+  readBatch: (paths: string[]) => JsonRecord[] | null,
+  readOne: (path: string) => JsonRecord | null,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (entries.length === 0) return out;
+  const paths = entries.map(infoPlistPath);
+  const batch = readBatch(paths);
+  const infos = batch && batch.length === entries.length ? batch : paths.map(readOne);
+  for (let i = 0; i < entries.length; i++) {
+    const info = infos[i];
+    const identifier = typeof info?.CFBundleIdentifier === "string" ? info.CFBundleIdentifier : null;
+    const name = typeof info?.CFBundleName === "string"
+      ? info.CFBundleName
+      : basename(entries[i]!, ".simdevicetype");
+    if (identifier) out.set(identifier, name);
+  }
   return out;
+}
+
+/**
+ * Split `plutil -convert json -o - a b c` output — one compact JSON value per
+ * input file, concatenated with no separator — into its values. Returns null
+ * if the stream isn't a clean sequence of JSON objects.
+ */
+export function parseConcatenatedJsonObjects(text: string): JsonRecord[] | null {
+  const out: JsonRecord[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") {
+      if (depth === 0) return null;
+      inString = true;
+    } else if (ch === "{" || ch === "[") {
+      if (depth === 0) {
+        if (ch === "[") return null;
+        start = i;
+      }
+      depth++;
+    } else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth < 0) return null;
+      if (depth === 0) {
+        try {
+          out.push(JSON.parse(text.slice(start, i + 1)) as JsonRecord);
+        } catch {
+          return null;
+        }
+      }
+    } else if (depth === 0 && !/\s/.test(ch!)) {
+      return null;
+    }
+  }
+  return depth === 0 ? out : null;
+}
+
+function readPlistBatch(paths: string[]): JsonRecord[] | null {
+  try {
+    const json = execFileSync("plutil", ["-convert", "json", "-o", "-", ...paths], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return parseConcatenatedJsonObjects(json);
+  } catch {
+    // plutil exits non-zero if any file fails; the caller then reads per file.
+    return null;
+  }
 }
 
 function readPlist(path: string): JsonRecord | null {
