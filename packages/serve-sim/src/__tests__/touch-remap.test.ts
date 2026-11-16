@@ -8,6 +8,7 @@ import {
 import {
   cliInputOrientation,
   configUrlForWsUrl,
+  displayMultiTouchToRaw,
   displayTouchToRaw,
 } from "../touch-remap";
 
@@ -110,5 +111,23 @@ describe("configUrlForWsUrl", () => {
     );
     expect(configUrlForWsUrl("ws://127.0.0.1:3100/other")).toBeNull();
     expect(configUrlForWsUrl("not a url")).toBeNull();
+  });
+});
+
+describe("displayMultiTouchToRaw", () => {
+  test("remaps both fingers with the same mapping as single touches", () => {
+    const touch = { type: "move", x1: 0.2, y1: 0.9, x2: 0.7, y2: 0.1 };
+    for (const orientation of ["landscape_left", "landscape_right", "portrait_upside_down"] as const) {
+      const raw = displayMultiTouchToRaw(touch, orientation);
+      const p1 = displayTouchToRaw({ type: "move", x: touch.x1, y: touch.y1 }, orientation);
+      const p2 = displayTouchToRaw({ type: "move", x: touch.x2, y: touch.y2 }, orientation);
+      expect(raw).toEqual({ type: "move", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
+    }
+  });
+
+  test("is a no-op for portrait and unknown orientation", () => {
+    const touch = { type: "begin", x1: 0.2, y1: 0.4, x2: 0.8, y2: 0.6 };
+    expect(displayMultiTouchToRaw(touch, "portrait")).toEqual(touch);
+    expect(displayMultiTouchToRaw(touch, undefined)).toEqual(touch);
   });
 });
