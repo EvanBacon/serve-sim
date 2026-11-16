@@ -139,39 +139,20 @@ The full erase is destructive — only do it when the user explicitly asks.
 
 ## Workflow 6: Drive a multi-step gesture reliably
 
-For a complex gesture (long drag, multi-finger choreography), the CLI's `gesture` subcommand is unreliable because each call opens a fresh WebSocket. The reliable path is one persistent WebSocket connection.
+A complete touch (`begin` → `move` × N → `end`) must be sent by one invocation. Pass the whole sequence as a JSON **array** to a single `gesture` call; the CLI sends every step in order, waiting each step's `delayMs` (default 16ms) before the next:
 
-In a Node agent:
-
-```js
-import WebSocket from "ws";
-import { encodeSingleTouch, encodeMultiTouch } from "serve-sim-client/touch-codec";
-
-// 3100 is the default stream port — discover the real one with
-// `serve-sim --list -q` (.streamUrl) when it may differ.
-const ws = new WebSocket("ws://localhost:3100/ws");
-await new Promise((r) => ws.once("open", r));
-
-let seq = 0;
-function send(data) {
-  const buf = data.x1 !== undefined
-    ? encodeMultiTouch(data, seq++)
-    : encodeSingleTouch(data, seq++);
-  ws.send(buf);
-}
-
-// Long vertical drag
-send({ type: "begin", x: 0.5, y: 0.2 });
-for (let i = 1; i <= 30; i++) {
-  send({ type: "move", x: 0.5, y: 0.2 + (0.6 * i) / 30 });
-  await new Promise((r) => setTimeout(r, 16));
-}
-send({ type: "end", x: 0.5, y: 0.8 });
-
-ws.close();
+```sh
+# Long vertical drag (finger moves down → content scrolls up)
+npx serve-sim gesture "$(node -e '
+  const steps = [{ type: "begin", x: 0.5, y: 0.2 }];
+  for (let i = 1; i <= 20; i++) steps.push({ type: "move", x: 0.5, y: 0.2 + (0.6 * i) / 20 });
+  steps[steps.length - 1].delayMs = 300; // hold before lifting so it is a positional drag, not a flick
+  steps.push({ type: "end", x: 0.5, y: 0.8 });
+  console.log(JSON.stringify(steps));
+')"
 ```
 
-If you do not want a Node dependency, you can build the same frames in any language — the binary format is documented in [endpoints.md](endpoints.md).
+For a momentum flick instead, use a few large fast moves and no hold. Multi-finger steps (`x1`/`y1`/`x2`/`y2`) work the same way. Never split one sequence across several `gesture` calls: the finger stays down between them, and any realistic gap makes the held `begin` read as a long-press. See [gestures.md](gestures.md) for the step shapes.
 
 ## Workflow 7: Show the simulator stream in the host's preview
 

@@ -20,7 +20,7 @@ import {
 } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs, type KeyEvent } from "./text-to-keys";
 import { PASTEBOARD_TEXT_LIMIT_BYTES, PASTE_KEY_EVENTS } from "./pasteboard";
-import { parseGestureSteps, stepPayload, DEFAULT_STEP_DELAY_MS, type GestureStep } from "./gesture-steps";
+import { gestureStepFrames, parseGestureSteps, type GestureStep } from "./gesture-steps";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, isInDeviceSet, resolveDevice } from "./device";
@@ -1244,25 +1244,20 @@ async function axDump(deviceArg?: string) {
 }
 
 async function gesture(jsonStr: string, deviceArg?: string, raw?: boolean) {
-  const state = await resolveInputTarget(deviceArg);
-
+  // Validate before touching the server so bad input fails fast, naming the step.
   let steps: GestureStep[];
   try {
     steps = parseGestureSteps(jsonStr);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(`serve-sim: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
 
+  const state = await resolveInputTarget(deviceArg);
   const orientation = await touchInputOrientation(state, raw);
-  // All steps ride ONE socket: a begin→move×N→end sequence split across CLI
-  // invocations (one socket each) registers as a long-press. A step's
-  // `delayMs` is the wait after it, i.e. before the next frame.
-  await sendAckedInput(state, "gesture", steps.map((step, i) => ({
-    tag: 0x03,
-    payload: displayTouchToRaw(stepPayload(step) as { type: string; x: number; y: number; edge?: number }, orientation),
-    delayMs: i === 0 ? 0 : steps[i - 1]!.delayMs ?? DEFAULT_STEP_DELAY_MS,
-  })));
+  // All steps ride one acked send: split across CLI invocations, the finger
+  // stays down between calls and the held `begin` reads as a long-press.
+  await sendAckedInput(state, "gesture", gestureStepFrames(steps, orientation));
 }
 
 async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean) {
