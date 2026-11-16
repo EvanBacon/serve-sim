@@ -3,6 +3,7 @@ import type { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { DuoStateMonitor, type DuoState } from "../duo-state";
+import { simctlArguments } from "../simctl";
 
 // The Duo monitor's child processes: the guest hinge reader
 // (`simctl spawn <udid> serve-sim-duo-hid watch-angle`), the SpringBoard panel
@@ -104,7 +105,7 @@ describe("Duo hinge reader exit reporting", () => {
     expect(readers()).toHaveLength(2);
     const restart = spawned.filter(({ args }) => args.at(-1) === "watch-angle");
     expect(restart[1]!.args).toEqual(restart[0]!.args);
-    expect(restart[1]!.args).toEqual(["simctl", "spawn", "UDID", "/cache/serve-sim-duo-hid", "watch-angle"]);
+    expect(restart[1]!.args).toEqual(simctlArguments(["spawn", "UDID", "/cache/serve-sim-duo-hid", "watch-angle"]));
     monitor.close();
   });
 
@@ -203,8 +204,9 @@ describe("Duo panel and orientation watchers", () => {
 
     const seeded = fakeMonitor();
     const showSeeded = seeded.execs.find(({ args }) => args.includes("show"))!;
+    // simctlArguments adds `--set <dir>` when SERVE_SIM_DEVICE_SET is configured.
     expect(showSeeded.args).toEqual([
-      "simctl", "spawn", "UDID", "log", "show", "--last", "boot", "--style", "compact", "--predicate",
+      ...simctlArguments(["spawn", "UDID", "log", "show", "--last", "boot", "--style", "compact", "--predicate"]),
       expect.stringContaining('process == "SpringBoard"'),
     ]);
     showSeeded.callback(null, `x [DisplayContentMode] .cover:pri .inner:aux\n${seed}`, "");
@@ -223,7 +225,7 @@ describe("Duo panel and orientation watchers", () => {
   test("orientation is read from `simctl io enumerate` and a failed read is not a state change", () => {
     const { monitor, execs, states } = fakeMonitor();
     const enumerate = execs.find(({ args }) => args.includes("enumerate"))!;
-    expect(enumerate.args).toEqual(["simctl", "io", "UDID", "enumerate"]);
+    expect(enumerate.args).toEqual(simctlArguments(["io", "UDID", "enumerate"]));
     expect(enumerate.options).toMatchObject({ timeout: 3000 });
     enumerate.callback(new Error("simctl timed out"), "", "");
     expect(states).toEqual([]);
