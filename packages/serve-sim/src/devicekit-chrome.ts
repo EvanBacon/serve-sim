@@ -164,6 +164,10 @@ const displaysCache = new Map<string, DeviceDisplayDescriptor[]>();
 const placeholderDescriptorCache = new Map<string, DevicePlaceholderAssetDescriptor | null>();
 let coreTypesIconEntriesCache: CoreTypesIconEntry[] | null = null;
 const placeholderAssetInfoCache = new Map<string, PlaceholderAssetInfo | null>();
+// Parsed profile.plist / capabilities.plist by path. These live in the Xcode
+// install and don't change while the server runs (the descriptor caches above
+// already assume as much).
+const profilePlistCache = new Map<string, JsonRecord | null>();
 
 export function bareChromeIdentifier(identifier: string): string {
   return identifier.startsWith(CHROME_PREFIX)
@@ -365,7 +369,7 @@ function resolveDeviceDisplaysUncached(profileName: string): DeviceDisplayDescri
   const profilePath = profilePathForName(profileName);
   if (!existsSync(profilePath)) return [];
   const profileDir = dirname(profilePath);
-  const capabilities = readPlist(join(profileDir, "capabilities.plist"));
+  const capabilities = readProfilePlist(join(profileDir, "capabilities.plist"));
   const raw = integratedCapabilityDisplays(capabilities);
   if (raw.length === 0) return [];
 
@@ -518,7 +522,7 @@ function resolveChromeDescriptor(
 }
 
 function readProfileMetadata(profilePath: string): DeviceProfileMetadata | null {
-  const raw = readPlist(profilePath);
+  const raw = readProfilePlist(profilePath);
   if (!raw) return null;
   const fullIdentifier = typeof raw.chromeIdentifier === "string" ? raw.chromeIdentifier : null;
   const chromeIdentifier = fullIdentifier ? bareChromeIdentifier(fullIdentifier) : null;
@@ -876,6 +880,48 @@ export function parseConcatenatedJsonObjects(text: string): JsonRecord[] | null 
     }
   }
   return depth === 0 ? out : null;
+}
+
+/**
+ * Read the profile.plist and capabilities.plist of every device type on a
+ * `/grid/api` page in one `plutil` call.
+ *
+ * Resolving chrome, displays and the placeholder asset otherwise spawns
+ * `plutil` synchronously twice per device type (~30 spawns, ~120 ms on a
+ * current Xcode) inside the first request, on the event loop that also
+ * carries the MJPEG stream. Paths the batch can't cover fall back to the
+ * per-file read in readProfilePlist.
+ */
+export function primeDeviceProfilePlists(
+  devices: readonly { name: string; deviceTypeIdentifier?: string }[],
+): void {
+  const paths = new Set<string>();
+  for (const device of devices) {
+    const profilePath = profilePathForName(profileNameForDevice(device));
+    for (const path of [join(dirname(profilePath), "capabilities.plist"), profilePath]) {
+      if (!profilePlistCache.has(path) && existsSync(path)) paths.add(path);
+    }
+  }
+  primePlistCache([...paths], readPlistBatch, profilePlistCache);
+}
+
+/** Fill `cache` from one batch read; leave it untouched if the batch fails or is incomplete. */
+export function primePlistCache(
+  paths: string[],
+  readBatch: (paths: string[]) => JsonRecord[] | null,
+  cache: Map<string, JsonRecord | null>,
+): void {
+  if (paths.length === 0) return;
+  const batch = readBatch(paths);
+  if (!batch || batch.length !== paths.length) return;
+  for (let i = 0; i < paths.length; i++) cache.set(paths[i]!, batch[i]!);
+}
+
+function readProfilePlist(path: string): JsonRecord | null {
+  if (profilePlistCache.has(path)) return profilePlistCache.get(path) ?? null;
+  const parsed = readPlist(path);
+  profilePlistCache.set(path, parsed);
+  return parsed;
 }
 
 function readPlistBatch(paths: string[]): JsonRecord[] | null {
