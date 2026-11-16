@@ -316,20 +316,29 @@ async function getBootedUdids(): Promise<Set<string> | null> {
 // surface it near the top of the grid the way Xcode's Devices window does.
 // Read asynchronously: the grid polls every 0.75–3 s, so a blocking spawn here
 // stalled the event loop (and every stream it carries) on most polls.
+// Overlapping calls after the cache expires share one in-flight `defaults`.
 let preferredSnapshot: { at: number; udid: string | null } = { at: 0, udid: null };
-export async function getPreferredDeviceUdid(): Promise<string | null> {
+let preferredInFlight: Promise<string | null> | null = null;
+export function getPreferredDeviceUdid(): Promise<string | null> {
   const now = Date.now();
-  if (now - preferredSnapshot.at < 1500) return preferredSnapshot.udid;
-  const udid = await new Promise<string | null>((resolve) => {
+  if (now - preferredSnapshot.at < 1500) return Promise.resolve(preferredSnapshot.udid);
+  if (preferredInFlight) return preferredInFlight;
+  const lookup = new Promise<string | null>((resolve) => {
     execFile(
       "defaults",
       ["read", "com.apple.iphonesimulator", "CurrentDeviceUDID"],
       { encoding: "utf-8", timeout: 1500 },
       (err, stdout) => resolve(err ? null : stdout.trim() || null),
     );
+  }).then((udid) => {
+    // Never let an older lookup replace a newer snapshot.
+    if (now >= preferredSnapshot.at) preferredSnapshot = { at: now, udid };
+    return udid;
+  }).finally(() => {
+    if (preferredInFlight === lookup) preferredInFlight = null;
   });
-  preferredSnapshot = { at: now, udid };
-  return udid;
+  preferredInFlight = lookup;
+  return lookup;
 }
 
 export async function readServeSimStates(): Promise<ServeSimState[]> {

@@ -85,6 +85,8 @@ describe.skipIf(!existsSync(DEVICE_TYPES_ROOT))("grid page resolution on this ho
 
   test("an already-primed page doesn't spawn plutil again", () => {
     const devices = installedDeviceTypes();
+    // Prime here so this test doesn't depend on the cold-page test running first.
+    primeDeviceProfilePlists(devices);
     plutilArgs.length = 0;
     primeDeviceProfilePlists(devices);
     expect(profilePlistSpawns().length).toBe(0);
