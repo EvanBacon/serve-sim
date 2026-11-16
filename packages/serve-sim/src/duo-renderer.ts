@@ -98,6 +98,13 @@ export function resetDuoRendererFailureLogForTests(): void {
   loggedFailures.clear();
 }
 
+/** Worker launch inputs; tests substitute fakes. Defaults are the real lookups. */
+export interface DuoRendererDeps {
+  executable?: () => string | null;
+  resolveModel?: () => DuoModelLookup;
+  spawn?: (command: string, args: string[], options: { stdio: "pipe" }) => ChildProcessWithoutNullStreams;
+}
+
 /** Persistent RealityKit worker. At most one immutable JPEG is in flight. */
 export class DuoRenderer {
   private readonly child: ChildProcessWithoutNullStreams;
@@ -107,10 +114,10 @@ export class DuoRenderer {
   readonly modelPath: string;
 
   /** Throws `DuoRendererError` for setup failures; later failures go to `onFailure` and any pending render. */
-  constructor(private readonly onFailure?: (error: DuoRendererError) => void) {
-    const executable = resolveDuoRendererExecutable();
+  constructor(private readonly onFailure?: (error: DuoRendererError) => void, deps: DuoRendererDeps = {}) {
+    const executable = (deps.executable ?? resolveDuoRendererExecutable)();
     if (!executable) throw new DuoRendererError("worker_missing", "Duo renderer is missing. Rebuild serve-sim.");
-    const lookup = resolveDuoModel();
+    const lookup = deps.resolveModel ? deps.resolveModel() : resolveDuoModel();
     if (!lookup.developerDir || !lookup.modelPath) {
       throw new DuoRendererError("developer_dir", "Could not resolve the selected Xcode (xcode-select -p failed).", { source: lookup.source, error: lookup.error });
     }
@@ -122,7 +129,7 @@ export class DuoRenderer {
       });
     }
     this.modelPath = lookup.modelPath;
-    this.child = spawn(executable, [lookup.modelPath], { stdio: "pipe" });
+    this.child = (deps.spawn ?? spawn)(executable, [lookup.modelPath], { stdio: "pipe" });
     this.child.stderr.on("data", (data) => {
       const text = data.toString();
       this.stderrTail = (this.stderrTail + text).slice(-STDERR_TAIL_BYTES);
