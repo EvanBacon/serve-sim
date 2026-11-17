@@ -58,7 +58,8 @@ export class DuoStateMonitor {
   private monitor?: ChildProcess;
   private enumeration?: ChildProcess;
   private panelMonitor?: ChildProcess;
-  private panelSeed?: ChildProcess;
+  /** Every running `log show` seed: one can outlive the stream restart that starts the next. */
+  private readonly panelSeeds = new Set<ChildProcess>();
   private panelRetry?: ReturnType<typeof setTimeout>;
   private retry?: ReturnType<typeof setTimeout>;
   private poll?: ReturnType<typeof setTimeout>;
@@ -124,14 +125,15 @@ export class DuoStateMonitor {
       }
     });
     // Seed from this boot's most recent transition, then let live events win.
-    this.panelSeed = this.execFile("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate]),
+    const seed: ChildProcess = this.execFile("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate]),
       { timeout: 10000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
-        this.panelSeed = undefined;
+        this.panelSeeds.delete(seed);
         if (!error && !liveSample) {
           const last = stdout.split("\n").reverse().find((line) => parsePrimaryPanel(line));
           if (last) accept(last);
         }
       });
+    this.panelSeeds.add(seed);
     child.on("error", () => {});
     child.once("close", () => {
       if (this.panelMonitor === child) this.panelMonitor = undefined;
@@ -195,7 +197,8 @@ export class DuoStateMonitor {
     this.stopped = true;
     clearTimeout(this.panelRetry);
     this.panelMonitor?.kill();
-    this.panelSeed?.kill();
+    for (const seed of this.panelSeeds) seed.kill();
+    this.panelSeeds.clear();
     clearTimeout(this.retry);
     clearTimeout(this.poll);
     this.monitor?.stdin?.end();

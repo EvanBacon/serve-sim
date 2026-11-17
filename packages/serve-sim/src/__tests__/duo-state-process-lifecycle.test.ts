@@ -199,6 +199,29 @@ describe("Duo panel and orientation watchers", () => {
     expect(panelStreams()).toHaveLength(2);
   });
 
+  // Reproduced on a real iOS 27.2 simulator: `log show --last boot` takes
+  // 1-3s there, longer than the 1s stream restart, so a stream that ends early
+  // leaves two seeds running at once.
+  test("close kills a `log show` seed that outlived a panel stream restart", () => {
+    const shows = (execs: ReturnType<typeof fakeMonitor>["execs"]) => execs.filter(({ args }) => args.includes("show"));
+
+    // The first seed finishes after the restart started a second one.
+    const finished = fakeMonitor();
+    finished.panelStreams()[0]!.emit("close", 0, null);
+    elapseRetry();
+    expect(shows(finished.execs)).toHaveLength(2);
+    shows(finished.execs)[0]!.callback(null, "", "");
+    finished.monitor.close();
+    expect(shows(finished.execs)[1]!.child.killed).toBe(true);
+
+    // Both seeds still running at close.
+    const running = fakeMonitor();
+    running.panelStreams()[0]!.emit("close", 0, null);
+    elapseRetry();
+    running.monitor.close();
+    expect(shows(running.execs).map(({ child }) => child.killed)).toEqual([true, true]);
+  });
+
   test("the boot log seeds the primary panel unless a live event already arrived", async () => {
     const seed = "x [DisplayContentMode] COMPLETED: .cover:aux .inner:pri | 100.0°\n";
 
