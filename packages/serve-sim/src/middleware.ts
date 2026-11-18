@@ -2498,6 +2498,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // log line. Filtering is done here (not in the browser) so the SSE stream
     // stays narrow and the client can listen without rate-limit concerns.
     if (url === base + "/appstate") {
+      // Watch for the client leaving from the start: one that leaves during
+      // the async lookups below must not get a `log stream` that nothing kills.
+      let closed = false;
+      let stopTail = () => {};
+      req.on("close", () => {
+        closed = true;
+        stopTail();
+      });
       const states = await readServeSimStates();
       const state = selectServeSimState(states, selectedDevice);
       if (!state) {
@@ -2532,6 +2540,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // AX bridge may be warming up — the log tail fills in once anything moves.
       }
 
+      if (closed) return;
       const child: ChildProcess = spawn("xcrun", simctlArguments([
         "spawn", udid, "log", "stream",
         "--style", "ndjson",
@@ -2539,8 +2548,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         "--predicate",
         'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
       ]), { stdio: ["ignore", "pipe", "ignore"] });
+      stopTail = () => {
+        child.stdout?.destroy();
+        child.kill();
+      };
 
-      let closed = false;
       const emitApp = async (bundleId: string, pid?: number) => {
         if (!isUserFacingBundle(bundleId)) return;
         if (bundleId === lastBundle) return;
@@ -2574,11 +2586,6 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         try { res.end(); } catch {}
       });
       child.on("close", () => res.end());
-      req.on("close", () => {
-        closed = true;
-        child.stdout?.destroy();
-        child.kill();
-      });
       return;
     }
 
