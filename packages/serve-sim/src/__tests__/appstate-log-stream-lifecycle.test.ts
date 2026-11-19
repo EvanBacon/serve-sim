@@ -30,6 +30,8 @@ const tails: FakeTail[] = [];
 let interceptBootedList = true;
 let holdBootedList: Promise<void> | null = null;
 let bootedListReached: () => void = () => {};
+/** Set once a drained request (see `x-test-drain-body`) emits 'close' server-side. */
+let drainedRequestClosed = false;
 
 const isOurTail = (args: unknown) =>
   Array.isArray(args) && args.includes(DEVICE) && args.includes("log") && args.includes("stream");
@@ -98,6 +100,12 @@ beforeAll(async () => {
   }));
   const middleware = simMiddleware({ basePath: "/", proxyHelpers: true });
   server = createServer((req, res) => {
+    // Stands in for an upstream middleware that drains the request body
+    // before handing off; the body then ends while the handler is running.
+    if (req.headers["x-test-drain-body"]) {
+      req.on("close", () => (drainedRequestClosed = true));
+      req.resume();
+    }
     void middleware(req, res, async () => {
       res.writeHead(404).end();
     });
@@ -114,9 +122,12 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-function openAppState() {
-  return request({ host: "127.0.0.1", port, path: `/appstate?device=${DEVICE}` });
+function openAppState(headers: Record<string, string> = {}) {
+  return request({ host: "127.0.0.1", port, path: `/appstate?device=${DEVICE}`, headers });
 }
+
+const foregroundLine = (bundleId: string, pid: number) =>
+  JSON.stringify({ eventMessage: `[app<${bundleId}>:${pid}] Setting process visibility to: Foreground` }) + "\n";
 
 async function waitFor(predicate: () => boolean, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
@@ -168,6 +179,36 @@ describe("GET /appstate log stream lifecycle", () => {
     }
   }, 10_000);
 
+  test("a request whose body was drained upstream still gets a live tail", async () => {
+    // A request emits 'close' once its body has been consumed, while the
+    // client is still connected; only the response's 'close' means it left.
+    tails.length = 0;
+    drainedRequestClosed = false;
+    let release!: () => void;
+    holdBootedList = new Promise<void>((resolve) => (release = resolve));
+    const reached = new Promise<void>((resolve) => (bootedListReached = resolve));
+    const req = openAppState({ "x-test-drain-body": "1" });
+    let body = "";
+    req.on("response", (res) => res.on("data", (d) => (body += String(d))));
+    req.on("error", () => {});
+    req.end();
+    try {
+      await reached; // the handler is mid-bootstrap
+      expect(await waitFor(() => drainedRequestClosed, 2_000)).toBe(true);
+      release();
+      expect(await waitFor(() => tails.length === 1, 5_000)).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(tails[0]!.killed).toBe(false);
+      tails[0]!.stdout.write(foregroundLine("com.example.drained", 21));
+      expect(await waitFor(() => body.includes("com.example.drained"), 3_000)).toBe(true);
+    } finally {
+      holdBootedList = null;
+      release?.();
+      req.destroy();
+    }
+    expect(await waitFor(() => tails[0]?.killed === true, 2_000)).toBe(true);
+  }, 10_000);
+
   test("forwards each user-facing foreground app once, across chunk boundaries", async () => {
     tails.length = 0;
     const req = openAppState();
@@ -177,14 +218,12 @@ describe("GET /appstate log stream lifecycle", () => {
     req.end();
     try {
       expect(await waitFor(() => tails.length === 1, 5_000)).toBe(true);
-      const line = (bundleId: string, pid: number) =>
-        JSON.stringify({ eventMessage: `[app<${bundleId}>:${pid}] Setting process visibility to: Foreground` }) + "\n";
       const feed = [
-        line("com.example.one", 11),
-        line("com.apple.WidgetRenderer.Extension", 12), // not a user-facing app
-        line("com.example.one", 13), // already reported
+        foregroundLine("com.example.one", 11),
+        foregroundLine("com.apple.WidgetRenderer.Extension", 12), // not a user-facing app
+        foregroundLine("com.example.one", 13), // already reported
         "not json\n",
-        line("com.example.two", 14),
+        foregroundLine("com.example.two", 14),
       ].join("");
       // Split mid-line, so a line must be reassembled before it is parsed.
       const cut = feed.indexOf("com.example.two") + 4;

@@ -2502,7 +2502,9 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       // the async lookups below must not get a `log stream` that nothing kills.
       let closed = false;
       let stopTail = () => {};
-      req.on("close", () => {
+      // `res`, not `req`: a request's 'close' also fires once its body has
+      // been consumed (e.g. resumed upstream), while the client is still here.
+      res.on("close", () => {
         closed = true;
         stopTail();
       });
