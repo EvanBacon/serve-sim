@@ -160,6 +160,27 @@ const axStreamerCache = createAxStreamerCache();
 // the partial line is dropped rather than retained indefinitely.
 const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
 
+/**
+ * Calls `callback` once when the client of a long-lived response goes away.
+ * The response's 'close' is the signal on Node and Bun >= 1.4. A request's
+ * 'close' alone is not: it also fires once the body has been consumed (e.g.
+ * resumed upstream) while the client is still connected. Bun < 1.4 never
+ * closes the response on disconnect, only the request, and then with its
+ * body unfinished, which is how that 'close' is told apart.
+ */
+function onClientGone(req: SimReq, res: SimRes, callback: () => void): void {
+  let gone = false;
+  const fire = () => {
+    if (gone) return;
+    gone = true;
+    callback();
+  };
+  res.once("close", fire);
+  req.once("close", () => {
+    if (!req.complete || !req.readableEnded) fire();
+  });
+}
+
 /** POST /reload only carries `{ bundleId }`. */
 const RELOAD_BODY_LIMIT_BYTES = 4 * 1024;
 
@@ -2502,9 +2523,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       // the async lookups below must not get a `log stream` that nothing kills.
       let closed = false;
       let stopTail = () => {};
-      // `res`, not `req`: a request's 'close' also fires once its body has
-      // been consumed (e.g. resumed upstream), while the client is still here.
-      res.on("close", () => {
+      onClientGone(req, res, () => {
         closed = true;
         stopTail();
       });
