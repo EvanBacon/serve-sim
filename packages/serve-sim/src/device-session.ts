@@ -1411,7 +1411,8 @@ export class DeviceSession {
       case 0x03: {
         const raw = json<{ type: string; x: number; y: number; edge?: number; ack?: number }>();
         if (!raw) return false;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        const refused = await this.inputRefusal();
+        if (refused !== null) return refused;
         const m = withoutAck(raw);
         this.recordTouchEvent(m);
         return this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
@@ -1421,7 +1422,8 @@ export class DeviceSession {
         if (!raw) return false;
         const m = withoutAck(raw);
         if (m.page != null && m.usage != null) {
-          if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+          const refused = await this.inputRefusal();
+          if (refused !== null) return refused;
           this.recordHidEvent(tag, m);
           return this.hid.buttonHid(m.page, m.usage, (m.phase as "down" | "up" | "press") ?? "press");
         }
@@ -1431,21 +1433,26 @@ export class DeviceSession {
         // NativeHid stays on the launch path if input is shadowed (a flick
         // would be dropped) rather than acknowledging a touch that was not
         // delivered.
-        if (m.button !== "home" && await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        if (m.button !== "home") {
+          const refused = await this.inputRefusal();
+          if (refused !== null) return refused;
+        }
         this.recordHidEvent(tag, m);
         return this.hid.button(m.button);
       }
       case 0x05: {
         const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number }>();
         if (!m) break;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        const refused = await this.inputRefusal();
+        if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         return (await this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H)) !== false;
       }
       case 0x06: {
         const m = json<{ type: string; usage: number }>();
         if (!m) break;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        const refused = await this.inputRefusal();
+        if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         const delivered = (await this.hid.key(m.type as "down" | "up", m.usage)) !== false;
         if (delivered && m.type === "down" && !isModifierUsage(m.usage)) this.forwardedTypingKey = true;
@@ -1489,7 +1496,8 @@ export class DeviceSession {
       case 0x0a: {
         const m = json<{ delta: number }>();
         if (!m) break;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        const refused = await this.inputRefusal();
+        if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         return (await this.hid.digitalCrown(m.delta)) !== false;
       }
@@ -1497,7 +1505,8 @@ export class DeviceSession {
         // Payload deltas are a fraction of the display; scale to device pixels.
         const m = json<{ dx: number; dy: number; x?: number; y?: number }>();
         if (!m) break;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        const refused = await this.inputRefusal();
+        if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         return (await this.hid.scroll(m.dx * W, m.dy * H, W, H, m.x, m.y)) !== false;
       }
@@ -1910,6 +1919,17 @@ export class DeviceSession {
     if (this.deviceHubProbe) return;
     if (this.deviceHubShadowSettled && this.now() - this.deviceHubShadowedAt < DeviceSession.DEVICE_HUB_SHADOW_RECHECK_MS) return;
     void this.refreshDeviceHubInput();
+  }
+
+  /**
+   * Gate for socket input behind the shadow probe: null to send, the shadowed
+   * result, or false when close() landed while the first-frame probe ran. Its
+   * socket is gone by then, so a begin/down sent now could never be ended.
+   */
+  private async inputRefusal(): Promise<ShadowedInputResult | false | null> {
+    const shadowed = await this.legacyInputShadowed();
+    if (this.isStopped()) return false;
+    return shadowed ? shadowedInputResult(this.udid) : null;
   }
 
   /** True when Device Hub has disconnected legacy HID and the event must not be acked as delivered. */
