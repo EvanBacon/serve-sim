@@ -119,19 +119,45 @@ describe("release tag and bump PR", () => {
     ).toContain("GITHUB_TOKEN");
   });
 
-  test("reuses a tag that already points at HEAD and refuses to move one", () => {
-    expect(tagDecision(null, "abc")).toEqual({ action: "create" });
-    expect(tagDecision("-", "abc")).toEqual({ action: "create" });
-    expect(tagDecision("abc", "abc")).toEqual({ action: "reuse" });
-    expect(() => tagDecision("old", "abc")).toThrow(/already points at old/);
+  test("creates or reuses a tag at HEAD after a successful publish", () => {
+    expect(tagDecision(null, "abc", { justPublished: true })).toEqual({
+      action: "create",
+    });
+    expect(tagDecision("-", "abc", { justPublished: true })).toEqual({
+      action: "create",
+    });
+    expect(tagDecision("abc", "abc", { justPublished: true })).toEqual({
+      action: "reuse",
+    });
+    expect(() => tagDecision("old", "abc", { justPublished: true })).toThrow(
+      /already points at old/,
+    );
   });
 
-  test("refuses to create a missing tag when the publish step was skipped", () => {
-    expect(() => tagDecision(null, "abc", { allowCreate: false })).toThrow(
-      /skipped npm publish/,
+  test("on skip, creates a missing tag only when npm gitHead matches HEAD", () => {
+    expect(
+      tagDecision(null, "abc", {
+        justPublished: false,
+        publishedGitHead: "abc",
+      }),
+    ).toEqual({ action: "create" });
+    expect(() =>
+      tagDecision(null, "abc", {
+        justPublished: false,
+        publishedGitHead: "zzz",
+      }),
+    ).toThrow(/gitHead/);
+    expect(() => tagDecision(null, "abc", { justPublished: false })).toThrow(
+      /gitHead/,
     );
-    expect(tagDecision("abc", "abc", { allowCreate: false })).toEqual({
+  });
+
+  test("on skip, leaves an existing tag on an earlier commit so the bump PR can still open", () => {
+    expect(tagDecision("abc", "abc", { justPublished: false })).toEqual({
       action: "reuse",
+    });
+    expect(tagDecision("old", "new", { justPublished: false })).toEqual({
+      action: "leave",
     });
   });
 

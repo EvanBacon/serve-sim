@@ -117,22 +117,31 @@ jobs:
           else
             EXISTING=-
           fi
-          # Only create a tag at HEAD when this run just published. A later
-          # skip-publish dispatch after main has moved must not tag the
-          # wrong commit; reuse an existing tag or fail if it is missing.
+          # After a successful publish, tag HEAD. On a skip rerun, create a
+          # missing tag only if npm's gitHead matches this checkout (the
+          # original publish commit). If the tag already exists on an
+          # earlier commit, leave it and continue to the bump PR.
           PUBLISH_ACTION="${{ steps.publish.outputs.action }}"
-          if [ "$PUBLISH_ACTION" = "publish" ]; then
-            TAG_MODE=create-ok
-          else
-            TAG_MODE=reuse-only
+          if [ "$PUBLISH_ACTION" != "publish" ] && [ "$PUBLISH_ACTION" != "skip" ]; then
+            echo "::error::Unexpected publish action: $PUBLISH_ACTION"
+            exit 1
           fi
-          DECISION=$(node "$SCRIPT" tag-decision "$EXISTING" "$HEAD" "$TAG_MODE")
+          GIT_HEAD=""
+          if [ "$PUBLISH_ACTION" = "skip" ]; then
+            GIT_HEAD=$(npm view "serve-sim@$VERSION" gitHead 2>/dev/null || true)
+          fi
+          DECISION=$(node "$SCRIPT" tag-decision "$EXISTING" "$HEAD" "$PUBLISH_ACTION" "$GIT_HEAD")
           if [ "$DECISION" = "create" ]; then
             git tag "$TAG"
             git push origin "$TAG"
             echo "Created $TAG at $HEAD"
-          else
+          elif [ "$DECISION" = "reuse" ]; then
             echo "$TAG already points at HEAD; reusing"
+          elif [ "$DECISION" = "leave" ]; then
+            echo "$TAG already points at $EXISTING; leaving it in place and continuing with the bump PR"
+          else
+            echo "::error::Unexpected tag decision: $DECISION"
+            exit 1
           fi
 
           git fetch origin main

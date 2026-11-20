@@ -165,21 +165,30 @@ export function tagDecision(existingSha, headSha, options = {}) {
   if (!headSha) {
     throw new Error("HEAD SHA is required to create or reuse a release tag.");
   }
-  const allowCreate = options.allowCreate !== false;
-  if (!existingSha || existingSha === "-") {
-    if (!allowCreate) {
-      throw new Error(
-        "tag is missing, but this run skipped npm publish so HEAD may not be the published commit. Re-run the original successful publish job to tag that commit, or create the tag manually.",
-      );
+  const justPublished = options.justPublished === true;
+  const publishedGitHead = options.publishedGitHead || null;
+  const existing = !existingSha || existingSha === "-" ? null : existingSha;
+
+  if (!existing) {
+    if (justPublished || (publishedGitHead && publishedGitHead === headSha)) {
+      return { action: "create" };
     }
-    return { action: "create" };
+    throw new Error(
+      "tag is missing, and this run skipped npm publish at a commit that does not match the published package's gitHead. Re-run the original publish job (same commit) to tag that commit, or create the tag manually.",
+    );
   }
-  if (existingSha === headSha) {
+  if (existing === headSha) {
     return { action: "reuse" };
   }
-  throw new Error(
-    `tag already points at ${existingSha}, not ${headSha}. Refusing to move the tag.`,
-  );
+  if (justPublished) {
+    throw new Error(
+      `tag already points at ${existing}, not ${headSha}. Refusing to move the tag.`,
+    );
+  }
+  // Skip path: the version is already on npm and tagged at an earlier
+  // commit (main may have moved). Leave the tag in place so the bump PR
+  // can still be opened.
+  return { action: "leave" };
 }
 
 export function planBumpOnMain(mainVersion, releasedVersion) {
@@ -245,7 +254,7 @@ export function loadRegistry() {
 }
 
 function usage() {
-  return "Usage: publish-version.mjs <beta|stable|next-patch|set <version>|tag-name <version>|bump-branch <version>|bump-title <version>|plan-bump <mainVersion> [releasedVersion]|tag-decision <existingSha or -> <headSha> [create-ok|reuse-only]>";
+  return "Usage: publish-version.mjs <beta|stable|next-patch|set <version>|tag-name <version>|bump-branch <version>|bump-title <version>|plan-bump <mainVersion> [releasedVersion]|tag-decision <existingSha or -> <headSha> <publish|skip> [publishedGitHead]>";
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -282,18 +291,17 @@ export function main(argv = process.argv.slice(2)) {
   if (command === "tag-decision") {
     const existing = argv[1];
     const head = argv[2];
-    const mode = argv[3] ?? "create-ok";
-    if (!existing || !head) {
+    const mode = argv[3];
+    const publishedGitHead = argv[4] || null;
+    if (!existing || !head || (mode !== "publish" && mode !== "skip")) {
       throw new Error(
-        "Usage: publish-version.mjs tag-decision <existingSha or -> <headSha> [create-ok|reuse-only]",
+        "Usage: publish-version.mjs tag-decision <existingSha or -> <headSha> <publish|skip> [publishedGitHead]",
       );
     }
-    if (mode !== "create-ok" && mode !== "reuse-only") {
-      throw new Error(
-        "Usage: publish-version.mjs tag-decision <existingSha or -> <headSha> [create-ok|reuse-only]",
-      );
-    }
-    return tagDecision(existing, head, { allowCreate: mode !== "reuse-only" }).action;
+    return tagDecision(existing, head, {
+      justPublished: mode === "publish",
+      publishedGitHead,
+    }).action;
   }
 
   if (command === "plan-bump") {

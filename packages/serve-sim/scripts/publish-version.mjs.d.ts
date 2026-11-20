@@ -34,8 +34,8 @@ export function bumpPrBody(options: {
 export function tagDecision(
   existingSha: string | null | undefined,
   headSha: string,
-  options?: { allowCreate?: boolean },
-): { action: "create" | "reuse" };
+  options?: { justPublished?: boolean; publishedGitHead?: string | null },
+): { action: "create" | "reuse" | "leave" };
 export function planBumpOnMain(
   mainVersion: string,
   releasedVersion: string,
