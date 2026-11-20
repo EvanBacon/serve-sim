@@ -8,6 +8,8 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { readAppInfoPlist } from "./app-info-plist";
+import { permissionStatuses, requestedPermissions } from "./client/utils/permissions";
 import { findBootedDevice, resolveDevice } from "./device";
 import { simctlArguments, simulatorDevicesDir } from "./simctl";
 
@@ -338,6 +340,73 @@ function setLocation(
   }
 }
 
+/**
+ * Minimal XML plist parser (`plutil -convert xml1` output). clients.plist
+ * holds <data>/<date> values, which `plutil -convert json` refuses, so parse
+ * the XML structurally instead of pattern-matching across entries.
+ * <data> and <date> come back as their raw text; unknown tags as null.
+ */
+export function parsePlistXml(xml: string): unknown {
+  const tokens = xml.matchAll(/<(\/?)([A-Za-z]+)[^>]*?(\/?)>|([^<]+)/g);
+  const decode = (t: string) =>
+    t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  type Frame = { kind: "dict"; value: Record<string, unknown>; key?: string } | { kind: "array"; value: unknown[] };
+  const stack: Frame[] = [];
+  let root: unknown;
+  let text = "";
+  let leaf: string | null = null;
+  const put = (v: unknown) => {
+    const top = stack[stack.length - 1];
+    if (!top) { root ??= v; return; }
+    if (top.kind === "array") top.value.push(v);
+    else if (top.key !== undefined) { top.value[top.key] = v; top.key = undefined; }
+  };
+  for (const [, close, tag, selfClose, chars] of tokens) {
+    if (chars !== undefined) { if (leaf) text += chars; continue; }
+    if (!tag || tag === "plist") continue;
+    if (selfClose) {
+      if (tag === "true" || tag === "false") put(tag === "true");
+      else if (tag === "dict") put({});
+      else if (tag === "array") put([]);
+      else if (tag !== "key") put(tag === "string" ? "" : null);
+      continue;
+    }
+    if (!close) {
+      if (tag === "dict") stack.push({ kind: "dict", value: {} });
+      else if (tag === "array") stack.push({ kind: "array", value: [] });
+      else { leaf = tag; text = ""; }
+      continue;
+    }
+    if (tag === "dict" || tag === "array") {
+      const done = stack.pop();
+      if (done) put(done.value);
+      continue;
+    }
+    const value = decode(text);
+    leaf = null;
+    const top = stack[stack.length - 1];
+    if (tag === "key") { if (top?.kind === "dict") top.key = value; continue; }
+    if (tag === "integer" || tag === "real") put(Number(value.trim()));
+    else if (tag === "string" || tag === "data" || tag === "date") put(value);
+    else put(null);
+  }
+  return root;
+}
+
+/**
+ * locationd `Authorization` for `bundleId`, from clients.plist XML: read only
+ * from the app's own top-level `i<bundleId>:` entry, never a later one.
+ */
+export function locationAuthorizationFromPlistXml(xml: string, bundleId: string): number | null {
+  const root = parsePlistXml(xml);
+  if (!root || typeof root !== "object" || Array.isArray(root)) return null;
+  const entry = (root as Record<string, unknown>)[`i${bundleId}:`];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const auth = (entry as Record<string, unknown>).Authorization;
+  return typeof auth === "number" && Number.isFinite(auth) ? auth : null;
+}
+
 function readLocation(
   udid: string,
   bundleId: string | undefined,
@@ -351,13 +420,8 @@ function readLocation(
   } catch {
     return null;
   }
-  const m = xml.match(
-    new RegExp(
-      `<key>i${bundleId.replace(/[.-]/g, "\\$&")}:</key>\\s*<dict>[\\s\\S]*?` +
-        `<key>Authorization</key>\\s*<integer>(\\d+)</integer>`,
-    ),
-  );
-  return m ? { Authorization: Number(m[1]) } : null;
+  const auth = locationAuthorizationFromPlistXml(xml, bundleId);
+  return auth === null ? null : { Authorization: auth };
 }
 
 // ─── Notifications writer ───
@@ -488,6 +552,36 @@ function readNotifications(
   }
 }
 
+// ─── list output ───
+
+interface RawPermissionState {
+  tcc: Record<string, number>;
+  location: { Authorization: number } | null;
+  notifications: { allowsNotifications: boolean; critical: boolean } | null;
+}
+
+/**
+ * `permissions list` JSON. With a bundle id it adds `statuses` (normalized,
+ * see permissionStatuses) and `requested` (catalogue keys the Info.plist
+ * declares usage strings for; null when the app isn't installed or its
+ * Info.plist can't be read). `info` undefined means no bundle id was given.
+ */
+export function buildListResult(
+  udid: string,
+  bundleId: string | undefined,
+  raw: RawPermissionState,
+  info: Record<string, unknown> | null | undefined,
+) {
+  return {
+    udid,
+    bundleId: bundleId ?? null,
+    ...raw,
+    ...(bundleId
+      ? { statuses: permissionStatuses(raw), requested: info ? requestedPermissions(info) : null }
+      : {}),
+  };
+}
+
 // ─── Dispatch ───
 
 function applyOne(
@@ -548,13 +642,13 @@ export async function permissions(args: string[]): Promise<void> {
   }
 
   if (parsed.verb === "list") {
-    const result = {
-      udid,
-      bundleId: parsed.bundleId ?? null,
+    const raw = {
       tcc: readTcc(udid, parsed.bundleId),
       location: readLocation(udid, parsed.bundleId),
       notifications: readNotifications(udid, parsed.bundleId),
     };
+    const info = parsed.bundleId ? await readAppInfoPlist(udid, parsed.bundleId) : undefined;
+    const result = buildListResult(udid, parsed.bundleId, raw, info);
     console.log(JSON.stringify(result, null, quiet ? 0 : 2));
     process.exit(0);
   }

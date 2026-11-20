@@ -31,6 +31,7 @@
     "dist/simcam/libSimCameraInjector.dylib",
     "dist/simcam/serve-sim-camera-helper",
     "dist/simax/serve-sim-ax-settings",
+    "src/app-info-plist.ts",
     "src/auth-bootstrap.ts",
     "src/ax.ts",
     "src/ax-agent.ts",
