@@ -34,6 +34,7 @@ export function bumpPrBody(options: {
 export function tagDecision(
   existingSha: string | null | undefined,
   headSha: string,
+  options?: { allowCreate?: boolean },
 ): { action: "create" | "reuse" };
 export function planBumpOnMain(
   mainVersion: string,

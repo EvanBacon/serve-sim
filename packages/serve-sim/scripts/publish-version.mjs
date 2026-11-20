@@ -161,11 +161,17 @@ If a later rerun of the publish workflow already opened this PR, this is the sam
 `;
 }
 
-export function tagDecision(existingSha, headSha) {
+export function tagDecision(existingSha, headSha, options = {}) {
   if (!headSha) {
     throw new Error("HEAD SHA is required to create or reuse a release tag.");
   }
+  const allowCreate = options.allowCreate !== false;
   if (!existingSha || existingSha === "-") {
+    if (!allowCreate) {
+      throw new Error(
+        "tag is missing, but this run skipped npm publish so HEAD may not be the published commit. Re-run the original successful publish job to tag that commit, or create the tag manually.",
+      );
+    }
     return { action: "create" };
   }
   if (existingSha === headSha) {
@@ -239,7 +245,7 @@ export function loadRegistry() {
 }
 
 function usage() {
-  return "Usage: publish-version.mjs <beta|stable|next-patch|set <version>|tag-name <version>|bump-branch <version>|bump-title <version>|plan-bump <mainVersion> [releasedVersion]|tag-decision <existingSha or -> <headSha>>";
+  return "Usage: publish-version.mjs <beta|stable|next-patch|set <version>|tag-name <version>|bump-branch <version>|bump-title <version>|plan-bump <mainVersion> [releasedVersion]|tag-decision <existingSha or -> <headSha> [create-ok|reuse-only]>";
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -276,10 +282,18 @@ export function main(argv = process.argv.slice(2)) {
   if (command === "tag-decision") {
     const existing = argv[1];
     const head = argv[2];
+    const mode = argv[3] ?? "create-ok";
     if (!existing || !head) {
-      throw new Error("Usage: publish-version.mjs tag-decision <existingSha or -> <headSha>");
+      throw new Error(
+        "Usage: publish-version.mjs tag-decision <existingSha or -> <headSha> [create-ok|reuse-only]",
+      );
     }
-    return tagDecision(existing, head).action;
+    if (mode !== "create-ok" && mode !== "reuse-only") {
+      throw new Error(
+        "Usage: publish-version.mjs tag-decision <existingSha or -> <headSha> [create-ok|reuse-only]",
+      );
+    }
+    return tagDecision(existing, head, { allowCreate: mode !== "reuse-only" }).action;
   }
 
   if (command === "plan-bump") {

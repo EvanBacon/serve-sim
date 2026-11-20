@@ -82,6 +82,7 @@ jobs:
           ACTION=${PLAN%% *}
           VERSION=${PLAN#* }
           echo "action=$ACTION version=$VERSION"
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           if [ "$ACTION" = "publish" ]; then
@@ -116,7 +117,16 @@ jobs:
           else
             EXISTING=-
           fi
-          DECISION=$(node "$SCRIPT" tag-decision "$EXISTING" "$HEAD")
+          # Only create a tag at HEAD when this run just published. A later
+          # skip-publish dispatch after main has moved must not tag the
+          # wrong commit; reuse an existing tag or fail if it is missing.
+          PUBLISH_ACTION="${{ steps.publish.outputs.action }}"
+          if [ "$PUBLISH_ACTION" = "publish" ]; then
+            TAG_MODE=create-ok
+          else
+            TAG_MODE=reuse-only
+          fi
+          DECISION=$(node "$SCRIPT" tag-decision "$EXISTING" "$HEAD" "$TAG_MODE")
           if [ "$DECISION" = "create" ]; then
             git tag "$TAG"
             git push origin "$TAG"
@@ -167,7 +177,7 @@ jobs:
           fi
 
           API="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pulls"
-          QUERY=$(node -e "process.stdout.write('head=' + process.argv[1] + ':' + encodeURIComponent(process.argv[2]) + '&state=open')" "$GITHUB_REPOSITORY_OWNER" "$BRANCH")
+          QUERY=$(node -e "process.stdout.write('head=' + process.argv[1] + ':' + encodeURIComponent(process.argv[2]) + '&state=open&base=main')" "$GITHUB_REPOSITORY_OWNER" "$BRANCH")
           EXISTING_PR=$(curl -sS \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \

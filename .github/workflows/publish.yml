@@ -36,12 +36,14 @@ jobs:
             exit 0
           fi
 
-          # Publish beta if serve-sim source changed. A package.json-only
-          # bump (the post-stable version PR) must not cut a new beta.
+          # Publish beta if any serve-sim file other than package.json
+          # changed. A package.json-only bump must not cut a new beta.
+          # Filter the path list first: otherwise a package.json change
+          # plus an unrelated repo file would still look like a source
+          # change.
           CHANGED=$(git diff --name-only HEAD~1 HEAD)
           SOURCE_CHANGED=false
-          if echo "$CHANGED" | grep -Eq "^packages/serve-sim/" && \
-             echo "$CHANGED" | grep -Ev "^packages/serve-sim/package.json$" | grep -q .; then
+          if echo "$CHANGED" | grep -E "^packages/serve-sim/" | grep -Ev "^packages/serve-sim/package.json$" | grep -q .; then
             SOURCE_CHANGED=true
           fi
 

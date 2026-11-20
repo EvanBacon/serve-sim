@@ -126,6 +126,15 @@ describe("release tag and bump PR", () => {
     expect(() => tagDecision("old", "abc")).toThrow(/already points at old/);
   });
 
+  test("refuses to create a missing tag when the publish step was skipped", () => {
+    expect(() => tagDecision(null, "abc", { allowCreate: false })).toThrow(
+      /skipped npm publish/,
+    );
+    expect(tagDecision("abc", "abc", { allowCreate: false })).toEqual({
+      action: "reuse",
+    });
+  });
+
   test("opens a bump PR only when main is still at the released version", () => {
     expect(planBumpOnMain("0.1.50", "0.1.50")).toEqual({
       action: "open",
