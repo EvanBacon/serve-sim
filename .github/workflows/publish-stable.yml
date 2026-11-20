@@ -64,53 +64,71 @@ jobs:
           xcrun simctl shutdown "${{ steps.ci-build.outputs.udid }}" || true
 
       - name: Build and publish serve-sim stable
+        id: publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd packages/serve-sim
 
-          # Stable publishing is manual-only. Bump from max(local, npm latest)
-          # + 1, publish to npm's latest tag, then commit that stable version.
-          LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view serve-sim dist-tags.latest 2>/dev/null || echo "")
-          [ -z "$PUBLISHED" ] && PUBLISHED="$LOCAL"
-          NEW=$(node -e "
-            const a='$LOCAL'.split('.').map(Number);
-            const b='$PUBLISHED'.split('.').map(Number);
-            const max=(a[0]>b[0]||(a[0]===b[0]&&a[1]>b[1])||(a[0]===b[0]&&a[1]===b[1]&&a[2]>b[2]))?a:b;
-            max[2]++;
-            console.log(max.join('.'));
-          ")
-          echo "Bumped serve-sim stable: local=$LOCAL npm=$PUBLISHED -> $NEW"
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('package.json'));
-            p.version = '$NEW';
-            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
-          "
+          # package.json holds the exact stable version to publish. No hidden
+          # bump from max(local, npm). If that version is already on npm, skip
+          # publish so a rerun can still tag and bump. The script fails if
+          # package.json is behind npm latest.
+          PLAN=$(node scripts/publish-version.mjs stable)
+          ACTION=${PLAN%% *}
+          VERSION=${PLAN#* }
+          echo "action=$ACTION version=$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          bun run build
+          if [ "$ACTION" = "publish" ]; then
+            bun run build
+            npm publish --access public --tag latest --provenance
+          elif [ "$ACTION" = "skip" ]; then
+            echo "serve-sim@$VERSION already on npm; skipping publish (idempotent rerun)"
+          else
+            echo "::error::Unexpected stable plan: $ACTION $VERSION"
+            exit 1
+          fi
 
-          npm publish --access public --tag latest --provenance
-
-      - name: Configure git and commit stable version bump
+      - name: Tag release and bump package.json to the next patch
         run: |
+          VERSION="${{ steps.publish.outputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::No version from the publish step."
+            exit 1
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packages/serve-sim/package.json
-          if git diff --cached --quiet; then
-            echo "No version bump to commit"
+
+          TAG="v$VERSION"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            git fetch origin tag "$TAG" --no-tags
+            TAGGED=$(git rev-list -n 1 "$TAG")
+            HEAD=$(git rev-parse HEAD)
+            if [ "$TAGGED" != "$HEAD" ]; then
+              echo "::error::$TAG already points at $TAGGED, not $HEAD. Refusing to move the tag."
+              exit 1
+            fi
+            echo "$TAG already points at HEAD"
           else
-            git commit -m "chore: bump serve-sim version [skip ci]"
-            for i in 1 2 3; do
-              if git push; then exit 0; fi
-              echo "Push rejected (attempt $i/3), rebasing on origin/main..."
-              git pull --rebase --autostash origin main || break
-            done
-            # main is a protected branch, so github-actions[bot] can't push the
-            # bump commit directly. That's fine: npm has already been advanced and
-            # the next run recomputes the version from npm's latest tag, so it never
-            # collides. The repo's package.json just stays behind npm. Warn instead
-            # of failing so the publish job reflects the (successful) npm publish.
-            echo "::warning::Could not push serve-sim version bump to protected main; npm already advanced and the next run recomputes from npm. Leaving package.json behind."
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          NEXT=$(node packages/serve-sim/scripts/publish-version.mjs next-patch)
+          CURRENT=$(node -p "require('./packages/serve-sim/package.json').version")
+          if [ "$CURRENT" = "$NEXT" ]; then
+            echo "package.json already at $NEXT"
+          elif [ "$CURRENT" != "$VERSION" ]; then
+            echo "::error::package.json is $CURRENT; expected $VERSION (the version just released) or $NEXT."
+            exit 1
+          else
+            node packages/serve-sim/scripts/publish-version.mjs set "$NEXT"
+            git add packages/serve-sim/package.json
+            git commit -m "chore: bump serve-sim to $NEXT [skip ci]"
+            if ! git push origin HEAD:main; then
+              echo "::error::Published serve-sim@$VERSION and tagged $TAG, but could not push the $NEXT bump to main (branch protection may be blocking github-actions[bot]). Allow the bot to push version-bump commits, or merge a package.json bump to $NEXT before the next release. Refusing to leave package.json silently behind npm."
+              exit 1
+            fi
           fi

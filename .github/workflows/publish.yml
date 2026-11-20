@@ -92,26 +92,14 @@ jobs:
         run: |
           cd packages/serve-sim
 
-          # Publish a unique prerelease from max(local, npm latest) + 1.
-          # This keeps automatic main pushes on npm's beta tag until stable
-          # promotion is requested explicitly.
-          LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view serve-sim dist-tags.latest 2>/dev/null || echo "")
-          [ -z "$PUBLISHED" ] && PUBLISHED="$LOCAL"
-          NEW=$(node -e "
-            const a='$LOCAL'.split('.').map(Number);
-            const b='$PUBLISHED'.split('.').map(Number);
-            const max=(a[0]>b[0]||(a[0]===b[0]&&a[1]>b[1])||(a[0]===b[0]&&a[1]===b[1]&&a[2]>b[2]))?a:b;
-            max[2]++;
-            console.log(max.join('.') + '-beta.${{ github.run_number }}.${{ github.run_attempt }}');
-          ")
-          echo "Bumped serve-sim: local=$LOCAL npm=$PUBLISHED -> $NEW"
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('package.json'));
-            p.version = '$NEW';
-            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
-          "
+          # package.json holds the next stable version. Each main publish is
+          # <that version>-beta.N, where N is one above the highest N already
+          # on npm. Legacy <version>-beta.N.M counts as N, so the next number
+          # sorts above those. Reruns recompute and cannot collide. The script
+          # fails if package.json is not ahead of npm's latest tag.
+          VERSION=$(node scripts/publish-version.mjs beta)
+          echo "Publishing serve-sim@$VERSION"
+          node scripts/publish-version.mjs set "$VERSION"
 
           bun run build
 
