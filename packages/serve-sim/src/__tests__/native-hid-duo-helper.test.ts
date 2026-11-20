@@ -62,6 +62,23 @@ describe("NativeHid Duo helper", () => {
     expect(native).toEqual([`new ${bundled}`, `setDuoHelper ${resolved}`, "pose"]);
   });
 
+  test("a Duo whose bundled helper already launches keeps the bridge on it", async () => {
+    const { bundled, native, deps } = setup(true);
+    const hid = new NativeHid("UDID", { ...deps, duoHelper: () => bundled });
+    expect(await hid.pose("book", 0)).toBe(true);
+    expect(native).toEqual([`new ${bundled}`, "pose"]);
+  });
+
+  test("a Duo whose helper cannot be resolved still sends guest commands through the bundled one", async () => {
+    const { bundled, native, deps } = setup(true);
+    const hid = new NativeHid("UDID", {
+      ...deps,
+      duoHelper: () => { throw new Error("codesign unavailable"); },
+    });
+    expect(await hid.pose("book", 0)).toBe(true);
+    expect(native).toEqual([`new ${bundled}`, "pose"]);
+  });
+
   test("once resolved, guest commands keep their order with touches sent in the same tick", async () => {
     for (const foldable of [false, true]) {
       const { native, deps } = setup(foldable);

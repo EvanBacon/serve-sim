@@ -367,11 +367,12 @@ describe("DeviceSession hardware keyboard HID", () => {
   ) {
     const calls: boolean[] = [];
     const writes: boolean[] = [];
-    const control = { accept: true, probes: 0 };
+    const control = { accept: true, probes: 0, keyDelivered: true };
     const session = new DeviceSession("TEST-UDID", {
       ...dependencies(),
       hid: {
         ...dependencies().hid,
+        key: async () => (control.keyDelivered ? undefined : false),
         hardwareKeyboard: async (enabled) => {
           calls.push(enabled);
           return control.accept;
@@ -393,6 +394,7 @@ describe("DeviceSession hardware keyboard HID", () => {
       session, calls, writes, control,
       toggle: () => send(0x0f, {}),
       key: (usage: number) => { send(0x06, { type: "down", usage }); send(0x06, { type: "up", usage }); },
+      keyUp: (usage: number) => send(0x06, { type: "up", usage }),
     };
   }
 
@@ -436,6 +438,25 @@ describe("DeviceSession hardware keyboard HID", () => {
     const k = keyboardSession();
     k.key(0xe3);
     k.key(0xe1);
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([true]);
+    k.session.close();
+  });
+
+  test("a typing key the injector could not deliver does not count as typing in the fallback", async () => {
+    const k = keyboardSession();
+    k.control.keyDelivered = false;
+    k.key(0x04);
+    k.toggle();
+    await waitFor(() => k.calls.length === 1);
+    expect(k.calls).toEqual([true]);
+    k.session.close();
+  });
+
+  test("only a key down counts as typing in the fallback, not a stray key up", async () => {
+    const k = keyboardSession();
+    k.keyUp(0x04);
     k.toggle();
     await waitFor(() => k.calls.length === 1);
     expect(k.calls).toEqual([true]);

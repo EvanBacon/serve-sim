@@ -7,6 +7,7 @@ import { dirname, join } from "path";
 import { PassThrough } from "stream";
 import { DuoStateMonitor } from "../duo-state";
 import { launchableHelper } from "../launchable-helper";
+import { simctlArguments } from "../simctl";
 
 // Issue #193: a helper re-signed with the hardened runtime (Electron/notarized
 // bundles) aborts under `simctl spawn` with "DYLD_ROOT_PATH not set".
@@ -168,7 +169,7 @@ describe("launchableHelper", () => {
       execFile: (() => fakeChild()) as unknown as typeof execFile,
     });
     monitor.close();
-    expect(spawned).toContainEqual(["simctl", "spawn", "UDID", resolved, "watch-angle"]);
+    expect(spawned).toContainEqual(simctlArguments(["spawn", "UDID", resolved, "watch-angle"]));
   });
 });
 

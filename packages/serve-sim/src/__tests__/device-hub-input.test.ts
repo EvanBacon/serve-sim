@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { isDeviceHubInputShadowed, repairDeviceHubInput } from "../device-hub-input";
+import { simctlArguments } from "../simctl";
 
 test("Device Hub input detection requires its exact active state", () => {
   expect(isDeviceHubInputShadowed("com.apple.coredevice.dtuhidd.active 1\n")).toBe(true);
@@ -14,10 +15,11 @@ test("input recovery clears suppression before restarting the guest service", as
     calls.push(args);
     return "com.apple.coredevice.dtuhidd.active 1";
   })).toBe(true);
-  expect(calls.map((args) => args.slice(3))).toEqual([
-    ["notifyutil", "-g", "com.apple.coredevice.dtuhidd.active"],
-    ["notifyutil", "-s", "com.apple.coredevice.dtuhidd.active", "0"],
-    ["launchctl", "kickstart", "-k", "system/com.apple.backboardd"],
+  // simctlArguments adds `--set <dir>` when SERVE_SIM_DEVICE_SET is configured.
+  expect(calls).toEqual([
+    simctlArguments(["spawn", "DEVICE", "notifyutil", "-g", "com.apple.coredevice.dtuhidd.active"]),
+    simctlArguments(["spawn", "DEVICE", "notifyutil", "-s", "com.apple.coredevice.dtuhidd.active", "0"]),
+    simctlArguments(["spawn", "DEVICE", "launchctl", "kickstart", "-k", "system/com.apple.backboardd"]),
   ]);
 });
 

@@ -4,6 +4,7 @@ import {
   DEFAULT_PRESS_HOME_TIMEOUT_MS,
   type RunResult,
 } from "../host-rpc";
+import { simctlArguments } from "../simctl";
 
 const UDID = "11111111-2222-3333-4444-555555555555";
 
@@ -50,7 +51,7 @@ describe("home", () => {
   test("falls back to simctl launch when pressHome returns false", async () => {
     const { rpc, calls } = handler({ pressHome: async () => false });
     expect(await rpc({ method: "home", params: { udid: UDID } })).toMatchObject({ exitCode: 0 });
-    expect(calls).toEqual([["xcrun", ["simctl", "launch", UDID, "com.apple.springboard"]]]);
+    expect(calls).toEqual([["xcrun", simctlArguments(["launch", UDID, "com.apple.springboard"])]]);
   });
 
   test("falls back to simctl launch when pressHome throws", async () => {
@@ -60,7 +61,7 @@ describe("home", () => {
       },
     });
     expect(await rpc({ method: "home", params: { udid: UDID } })).toMatchObject({ exitCode: 0 });
-    expect(calls).toEqual([["xcrun", ["simctl", "launch", UDID, "com.apple.springboard"]]]);
+    expect(calls).toEqual([["xcrun", simctlArguments(["launch", UDID, "com.apple.springboard"])]]);
   });
 
   test("falls back to simctl launch when pressHome exceeds the timeout", async () => {
@@ -71,7 +72,7 @@ describe("home", () => {
     const t0 = performance.now();
     expect(await rpc({ method: "home", params: { udid: UDID } })).toMatchObject({ exitCode: 0 });
     expect(performance.now() - t0).toBeLessThan(400);
-    expect(calls).toEqual([["xcrun", ["simctl", "launch", UDID, "com.apple.springboard"]]]);
+    expect(calls).toEqual([["xcrun", simctlArguments(["launch", UDID, "com.apple.springboard"])]]);
   });
 
   test("aborts a timed-out pressHome so a late native press cannot still fire", async () => {
@@ -85,13 +86,13 @@ describe("home", () => {
     });
     expect(await rpc({ method: "home", params: { udid: UDID } })).toMatchObject({ exitCode: 0 });
     expect(seen?.aborted).toBe(true);
-    expect(calls).toEqual([["xcrun", ["simctl", "launch", UDID, "com.apple.springboard"]]]);
+    expect(calls).toEqual([["xcrun", simctlArguments(["launch", UDID, "com.apple.springboard"])]]);
   });
 
   test("without pressHome, launches SpringBoard via simctl (legacy path)", async () => {
     const { rpc, calls } = handler();
     expect(await rpc({ method: "home", params: { udid: UDID } })).toMatchObject({ exitCode: 0 });
-    expect(calls).toEqual([["xcrun", ["simctl", "launch", UDID, "com.apple.springboard"]]]);
+    expect(calls).toEqual([["xcrun", simctlArguments(["launch", UDID, "com.apple.springboard"])]]);
   });
 
   test("watch home still uses the Simulator.app menu, not pressHome or simctl", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { randomUUID } from "crypto";
 import { existsSync, rmSync } from "fs";
 import { createHostRpcHandler, INSTALL_REQUIRES_EXEC, type RunResult } from "../host-rpc";
+import { simctlArguments } from "../simctl";
 
 // Installing (and launching) an arbitrary .ipa is host code execution, so it
 // needs `--allow-exec` like the shell does — even for a loopback page.
@@ -56,6 +57,6 @@ describe("installApp requires allowExec", () => {
     const { rpc, calls } = handler(true);
     const path = `/tmp/serve-sim-install-${randomUUID()}.ipa`;
     expect(await rpc({ method: "installApp", params: { udid: UDID, path } })).toMatchObject({ exitCode: 0 });
-    expect(calls).toEqual([["xcrun", ["simctl", "install", UDID, path]]]);
+    expect(calls).toEqual([["xcrun", simctlArguments(["install", UDID, path])]]);
   });
 });

@@ -106,6 +106,42 @@ describe("simctlArguments", () => {
     });
   });
 
+  test("every iPhone Duo monitor process runs in the configured set, with the caller's Xcode", () => {
+    // Panel `log stream`, its `log show` seed, `io enumerate` and the hinge
+    // reader each go through xcrun; one without `--set` would watch a
+    // same-UDID simulator in Xcode's default set, and one with its own env
+    // would drop the DEVELOPER_DIR that picks the Xcode serving this set.
+    const developerDir = "/Applications/Xcode-serve-sim-test.app/Contents/Developer";
+    const monitorCalls = `
+      const child = { stdin: { on() {}, end() {} }, stdout: { setEncoding() {}, on() {} }, stderr: { setEncoding() {}, on() {} }, on() {}, once() {}, kill() {} };
+      const calls = [];
+      const record = (command, args, options) => {
+        calls.push({ command, args, developerDir: (options?.env ?? process.env).DEVELOPER_DIR ?? null });
+        return child;
+      };
+      const monitor = new m.DuoStateMonitor("UDID", () => {}, { duoHelper: () => "/helper", spawn: record, execFile: record });
+      monitor.close();
+      return calls;`;
+    const duoState = join(import.meta.dir, "..", "duo-state.ts");
+    const predicate = 'process == "SpringBoard" AND category == "DisplayContentMode" AND (eventMessage CONTAINS ".cover:pri" OR eventMessage CONTAINS ".inner:pri")';
+    withSet((dir) => {
+      const simctl = (...args: string[]) => ({
+        command: "/usr/bin/xcrun",
+        args: ["simctl", "--set", dir, ...args],
+        developerDir,
+      });
+      expect(inFreshProcess(monitorCalls, { env: { [DEVICE_SET_ENV]: dir, DEVELOPER_DIR: developerDir }, module: duoState })).toEqual({
+        ok: true,
+        value: [
+          simctl("spawn", "UDID", "log", "stream", "--style", "compact", "--predicate", predicate),
+          simctl("spawn", "UDID", "log", "show", "--last", "boot", "--style", "compact", "--predicate", predicate),
+          simctl("spawn", "UDID", "/helper", "watch-angle"),
+          simctl("io", "UDID", "enumerate"),
+        ],
+      });
+    });
+  });
+
   test("Device Hub probe and `repair-input` restart the simulator in the configured set", () => {
     // A probe or kickstart without `--set` would read, or restart
     // SpringBoard on, a same-UDID lookup in Xcode's default set instead.
