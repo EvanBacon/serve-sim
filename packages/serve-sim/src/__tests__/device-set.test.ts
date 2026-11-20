@@ -105,6 +105,36 @@ describe("simctlArguments", () => {
       value: { reader: ["simctl", "spawn", "UDID", "/helper", "watch-angle"], all: true },
     });
   });
+
+  test("Device Hub probe and `repair-input` restart the simulator in the configured set", () => {
+    // A probe or kickstart without `--set` would read, or restart
+    // SpringBoard on, a same-UDID lookup in Xcode's default set instead.
+    const repairArgs = `
+      const calls = [];
+      const invoke = async (args) => { calls.push(args); return "com.apple.coredevice.dtuhidd.active 1"; };
+      const shadowed = await m.readDeviceHubInputShadowed("UDID", invoke);
+      const repaired = await m.repairDeviceHubInput("UDID", invoke);
+      return { shadowed, repaired, calls };`;
+    const deviceHub = join(import.meta.dir, "..", "device-hub-input.ts");
+    const expected = (prefix: string[]) => ({
+      ok: true as const,
+      value: {
+        shadowed: true,
+        repaired: true,
+        calls: [
+          [...prefix, "spawn", "UDID", "notifyutil", "-g", "com.apple.coredevice.dtuhidd.active"],
+          [...prefix, "spawn", "UDID", "notifyutil", "-g", "com.apple.coredevice.dtuhidd.active"],
+          [...prefix, "spawn", "UDID", "notifyutil", "-s", "com.apple.coredevice.dtuhidd.active", "0"],
+          [...prefix, "spawn", "UDID", "launchctl", "kickstart", "-k", "system/com.apple.backboardd"],
+        ],
+      },
+    });
+    withSet((dir) => {
+      expect(inFreshProcess(repairArgs, { env: { [DEVICE_SET_ENV]: dir }, module: deviceHub }))
+        .toEqual(expected(["simctl", "--set", dir]));
+    });
+    expect(inFreshProcess(repairArgs, { module: deviceHub })).toEqual(expected(["simctl"]));
+  });
 });
 
 describe("resolveDeviceSet", () => {

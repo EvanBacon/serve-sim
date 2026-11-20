@@ -160,6 +160,27 @@ const axStreamerCache = createAxStreamerCache();
 // the partial line is dropped rather than retained indefinitely.
 const SSE_LINE_BUFFER_LIMIT = 1024 * 1024;
 
+/**
+ * Calls `callback` once when the client of a long-lived response goes away.
+ * The response's 'close' is the signal on Node and Bun >= 1.4. A request's
+ * 'close' alone is not: it also fires once the body has been consumed (e.g.
+ * resumed upstream) while the client is still connected. Bun < 1.4 never
+ * closes the response on disconnect, only the request, and then with its
+ * body unfinished, which is how that 'close' is told apart.
+ */
+function onClientGone(req: SimReq, res: SimRes, callback: () => void): void {
+  let gone = false;
+  const fire = () => {
+    if (gone) return;
+    gone = true;
+    callback();
+  };
+  res.once("close", fire);
+  req.once("close", () => {
+    if (!req.complete || !req.readableEnded) fire();
+  });
+}
+
 /** POST /reload only carries `{ bundleId }`. */
 const RELOAD_BODY_LIMIT_BYTES = 4 * 1024;
 
@@ -2498,6 +2519,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // log line. Filtering is done here (not in the browser) so the SSE stream
     // stays narrow and the client can listen without rate-limit concerns.
     if (url === base + "/appstate") {
+      // Watch for the client leaving from the start: one that leaves during
+      // the async lookups below must not get a `log stream` that nothing kills.
+      let closed = false;
+      let stopTail = () => {};
+      onClientGone(req, res, () => {
+        closed = true;
+        stopTail();
+      });
       const states = await readServeSimStates();
       const state = selectServeSimState(states, selectedDevice);
       if (!state) {
@@ -2532,6 +2561,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // AX bridge may be warming up — the log tail fills in once anything moves.
       }
 
+      if (closed) return;
       const child: ChildProcess = spawn("xcrun", simctlArguments([
         "spawn", udid, "log", "stream",
         "--style", "ndjson",
@@ -2539,8 +2569,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         "--predicate",
         'process == "SpringBoard" AND eventMessage CONTAINS "Setting process visibility to: Foreground"',
       ]), { stdio: ["ignore", "pipe", "ignore"] });
+      stopTail = () => {
+        child.stdout?.destroy();
+        child.kill();
+      };
 
-      let closed = false;
       const emitApp = async (bundleId: string, pid?: number) => {
         if (!isUserFacingBundle(bundleId)) return;
         if (bundleId === lastBundle) return;
@@ -2574,11 +2607,6 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         try { res.end(); } catch {}
       });
       child.on("close", () => res.end());
-      req.on("close", () => {
-        closed = true;
-        child.stdout?.destroy();
-        child.kill();
-      });
       return;
     }
 
