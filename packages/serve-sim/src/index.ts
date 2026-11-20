@@ -994,7 +994,7 @@ async function touchInputOrientation(
       return undefined;
     }
     if (!res.ok) return undefined;
-    return cliInputOrientation(await res.json());
+    return cliInputOrientation(await res.json(), { includeFoldables: true });
   } catch (err) {
     debugCli("touch orientation lookup failed for %s: %o", url, err);
     return undefined;

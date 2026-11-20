@@ -41,6 +41,20 @@ describe("cliInputOrientation", () => {
     ).toBeUndefined();
   });
 
+  // Measured with the touch probe on an iPhone Duo (iOS 27.1): the inner
+  // panel's guest UI is landscape_left while its raw frame stays 2007x2853,
+  // and a CLI tap at display (0.1, 0.08) landed at display (0.92, 0.10).
+  test("remaps foldables for CLI taps when asked, from the panel's raw frame", () => {
+    const inner = { width: 2007, height: 2853, orientation: "landscape_left", hingeDegrees: 180 };
+    expect(cliInputOrientation(inner, { includeFoldables: true })).toBe("landscape_left");
+    const raw = displayTouchToRaw({ type: "begin", x: 0.1, y: 0.08 }, cliInputOrientation(inner, { includeFoldables: true }));
+    expect(raw.x).toBeCloseTo(0.08, 6);
+    expect(raw.y).toBeCloseTo(0.9, 6);
+    const cover = { width: 1398, height: 2034, orientation: "landscape_right", hingeDegrees: 0 };
+    expect(cliInputOrientation(cover, { includeFoldables: true })).toBe("landscape_right");
+    expect(cliInputOrientation({ ...cover, orientation: "portrait" }, { includeFoldables: true })).toBeUndefined();
+  });
+
   test("ignores missing, malformed, or unknown config", () => {
     expect(cliInputOrientation(null)).toBeUndefined();
     expect(cliInputOrientation("nope")).toBeUndefined();
