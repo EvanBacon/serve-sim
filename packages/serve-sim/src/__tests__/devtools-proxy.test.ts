@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { spawn, type ChildProcess } from "child_process";
 import { simMiddleware, type ServeSimState, type WebKitBridge } from "../middleware";
+import { resolveDeviceSet } from "../simctl";
 import { servePreview, type PreviewServer } from "../runtime";
 import { STATE_DIR, stateFileForDevice } from "../state";
 import { freePort } from "./server-test-support";
@@ -50,7 +51,11 @@ describe("devtools proxy", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fakeHelperProcess.pid).toBeTruthy();
     expect(fakeHelperProcess.exitCode).toBeNull();
+    const deviceSet = resolveDeviceSet();
     const state: ServeSimState = {
+      // Recorded like a real helper's state: under SERVE_SIM_DEVICE_SET the
+      // middleware only lists states from its own device set.
+      ...(deviceSet !== undefined ? { deviceSet } : {}),
       pid: fakeHelperProcess.pid!,
       port: 3100,
       device: udid,

@@ -5,6 +5,7 @@ import type { AddressInfo, Socket } from "net";
 import { clearEventLogForTests, recordEventLogEvent } from "../event-log";
 import { createExecUpgradeHandler } from "../exec-ws";
 import { simMiddleware, type ServeSimState } from "../middleware";
+import { resolveDeviceSet } from "../simctl";
 import { servePreview, type PreviewServer } from "../runtime";
 import { STATE_DIR, stateFileForDevice } from "../state";
 
@@ -403,7 +404,11 @@ describe("exec-ws control channel", () => {
     const device = `EXEC-WS-LAN-${process.pid}`;
     const stateFile = stateFileForDevice(device);
     mkdirSync(STATE_DIR, { recursive: true });
+    const deviceSet = resolveDeviceSet();
     const state: ServeSimState = {
+      // Recorded like a real helper's state: under SERVE_SIM_DEVICE_SET the
+      // middleware only lists states from its own device set.
+      ...(deviceSet !== undefined ? { deviceSet } : {}),
       pid: process.pid,
       port: 3100,
       device,

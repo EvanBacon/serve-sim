@@ -21,6 +21,7 @@ import {
   resolveLiveHelperState,
   SIMULATOR_SHUTDOWN_GRACE_MS,
 } from "../helper-lifecycle";
+import { resolveDeviceSet } from "../simctl";
 import { STATE_DIR, stateFileForDevice, type ServeSimDeviceState } from "../state";
 
 /** Last JSON object on stdout — `--kill` may print a port-reaper line first. */
@@ -279,7 +280,11 @@ describe("CLI --list / --kill against a live pidfile (no Simulator)", () => {
     const advertised = await spawnListener();
     const { child } = advertised;
     mkdirSync(STATE_DIR, { recursive: true });
+    // The CLI child inherits SERVE_SIM_DEVICE_SET and only tracks pidfiles
+    // recorded for its own device set, as a real helper's would be.
+    const deviceSet = resolveDeviceSet();
     writeFileSync(file, JSON.stringify(state({
+      ...(deviceSet !== undefined ? { deviceSet } : {}),
       pid: advertised.pid,
       port: advertised.port,
     })));

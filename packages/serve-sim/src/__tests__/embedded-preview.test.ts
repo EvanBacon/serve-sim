@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { createServer, type Server } from "http";
 import type { AddressInfo, Socket } from "net";
 import { simMiddleware, type ServeSimState } from "../middleware";
+import { resolveDeviceSet } from "../simctl";
 import { STATE_DIR, stateFileForDevice } from "../state";
 
 // An embedded mount (`app.use(simMiddleware({ basePath: "/.sim" }))` in a dev
@@ -52,7 +53,11 @@ let direct: { server: Server; origin: string };
 
 beforeAll(async () => {
   mkdirSync(STATE_DIR, { recursive: true });
+  const deviceSet = resolveDeviceSet();
   const state: ServeSimState = {
+    // Recorded like a real helper's state: under SERVE_SIM_DEVICE_SET the
+    // middleware only lists states from its own device set.
+    ...(deviceSet !== undefined ? { deviceSet } : {}),
     pid: process.pid,
     port: HELPER_PORT,
     device: DEVICE,
