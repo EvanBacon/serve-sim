@@ -3,6 +3,7 @@ import type { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { DuoStateMonitor, parseHingeSample, parseIntegratedScreenOrientations, parsePrimaryPanel, type DuoState } from "../duo-state";
+import { simctlArguments } from "../simctl";
 
 class FakeChild extends EventEmitter {
   stdin = new PassThrough();
@@ -68,7 +69,7 @@ test("hinge angles from the guest reader reach the session state", async () => {
   // it exits on stdin EOF, so an ignored stdin would end it at once.
   expect(spawned.find(({ child }) => child === reader)).toMatchObject({
     command: "/usr/bin/xcrun",
-    args: ["simctl", "spawn", "UDID", "/helper", "watch-angle"],
+    args: simctlArguments(["spawn", "UDID", "/helper", "watch-angle"]),
     options: { stdio: ["pipe", "pipe", "pipe"] },
   });
 
