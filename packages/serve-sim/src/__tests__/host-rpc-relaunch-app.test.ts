@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHostRpcHandler, type RunResult } from "../host-rpc";
+import { simctlArguments } from "../simctl";
 
 const UDID = "11111111-2222-3333-4444-555555555555";
 const APP = "com.example.app";
+// `simctl` plus `--set <dir>` when SERVE_SIM_DEVICE_SET is configured.
+const SIMCTL_SUBCOMMAND_INDEX = simctlArguments([]).length;
 
 function handler({ terminateExit = 0, known = true } = {}) {
   const calls: Array<[string, string[]]> = [];
@@ -29,15 +32,15 @@ describe("relaunchApp", () => {
       exitCode: 0,
     });
     expect(calls).toEqual([
-      ["xcrun", ["simctl", "terminate", UDID, APP]],
-      ["xcrun", ["simctl", "launch", UDID, APP]],
+      ["xcrun", simctlArguments(["terminate", UDID, APP])],
+      ["xcrun", simctlArguments(["launch", UDID, APP])],
     ]);
   });
 
   test("still launches when the app isn't running", async () => {
     const { rpc, calls } = handler({ terminateExit: 3 });
     expect(await rpc({ method: "relaunchApp", params: { udid: UDID, bundleId: APP } })).toMatchObject({ exitCode: 0 });
-    expect(calls.map(([, args]) => args[1])).toEqual(["terminate", "launch"]);
+    expect(calls.map(([, args]) => args[SIMCTL_SUBCOMMAND_INDEX])).toEqual(["terminate", "launch"]);
   });
 
   test("rejects bad bundle ids and udids without running anything", async () => {

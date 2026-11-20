@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHostRpcHandler, type RunResult } from "../host-rpc";
+import { simctlArguments } from "../simctl";
 
 const UDID = "11111111-2222-3333-4444-555555555555";
 const NAME = "serve-sim-recording-2026-11-11-12-30-00.mp4";
@@ -103,6 +104,6 @@ describe("addMedia", () => {
     writeFileSync(path, "mp4");
     const { rpc, calls } = handler();
     await rpc({ method: "addMedia", params: { udid: UDID, path } });
-    expect(calls).toEqual([["xcrun", ["simctl", "addmedia", UDID, path]]]);
+    expect(calls).toEqual([["xcrun", simctlArguments(["addmedia", UDID, path])]]);
   });
 });
