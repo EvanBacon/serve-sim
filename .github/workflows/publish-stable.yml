@@ -10,15 +10,19 @@ jobs:
   publish-stable:
     if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
     runs-on: macos-26
+    concurrency:
+      group: serve-sim-publish-stable
+      cancel-in-progress: false
     permissions:
       contents: write
+      pull-requests: write
       id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
 
       - name: Require main branch
         run: |
@@ -72,8 +76,8 @@ jobs:
 
           # package.json holds the exact stable version to publish. No hidden
           # bump from max(local, npm). If that version is already on npm, skip
-          # publish so a rerun can still tag and bump. The script fails if
-          # package.json is behind npm latest.
+          # publish so a rerun can still tag and open the bump PR. The script
+          # fails if package.json is behind npm latest.
           PLAN=$(node scripts/publish-version.mjs stable)
           ACTION=${PLAN%% *}
           VERSION=${PLAN#* }
@@ -90,45 +94,125 @@ jobs:
             exit 1
           fi
 
-      - name: Tag release and bump package.json to the next patch
+      - name: Tag release and open the next-version bump PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.publish.outputs.version }}"
           if [ -z "$VERSION" ]; then
             echo "::error::No version from the publish step."
             exit 1
           fi
 
+          SCRIPT=packages/serve-sim/scripts/publish-version.mjs
+          TAG=$(node "$SCRIPT" tag-name "$VERSION")
+          HEAD=$(git rev-parse HEAD)
+          EXISTING=$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')
+          if [ -n "$EXISTING" ]; then
+            git fetch origin tag "$TAG" --no-tags
+            EXISTING=$(git rev-list -n 1 "$TAG")
+          else
+            EXISTING=-
+          fi
+          DECISION=$(node "$SCRIPT" tag-decision "$EXISTING" "$HEAD")
+          if [ "$DECISION" = "create" ]; then
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Created $TAG at $HEAD"
+          else
+            echo "$TAG already points at HEAD; reusing"
+          fi
+
+          git fetch origin main
+          MAIN_VERSION=$(git show origin/main:packages/serve-sim/package.json | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>console.log(JSON.parse(s).version))")
+          PLAN=$(node "$SCRIPT" plan-bump "$MAIN_VERSION" "$VERSION")
+          ACTION=${PLAN%% *}
+          NEXT=${PLAN#* }
+          if [ "$ACTION" = "skip" ]; then
+            echo "origin/main already has $NEXT; no bump PR needed"
+            exit 0
+          fi
+
+          BRANCH=$(node "$SCRIPT" bump-branch "$NEXT")
+          TITLE=$(node "$SCRIPT" bump-title "$NEXT")
+          BODY=$(node --input-type=module -e "
+            import { bumpPrBody, releaseTagName } from './$SCRIPT';
+            process.stdout.write(bumpPrBody({ released: process.argv[1], next: process.argv[2], tag: releaseTagName(process.argv[1]) }));
+          " "$VERSION" "$NEXT")
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          TAG="v$VERSION"
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
-            git fetch origin tag "$TAG" --no-tags
-            TAGGED=$(git rev-list -n 1 "$TAG")
-            HEAD=$(git rev-parse HEAD)
-            if [ "$TAGGED" != "$HEAD" ]; then
-              echo "::error::$TAG already points at $TAGGED, not $HEAD. Refusing to move the tag."
-              exit 1
+          REMOTE_OK=false
+          if git fetch origin "$BRANCH"; then
+            REMOTE_VERSION=$(git show "origin/$BRANCH:packages/serve-sim/package.json" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>console.log(JSON.parse(s).version))")
+            if [ "$REMOTE_VERSION" = "$NEXT" ]; then
+              REMOTE_OK=true
+              echo "Branch $BRANCH already bumps to $NEXT"
             fi
-            echo "$TAG already points at HEAD"
-          else
-            git tag "$TAG"
-            git push origin "$TAG"
           fi
 
-          NEXT=$(node packages/serve-sim/scripts/publish-version.mjs next-patch)
-          CURRENT=$(node -p "require('./packages/serve-sim/package.json').version")
-          if [ "$CURRENT" = "$NEXT" ]; then
-            echo "package.json already at $NEXT"
-          elif [ "$CURRENT" != "$VERSION" ]; then
-            echo "::error::package.json is $CURRENT; expected $VERSION (the version just released) or $NEXT."
-            exit 1
-          else
-            node packages/serve-sim/scripts/publish-version.mjs set "$NEXT"
+          if [ "$REMOTE_OK" != "true" ]; then
+            git checkout -B "$BRANCH" origin/main
+            node "$SCRIPT" set "$NEXT"
             git add packages/serve-sim/package.json
-            git commit -m "chore: bump serve-sim to $NEXT [skip ci]"
-            if ! git push origin HEAD:main; then
-              echo "::error::Published serve-sim@$VERSION and tagged $TAG, but could not push the $NEXT bump to main (branch protection may be blocking github-actions[bot]). Allow the bot to push version-bump commits, or merge a package.json bump to $NEXT before the next release. Refusing to leave package.json silently behind npm."
+            if git diff --cached --quiet; then
+              echo "::error::Checked out $BRANCH from origin/main but package.json did not change to $NEXT."
               exit 1
             fi
+            git commit -m "chore: bump serve-sim to $NEXT [skip ci]"
+            git push --force-with-lease origin "$BRANCH"
           fi
+
+          API="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/pulls"
+          QUERY=$(node -e "process.stdout.write('head=' + process.argv[1] + ':' + encodeURIComponent(process.argv[2]) + '&state=open')" "$GITHUB_REPOSITORY_OWNER" "$BRANCH")
+          EXISTING_PR=$(curl -sS \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${API}?${QUERY}")
+          PR_URL=$(node -e "
+            const pulls = JSON.parse(process.argv[1]);
+            if (!Array.isArray(pulls)) {
+              console.error(typeof pulls === 'object' ? JSON.stringify(pulls) : pulls);
+              process.exit(2);
+            }
+            const hit = pulls.find(p => p.html_url);
+            if (hit) process.stdout.write(hit.html_url);
+          " "$EXISTING_PR") || {
+            echo "::error::Failed to query existing bump PRs for $BRANCH."
+            exit 1
+          }
+
+          if [ -n "$PR_URL" ]; then
+            echo "Reusing bump PR $PR_URL"
+            exit 0
+          fi
+
+          PAYLOAD=$(node -e "
+            process.stdout.write(JSON.stringify({
+              title: process.argv[1],
+              head: process.argv[2],
+              base: 'main',
+              body: process.argv[3],
+            }));
+          " "$TITLE" "$BRANCH" "$BODY")
+          CREATE=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$API")
+          PR_URL=$(node -e "
+            const pr = JSON.parse(process.argv[1]);
+            if (!pr.html_url) process.exit(2);
+            process.stdout.write(pr.html_url);
+          " "$CREATE") || {
+            echo "$CREATE"
+            echo "::error::Failed to open the bump PR for $NEXT. If the API says GitHub Actions is not permitted to create or approve pull requests, enable Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and approve pull requests. Do not add a PAT. The package was published and tagged ${TAG}."
+            exit 1
+          }
+          echo "Opened bump PR $PR_URL"

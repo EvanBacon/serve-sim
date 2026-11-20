@@ -15,6 +15,9 @@ jobs:
   publish-beta:
     if: github.repository == 'EvanBacon/serve-sim' && github.ref == 'refs/heads/main'
     runs-on: macos-26
+    concurrency:
+      group: serve-sim-publish-beta
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -33,10 +36,12 @@ jobs:
             exit 0
           fi
 
-          # Publish beta if serve-sim source changed.
+          # Publish beta if serve-sim source changed. A package.json-only
+          # bump (the post-stable version PR) must not cut a new beta.
           CHANGED=$(git diff --name-only HEAD~1 HEAD)
           SOURCE_CHANGED=false
-          if echo "$CHANGED" | grep -Eq "^packages/serve-sim/"; then
+          if echo "$CHANGED" | grep -Eq "^packages/serve-sim/" && \
+             echo "$CHANGED" | grep -Ev "^packages/serve-sim/package.json$" | grep -q .; then
             SOURCE_CHANGED=true
           fi
 

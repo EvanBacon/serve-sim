@@ -4,10 +4,17 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   betaPlan,
+  bumpBranchName,
+  bumpPrBody,
+  bumpPrTitle,
+  findReusableBumpPr,
   nextBetaVersion,
   nextPatch,
   normalizeVersions,
+  planBumpOnMain,
+  releaseTagName,
   stablePlan,
+  tagDecision,
   writePackageVersion,
 } from "../../scripts/publish-version.mjs";
 
@@ -95,6 +102,87 @@ describe("stablePlan", () => {
 describe("nextPatch", () => {
   test("increments the patch", () => {
     expect(nextPatch("0.1.50")).toBe("0.1.51");
+  });
+});
+
+describe("release tag and bump PR", () => {
+  test("names the git tag and the bump PR from the version", () => {
+    expect(releaseTagName("0.1.50")).toBe("v0.1.50");
+    expect(bumpBranchName("0.1.51")).toBe("chore/bump-serve-sim-to-0.1.51");
+    expect(bumpPrTitle("0.1.51")).toBe("chore: bump serve-sim to 0.1.51");
+    expect(
+      bumpPrBody({
+        released: "0.1.50",
+        next: "0.1.51",
+        tag: "v0.1.50",
+      }),
+    ).toContain("GITHUB_TOKEN");
+  });
+
+  test("reuses a tag that already points at HEAD and refuses to move one", () => {
+    expect(tagDecision(null, "abc")).toEqual({ action: "create" });
+    expect(tagDecision("-", "abc")).toEqual({ action: "create" });
+    expect(tagDecision("abc", "abc")).toEqual({ action: "reuse" });
+    expect(() => tagDecision("old", "abc")).toThrow(/already points at old/);
+  });
+
+  test("opens a bump PR only when main is still at the released version", () => {
+    expect(planBumpOnMain("0.1.50", "0.1.50")).toEqual({
+      action: "open",
+      next: "0.1.51",
+    });
+    expect(planBumpOnMain("0.1.51", "0.1.50")).toEqual({
+      action: "skip",
+      next: "0.1.51",
+    });
+    expect(() => planBumpOnMain("0.1.49", "0.1.50")).toThrow(
+      /origin\/main package.json is 0.1.49/,
+    );
+  });
+
+  test("reuses an open bump PR by head branch, then by title", () => {
+    const openByHead = {
+      state: "open",
+      title: "other",
+      html_url: "https://example/1",
+      number: 1,
+      head: { ref: "chore/bump-serve-sim-to-0.1.51" },
+      base: { ref: "main" },
+    };
+    const openByTitle = {
+      state: "open",
+      title: "chore: bump serve-sim to 0.1.51",
+      html_url: "https://example/2",
+      number: 2,
+      head: { ref: "old-branch" },
+      base: { ref: "main" },
+    };
+    const closed = {
+      state: "closed",
+      title: "chore: bump serve-sim to 0.1.51",
+      html_url: "https://example/3",
+      number: 3,
+      head: { ref: "chore/bump-serve-sim-to-0.1.51" },
+      base: { ref: "main" },
+    };
+    expect(
+      findReusableBumpPr([closed, openByTitle, openByHead], {
+        branch: "chore/bump-serve-sim-to-0.1.51",
+        title: "chore: bump serve-sim to 0.1.51",
+      }),
+    ).toBe(openByHead);
+    expect(
+      findReusableBumpPr([closed, openByTitle], {
+        branch: "chore/bump-serve-sim-to-0.1.51",
+        title: "chore: bump serve-sim to 0.1.51",
+      }),
+    ).toBe(openByTitle);
+    expect(
+      findReusableBumpPr([closed], {
+        branch: "chore/bump-serve-sim-to-0.1.51",
+        title: "chore: bump serve-sim to 0.1.51",
+      }),
+    ).toBeNull();
   });
 });
 
