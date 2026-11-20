@@ -2551,12 +2551,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       let lastBundle = "";
       try {
         const info = JSON.parse(await axFrontmostAsync(udid)) as { bundleId?: string; pid?: number };
-        if (!info.bundleId || !isUserFacingBundle(info.bundleId)) return;
-        if (res.writableEnded) return;
-        lastBundle = info.bundleId;
-        const isReactNative = await detectReactNative(udid, info.bundleId);
-        if (res.writableEnded) return;
-        res.write("data: " + JSON.stringify({ bundleId: info.bundleId, pid: info.pid, isReactNative }) + "\n\n");
+        // A frontmost app that isn't user-facing (or has no bundle id) skips
+        // only the bootstrap event; the tail below must still start.
+        if (info.bundleId && isUserFacingBundle(info.bundleId)) {
+          if (res.writableEnded) return;
+          lastBundle = info.bundleId;
+          const isReactNative = await detectReactNative(udid, info.bundleId);
+          if (res.writableEnded) return;
+          res.write("data: " + JSON.stringify({ bundleId: info.bundleId, pid: info.pid, isReactNative }) + "\n\n");
+        }
       } catch {
         // AX bridge may be warming up — the log tail fills in once anything moves.
       }
