@@ -40,6 +40,10 @@ public final class HIDClientChannel<Client: AnyObject> {
     private var loggedNotReady = false
     private var loggedNotReadyLimit = false
     public private(set) var client: Client?
+    /// Why the most recent `send` returned what it did (for touch traces):
+    /// delivered, reconnected+delivered, gate-drop, no-client, not-ready-probe,
+    /// not-ready-drop, transmit-failed.
+    public private(set) var lastSendOutcome = "none"
 
     public init(
         gate: HIDDeliveryGate,
@@ -109,17 +113,24 @@ public final class HIDClientChannel<Client: AnyObject> {
     /// isn't booted or there is no client, and the probe slot is only
     /// consumed when `probe` returns true.
     public func send(_ transmit: (Client) -> Bool, probe: ((Client) -> Bool)? = nil) -> Bool {
+        reconnectedThisSend = false
         switch admitForSend() {
         case .drop:
+            if lastSendOutcome != "not-ready-drop" { lastSendOutcome = "gate-drop" }
             return false
         case .deliver:
             guard let client else {
+                lastSendOutcome = "no-client"
                 log("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
                 return false
             }
-            return transmit(client)
+            let ok = transmit(client)
+            lastSendOutcome = ok ? (reconnectedThisSend ? "reconnected+delivered" : "delivered") : "transmit-failed"
+            return ok
         case .probe:
+            lastSendOutcome = "not-ready-probe"
             guard let client else {
+                lastSendOutcome = "no-client"
                 log("[hid] Dropped HID message: no SimDeviceLegacyHIDClient")
                 return false
             }
@@ -129,6 +140,8 @@ public final class HIDClientChannel<Client: AnyObject> {
             return false
         }
     }
+
+    private var reconnectedThisSend = false
 
     /// Gate input that doesn't go through the client (it still triggers the
     /// reconnect, so the next touch after a Home press works).
@@ -177,6 +190,7 @@ public final class HIDClientChannel<Client: AnyObject> {
     /// Like `admit()`, but while not-ready withholds the caller's event and
     /// lets one non-action probe through every `notReadyProbeInterval`.
     private func admitForSend() -> SendAdmission {
+        lastSendOutcome = "none"
         switch gate.admit() {
         case .drop(let message):
             if let message { log(message) }
@@ -191,6 +205,7 @@ public final class HIDClientChannel<Client: AnyObject> {
             }
             log(Self.reconnectedMessage)
             didReconnect()
+            reconnectedThisSend = true
             return admitReadyForSend()
         }
     }
@@ -201,6 +216,7 @@ public final class HIDClientChannel<Client: AnyObject> {
         logNotReadyLimitOnce()
         let t = now()
         if let last = lastNotReadyProbeAt, t - last < notReadyProbeInterval {
+            lastSendOutcome = "not-ready-drop"
             return .drop
         }
         return .probe

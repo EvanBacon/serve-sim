@@ -11,6 +11,24 @@ import SimNativeSupport
 /// `print` so real problems are always visible.
 private let hidDebugEnabled = ProcessInfo.processInfo.environment["SERVE_SIM_DEBUG_HID"] != nil
 
+/// Per-touch trace (`SERVE_SIM_TOUCH_TRACE=1`): one `[touch-trace] native {…}`
+/// line per touch with the client-sent size, the Indigo target before/after
+/// `updateTouchTarget`, and why the channel did or didn't hand it off, plus
+/// `[touch-trace] completion {…}` for asynchronous send errors. Off by default.
+private let touchTraceEnabled = ProcessInfo.processInfo.environment["SERVE_SIM_TOUCH_TRACE"] != nil
+
+@inline(__always)
+private func touchTrace(_ fields: @autoclosure () -> [String: Any]) {
+    guard touchTraceEnabled else { return }
+    var line = fields()
+    line["t"] = ProcessInfo.processInfo.systemUptime
+    line["wall"] = Date().timeIntervalSince1970
+    guard let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]),
+          let text = String(data: data, encoding: .utf8) else { return }
+    print("[touch-trace] native \(text)")
+    fflush(stdout)
+}
+
 @inline(__always)
 private func hidLog(_ message: @autoclosure () -> String) {
     guard hidDebugEnabled else { return }
@@ -379,6 +397,8 @@ actor HIDInjector {
         let block: @convention(block) (NSError?) -> Void = { [weak channel, weak client] error in
             guard let channel, let client else { return }
             if let error {
+                touchTrace(["kind": "completion", "domain": error.domain, "code": error.code,
+                            "current": channel.client === client])
                 channel.clientReported(client, domain: error.domain, code: error.code)
             } else {
                 channel.clientReportedSuccess(client)
@@ -461,10 +481,21 @@ actor HIDInjector {
 
     /// Returns whether the touch was handed to the HID client.
     func sendTouch(type: String, x: Double, y: Double, screenWidth: Int, screenHeight: Int, edge: UInt32 = 0) -> Bool {
+        let previousTarget = touchTarget
         updateTouchTarget(width: screenWidth, height: screenHeight)
-        guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else { return false }
+        guard let msg = touchMessage(type: type, x: x, y: y, edge: edge) else {
+            touchTrace(["kind": "touch", "type": type, "x": x, "y": y, "w": screenWidth, "h": screenHeight,
+                        "target": String(touchTarget, radix: 16), "outcome": "no-message"])
+            return false
+        }
         hidLog("[hid] Sending \(type) at (\(String(format:"%.3f",x)),\(String(format:"%.3f",y)))\(edge > 0 ? " edge=\(edge)" : "")")
-        return rawSend(msg)
+        let sent = rawSend(msg)
+        touchTrace(["kind": "touch", "type": type, "x": x, "y": y, "edge": Int(edge),
+                    "w": screenWidth, "h": screenHeight,
+                    "sizeTarget": DevicePose.touchTarget(width: screenWidth, height: screenHeight).map { String($0, radix: 16) } ?? "none",
+                    "prevTarget": String(previousTarget, radix: 16), "target": String(touchTarget, radix: 16),
+                    "duo": duoBridge != nil, "sent": sent, "outcome": channel.lastSendOutcome])
+        return sent
     }
 
     func sendMultiTouch(type: String, x1: Double, y1: Double, x2: Double, y2: Double, screenWidth: Int, screenHeight: Int) -> Bool {
@@ -487,7 +518,11 @@ actor HIDInjector {
         }
 
         hidLog("[hid] Multi-touch \(type) f1=(\(String(format:"%.3f",x1)),\(String(format:"%.3f",y1))) f2=(\(String(format:"%.3f",x2)),\(String(format:"%.3f",y2)))")
-        return rawSend(rawMsg)
+        let sent = rawSend(rawMsg)
+        touchTrace(["kind": "multi", "type": type, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                    "w": screenWidth, "h": screenHeight, "target": String(touchTarget, radix: 16),
+                    "sent": sent, "outcome": channel.lastSendOutcome])
+        return sent
     }
 
     // MARK: - Button events

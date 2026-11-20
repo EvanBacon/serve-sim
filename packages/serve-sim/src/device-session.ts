@@ -24,6 +24,7 @@ import { redactHome } from "./diagnostics-redact";
 import { DuoStateMonitor, type DuoState } from "./duo-state";
 import type { IncomingMessage, ServerResponse } from "http";
 import { displaySizeForPanel, duoPanel, resolveDevicePose, type DuoPanel } from "./device-pose";
+import { formatTouchTrace, touchTraceEnabled } from "./touch-trace";
 import {
   NativeCapture,
   NativeHid,
@@ -80,6 +81,8 @@ import {
   parseRollingBufferQuery,
   type RollingBufferOptions,
 } from "./rolling-buffer";
+
+const TOUCH_TRACE = touchTraceEnabled();
 
 /**
  * Minimal WebSocket surface the HID input channel needs. Satisfied by both the
@@ -1411,10 +1414,16 @@ export class DeviceSession {
       case 0x03: {
         const raw = json<{ type: string; x: number; y: number; edge?: number; ack?: number }>();
         if (!raw) return false;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        const started = TOUCH_TRACE ? Date.now() : 0;
+        if (await this.legacyInputShadowed()) {
+          if (TOUCH_TRACE) this.traceTouch(tag, raw, W, H, "shadowed", started);
+          return shadowedInputResult(this.udid);
+        }
         const m = withoutAck(raw);
         this.recordTouchEvent(m);
-        return this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
+        const result = await this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
+        if (TOUCH_TRACE) this.traceTouch(tag, raw, W, H, result, started);
+        return result;
       }
       case 0x04: {
         const raw = json<{ button: string; page?: number; usage?: number; phase?: string; ack?: number }>();
@@ -1438,9 +1447,15 @@ export class DeviceSession {
       case 0x05: {
         const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number }>();
         if (!m) break;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+        const started = TOUCH_TRACE ? Date.now() : 0;
+        if (await this.legacyInputShadowed()) {
+          if (TOUCH_TRACE) this.traceTouch(tag, m, W, H, "shadowed", started);
+          return shadowedInputResult(this.udid);
+        }
         this.recordHidEvent(tag, m);
-        return (await this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H)) !== false;
+        const delivered = (await this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H)) !== false;
+        if (TOUCH_TRACE) this.traceTouch(tag, m, W, H, delivered, started);
+        return delivered;
       }
       case 0x06: {
         const m = json<{ type: string; usage: number }>();
@@ -1824,6 +1839,28 @@ export class DeviceSession {
   }
 
   private static readonly DEVICE_HUB_SHADOW_RECHECK_MS = 2_000;
+
+  /** `SERVE_SIM_TOUCH_TRACE=1`: one line per touch frame; see touch-trace.ts. */
+  private traceTouch(tag: number, frame: object, width: number, height: number, result: unknown, started: number): void {
+    const foldable = this.primaryDuoPanel != null || this.duo.hinge != null;
+    console.log(formatTouchTrace({
+      tag,
+      udid: this.udid,
+      frame: frame as Record<string, unknown>,
+      width,
+      height,
+      orientation: this.orientation,
+      duo: foldable ? {
+        hingeDegrees: this.duo.hinge ?? null,
+        primaryPanel: this.primaryDuoPanel ?? null,
+        activePanel: this.activePanel(),
+        followedCover: this.followedCover ?? null,
+      } : undefined,
+      shadowed: this.deviceHubShadowed ?? null,
+      result,
+      elapsedMs: Date.now() - started,
+    }));
+  }
 
   private now(): number {
     return this.dependencies?.now?.() ?? Date.now();

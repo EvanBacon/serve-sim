@@ -287,4 +287,24 @@ final class HIDClientChannelTests: XCTestCase {
         let h = Harness(); h.setup()
         XCTAssertFalse(h.channel.send { _ in false })
     }
+
+    func testLastSendOutcomeExplainsEachResult() {
+        let h = Harness(); h.setup()
+        XCTAssertTrue(h.channel.send { _ in true })
+        XCTAssertEqual(h.channel.lastSendOutcome, "delivered")
+        XCTAssertFalse(h.channel.send { _ in false })
+        XCTAssertEqual(h.channel.lastSendOutcome, "transmit-failed")
+        h.state = shutdown
+        XCTAssertFalse(h.channel.send { _ in true })
+        XCTAssertEqual(h.channel.lastSendOutcome, "gate-drop")
+        h.state = booted
+        XCTAssertTrue(h.channel.send { _ in true })
+        XCTAssertEqual(h.channel.lastSendOutcome, "reconnected+delivered")
+        let client = h.channel.client!
+        h.channel.clientReported(client, domain: "SimulatorKit.SimDeviceLegacyHIDClient.HIDError", code: 2)
+        XCTAssertFalse(h.channel.send({ _ in true }, probe: { _ in true }))
+        XCTAssertEqual(h.channel.lastSendOutcome, "not-ready-probe")
+        XCTAssertFalse(h.channel.send({ _ in true }, probe: { _ in true }))
+        XCTAssertEqual(h.channel.lastSendOutcome, "not-ready-drop")
+    }
 }
