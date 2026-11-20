@@ -60,6 +60,27 @@ export function displayTouchToRaw<T extends DisplayTouch>(
   return out;
 }
 
+export interface DisplayMultiTouch {
+  type: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/**
+ * Convert a two-finger display-space touch to the raw portrait frame, the
+ * same per-finger mapping the web viewer's `sendMultiTouch` applies.
+ */
+export function displayMultiTouchToRaw<T extends DisplayMultiTouch>(
+  touch: T,
+  orientation: SimulatorOrientation | null | undefined,
+): T {
+  const p1 = rawPointForDisplayPoint(orientation, touch.x1, touch.y1);
+  const p2 = rawPointForDisplayPoint(orientation, touch.x2, touch.y2);
+  return { ...touch, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+}
+
 /**
  * `/config` URL for an input target, derived from its HID socket URL
  * (`…/helper/<udid>/ws`). Works for local state files and `--url` remotes.

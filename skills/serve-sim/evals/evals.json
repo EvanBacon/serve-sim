@@ -33,7 +33,7 @@
       "expected_behavior": [
         "Runs `npx serve-sim --detach -q` and surfaces the returned URL to the user.",
         "Issues a gesture sequence (begin → move → end) with `edge: 2` (top), starting at low y (~0.02) and dragging down to y ~0.4.",
-        "Each gesture call uses `npx serve-sim gesture '<json>'` with valid normalized coordinates.",
+        "Sends the whole sequence as a JSON array in ONE `npx serve-sim gesture '<json>'` call with valid normalized coordinates (not one call per step).",
         "Does NOT use `tap` for this multi-step gesture."
       ],
       "files": []
