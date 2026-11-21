@@ -53,7 +53,7 @@ import {
 } from "./devicekit-chrome";
 import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler } from "./exec-ws";
 import { createHostRpcHandler } from "./host-rpc";
-import { createPasteboardRoute, type DevicectlRunner } from "./pasteboard";
+import { createPasteboardRoute, PASTE_KEY_EVENTS, stagePasteboardText, type DevicectlRunner } from "./pasteboard";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
@@ -1678,6 +1678,20 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // host-rpc still falls back to simctl.
     pressHome: async (udid, signal) => {
       return getDeviceSession(udid).pressHome(signal);
+    },
+    // The Linking tool's Spotlight / Settings actions drive the same
+    // in-process HID, AX and pasteboard paths as `serve-sim gesture|tap|paste`.
+    linkingInput: {
+      touches: (udid, steps) => getDeviceSession(udid).injectTouchSteps(steps),
+      tap: (udid, point) => getDeviceSession(udid).tapAt(point),
+      snapshot: (udid) => getDeviceSession(udid).axSnapshot(),
+      paste: async (udid, text) => {
+        const staged = await stagePasteboardText(udid, text, options?.pasteboardRunner);
+        if (!staged.ok) {
+          throw new Error(`Couldn't stage the simulator pasteboard (${[staged.error, staged.detail].filter(Boolean).join(": ")})`);
+        }
+        if (!(await getDeviceSession(udid).pressKeys(PASTE_KEY_EVENTS))) throw new Error("Cmd+V was not delivered");
+      },
     },
   });
 

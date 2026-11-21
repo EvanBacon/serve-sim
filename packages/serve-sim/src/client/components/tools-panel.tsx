@@ -6,6 +6,7 @@ import { AppPermissionsTool } from "./app-permissions-tool";
 import { AxTreeTool } from "./ax-tree-tool";
 import { CameraTool } from "./camera-tool";
 import { EventLogTool } from "./event-log-tool";
+import { LinkingTool } from "./linking-tool";
 import { PANEL_BACKGROUND } from "./panel-colors";
 import { SimulatorSettingsTool } from "./simulator-settings-tool";
 import { StreamSettingsTool, type CodecPreference } from "./stream-settings-tool";
@@ -64,6 +65,7 @@ export function ToolsPanel({
           <CameraTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <LocationEmulationTool udid={udid} host={hostAction} />
           <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
+          <LinkingTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
           <StreamSettingsTool
             preference={codecPreference}
             onPreferenceChange={onCodecPreferenceChange}
