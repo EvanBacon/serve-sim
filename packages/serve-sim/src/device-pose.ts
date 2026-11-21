@@ -80,3 +80,22 @@ export function displaySizeForHingeDegrees(hingeDegrees: number): {
 } {
   return displaySizeForPanel(duoPanel({ hingeDegrees }));
 }
+
+/**
+ * The panel Duo touches go to: the same panel the server treats as active
+ * (primary-panel readback, then the 90° hinge rule), and before either is
+ * known, the panel whose framebuffer is being captured. Cover as a last
+ * resort (a size of 0×0 before the first frame says nothing).
+ */
+export function duoTouchPanel(input: {
+  primaryPanel?: DuoPanel | null;
+  hingeDegrees?: number | null;
+  width: number;
+  height: number;
+}): DuoPanel {
+  if (input.primaryPanel) return input.primaryPanel;
+  if (input.hingeDegrees != null && Number.isFinite(input.hingeDegrees)) return duoPanel({ hingeDegrees: input.hingeDegrees });
+  const [a, b] = [input.width, input.height].sort((x, y) => x - y);
+  if (a === DUO_INNER_SIZE.width && b === DUO_INNER_SIZE.height) return "inner";
+  return "cover";
+}

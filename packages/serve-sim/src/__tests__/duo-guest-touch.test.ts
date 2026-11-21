@@ -2,13 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
 import { deviceHubInputShadowedMessage } from "../device-hub-input";
 import { FoldGate } from "../fold-gate";
+import { cliInputOrientation } from "../touch-remap";
 
 type Hid = DeviceSessionDependencies["hid"];
 const ACK = 0x84;
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
 /** A started foldable session with a fake guest digitizer. */
-async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: string) => boolean; foldGate?: FoldGate } = {}) {
+async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: string) => boolean; foldGate?: FoldGate; size?: { width: number; height: number } | null; noState?: boolean; duoStateWaitMs?: number } = {}) {
   const calls: unknown[][] = [];
   const hid: Hid = {
     touch: async (...a) => { calls.push(["legacy", ...a]); return true; },
@@ -27,16 +28,19 @@ async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: s
     capture: {
       start: async () => {}, stop: async () => {},
       subscribeMjpeg: async () => () => {}, subscribeAvcc: async () => () => {},
-      subscribeSize: async (cb: (size: { width: number; height: number }) => void) => { cb({ width: 1398, height: 2034 }); return () => {}; },
+      subscribeSize: async (cb: (size: { width: number; height: number }) => void) => { if (opts.size !== null) cb(opts.size ?? { width: 1398, height: 2034 }); return () => {}; },
       snapshotJpeg: async () => null, setPreferredScreenSize: async () => {},
     } as never,
     hid,
     readDeviceHubInputShadowed: async () => opts.shadowed ?? false,
     watchDeviceHubInput: null,
     ...(opts.foldGate ? { foldGate: opts.foldGate } : {}),
+    ...(opts.duoStateWaitMs != null ? { duoStateWaitMs: opts.duoStateWaitMs } : {}),
     createDuoMonitor: (_udid, onState) => { onDuoState = onState as never; return { close() {}, refreshOrientation() {} }; },
   });
   await s.start();
+  // A started Duo normally has its hinge reading within a second.
+  if (!opts.noState) onDuoState({ hingeDegrees: 0, orientations: {} });
   const replies: Record<string, unknown>[] = [];
   let receive!: (data: Buffer) => void;
   s.attachHidSocket({
@@ -173,5 +177,49 @@ describe("Duo guest-digitizer touch routing", () => {
     await settle();
     expect(d.calls.filter((c) => c[0] === "guest")).toEqual([["guest", "primary-1", "begin", 0.4, 0.4]]);
     expect(d.replies.map((r) => r.ok)).toEqual([true]);
+  });
+
+  test("before any Duo state, touches follow the captured panel instead of defaulting to the cover", async () => {
+    const d = await duo({ size: { width: 2007, height: 2853 }, noState: true, duoStateWaitMs: 0 });
+    d.send(0x03, { type: "begin", x: 0.3, y: 0.3, ack: 1 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([["guest", "primary-1", "begin", 0.3, 0.3]]);
+    expect(d.s.screenConfig().duoPanel).toBe("inner");
+  });
+
+  test("legacy touches carry the touch panel's size, even before the first frame and after a fold", async () => {
+    const d = await duo({ size: null, noState: true, duoStateWaitMs: 0 });
+    d.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 1 });
+    d.send(0x03, { type: "end", x: 0.5, y: 0.8, edge: 3, ack: 2 });
+    await settle();
+    d.duoState({ hingeDegrees: 180, primaryPanel: "inner", orientations: {} });
+    await settle();
+    d.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 3 });
+    await settle();
+    // The legacy Indigo target is chosen from this size natively.
+    expect(d.calls.filter((c) => c[0] === "legacy").map((c) => [c[1], c[4], c[5]])).toEqual([
+      ["begin", 1398, 2034], ["end", 1398, 2034], ["begin", 2007, 2853],
+    ]);
+  });
+
+  test("/config gives the CLI the server's panel and its orientation, so its remap matches", async () => {
+    const d = await duo();
+    d.duoState({ hingeDegrees: 180, primaryPanel: "inner", orientations: { inner: "landscape_left", cover: "portrait" } });
+    await settle();
+    const config = d.s.screenConfig();
+    expect(config.duoPanel).toBe("inner");
+    expect(config.orientation).toBe("landscape_left");
+    // Raw size still reports the captured framebuffer; the remap only needs it to be portrait-shaped.
+    expect(cliInputOrientation({ ...config, width: 2007, height: 2853 }, { includeFoldables: true })).toBe("landscape_left");
+  });
+
+  test("the first touch right after start waits for the Duo panel readback instead of guessing the cover", async () => {
+    const d = await duo({ noState: true, duoStateWaitMs: 5_000 });
+    d.send(0x03, { type: "begin", x: 0.2, y: 0.2, ack: 1 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([]);
+    d.duoState({ primaryPanel: "inner", orientations: {} });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([["guest", "primary-1", "begin", 0.2, 0.2]]);
   });
 });
