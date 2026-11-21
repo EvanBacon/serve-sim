@@ -50,7 +50,7 @@ import {
   recordingFileName,
   recordingRotation,
 } from "./recording";
-import { collectAxSnapshot } from "./ax";
+import { collectAxSnapshot, type AxSnapshot } from "./ax";
 import { AxAgent, AxAgentError } from "./ax-agent";
 import { serveAxAgent, type AxAgentEndpoint } from "./ax-agent-http";
 import { cliInputOrientation, displayTouchToRaw } from "./touch-remap";
@@ -797,7 +797,7 @@ export class DeviceSession {
   /** `/ax/snapshot`, `/ax/act`, `/ax/settle` — see ax-agent-http.ts. */
   handleAxAgent(req: IncomingMessage, res: ServerResponse, endpoint: AxAgentEndpoint): Promise<void> {
     this.axAgent ??= new AxAgent({
-      collect: () => collectAxSnapshot(this.udid, this.dependencies?.axDescribe ?? ((udid) => axDescribeAsync(udid, "agent"))),
+      collect: () => this.axSnapshot(),
       contentFrames: () => this.contentFrameCount(),
       tap: (point, holdMs) => this.injectTap(point, holdMs),
     });
@@ -839,6 +839,47 @@ export class DeviceSession {
     await touch("begin");
     await new Promise((resolve) => setTimeout(resolve, holdMs));
     await touch("end");
+  }
+
+  /**
+   * Host-driven input for the Linking tool's `linkingAction` (Spotlight,
+   * Settings navigation): the same in-process HID path as `/ws` touches
+   * and `serve-sim tap|gesture|paste`, in normalized display coords.
+   */
+  async injectTouchSteps(steps: ReadonlyArray<{ type: "begin" | "move" | "end"; x: number; y: number; waitMs: number }>): Promise<void> {
+    await this.start();
+    if (await this.legacyInputShadowed()) throw new Error(deviceHubInputShadowedMessage(this.udid));
+    if (this.width === 0 || this.height === 0) throw new Error("Screen size is not known yet; retry in a moment.");
+    const orientation = cliInputOrientation(this.screenConfig());
+    for (const step of steps) {
+      const raw = displayTouchToRaw({ type: step.type, x: step.x, y: step.y }, orientation);
+      this.recordTouchEvent(raw);
+      await this.hid.touch(step.type, raw.x, raw.y, this.width, this.height, 0);
+      if (step.waitMs > 0) await new Promise((resolve) => setTimeout(resolve, step.waitMs));
+    }
+  }
+
+  /** Tap at normalized display coords (see injectTap). */
+  tapAt(point: { x: number; y: number }): Promise<void> {
+    return this.injectTap(point, 60);
+  }
+
+  /** Press keys through the HID injector; false when one wasn't delivered. */
+  async pressKeys(events: ReadonlyArray<{ type: "down" | "up"; usage: number }>, gapMs = 20): Promise<boolean> {
+    await this.start();
+    if (await this.legacyInputShadowed()) throw new Error(deviceHubInputShadowedMessage(this.udid));
+    let delivered = true;
+    for (const event of events) {
+      this.recordHidEvent(0x06, event);
+      if ((await this.hid.key(event.type, event.usage)) === false) delivered = false;
+      await new Promise((resolve) => setTimeout(resolve, gapMs));
+    }
+    return delivered;
+  }
+
+  /** One normalized AX snapshot (the `/ax/snapshot` source). */
+  axSnapshot(): Promise<AxSnapshot> {
+    return collectAxSnapshot(this.udid, this.dependencies?.axDescribe ?? ((udid) => axDescribeAsync(udid, "agent")));
   }
 
   handleForeground(_req: IncomingMessage, res: ServerResponse): Promise<void> {

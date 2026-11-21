@@ -13,6 +13,21 @@ import {
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep } from "path";
 import { appBundlePath, readInfoPlistAt } from "./app-info-plist";
+import type { AxSnapshot } from "./ax-shared";
+import {
+  LINKING_ACTION_KEYS,
+  isSystemSurface,
+  MAX_SPOTLIGHT_QUERY_LENGTH,
+  urlProblem,
+} from "./client/utils/linking";
+import { displayNameFromInfoPlist, readUniversalLinkDomains, urlSchemesFromInfoPlist } from "./linking";
+import {
+  navigateToAppSettings,
+  scrollDragPath,
+  SettingsNavigationError,
+  type TouchStep,
+} from "./settings-navigation";
+import { confirmOpenInAlert, dismissOpenInAlerts, type AlertDeps } from "./open-url-alert";
 import { PERMISSION_SERVICES, permissionStatuses } from "./client/utils/permissions";
 import { shellJoin } from "./shell-quote";
 import { simctlArguments } from "./simctl";
@@ -60,6 +75,53 @@ export interface HostRpcOptions {
   pressHome?: (udid: string, signal?: AbortSignal) => Promise<boolean>;
   /** Bound on `pressHome`. Default `DEFAULT_PRESS_HOME_TIMEOUT_MS`. */
   pressHomeTimeoutMs?: number;
+  /**
+   * In-process input for `linkingAction` (the server's device session):
+   * Spotlight's swipe + paste and the Settings navigation. Without it those
+   * two kinds of action fail; launch/terminate still work.
+   */
+  linkingInput?: LinkingInput;
+  /** Test hooks for the pauses and per-screen timeouts inside `linkingAction`. */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+export interface LinkingInput {
+  touches(udid: string, steps: readonly TouchStep[]): Promise<void>;
+  tap(udid: string, point: { x: number; y: number }): Promise<void>;
+  /** Stage `text` on the guest pasteboard (verified) and press Cmd+V. */
+  paste(udid: string, text: string): Promise<void>;
+  snapshot(udid: string): Promise<AxSnapshot>;
+}
+
+/**
+ * The swipe that opens Spotlight from the home screen: a short downward
+ * drag in the middle of the page (from the top edge it would open
+ * Notification Center instead).
+ */
+export const SPOTLIGHT_SWIPE: readonly TouchStep[] = [
+  { type: "begin", x: 0.5, y: 0.35, waitMs: 30 },
+  { type: "move", x: 0.5, y: 0.45, waitMs: 30 },
+  { type: "move", x: 0.5, y: 0.6, waitMs: 30 },
+  { type: "end", x: 0.5, y: 0.62, waitMs: 0 },
+];
+
+/** After Home, before the swipe: the app-close animation. */
+const SPOTLIGHT_HOME_SETTLE_MS = 800;
+/** After the swipe, before pasting: Spotlight's field taking focus. */
+const SPOTLIGHT_FOCUS_MS = 1_000;
+
+const SETTINGS_BUNDLE_ID = "com.apple.Preferences";
+const SPRINGBOARD_BUNDLE_ID = "com.apple.springboard";
+
+/** `simctl openurl` stderr → a one-line reason for the Linking widget. */
+export function openUrlError(url: string, stderr: string, exitCode: number): string {
+  if (/LSApplicationWorkspaceErrorDomain, code=115|error 115\b/.test(stderr)) {
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase() ?? "";
+    return `No app handles ${scheme}://`;
+  }
+  const line = stderr.split("\n").map((l) => l.trim()).find(Boolean);
+  return line ?? `simctl openurl failed (exit ${exitCode})`;
 }
 
 /** Cap on the native Home path so a stuck launch cannot hang the toolbar. */
@@ -211,6 +273,9 @@ function timestampSlug(): string {
 
 export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
   const runner = opts.run ?? defaultRun;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  /** Devices with a `linkingAction` in flight: two would fight over input. */
+  const linkingBusy = new Set<string>();
   const desktop = () => join(opts.homeDir ?? homedir(), "Desktop");
 
   const run = async (file: string, args: string[]): Promise<RunResult> => {
@@ -275,6 +340,141 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
 
   const cameraFileArg = (p: Params): string => uploadPathParam(p, "filePath", ["camsrc"]);
 
+  /** Home on an iPhone/iPad: the in-process path, else `simctl launch springboard`. */
+  const pressHome = async (udid: string): Promise<RunResult> => {
+    if (opts.pressHome) {
+      const delivered = await racePressHome(
+        opts.pressHome,
+        udid,
+        opts.pressHomeTimeoutMs ?? DEFAULT_PRESS_HOME_TIMEOUT_MS,
+      );
+      if (delivered) {
+        const result: RunResult = { stdout: "", stderr: "", exitCode: 0 };
+        try {
+          opts.onCommandResult?.(`serve-sim button home -d ${udid}`, result);
+        } catch {
+          // Diagnostic side-channel only.
+        }
+        return result;
+      }
+    }
+    return run("xcrun", simctlArguments(["launch", udid, SPRINGBOARD_BUNDLE_ID]));
+  };
+
+  const ok = (stdout = ""): RunResult => ({ stdout, stderr: "", exitCode: 0 });
+  const failed = (stderr: string): RunResult => ({ stdout: "", stderr, exitCode: 1 });
+
+  /** Display name for Spotlight / Settings from the app's Info.plist, or why there isn't one. */
+  const appDisplayName = async (udid: string, bundleId: string): Promise<{ name: string } | { problem: string }> => {
+    const app = await appBundlePath(udid, bundleId, runner);
+    if ("error" in app) return { problem: `${bundleId} isn't installed on this simulator` };
+    const name = displayNameFromInfoPlist(await readInfoPlistAt(app.path, runner));
+    return name
+      ? { name }
+      : { problem: `${bundleId} has no CFBundleDisplayName or CFBundleName, so it can't be found in Settings › Apps` };
+  };
+
+  const alertDeps = (udid: string, input: LinkingInput): AlertDeps => ({
+    snapshot: () => input.snapshot(udid),
+    tap: (point) => input.tap(udid, point),
+    sleep,
+    now: opts.now ?? Date.now,
+  });
+
+  /** Cancel stacked `Open in …?` alerts left by earlier openurls (see open-url-alert.ts). */
+  const clearStrayAlerts = async (udid: string, input: LinkingInput) => {
+    await dismissOpenInAlerts(alertDeps(udid, input));
+  };
+
+  /** Run `fn` unless another linking action holds this device. */
+  const exclusive = async (udid: string, fn: () => Promise<RunResult>): Promise<RunResult> => {
+    if (linkingBusy.has(udid)) return failed("Another linking action is still running");
+    linkingBusy.add(udid);
+    try {
+      return await fn();
+    } catch (error) {
+      // Input-path failures (shadowed input, pasteboard, stuck alerts) come back inline.
+      return failed(error instanceof Error ? error.message : String(error));
+    } finally {
+      linkingBusy.delete(udid);
+    }
+  };
+
+  const openUrl = async (udid: string, url: string): Promise<RunResult> => {
+    const input = opts.linkingInput;
+    if (input) await clearStrayAlerts(udid, input);
+    const r = await run("xcrun", simctlArguments(["openurl", udid, url]));
+    if (r.exitCode !== 0) return { ...r, stderr: openUrlError(url, r.stderr, r.exitCode) };
+    // iOS confirms custom schemes ("Open in “App”?"); the user asked to open it.
+    if (input && (await confirmOpenInAlert(alertDeps(udid, input))) === "stuck") {
+      return failed("iOS asked to confirm opening the link, and the alert didn't close");
+    }
+    return r;
+  };
+
+  const linkingAction = async (
+    udid: string,
+    bundleId: string,
+    action: (typeof LINKING_ACTION_KEYS)[number],
+    query: string | undefined,
+  ): Promise<RunResult> => {
+    // Spotlight, Settings, Home and other system UI aren't apps to act on.
+    if (action !== "spotlight" && isSystemSurface(bundleId)) {
+      return failed(`${bundleId} is system UI, not an app; bring an app to the front first`);
+    }
+    switch (action) {
+      case "launch":
+        return run("xcrun", simctlArguments(["launch", udid, bundleId]));
+      case "terminate":
+        return run("xcrun", simctlArguments(["terminate", udid, bundleId]));
+      case "spotlight": {
+        const input = opts.linkingInput;
+        if (!input) return failed("Spotlight needs the serve-sim preview's input session");
+        const named = query === undefined && !isSystemSurface(bundleId) ? await appDisplayName(udid, bundleId) : null;
+        const text = query ?? (named && "name" in named ? named.name : null);
+        if (!text) return failed("Type something to search for");
+        await clearStrayAlerts(udid, input);
+        const home = await pressHome(udid);
+        if (home.exitCode !== 0) return home;
+        await sleep(SPOTLIGHT_HOME_SETTLE_MS);
+        await input.touches(udid, SPOTLIGHT_SWIPE);
+        await sleep(SPOTLIGHT_FOCUS_MS);
+        await input.paste(udid, text);
+        return ok();
+      }
+      case "settings":
+      case "notificationSettings": {
+        const input = opts.linkingInput;
+        if (!input) return failed("Settings navigation needs the serve-sim preview's input session");
+        const named = await appDisplayName(udid, bundleId);
+        if ("problem" in named) return failed(named.problem);
+        const displayName = named.name;
+        await clearStrayAlerts(udid, input);
+        try {
+          await navigateToAppSettings(
+            { bundleId, displayName, notifications: action === "notificationSettings" },
+            {
+              openSettingsRoot: async () => {
+                // Settings keeps its navigation stack; a fresh launch starts at the root.
+                await run("xcrun", simctlArguments(["terminate", udid, SETTINGS_BUNDLE_ID]));
+                const r = await run("xcrun", simctlArguments(["openurl", udid, "App-prefs:"]));
+                if (r.exitCode !== 0) throw new SettingsNavigationError(openUrlError("App-prefs:", r.stderr, r.exitCode));
+              },
+              snapshot: () => input.snapshot(udid),
+              tap: (point) => input.tap(udid, point),
+              scroll: (direction) => input.touches(udid, scrollDragPath(direction)),
+              sleep,
+              now: opts.now ?? Date.now,
+            },
+          );
+        } catch (error) {
+          return failed(error instanceof Error ? error.message : String(error));
+        }
+        return ok();
+      }
+    }
+  };
+
   const methods: Record<string, (p: Params) => Promise<Record<string, unknown>>> = {
     async toggleAppearance(p) {
       const udid = udidParam(p);
@@ -289,23 +489,7 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       const watch = p.watch === true;
       await requireDevice(udid);
       if (watch) return { ...(await run("osascript", WATCH_HOME_SCRIPT.flatMap((line) => ["-e", line]))) };
-      if (opts.pressHome) {
-        const delivered = await racePressHome(
-          opts.pressHome,
-          udid,
-          opts.pressHomeTimeoutMs ?? DEFAULT_PRESS_HOME_TIMEOUT_MS,
-        );
-        if (delivered) {
-          const result: RunResult = { stdout: "", stderr: "", exitCode: 0 };
-          try {
-            opts.onCommandResult?.(`serve-sim button home -d ${udid}`, result);
-          } catch {
-            // Diagnostic side-channel only.
-          }
-          return { ...result };
-        }
-      }
-      return { ...(await run("xcrun", simctlArguments(["launch", udid, "com.apple.springboard"]))) };
+      return { ...(await pressHome(udid)) };
     },
 
     async relaunchApp(p) {
@@ -565,6 +749,51 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       if (!path.endsWith(".ipa")) fail("invalid path");
       await requireDevice(udid);
       return { ...(await run("xcrun", simctlArguments(["install", udid, path]))) };
+    },
+
+    // Open a URL (custom scheme or universal link) in the simulator.
+    async openUrl(p) {
+      const udid = udidParam(p);
+      const problem = urlProblem(p.url);
+      if (problem) fail(`invalid url: ${problem}`);
+      const url = p.url as string;
+      await requireDevice(udid);
+      return { ...(await exclusive(udid, () => openUrl(udid, url))) };
+    },
+
+    // Read-only: what the app answers to. Bypasses the event log like
+    // permissionsStatus (codesign/otool lines would be noise there).
+    async linkingInfo(p) {
+      const udid = udidParam(p);
+      const bundleId = bundleIdParam(p);
+      await requireDevice(udid);
+      const app = await appBundlePath(udid, bundleId, runner);
+      if ("error" in app) fail(app.error);
+      const info = await readInfoPlistAt(app.path, runner);
+      return {
+        displayName: displayNameFromInfoPlist(info),
+        schemes: urlSchemesFromInfoPlist(info),
+        domains: await readUniversalLinkDomains(app.path, info, runner),
+      };
+    },
+
+    // Non-URL ways into the app: Spotlight search, launch/terminate, and
+    // its Settings pages (UI navigation; see settings-navigation.ts).
+    async linkingAction(p) {
+      const udid = udidParam(p);
+      const bundleId = bundleIdParam(p);
+      const action = enumParam(p, "action", LINKING_ACTION_KEYS);
+      let query: string | undefined;
+      if (p.query !== undefined && p.query !== "") {
+        if (
+          action !== "spotlight" || typeof p.query !== "string" ||
+          p.query.length > MAX_SPOTLIGHT_QUERY_LENGTH || hasControlChar(p.query) || !p.query.trim()
+        ) fail("invalid query");
+        query = p.query.trim();
+      }
+      if (bundleId === SPRINGBOARD_BUNDLE_ID && action !== "spotlight") fail(`cannot ${action} SpringBoard`);
+      await requireDevice(udid);
+      return { ...(await exclusive(udid, () => linkingAction(udid, bundleId, action, query))) };
     },
 
     // Set (lat/lng) or clear the simulated location.
