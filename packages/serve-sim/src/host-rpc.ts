@@ -12,7 +12,8 @@ import {
 } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep } from "path";
-import { PERMISSION_SERVICES } from "./client/utils/permissions";
+import { appBundlePath, readInfoPlistAt } from "./app-info-plist";
+import { PERMISSION_SERVICES, permissionStatuses } from "./client/utils/permissions";
 import { shellJoin } from "./shell-quote";
 import { simctlArguments } from "./simctl";
 import { getUiOption, setUiOption } from "./ui-settings";
@@ -267,11 +268,9 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
   };
 
   const appContainer = async (udid: string, bundleId: string): Promise<string> => {
-    const r = await run("xcrun", simctlArguments(["get_app_container", udid, bundleId, "app"]));
-    if (r.exitCode !== 0) fail(r.stderr.trim() || "App not found on simulator");
-    const appPath = r.stdout.trim();
-    if (!appPath) fail("Empty app path");
-    return appPath;
+    const app = await appBundlePath(udid, bundleId, run);
+    if ("error" in app) fail(app.error);
+    return app.path;
   };
 
   const cameraFileArg = (p: Params): string => uploadPathParam(p, "filePath", ["camsrc"]);
@@ -387,18 +386,9 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       await requireDevice(udid);
       const appPath = await appContainer(udid, bundleId);
 
-      // Info.plist comes from the app bundle; like the icons below, only read
-      // a regular file so a symlink can't point plutil at an arbitrary path.
-      const plistPath = join(appPath, "Info.plist");
-      let plistIsFile = false;
-      try { plistIsFile = lstatSync(plistPath).isFile(); } catch {}
-      const plist = plistIsFile
-        ? await run("plutil", ["-convert", "json", "-o", "-", plistPath])
-        : null;
-      let info: any = {};
-      if (plist?.exitCode === 0) {
-        try { info = JSON.parse(plist.stdout); } catch {}
-      }
+      // Only a regular-file Info.plist is read (see readInfoPlistAt), like
+      // the icons below.
+      const info: any = (await readInfoPlistAt(appPath, run)) ?? {};
 
       // CFBundleIcons → primary → CFBundleIconFiles last entry, falling back
       // to CFBundleIconFiles / CFBundleIconFile.
@@ -452,6 +442,23 @@ export function createHostRpcHandler(opts: HostRpcOptions): HostRpcHandler {
       }
       await requireDevice(udid);
       return { ...(await serveSim(["permissions", action, service, bundleId, "-d", udid])) };
+    },
+
+    // Read-only: the app's requested permissions (Info.plist usage keys) and
+    // the current status of each. The panel polls this, so it bypasses the
+    // event-log observer rather than logging a line every few seconds.
+    async permissionsStatus(p) {
+      const udid = udidParam(p);
+      const bundleId = bundleIdParam(p);
+      await requireDevice(udid);
+      const r = await runner(...serveSimArgv(opts.serveSimBin, ["permissions", "list", bundleId, "-d", udid, "-q"]));
+      if (r.exitCode !== 0) fail(r.stderr.trim() || `serve-sim permissions list failed (exit ${r.exitCode})`);
+      let raw: any;
+      try { raw = JSON.parse(r.stdout); } catch { fail("unreadable permissions list output"); }
+      const requested = Array.isArray(raw?.requested)
+        ? raw.requested.filter((k: unknown): k is string => typeof k === "string" && PERMISSION_NAMES.has(k))
+        : null;
+      return { requested, statuses: permissionStatuses(raw) };
     },
 
     async cameraListWebcams() {
