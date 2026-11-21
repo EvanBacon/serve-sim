@@ -21,8 +21,9 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError,
   onStreamingChange: (streaming: boolean) => void;
   onHardwarePress: React.ComponentProps<typeof HardwareKey>["onPress"];
   url: string; projection: DuoProjection | null;
-  onTouch: (event: { type: string; x: number; y: number; edge?: number }) => void;
-  onMultiTouch: (event: { type: string; x1: number; y1: number; x2: number; y2: number }) => void;
+  /** `panel` (on begin) is the panel the touched leaves showed, so a touch made during a fold is never redirected. */
+  onTouch: (event: { type: string; x: number; y: number; edge?: number; panel?: "cover" | "inner" }) => void;
+  onMultiTouch: (event: { type: string; x1: number; y1: number; x2: number; y2: number; panel?: "cover" | "inner" }) => void;
 }) {
   const hardwarePositions = duoHardwarePositions(projection);
   const poseKey = duoPoseKey(projection);
@@ -95,8 +96,9 @@ export function DuoThreeDView({ url, projection, onTouch, onMultiTouch, onError,
       points.current.set(event.pointerId, raw);
       event.currentTarget.setPointerCapture(event.pointerId);
       const two = pair();
-      if (two) onMultiTouch({ type: "begin", ...two });
-      else onTouch({ type: "begin", ...raw });
+      const panel = projection?.panel;
+      if (two) onMultiTouch({ type: "begin", ...two, ...(panel ? { panel } : {}) });
+      else onTouch({ type: "begin", ...raw, ...(panel ? { panel } : {}) });
     }}
     onPointerMove={(event) => {
       if (!points.current.has(event.pointerId)) return;

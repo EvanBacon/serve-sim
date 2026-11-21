@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
 import { deviceHubInputShadowedMessage } from "../device-hub-input";
+import { FoldGate } from "../fold-gate";
 
 type Hid = DeviceSessionDependencies["hid"];
 const ACK = 0x84;
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
 /** A started foldable session with a fake guest digitizer. */
-async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: string) => boolean } = {}) {
+async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: string) => boolean; foldGate?: FoldGate } = {}) {
   const calls: unknown[][] = [];
   const hid: Hid = {
     touch: async (...a) => { calls.push(["legacy", ...a]); return true; },
@@ -32,6 +33,7 @@ async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: s
     hid,
     readDeviceHubInputShadowed: async () => opts.shadowed ?? false,
     watchDeviceHubInput: null,
+    ...(opts.foldGate ? { foldGate: opts.foldGate } : {}),
     createDuoMonitor: (_udid, onState) => { onDuoState = onState as never; return { close() {}, refreshOrientation() {} }; },
   });
   await s.start();
@@ -117,5 +119,59 @@ describe("Duo guest-digitizer touch routing", () => {
     await settle();
     expect(d.calls.filter((c) => c[0] === "guestMulti")).toEqual([["guestMulti", "primary", "begin"], ["guestMulti", "primary", "end"]]);
     expect(d.calls.some((c) => c[0] === "legacyMulti")).toBe(false);
+  });
+
+  test("a touch that begins during a fold waits for the overlay, then goes to the panel it was aimed at", async () => {
+    const gate = new FoldGate({ noOverlayMs: 10_000, maxMs: 10_000, graceMs: 0 });
+    const d = await duo({ foldGate: gate });
+    d.duoState({ hingeDegrees: 180, primaryPanel: "inner", orientations: {} });
+    await settle();
+    gate.overlay("start");
+    d.send(0x03, { type: "begin", x: 0.4, y: 0.4, ack: 1 });
+    d.send(0x03, { type: "end", x: 0.4, y: 0.4, ack: 2 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([]);
+    expect(d.replies).toEqual([]);
+    gate.overlay("postflight");
+    gate.overlay("reset");
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([["guest", "primary-1", "begin", 0.4, 0.4], ["guest", "primary-1", "end", 0.4, 0.4]]);
+    expect(d.replies.map((r) => r.ok)).toEqual([true, true]);
+  });
+
+  test("a viewer touch aimed at a panel the fold switched away from is refused, never redirected", async () => {
+    const gate = new FoldGate({ noOverlayMs: 10_000, maxMs: 10_000, graceMs: 0 });
+    const d = await duo({ foldGate: gate });
+    gate.overlay("start");
+    d.send(0x03, { type: "begin", x: 0.4, y: 0.4, panel: "cover", ack: 1 });
+    d.send(0x03, { type: "move", x: 0.5, y: 0.5, ack: 2 });
+    d.send(0x03, { type: "end", x: 0.5, y: 0.5, ack: 3 });
+    await settle();
+    d.duoState({ hingeDegrees: 180, primaryPanel: "inner", orientations: {} });
+    gate.overlay("postflight");
+    gate.overlay("reset");
+    await settle();
+    expect(d.calls.some((c) => c[0] === "guest" || c[0] === "legacy")).toBe(false);
+    expect(d.replies[0]).toEqual({ ack: 1, ok: false, error: "Fold in progress: the touch was aimed at the cover display, but the inner display is active now. Retry the touch." });
+    expect(d.replies.slice(1).map((r) => r.ok)).toEqual([false, false]);
+    // The next gesture is delivered normally.
+    d.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 4 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([["guest", "primary-1", "begin", 0.1, 0.1]]);
+  });
+
+  test("a touch without a panel (CLI) during a fold goes to the fold's target panel", async () => {
+    const gate = new FoldGate({ noOverlayMs: 10_000, maxMs: 10_000, graceMs: 0 });
+    const d = await duo({ foldGate: gate });
+    gate.begin("hinge", "inner"); // `serve-sim fold 180` from the cover
+    d.send(0x03, { type: "begin", x: 0.4, y: 0.4, ack: 1 });
+    await settle();
+    d.duoState({ hingeDegrees: 180, primaryPanel: "inner", orientations: {} });
+    gate.overlay("start");
+    gate.overlay("postflight");
+    gate.overlay("reset");
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([["guest", "primary-1", "begin", 0.4, 0.4]]);
+    expect(d.replies.map((r) => r.ok)).toEqual([true]);
   });
 });

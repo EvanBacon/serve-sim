@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import type { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { DuoStateMonitor, parseHingeSample, parseIntegratedScreenOrientations, parsePrimaryPanel, type DuoState } from "../duo-state";
+import { DuoStateMonitor, parseFoldOverlay, parseHingeSample, parseIntegratedScreenOrientations, parsePrimaryPanel, type DuoState } from "../duo-state";
 import { simctlArguments } from "../simctl";
 
 class FakeChild extends EventEmitter {
@@ -125,4 +125,14 @@ Port:
     cover: "portrait_upside_down", inner: "landscape_left",
   });
   expect(parseIntegratedScreenOrientations("UI Orientation: Portrait")).toEqual({});
+});
+
+test("parseFoldOverlay reads SpringBoard's fold overlay start and end", () => {
+  const prefix = "2026-11-20 15:52:11.788 Df SpringBoard[52819:4635244] [com.apple.SpringBoard:ZStack] Requested update preferences for <ContinuousFoldSnapshotOverlay> with reason: ";
+  expect(parseFoldOverlay(prefix + "cloak installed")).toBe("start");
+  expect(parseFoldOverlay(prefix + "snapshot removed at postflight")).toBe("postflight");
+  expect(parseFoldOverlay(prefix + "overlay reset")).toBe("reset");
+  expect(parseFoldOverlay(prefix + "cloak reveal began")).toBeNull();
+  // The log process echoes its own predicate; that must not count.
+  expect(parseFoldOverlay('log[1:0] [com.apple.log:] args: log stream --predicate eventMessage CONTAINS "<ContinuousFoldSnapshotOverlay> with reason: cloak installed"')).toBeNull();
 });

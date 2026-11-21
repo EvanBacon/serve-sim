@@ -23,6 +23,8 @@ export type DevicePoseSpec = {
 export const DUO_COVER_SIZE = { width: 1398, height: 2034 } as const;
 export const DUO_INNER_SIZE = { width: 2007, height: 2853 } as const;
 export const DUO_COVER_ACTIVE_BELOW_DEGREES = 90;
+/** Duration of a named pose's guest hinge sweep (HIDInjector.setPose sends `sweep … 800`). */
+export const DUO_POSE_SWEEP_MS = 800;
 
 const PRESETS: readonly DevicePoseSpec[] = DUO_POSES.map(({ id, label, hingeDegrees }) => spec(id, label, hingeDegrees));
 

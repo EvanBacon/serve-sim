@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 #import <notify.h>
 #import <sys/sysctl.h>
+#import <stdatomic.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
 #import <objc/message.h>
@@ -282,6 +283,11 @@ static void exitWhenBackboarddIsReplaced(void) {
     (void)CFBridgingRetain(timer);
 }
 
+// Hinge and orientation vendor events go through one serial queue so an
+// asynchronous sweep and later commands stay ordered.
+static dispatch_queue_t hingeQueue;
+static _Atomic uint64_t hingeGeneration;
+
 static BOOL sendEvent(id service, CFTypeRef event) {
     if (!event) return NO;
     BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(service, sel_registerName("dispatchEvent:"), (__bridge id)event);
@@ -298,6 +304,7 @@ int main(int argc, char **argv) {
         CFTypeRef (*vendor)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, const void *, CFIndex, uint32_t) = dlsym(io, "IOHIDEventCreateVendorDefinedEvent");
         CFTypeRef (*keyboard)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, Boolean, uint32_t) = dlsym(io, "IOHIDEventCreateKeyboardEvent");
         exitWhenBackboarddIsReplaced();
+        hingeQueue = dispatch_queue_create("serve-sim.duo.hinge", DISPATCH_QUEUE_SERIAL);
         id hinge = service(0xff61, 0x5b, NO), buttons = service(0x0b, 1, YES);
         if (!vendor || !keyboard || !hinge || !buttons) { fprintf(stderr, "Duo HID service unavailable\n"); return 1; }
         digitizerEvent = dlsym(io, "IOHIDEventCreateDigitizerEvent");
@@ -330,26 +337,48 @@ int main(int argc, char **argv) {
                     id screen = touchscreens[@(display)];
                     if (screen) ok = sendEvent(screen, touchEvent(phase, tx, ty, 2));
                 } else if (sscanf(line, "angle %lf %c", &angle, &extra) == 1 && isfinite(angle) && angle >= 0 && angle <= 180) {
-                    NSData *payload = hingePayload(angle);
-                    ok = sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
+                    atomic_fetch_add(&hingeGeneration, 1); // cancels a running sweep
+                    __block BOOL sent = NO;
+                    dispatch_sync(hingeQueue, ^{
+                        NSData *payload = hingePayload(angle);
+                        sent = sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
+                    });
+                    ok = sent;
                 } else if (sscanf(line, "sweep %lf %lf %lf %c", &from, &angle, &milliseconds, &extra) == 3 &&
                            isfinite(from) && from >= 0 && from <= 180 &&
                            isfinite(angle) && angle >= 0 && angle <= 180 &&
                            isfinite(milliseconds) && milliseconds >= 0 && milliseconds <= 1500) {
+                    // The sweep animates on the hinge queue and the reply means
+                    // "accepted, first frame dispatched". Touch commands keep
+                    // flowing meanwhile instead of queueing behind ~800 ms of
+                    // frames; a newer sweep or angle cancels the rest.
+                    uint64_t generation = atomic_fetch_add(&hingeGeneration, 1) + 1;
                     int frames = MAX(1, (int)ceil(milliseconds / 16.667));
-                    ok = YES;
-                    for (int i = 1; i <= frames; i++) {
-                        double progress = (double)i / frames;
-                        double eased = 1 - pow(1 - progress, 3);
-                        NSData *payload = hingePayload(from + (angle - from) * eased);
-                        if (!sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0))) {
-                            ok = NO; break;
-                        }
-                        if (i < frames) usleep((useconds_t)(milliseconds * 1000 / frames));
+                    double fromAngle = from, toAngle = angle, duration = milliseconds;
+                    __block BOOL first = NO;
+                    dispatch_sync(hingeQueue, ^{
+                        NSData *payload = hingePayload(fromAngle + (toAngle - fromAngle) * (1 - pow(1 - 1.0 / frames, 3)));
+                        first = sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
+                    });
+                    ok = first;
+                    if (first && frames > 1) {
+                        dispatch_async(hingeQueue, ^{
+                            for (int i = 2; i <= frames; i++) {
+                                usleep((useconds_t)(duration * 1000 / frames));
+                                if (atomic_load(&hingeGeneration) != generation) return;
+                                double eased = 1 - pow(1 - (double)i / frames, 3);
+                                NSData *payload = hingePayload(fromAngle + (toAngle - fromAngle) * eased);
+                                if (!sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0))) return;
+                            }
+                        });
                     }
                 } else if (sscanf(line, "orientation %u %c", &orientation, &extra) == 1) {
                     NSData *payload = orientationPayload(orientation);
-                    if (payload) ok = sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
+                    __block BOOL sent = NO;
+                    if (payload) dispatch_sync(hingeQueue, ^{
+                        sent = sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
+                    });
+                    ok = sent;
                 } else if (sscanf(line, "key %u %u %u %c", &page, &usage, &down, &extra) == 3 && page <= 65535 && usage <= 65535 && down <= 1) {
                     ok = sendEvent(buttons, keyboard(NULL, mach_absolute_time(), page, usage, down, 0));
                 }

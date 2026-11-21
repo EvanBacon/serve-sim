@@ -64,7 +64,7 @@ afterEach(() => {
   consoleError.mockRestore();
 });
 
-function fakeMonitor() {
+function fakeMonitor(onFoldOverlay?: (phase: "start" | "postflight" | "reset") => void) {
   const spawned: { args: string[]; child: FakeChild }[] = [];
   const execs: { args: string[]; options: unknown; callback: ExecCallback; child: FakeChild }[] = [];
   const states: DuoState[] = [];
@@ -80,6 +80,7 @@ function fakeMonitor() {
   }) as unknown as typeof execFile;
   const monitor = new DuoStateMonitor("UDID", (state) => states.push({ ...state }), {
     duoHelper: () => "/cache/serve-sim-duo-hid",
+    onFoldOverlay,
     spawn: fakeSpawn,
     execFile: fakeExecFile,
   });
@@ -262,5 +263,22 @@ describe("Duo panel and orientation watchers", () => {
         UI Orientation: Landscape Right`, "");
     expect(ok.states).toEqual([{ orientations: { cover: "landscape_right" } }]);
     ok.monitor.close();
+  });
+});
+
+describe("Duo fold overlay stream", () => {
+  test("live fold-overlay lines reach onFoldOverlay without touching the panel state", async () => {
+    const phases: string[] = [];
+    const running = fakeMonitor((phase) => phases.push(phase));
+    const stream = running.panelStreams()[0]!;
+    expect(running.spawned.find(({ args }) => args.includes("stream"))!.args.at(-1)).toContain("ContinuousFoldSnapshotOverlay");
+    const z = "x [com.apple.SpringBoard:ZStack] Requested update preferences for <ContinuousFoldSnapshotOverlay> with reason: ";
+    stream.stdout.write(`${z}cloak installed\n${z}cloak reveal began\n${z}snapshot removed at postflight\n`);
+    await flush();
+    expect(phases).toEqual(["start", "postflight"]);
+    expect(running.states.some((state) => state.primaryPanel)).toBe(false);
+    // The boot-log seed keeps the narrower panel-only predicate.
+    expect(running.execs.find(({ args }) => args.includes("show"))!.args.at(-1)).not.toContain("ZStack");
+    running.monitor.close();
   });
 });

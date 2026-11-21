@@ -34,6 +34,20 @@ export function parsePrimaryPanel(line: string): "cover" | "inner" | null {
   return null;
 }
 
+/**
+ * SpringBoard's fold overlay: "cloak installed" starts a fold transition,
+ * "snapshot removed at postflight" is its last step, and the "overlay reset"
+ * that follows ends it. Touches until then belong to the overlay, not the app
+ * (a touch right after postflight was still dropped; one after the final
+ * reset was delivered). "overlay reset" also appears mid-transition.
+ */
+export function parseFoldOverlay(line: string): "start" | "postflight" | "reset" | null {
+  if (!/\[(?:com\.apple\.SpringBoard:)?ZStack\]/.test(line)) return null;
+  const match = /<ContinuousFoldSnapshotOverlay> with reason: (cloak installed|snapshot removed at postflight|overlay reset)\s*$/.exec(line);
+  if (!match) return null;
+  return match[1] === "cloak installed" ? "start" : match[1] === "overlay reset" ? "reset" : "postflight";
+}
+
 export interface DuoState {
   hingeDegrees?: number;
   primaryPanel?: "cover" | "inner";
@@ -47,6 +61,8 @@ export interface DuoStateMonitorOptions {
    * monitor keeps running.
    */
   duoHelper: () => string;
+  /** SpringBoard fold-overlay transitions (see `parseFoldOverlay`). */
+  onFoldOverlay?: (phase: "start" | "postflight" | "reset") => void;
   /** Process launchers; tests substitute fakes. */
   spawn?: typeof spawn;
   execFile?: typeof execFile;
@@ -111,7 +127,9 @@ export class DuoStateMonitor {
       this.onState(this.state);
       this.refreshOrientation();
     };
-    const child = this.spawn("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", predicate]), { stdio: ["ignore", "pipe", "ignore"] });
+    // The live stream also carries the fold overlay; the boot-log seed below does not need it.
+    const streamPredicate = `(${predicate}) OR (process == "SpringBoard" AND category == "ZStack" AND eventMessage CONTAINS "<ContinuousFoldSnapshotOverlay> with reason")`;
+    const child = this.spawn("/usr/bin/xcrun", simctlArguments(["spawn", this.udid, "log", "stream", "--style", "compact", "--predicate", streamPredicate]), { stdio: ["ignore", "pipe", "ignore"] });
     this.panelMonitor = child;
     let pending = "";
     child.stdout.setEncoding("utf8");
@@ -120,6 +138,11 @@ export class DuoStateMonitor {
       const lines = pending.split("\n");
       pending = lines.pop()!.slice(-4096);
       for (const line of lines) {
+        const fold = parseFoldOverlay(line);
+        if (fold) {
+          if (!this.stopped) this.options.onFoldOverlay?.(fold);
+          continue;
+        }
         if (parsePrimaryPanel(line)) liveSample = true;
         accept(line);
       }
