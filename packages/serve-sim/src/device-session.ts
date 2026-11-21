@@ -1,4 +1,5 @@
 import { deviceHubInputShadowedMessage, readDeviceHubInputShadowed } from "./device-hub-input";
+import { DeviceHubInputWatcher, type DeviceHubInputWatch } from "./device-hub-watch";
 import { axTreeHasSoftwareKeyboard, readHardwareKeyboardState, writeHardwareKeyboardState } from "./hardware-keyboard-state";
 import { isModifierUsage } from "./keyboard-modifiers";
 import { DuoRenderer, DuoRendererError, logDuoRendererFailure } from "./duo-renderer";
@@ -320,6 +321,8 @@ export interface DeviceSessionDependencies {
    * this so they never spawn simctl.
    */
   readDeviceHubInputShadowed?: (udid: string) => Promise<boolean | null>;
+  /** Live Device Hub flag watch; production streams it from the guest helper. Null disables it. */
+  watchDeviceHubInput?: ((udid: string, onReading: (shadowed: boolean | null) => void) => DeviceHubInputWatch | null) | null;
   /** Clock for the shadow-flag TTL; defaults to `Date.now`. */
   now?: () => number;
 }
@@ -415,6 +418,9 @@ export class DeviceSession {
   private deviceHubShadowSettled = false;
   /** Single-flight probe; reused so a burst of events cannot spawn overlapping simctl. */
   private deviceHubProbe?: Promise<void>;
+  /** Guest-side flag watch; while it has a reading, per-event checks are free. */
+  private deviceHubWatch?: DeviceHubInputWatch;
+  private deviceHubWatchLive = false;
   /** Tests inject `hid`; production constructs `NativeHid` and must probe live. */
   private readonly usesInjectedHid: boolean;
   /** Active screen recording (one per session), or a start/stop in flight. */
@@ -491,6 +497,7 @@ export class DeviceSession {
       this.phase = "running";
       // Do not await: a wedged notifyutil must not delay the first stream frame.
       void this.refreshDeviceHubInput();
+      this.startDeviceHubWatch();
       void this.warmHomeIndicatorSupport();
       const bufferDefault = this.dependencies?.rollingBuffer !== undefined
         ? this.dependencies.rollingBuffer
@@ -565,6 +572,9 @@ export class DeviceSession {
     }
     for (const stored of this.recordingIndexes.values()) clearTimeout(stored.expiry);
     this.recordingIndexes.clear();
+    this.deviceHubWatch?.close();
+    this.deviceHubWatch = undefined;
+    this.deviceHubWatchLive = false;
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
   }
@@ -1839,6 +1849,8 @@ export class DeviceSession {
   }
 
   private static readonly DEVICE_HUB_SHADOW_RECHECK_MS = 2_000;
+  /** A refusal re-reads after this long, so one refused drag doesn't probe per frame. */
+  private static readonly DEVICE_HUB_SHADOWED_RECHECK_MS = 250;
 
   /** `SERVE_SIM_TOUCH_TRACE=1`: one line per touch frame; see touch-trace.ts. */
   private traceTouch(tag: number, frame: object, width: number, height: number, result: unknown, started: number): void {
@@ -1943,18 +1955,60 @@ export class DeviceSession {
     return probe;
   }
 
-  private maybeRefreshDeviceHubInput(): void {
-    if (this.deviceHubProbe) return;
-    if (this.deviceHubShadowSettled && this.now() - this.deviceHubShadowedAt < DeviceSession.DEVICE_HUB_SHADOW_RECHECK_MS) return;
-    void this.refreshDeviceHubInput();
+  private startDeviceHubWatch(): void {
+    if (this.deviceHubWatch || this.isStopped()) return;
+    const watch = this.dependencies?.watchDeviceHubInput !== undefined
+      ? this.dependencies.watchDeviceHubInput
+      : this.usesInjectedHid
+        ? null
+        : (udid: string, onReading: (shadowed: boolean | null) => void) => new DeviceHubInputWatcher(udid, { helper: duoHidHelperPath, onReading });
+    if (!watch) return;
+    this.deviceHubWatch = watch(this.udid, (shadowed) => this.noteDeviceHubWatchReading(shadowed)) ?? undefined;
   }
 
-  /** True when Device Hub has disconnected legacy HID and the event must not be acked as delivered. */
+  private noteDeviceHubWatchReading(shadowed: boolean | null): void {
+    if (this.isStopped()) return;
+    if (shadowed == null) {
+      // Unknown until the watch restarts: the next event must re-read.
+      this.deviceHubWatchLive = false;
+      this.deviceHubShadowedAt = Number.NEGATIVE_INFINITY;
+      return;
+    }
+    this.deviceHubWatchLive = true;
+    this.deviceHubShadowed = shadowed;
+    this.deviceHubShadowedAt = this.now();
+    this.deviceHubShadowSettled = true;
+    if (shadowed && !this.deviceHubShadowWarned) {
+      this.deviceHubShadowWarned = true;
+      console.warn(`[hid] ${deviceHubInputShadowedMessage(this.udid)}`);
+    }
+    if (!shadowed) this.deviceHubShadowWarned = false;
+  }
+
+  /**
+   * True when Device Hub has disconnected legacy HID and the event must not be
+   * sent or acked as delivered. A legacy event sent through the disconnected
+   * service aborts backboardd (every app dies), so a reading that may be
+   * stale is never trusted for a send:
+   *
+   * - With a live guest watch, its reading is current (≤50 ms) and free.
+   * - Otherwise the event waits for a fresh read when there is no reading,
+   *   the last one is older than the TTL, or it said shadowed (so the first
+   *   event after a repair is not refused on an old value).
+   *
+   * Every event waits on an in-flight probe, which keeps frames in send order.
+   */
   private async legacyInputShadowed(): Promise<boolean> {
-    // Await only when we have no reading yet, and then only the shared probe,
-    // so a burst of events cannot spawn overlapping simctl or complete out of order.
-    if (!this.deviceHubShadowSettled) await this.refreshDeviceHubInput();
-    else this.maybeRefreshDeviceHubInput();
+    if (!this.deviceHubWatch) this.startDeviceHubWatch();
+    if (this.deviceHubProbe) {
+      await this.deviceHubProbe;
+    } else if (!this.deviceHubWatchLive) {
+      const age = this.now() - this.deviceHubShadowedAt;
+      const stale = !this.deviceHubShadowSettled
+        || age >= DeviceSession.DEVICE_HUB_SHADOW_RECHECK_MS
+        || (this.deviceHubShadowed === true && age >= DeviceSession.DEVICE_HUB_SHADOWED_RECHECK_MS);
+      if (stale) await this.refreshDeviceHubInput();
+    }
     return this.deviceHubShadowed === true;
   }
 
@@ -1984,6 +2038,7 @@ export class DeviceSession {
       },
       hid: {
         device_hub_input_shadowed: this.deviceHubShadowed ?? null,
+        device_hub_input_watch: this.deviceHubWatchLive ? "live" : this.deviceHubWatch ? "starting" : "off",
         sockets: this.hidSockets.size,
       },
     };

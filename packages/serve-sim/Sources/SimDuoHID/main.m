@@ -1,7 +1,9 @@
 // Guest HID transport for hinge angles, physical orientation, and hardware buttons.
 // Spawned inside iOS Simulator; one command/reply per line until EOF.
 // `watch-angle` instead streams the hinge angle the guest reports (see watchAngle).
+// `watch-notify <name>` streams a notify(3) state value (see watchNotify).
 #import <Foundation/Foundation.h>
+#import <notify.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
 #import <objc/message.h>
@@ -55,6 +57,42 @@ static int watchAngle(void) {
     char buffer[64];
     while (read(STDIN_FILENO, buffer, sizeof buffer) > 0) {}
     [manager stopAngleUpdates];
+    return 0;
+}
+
+// Prints `state <value>` for the first read and for every change of the
+// notify(3) state `name`, until the parent closes stdin. Used for
+// com.apple.coredevice.dtuhidd.active, the flag Device Hub's dtuhidd sets when
+// it disconnects legacy Indigo input: a legacy touch sent while it is 1 aborts
+// backboardd ("Unable to dispatch event through disconnected service"), so the
+// server must see 0->1 before its next send. notify_get_state is an in-process
+// read, so polling every 50 ms is cheap; setters don't always post, so a
+// notify_register_dispatch alone would miss changes.
+static int watchNotify(const char *name) {
+    int token = 0;
+    if (notify_register_check(name, &token) != NOTIFY_STATUS_OK) {
+        fprintf(stderr, "notify_register_check failed for %s\n", name);
+        return 2;
+    }
+    dispatch_queue_t queue = dispatch_queue_create("serve-sim.notify", DISPATCH_QUEUE_SERIAL);
+    __block uint64_t last = UINT64_MAX;
+    __block BOOL first = YES;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), 50 * NSEC_PER_MSEC, 5 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        uint64_t value = 0;
+        if (notify_get_state(token, &value) != NOTIFY_STATUS_OK) return;
+        if (!first && value == last) return;
+        first = NO;
+        last = value;
+        printf("state %llu\n", (unsigned long long)value);
+        fflush(stdout);
+    });
+    dispatch_resume(timer);
+    char buffer[64];
+    while (read(STDIN_FILENO, buffer, sizeof buffer) > 0) {}
+    dispatch_source_cancel(timer);
+    notify_cancel(token);
     return 0;
 }
 
@@ -140,7 +178,8 @@ static BOOL sendEvent(id service, CFTypeRef event) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc == 2 && strcmp(argv[1], "watch-angle") == 0) return watchAngle();
-        if (argc != 1) { fprintf(stderr, "usage: serve-sim-duo-hid [watch-angle]\n"); return 64; }
+        if (argc == 3 && strcmp(argv[1], "watch-notify") == 0) return watchNotify(argv[2]);
+        if (argc != 1) { fprintf(stderr, "usage: serve-sim-duo-hid [watch-angle | watch-notify <name>]\n"); return 64; }
         dlopen("/System/Library/PrivateFrameworks/HID.framework/HID", RTLD_NOW);
         void *io = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
         CFTypeRef (*vendor)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, const void *, CFIndex, uint32_t) = dlsym(io, "IOHIDEventCreateVendorDefinedEvent");

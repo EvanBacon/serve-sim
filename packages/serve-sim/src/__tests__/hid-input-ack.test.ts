@@ -12,7 +12,7 @@ const ACK_TAG = 0x84;
 
 type Hid = DeviceSessionDependencies["hid"];
 
-function session(hid: Partial<Hid>, readDeviceHubInputShadowed: () => Promise<boolean | null> = async () => null, now?: () => number): {
+function session(hid: Partial<Hid>, readDeviceHubInputShadowed: () => Promise<boolean | null> = async () => null, now?: () => number, watchDeviceHubInput?: DeviceSessionDependencies["watchDeviceHubInput"]): {
   send: (tag: number, payload: unknown) => void;
   replies: Array<{ tag: number; body: Record<string, unknown> }>;
   calls: unknown[][];
@@ -47,6 +47,7 @@ function session(hid: Partial<Hid>, readDeviceHubInputShadowed: () => Promise<bo
     hid: { ...base, ...hid },
     readDeviceHubInputShadowed,
     ...(now ? { now } : {}),
+    ...(watchDeviceHubInput ? { watchDeviceHubInput } : {}),
   });
   const replies: Array<{ tag: number; body: Record<string, unknown> }> = [];
   let receive!: (data: Buffer) => void;
@@ -220,7 +221,7 @@ describe("HID input acknowledgements (#136)", () => {
     ]);
   });
 
-  test("a mid-session repair is picked up on the next event after the TTL refresh settles", async () => {
+  test("a repair is honored by the first event after it: a cached refusal is re-read before refusing", async () => {
     let now = 0;
     let shadowed: boolean | null = true;
     let probes = 0;
@@ -234,19 +235,15 @@ describe("HID input acknowledgements (#136)", () => {
     expect(s.replies[0]!.body.ok).toBe(false);
     expect(s.calls).toEqual([]);
     shadowed = false;
-    now = 2_000;
+    now = 300;
     s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 2 });
     await new Promise((resolve) => setTimeout(resolve, 20));
-    // Cached true is still used; the refresh runs in the background.
-    expect(s.replies[1]!.body.ok).toBe(false);
-    s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 3 });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(s.replies[2]!.body).toEqual({ ack: 3, ok: true });
+    expect(s.replies[1]!.body).toEqual({ ack: 2, ok: true });
     expect(s.calls[0]!.slice(0, 4)).toEqual(["touch", "begin", 0.5, 0.5]);
     expect(probes).toBe(2);
   });
 
-  test("a sync throw in the probe does not pin the in-flight promise, so a later TTL refresh can run", async () => {
+  test("a sync throw in the probe does not pin the in-flight promise, and a stale reading is re-read before sending", async () => {
     let now = 0;
     let probes = 0;
     let shadowed: boolean | "throw" = "throw";
@@ -262,13 +259,52 @@ describe("HID input acknowledgements (#136)", () => {
     expect(probes).toBe(1);
     shadowed = true;
     now = 2_000;
+    // Device Hub attached since the last reading: the stale reading is not
+    // trusted for a send (a legacy touch through a disconnected service aborts
+    // backboardd), so this event waits for a fresh read and is refused.
     s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 2 });
     await settle();
-    // Cached unreadable still fails open; the refresh runs in the background.
-    expect(s.replies[1]!.body.ok).toBe(true);
-    s.send(0x03, { type: "begin", x: 0.5, y: 0.5, ack: 3 });
+    expect(s.replies[1]!.body.ok).toBe(false);
+    expect(probes).toBe(2);
+  });
+
+  test("a live watch reading is used without probing, including 0->1 and 1->0 flips", async () => {
+    let probes = 0;
+    let report!: (shadowed: boolean | null) => void;
+    const s = session({}, async () => { probes += 1; return false; }, () => 0, (_udid, onReading) => {
+      report = onReading;
+      return { close() {} };
+    });
+    // The first event starts the watch; with no reading yet it probes once.
+    s.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 1 });
     await settle();
-    expect(s.replies[2]!.body.ok).toBe(false);
+    report(true);
+    s.send(0x03, { type: "end", x: 0.1, y: 0.1, ack: 2 });
+    await settle();
+    report(false);
+    s.send(0x03, { type: "begin", x: 0.2, y: 0.2, ack: 3 });
+    await settle();
+    expect(s.replies.map((r) => r.body.ok)).toEqual([true, false, true]);
+    expect(s.calls.map((c) => [c[1], c[2]])).toEqual([["begin", 0.1], ["begin", 0.2]]);
+    expect(probes).toBe(1);
+  });
+
+  test("when the watch stops, the next event re-reads instead of trusting the last reading", async () => {
+    let probes = 0;
+    let report!: (shadowed: boolean | null) => void;
+    const s = session({}, async () => { probes += 1; return true; }, () => 10, (_udid, onReading) => {
+      report = onReading;
+      return { close() {} };
+    });
+    s.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 1 });
+    await settle();
+    report(false);
+    s.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 2 });
+    await settle();
+    report(null);
+    s.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 3 });
+    await settle();
+    expect(s.replies.map((r) => r.body.ok)).toEqual([false, true, false]);
     expect(probes).toBe(2);
   });
 });
