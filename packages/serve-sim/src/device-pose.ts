@@ -23,6 +23,8 @@ export type DevicePoseSpec = {
 export const DUO_COVER_SIZE = { width: 1398, height: 2034 } as const;
 export const DUO_INNER_SIZE = { width: 2007, height: 2853 } as const;
 export const DUO_COVER_ACTIVE_BELOW_DEGREES = 90;
+/** Duration of a named pose's guest hinge sweep (HIDInjector.setPose sends `sweep … 800`). */
+export const DUO_POSE_SWEEP_MS = 800;
 
 const PRESETS: readonly DevicePoseSpec[] = DUO_POSES.map(({ id, label, hingeDegrees }) => spec(id, label, hingeDegrees));
 
@@ -77,4 +79,23 @@ export function displaySizeForHingeDegrees(hingeDegrees: number): {
   height: number;
 } {
   return displaySizeForPanel(duoPanel({ hingeDegrees }));
+}
+
+/**
+ * The panel Duo touches go to: the same panel the server treats as active
+ * (primary-panel readback, then the 90° hinge rule), and before either is
+ * known, the panel whose framebuffer is being captured. Cover as a last
+ * resort (a size of 0×0 before the first frame says nothing).
+ */
+export function duoTouchPanel(input: {
+  primaryPanel?: DuoPanel | null;
+  hingeDegrees?: number | null;
+  width: number;
+  height: number;
+}): DuoPanel {
+  if (input.primaryPanel) return input.primaryPanel;
+  if (input.hingeDegrees != null && Number.isFinite(input.hingeDegrees)) return duoPanel({ hingeDegrees: input.hingeDegrees });
+  const [a, b] = [input.width, input.height].sort((x, y) => x - y);
+  if (a === DUO_INNER_SIZE.width && b === DUO_INNER_SIZE.height) return "inner";
+  return "cover";
 }

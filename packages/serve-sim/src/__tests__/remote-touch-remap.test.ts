@@ -117,11 +117,15 @@ describe("CLI touch remap against an authenticated remote preview", () => {
     }, 25_000);
   }
 
-  test("foldables (hingeDegrees set) skip the remap", async () => {
+  // CLI x/y are display coordinates on foldables too: the Duo's /config
+  // reports the active panel's raw size and guest UI orientation (the inner
+  // panel is landscape_left by default), so taps are remapped like any device.
+  test("foldables (hingeDegrees set) remap display coords like other devices", async () => {
     configBody = { ...LANDSCAPE_LEFT, hingeDegrees: 180 };
     const r = await runCli(["tap", "0.715", "0.343", ...remote]);
     expect(r.status).toBe(0);
-    expect(touches[0]).toMatchObject({ type: "begin", x: 0.715, y: 0.343 });
+    expect(touches[0]!.x).toBeCloseTo(0.343, 6);
+    expect(touches[0]!.y).toBeCloseTo(0.285, 6);
     expect(r.stderr).not.toContain("remap skipped");
   }, 25_000);
 

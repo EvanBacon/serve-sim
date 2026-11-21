@@ -5,7 +5,9 @@ import { simctlArguments } from "./simctl";
 const exec = promisify(execFile);
 type Run = (args: string[]) => Promise<string>;
 const run: Run = async (args) => (await exec("/usr/bin/xcrun", args, { timeout: 5000 })).stdout;
-const key = "com.apple.coredevice.dtuhidd.active";
+/** notify(3) state Device Hub's guest dtuhidd sets to 1 when it disconnects legacy input. */
+export const DEVICE_HUB_INPUT_KEY = "com.apple.coredevice.dtuhidd.active";
+const key = DEVICE_HUB_INPUT_KEY;
 
 export function isDeviceHubInputShadowed(output: string): boolean {
   return output.trim() === `${key} 1`;

@@ -1,4 +1,5 @@
 import { deviceHubInputShadowedMessage, readDeviceHubInputShadowed } from "./device-hub-input";
+import { DeviceHubInputWatcher, type DeviceHubInputWatch } from "./device-hub-watch";
 import { axTreeHasSoftwareKeyboard, readHardwareKeyboardState, writeHardwareKeyboardState } from "./hardware-keyboard-state";
 import { isModifierUsage } from "./keyboard-modifiers";
 import { DuoRenderer, DuoRendererError, logDuoRendererFailure } from "./duo-renderer";
@@ -23,7 +24,9 @@ import { redactHome } from "./diagnostics-redact";
  */
 import { DuoStateMonitor, type DuoState } from "./duo-state";
 import type { IncomingMessage, ServerResponse } from "http";
-import { displaySizeForPanel, duoPanel, resolveDevicePose, type DuoPanel } from "./device-pose";
+import { DUO_POSE_SWEEP_MS, displaySizeForHingeDegrees, displaySizeForPanel, duoPanel, duoTouchPanel, resolveDevicePose, type DuoPanel } from "./device-pose";
+import { formatTouchTrace, touchTraceEnabled } from "./touch-trace";
+import { FoldGate } from "./fold-gate";
 import {
   NativeCapture,
   NativeHid,
@@ -31,6 +34,7 @@ import {
   axDescribeAsync,
   axFrontmostAsync,
   duoHidHelperPath,
+  type GuestDisplay,
   homeButtonSessionRoute,
   type MjpegFrame,
 } from "./native";
@@ -80,6 +84,8 @@ import {
   parseRollingBufferQuery,
   type RollingBufferOptions,
 } from "./rolling-buffer";
+
+const TOUCH_TRACE = touchTraceEnabled();
 
 /**
  * Minimal WebSocket surface the HID input channel needs. Satisfied by both the
@@ -276,14 +282,20 @@ type HidTransport = {
   | "hardwareKeyboard"
   | "pose"
   | "hinge"
-> & Partial<Pick<NativeHid, "close" | "isFoldable">>;
+> & Partial<Pick<NativeHid, "close" | "isFoldable" | "guestTouch" | "guestMultiTouch" | "warmGuestHelper">>;
 
 export interface DeviceSessionDependencies {
   capture: CaptureTransport;
   hid: HidTransport;
   createDuoRenderer?: (onFailure: (error: DuoRendererError) => void) => Pick<DuoRenderer, "render" | "close">;
   /** `duoHelper` resolves the launchable guest helper (may run `codesign`); call it lazily. */
-  createDuoMonitor?: (udid: string, onState: (state: DuoState) => void, duoHelper: () => string) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  createDuoMonitor?: (udid: string, onState: (state: DuoState) => void, duoHelper: () => string, onFoldOverlay?: (phase: "start" | "postflight" | "reset") => void) => Pick<DuoStateMonitor, "close" | "refreshOrientation">;
+  /** How long a named pose's guest sweep runs after it is accepted (the helper replies at the first frame). */
+  poseSweepMs?: number;
+  /** Fold-transition tracking; tests inject one with fake timers. */
+  foldGate?: FoldGate;
+  /** How long the first Duo touch waits for a panel/hinge readback (default 2 s). */
+  duoStateWaitMs?: number;
   /** Server-side recording cap; defaults to `MAX_RECORDING_MS`. */
   maxRecordingMs?: number;
   /** How long a capped file is held for its owner; defaults to `RECORDING_HOLD_MS`. */
@@ -317,6 +329,8 @@ export interface DeviceSessionDependencies {
    * this so they never spawn simctl.
    */
   readDeviceHubInputShadowed?: (udid: string) => Promise<boolean | null>;
+  /** Live Device Hub flag watch; production streams it from the guest helper. Null disables it. */
+  watchDeviceHubInput?: ((udid: string, onReading: (shadowed: boolean | null) => void) => DeviceHubInputWatch | null) | null;
   /** Clock for the shadow-flag TTL; defaults to `Date.now`. */
   now?: () => number;
 }
@@ -389,6 +403,18 @@ export class DeviceSession {
   private duoMonitor?: Pick<DuoStateMonitor, "close" | "refreshOrientation">;
   private followedCover?: boolean;
   private primaryDuoPanel?: DuoPanel;
+  /** Set once `isFoldable` resolves true; Duo touches then prefer the guest digitizer. */
+  private foldable = false;
+  private foldableLookup?: Promise<boolean>;
+  /** Resolves once the Duo monitor has reported a primary panel or a hinge angle. */
+  private duoStateKnown: Promise<void>;
+  private resolveDuoStateKnown!: () => void;
+  /** Transport chosen at a gesture's begin, kept until its end (never switch mid-gesture). */
+  private touchRoute?: "guest" | "legacy" | "rejected";
+  /** Touch frames (0x03/0x05/AX taps) run one at a time, so a held gesture keeps its order. */
+  private touchQueue: Promise<unknown> = Promise.resolve();
+  private readonly foldGate: FoldGate;
+  private multiTouchRoute?: "guest" | "legacy" | "rejected";
   private poseQueue: Promise<void> = Promise.resolve();
   // The guest has no getter, and initial visibility after boot isn't
   // predictable from earlier boots. An explicit set lasts for the boot, so it
@@ -412,6 +438,9 @@ export class DeviceSession {
   private deviceHubShadowSettled = false;
   /** Single-flight probe; reused so a burst of events cannot spawn overlapping simctl. */
   private deviceHubProbe?: Promise<void>;
+  /** Guest-side flag watch; while it has a reading, per-event checks are free. */
+  private deviceHubWatch?: DeviceHubInputWatch;
+  private deviceHubWatchLive = false;
   /** Tests inject `hid`; production constructs `NativeHid` and must probe live. */
   private readonly usesInjectedHid: boolean;
   /** Active screen recording (one per session), or a start/stop in flight. */
@@ -426,6 +455,8 @@ export class DeviceSession {
 
   constructor(public readonly udid: string, private readonly dependencies?: DeviceSessionDependencies) {
     this.usesInjectedHid = dependencies?.hid != null;
+    this.foldGate = dependencies?.foldGate ?? new FoldGate();
+    this.duoStateKnown = new Promise((resolve) => { this.resolveDuoStateKnown = resolve; });
     this.hid = dependencies?.hid ?? new NativeHid(udid, {
       getOrientation: () => this.homeButtonRoute().orientation ?? undefined,
       isInputShadowed: () => this.homeButtonRoute().inputShadowed === true,
@@ -488,24 +519,26 @@ export class DeviceSession {
       this.phase = "running";
       // Do not await: a wedged notifyutil must not delay the first stream frame.
       void this.refreshDeviceHubInput();
+      this.startDeviceHubWatch();
       void this.warmHomeIndicatorSupport();
       const bufferDefault = this.dependencies?.rollingBuffer !== undefined
         ? this.dependencies.rollingBuffer
         : parseRollingBufferEnv();
       if (bufferDefault && this.supportsBuffer()) this.startBuffer(bufferDefault);
-      if (await this.hid.isFoldable?.() && !this.isStopped()) {
+      if (await this.isFoldable() && !this.isStopped()) {
+        void this.hid.warmGuestHelper?.();
         const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
         if (this.isStopped()) {
           await unsubscribe();
           return;
         }
         this.unsubscribeMjpeg = unsubscribe;
-        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState, duoHelper) => new DuoStateMonitor(udid, onState, { duoHelper }));
+        const createMonitor = this.dependencies?.createDuoMonitor ?? ((udid, onState, duoHelper, onFoldOverlay) => new DuoStateMonitor(udid, onState, { duoHelper, onFoldOverlay }));
         this.duoMonitor = createMonitor(this.udid, (state) => {
           void this.followDuoState(state).catch((error) => {
             console.error("[duo] State update failed:", error);
           });
-        }, duoHidHelperPath);
+        }, duoHidHelperPath, (phase) => this.foldGate.overlay(phase));
       }
     })().catch((error) => {
       // Failed DeviceSession instances are evicted by the registry below. Keep
@@ -562,6 +595,10 @@ export class DeviceSession {
     }
     for (const stored of this.recordingIndexes.values()) clearTimeout(stored.expiry);
     this.recordingIndexes.clear();
+    this.foldGate.close();
+    this.deviceHubWatch?.close();
+    this.deviceHubWatch = undefined;
+    this.deviceHubWatchLive = false;
     this.runCleanup("HID close", () => this.hid.close?.());
     this.runCleanup("capture stop", () => this.capture.stop());
   }
@@ -580,6 +617,7 @@ export class DeviceSession {
     if (this.isStopped()) return;
     if (state.hingeDegrees != null) this.duo.noteHinge(state.hingeDegrees);
     if (state.primaryPanel) this.primaryDuoPanel = state.primaryPanel;
+    if (this.primaryDuoPanel || this.duo.hinge != null) this.resolveDuoStateKnown();
     const panel = this.activePanel();
     const size = displaySizeForPanel(panel);
     if ((state.hingeDegrees != null || state.primaryPanel) && (panel === "cover") !== this.followedCover) {
@@ -826,15 +864,14 @@ export class DeviceSession {
    */
   private async injectTap(point: { x: number; y: number }, holdMs: number): Promise<void> {
     await this.start();
-    if (await this.legacyInputShadowed()) {
-      throw new AxAgentError(503, "input_shadowed", deviceHubInputShadowedMessage(this.udid));
-    }
     if (this.width === 0 || this.height === 0) throw new Error("Screen size is not known yet; retry in a moment.");
     const orientation = cliInputOrientation(this.screenConfig());
     const touch = async (type: "begin" | "end") => {
       const raw = displayTouchToRaw({ type, x: point.x, y: point.y }, orientation);
-      this.recordTouchEvent(raw);
-      await this.hid.touch(type, raw.x, raw.y, this.width, this.height, 0);
+      const result = await this.serialTouch(() => this.deliverTouch(raw, this.width, this.height));
+      if (isShadowedInputResult(result)) {
+        throw new AxAgentError(503, "input_shadowed", deviceHubInputShadowedMessage(this.udid));
+      }
     };
     await touch("begin");
     await new Promise((resolve) => setTimeout(resolve, holdMs));
@@ -1409,12 +1446,12 @@ export class DeviceSession {
       // Touch and button resolve whether the injector delivered the event; the
       // socket handler turns that into an ack when the frame asked for one.
       case 0x03: {
-        const raw = json<{ type: string; x: number; y: number; edge?: number; ack?: number }>();
+        const raw = json<{ type: string; x: number; y: number; edge?: number; panel?: string; ack?: number }>();
         if (!raw) return false;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
-        const m = withoutAck(raw);
-        this.recordTouchEvent(m);
-        return this.hid.touch(m.type as "begin" | "move" | "end", m.x, m.y, W, H, m.edge ?? 0);
+        const started = TOUCH_TRACE ? Date.now() : 0;
+        const result = await this.serialTouch(() => this.deliverTouch(withoutAck(raw), W, H));
+        if (TOUCH_TRACE) this.traceTouch(tag, raw, W, H, isShadowedInputResult(result) ? "shadowed" : result, started, this.touchRoute);
+        return result;
       }
       case 0x04: {
         const raw = json<{ button: string; page?: number; usage?: number; phase?: string; ack?: number }>();
@@ -1436,11 +1473,12 @@ export class DeviceSession {
         return this.hid.button(m.button);
       }
       case 0x05: {
-        const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number }>();
+        const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number; panel?: string }>();
         if (!m) break;
-        if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
-        this.recordHidEvent(tag, m);
-        return (await this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H)) !== false;
+        const started = TOUCH_TRACE ? Date.now() : 0;
+        const result = await this.serialTouch(() => this.deliverMultiTouch(m, W, H));
+        if (TOUCH_TRACE) this.traceTouch(tag, m, W, H, isShadowedInputResult(result) ? "shadowed" : result, started, this.multiTouchRoute);
+        return result;
       }
       case 0x06: {
         const m = json<{ type: string; usage: number }>();
@@ -1551,11 +1589,20 @@ export class DeviceSession {
           if (!spec) break;
           const from = this.duo.displayAngle();
           this.duo.beginPose(from, spec.hingeDegrees);
+          // Only a pose that changes panels shows SpringBoard's fold overlay
+          // (book ↔ open stays on the inner one); a guest overlay still starts
+          // the gate from the log either way.
+          if (spec.coverActive !== (this.activePanel() === "cover")) this.foldGate.begin("pose", spec.coverActive ? "cover" : "inner");
           const accepted = await this.hid.pose(m.pose, from);
           if (!accepted) {
             this.duo.cancelPose();
             break;
           }
+          // The guest helper replies once the sweep starts, so touches are not
+          // queued behind it on the HID actor; wait out the sweep here instead.
+          const sweepMs = this.dependencies?.poseSweepMs ?? (this.usesInjectedHid ? 0 : DUO_POSE_SWEEP_MS);
+          if (sweepMs > 0) await new Promise((resolve) => setTimeout(resolve, sweepMs));
+          if (this.isStopped()) return false;
           this.duo.finishPose(spec.hingeDegrees);
           await this.followDuoState({ hingeDegrees: spec.hingeDegrees, orientations: {} });
           this.duoMonitor?.refreshOrientation();
@@ -1563,6 +1610,8 @@ export class DeviceSession {
           this.duo.requestFrame();
           return true;
         } else if (typeof m.hinge === "number" && Number.isFinite(m.hinge) && m.hinge >= 0 && m.hinge <= 180) {
+          const target = displaySizeForHingeDegrees(m.hinge).coverActive ? "cover" : "inner";
+          if (target !== this.activePanel()) this.foldGate.begin("hinge", target);
           if (!await this.hid.hinge(m.hinge)) break;
           this.duo.cancelPose();
           await this.followDuoState({ hingeDegrees: m.hinge, orientations: {} });
@@ -1710,13 +1759,15 @@ export class DeviceSession {
 
   // ── Config ───────────────────────────────────────────────────────────────
 
-  screenConfig(): { width: number; height: number; orientation: string; hingeDegrees?: number; duoViewOrientation?: string } {
+  screenConfig(): { width: number; height: number; orientation: string; hingeDegrees?: number; duoViewOrientation?: string; duoPanel?: DuoPanel } {
     const hingeDegrees = this.duo.hinge;
     return {
       width: this.width,
       height: this.height,
       orientation: this.orientation,
       ...(hingeDegrees == null ? {} : { hingeDegrees, duoViewOrientation: this.duo.viewOrientationName }),
+      // The panel touches go to, so CLI clients can see what they target.
+      ...(this.foldable ? { duoPanel: this.touchPanel() } : {}),
     };
   }
 
@@ -1824,6 +1875,174 @@ export class DeviceSession {
   }
 
   private static readonly DEVICE_HUB_SHADOW_RECHECK_MS = 2_000;
+  /** A refusal re-reads after this long, so one refused drag doesn't probe per frame. */
+  private static readonly DEVICE_HUB_SHADOWED_RECHECK_MS = 250;
+
+  /** One `isFoldable` lookup per session; a touch can arrive before `start()` has asked. */
+  private async isFoldable(): Promise<boolean> {
+    this.foldableLookup ??= Promise.resolve(this.hid.isFoldable?.() ?? false).then((foldable) => foldable === true, () => false);
+    this.foldable = await this.foldableLookup;
+    return this.foldable;
+  }
+
+  /**
+   * Before a gesture on a Duo: know it is a Duo, and if the monitor has not
+   * reported a panel or hinge yet (the first touch right after the server
+   * starts), wait briefly for it rather than guessing the cover.
+   */
+  private async readyForDuoTouch(): Promise<void> {
+    if (!(await this.isFoldable())) return;
+    if (this.primaryDuoPanel || this.duo.hinge != null) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.duoStateKnown,
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, this.dependencies?.duoStateWaitMs ?? DeviceSession.DUO_STATE_WAIT_MS); timer.unref?.(); }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  private static readonly DUO_STATE_WAIT_MS = 2_000;
+
+  /** The panel Duo touches go to; see `duoTouchPanel`. */
+  private touchPanel(): DuoPanel {
+    return duoTouchPanel({ primaryPanel: this.primaryDuoPanel, hingeDegrees: this.duo.hinge, width: this.width, height: this.height });
+  }
+
+  /** The Duo guest display for touches. */
+  private guestDisplay(): GuestDisplay {
+    return this.touchPanel() === "inner" ? "primary-1" : "primary";
+  }
+
+  /**
+   * Size passed with a legacy touch; native picks the Indigo target from it.
+   * On a Duo that is the touch panel's size, so the target follows the
+   * server's panel rather than the last captured frame (which lags a fold
+   * and is 0×0 before the first frame, leaving the previous target).
+   */
+  private legacyTouchSize(width: number, height: number): { width: number; height: number } {
+    if (!this.foldable) return { width, height };
+    return displaySizeForPanel(this.touchPanel());
+  }
+
+  /**
+   * Choose a gesture's transport at its begin. Duo touches, including home
+   * edge swipes (the guest digitizer carries the edge), use the guest helper:
+   * it works while Device Hub has disconnected legacy input.
+   */
+  private chooseRoute(): "guest" | "legacy" {
+    return this.foldable && this.hid.guestTouch ? "guest" : "legacy";
+  }
+
+  private serialTouch<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.touchQueue.then(fn, fn);
+    this.touchQueue = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * A gesture that begins during a fold waits for SpringBoard's fold overlay
+   * to go away (it swallows touches). It is then delivered unless it was
+   * aimed at a panel that is no longer active: it is refused, never
+   * redirected. The aim is the panel the viewer showed (`panel` on begin),
+   * else the fold's target (a CLI tap after `fold`/a pose means the new
+   * panel), else whichever panel is active once the fold settles.
+   * Null means deliver.
+   */
+  private async holdForFold(panel: unknown): Promise<ShadowedInputResult | null> {
+    if (!this.foldable) return null;
+    const settled = this.foldGate.whenSettled();
+    if (!settled) return null;
+    const aimed = panel === "cover" || panel === "inner" ? panel : this.foldGate.target;
+    await settled;
+    // Panel readback can trail the overlay slightly; let a pending update land.
+    await this.duoStateQueue;
+    const now = this.touchPanel();
+    if (!aimed || now === aimed) return null;
+    return { ok: false, error: `Fold in progress: the touch was aimed at the ${aimed} display, but the ${now} display is active now. Retry the touch.` };
+  }
+
+  /** One single-finger touch frame, guest or legacy; legacy is refused while shadowed. */
+  private async deliverTouch(m: { type: string; x: number; y: number; edge?: number; panel?: unknown }, W: number, H: number): Promise<boolean | ShadowedInputResult> {
+    const type = m.type as "begin" | "move" | "end";
+    if (type === "begin") {
+      await this.readyForDuoTouch();
+      const refused = await this.holdForFold(m.panel);
+      if (refused) {
+        this.touchRoute = "rejected";
+        return refused;
+      }
+    }
+    if (this.touchRoute === "rejected" && type !== "begin") {
+      if (type === "end") this.touchRoute = undefined;
+      return false;
+    }
+    if (type === "begin" || !this.touchRoute) this.touchRoute = this.chooseRoute();
+    const route = this.touchRoute;
+    if (type === "end") this.touchRoute = undefined;
+    if (route === "guest") {
+      this.recordTouchEvent(m);
+      if (await this.hid.guestTouch!(this.guestDisplay(), type, m.x, m.y, m.edge ?? 0)) return true;
+      // Never switch transports mid-gesture; a failed begin may fall back.
+      if (type !== "begin") return false;
+      this.touchRoute = "legacy";
+    }
+    if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+    if (route !== "guest") this.recordTouchEvent(m);
+    const size = this.legacyTouchSize(W, H);
+    return (await this.hid.touch(type, m.x, m.y, size.width, size.height, m.edge ?? 0)) === true;
+  }
+
+  private async deliverMultiTouch(m: { type: string; x1: number; y1: number; x2: number; y2: number; panel?: unknown }, W: number, H: number): Promise<boolean | ShadowedInputResult> {
+    const type = m.type as "begin" | "move" | "end";
+    if (type === "begin") {
+      await this.readyForDuoTouch();
+      const refused = await this.holdForFold(m.panel);
+      if (refused) {
+        this.multiTouchRoute = "rejected";
+        return refused;
+      }
+    }
+    if (this.multiTouchRoute === "rejected" && type !== "begin") {
+      if (type === "end") this.multiTouchRoute = undefined;
+      return false;
+    }
+    if (type === "begin" || !this.multiTouchRoute) this.multiTouchRoute = this.foldable && this.hid.guestMultiTouch ? "guest" : "legacy";
+    const route = this.multiTouchRoute;
+    if (type === "end") this.multiTouchRoute = undefined;
+    if (route === "guest") {
+      this.recordHidEvent(0x05, m);
+      if (await this.hid.guestMultiTouch!(this.guestDisplay(), type, m.x1, m.y1, m.x2, m.y2)) return true;
+      if (type !== "begin") return false;
+      this.multiTouchRoute = "legacy";
+    }
+    if (await this.legacyInputShadowed()) return shadowedInputResult(this.udid);
+    if (route !== "guest") this.recordHidEvent(0x05, m);
+    const size = this.legacyTouchSize(W, H);
+    return (await this.hid.multiTouch(type, m.x1, m.y1, m.x2, m.y2, size.width, size.height)) !== false;
+  }
+
+  /** `SERVE_SIM_TOUCH_TRACE=1`: one line per touch frame; see touch-trace.ts. */
+  private traceTouch(tag: number, frame: object, width: number, height: number, result: unknown, started: number, route?: string): void {
+    const foldable = this.primaryDuoPanel != null || this.duo.hinge != null;
+    console.log(formatTouchTrace({
+      tag,
+      udid: this.udid,
+      frame: frame as Record<string, unknown>,
+      width,
+      height,
+      orientation: this.orientation,
+      duo: foldable ? {
+        hingeDegrees: this.duo.hinge ?? null,
+        primaryPanel: this.primaryDuoPanel ?? null,
+        activePanel: this.activePanel(),
+        followedCover: this.followedCover ?? null,
+      } : undefined,
+      shadowed: this.deviceHubShadowed ?? null,
+      route: route ?? null,
+      result,
+      elapsedMs: Date.now() - started,
+    }));
+  }
 
   private now(): number {
     return this.dependencies?.now?.() ?? Date.now();
@@ -1906,18 +2125,60 @@ export class DeviceSession {
     return probe;
   }
 
-  private maybeRefreshDeviceHubInput(): void {
-    if (this.deviceHubProbe) return;
-    if (this.deviceHubShadowSettled && this.now() - this.deviceHubShadowedAt < DeviceSession.DEVICE_HUB_SHADOW_RECHECK_MS) return;
-    void this.refreshDeviceHubInput();
+  private startDeviceHubWatch(): void {
+    if (this.deviceHubWatch || this.isStopped()) return;
+    const watch = this.dependencies?.watchDeviceHubInput !== undefined
+      ? this.dependencies.watchDeviceHubInput
+      : this.usesInjectedHid
+        ? null
+        : (udid: string, onReading: (shadowed: boolean | null) => void) => new DeviceHubInputWatcher(udid, { helper: duoHidHelperPath, onReading });
+    if (!watch) return;
+    this.deviceHubWatch = watch(this.udid, (shadowed) => this.noteDeviceHubWatchReading(shadowed)) ?? undefined;
   }
 
-  /** True when Device Hub has disconnected legacy HID and the event must not be acked as delivered. */
+  private noteDeviceHubWatchReading(shadowed: boolean | null): void {
+    if (this.isStopped()) return;
+    if (shadowed == null) {
+      // Unknown until the watch restarts: the next event must re-read.
+      this.deviceHubWatchLive = false;
+      this.deviceHubShadowedAt = Number.NEGATIVE_INFINITY;
+      return;
+    }
+    this.deviceHubWatchLive = true;
+    this.deviceHubShadowed = shadowed;
+    this.deviceHubShadowedAt = this.now();
+    this.deviceHubShadowSettled = true;
+    if (shadowed && !this.deviceHubShadowWarned) {
+      this.deviceHubShadowWarned = true;
+      console.warn(`[hid] ${deviceHubInputShadowedMessage(this.udid)}`);
+    }
+    if (!shadowed) this.deviceHubShadowWarned = false;
+  }
+
+  /**
+   * True when Device Hub has disconnected legacy HID and the event must not be
+   * sent or acked as delivered. A legacy event sent through the disconnected
+   * service aborts backboardd (every app dies), so a reading that may be
+   * stale is never trusted for a send:
+   *
+   * - With a live guest watch, its reading is current (≤50 ms) and free.
+   * - Otherwise the event waits for a fresh read when there is no reading,
+   *   the last one is older than the TTL, or it said shadowed (so the first
+   *   event after a repair is not refused on an old value).
+   *
+   * Every event waits on an in-flight probe, which keeps frames in send order.
+   */
   private async legacyInputShadowed(): Promise<boolean> {
-    // Await only when we have no reading yet, and then only the shared probe,
-    // so a burst of events cannot spawn overlapping simctl or complete out of order.
-    if (!this.deviceHubShadowSettled) await this.refreshDeviceHubInput();
-    else this.maybeRefreshDeviceHubInput();
+    if (!this.deviceHubWatch) this.startDeviceHubWatch();
+    if (this.deviceHubProbe) {
+      await this.deviceHubProbe;
+    } else if (!this.deviceHubWatchLive) {
+      const age = this.now() - this.deviceHubShadowedAt;
+      const stale = !this.deviceHubShadowSettled
+        || age >= DeviceSession.DEVICE_HUB_SHADOW_RECHECK_MS
+        || (this.deviceHubShadowed === true && age >= DeviceSession.DEVICE_HUB_SHADOWED_RECHECK_MS);
+      if (stale) await this.refreshDeviceHubInput();
+    }
     return this.deviceHubShadowed === true;
   }
 
@@ -1947,6 +2208,7 @@ export class DeviceSession {
       },
       hid: {
         device_hub_input_shadowed: this.deviceHubShadowed ?? null,
+        device_hub_input_watch: this.deviceHubWatchLive ? "live" : this.deviceHubWatch ? "starting" : "off",
         sockets: this.hidSockets.size,
       },
     };

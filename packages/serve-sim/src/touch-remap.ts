@@ -35,12 +35,21 @@ export interface DisplayTouch {
  * are already landscape, for foldables (a `hingeDegrees` reading means the
  * viewer renders the Duo projection, which sends touches unrotated), and for
  * missing or malformed config.
+ *
+ * `includeFoldables` is for `serve-sim tap` / `gesture`, whose x/y are display
+ * (screenshot) coordinates: on a Duo `/config` reports the active panel's raw
+ * size and its guest UI orientation (the inner panel is `landscape_left` in the
+ * default pose), so the same remap applies. The viewer and AX-ref taps send
+ * panel-native points and keep the default.
  */
-export function cliInputOrientation(config: unknown): SimulatorOrientation | undefined {
+export function cliInputOrientation(
+  config: unknown,
+  options: { includeFoldables?: boolean } = {},
+): SimulatorOrientation | undefined {
   if (!config || typeof config !== "object") return undefined;
   const c = config as Partial<StreamConfig>;
   if (typeof c.width !== "number" || typeof c.height !== "number") return undefined;
-  if (typeof c.hingeDegrees === "number") return undefined;
+  if (typeof c.hingeDegrees === "number" && !options.includeFoldables) return undefined;
   const orientation = ORIENTATIONS.has(c.orientation as SimulatorOrientation)
     ? c.orientation
     : undefined;

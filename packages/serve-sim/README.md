@@ -80,10 +80,25 @@ including intermediate poses that depend on whether you were opening or closing.
 Until guest readback arrives, a 90° threshold provides the initial fallback.
 The runtime decides which intermediate poses apps adopt.
 
-Xcode 27 Device Hub can disconnect legacy touch/keyboard services. If input
-stops working, run `serve-sim repair-input -d <udid>`. **This restarts SpringBoard
-and closes running apps.** Restart serve-sim afterward to reconnect guest HID
-services, then reopen your app. This repair is explicit, never automatic.
+Duo touches (taps, drags, two-finger, `serve-sim tap`/`gesture`, `tap @eN`) go
+through touchscreen digitizers that `serve-sim-duo-hid` registers inside the
+simulator, one per panel. They keep working while Xcode 27 Device Hub is attached,
+which disconnects the legacy touch/keyboard path (Device Hub attaches to every
+simulator that boots while it is running). Home-edge swipes carry their edge on
+that path too, so swipe-up-to-home works on both panels. `serve-sim tap`/`gesture` coordinates are display (screenshot) coordinates on
+the Duo too, remapped to the panel's orientation.
+
+A touch that starts while the Duo is folding is held until SpringBoard's fold
+transition finishes (it swallows touches until then), then delivered to the panel
+it was aimed at. If that panel is no longer active, the touch is refused with a
+`Fold in progress` error instead of landing on the other panel.
+
+On other devices, and for keyboard input, Device Hub's disconnection still blocks
+legacy input: serve-sim refuses it (sending it would crash `backboardd` and close
+every app) and tells you to run `serve-sim repair-input -d <udid>`. **This restarts
+SpringBoard and closes running apps.** Restart serve-sim afterward to reconnect the
+legacy HID client, then reopen your app. This repair is explicit, never automatic.
+A Duo's guest helper reconnects on its own after the restart.
 
 If Device Hub is stuck on “Connecting display…” and `xcrun simctl io <udid>
 enumerate` lists no framebuffer ports, streaming cannot start until the simulator's

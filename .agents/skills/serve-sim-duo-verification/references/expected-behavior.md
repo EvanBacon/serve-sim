@@ -1,6 +1,6 @@
 # iPhone Duo feature contract and regression checklist
 
-Updated September 23, 2026. These are the expected behaviors to preserve when
+Updated November 20, 2026. These are the expected behaviors to preserve when
 changing rendering, capture, gestures, hardware controls, or toolbar layout.
 Use [verification.md](verification.md) for historical validation; its earlier
 2D-mode descriptions and instant-angle matrix do not define the current UI.
@@ -72,6 +72,28 @@ Use [verification.md](verification.md) for historical validation; its earlier
   their new orientation. Selection remains attached to the current fold pose.
 - [ ] Touches map to the correct location on both bent screen halves, including
   after rotation and resolution changes. Hardware controls do not send screen taps.
+- [ ] Touch goes through the guest helper's per-panel digitizers (`primary` =
+  cover, `primary-1` = inner, bound by CADisplay uniqueId) and keeps working with
+  Device Hub attached (`com.apple.coredevice.dtuhidd.active` = 1), without
+  `repair-input`. Home-edge swipes go the same way: the helper ORs the edge's
+  event-mask bits (SimulatorKit's table: left 0x02040000, top 0x08040000,
+  bottom 0x01040000, right 0x04040000), so swipe-up goes home on both panels
+  with Device Hub attached. A legacy event is never sent while shadowed: it
+  aborts backboardd.
+- [ ] The Device Hub flag is watched live in the guest (`watch-notify`). Reboot
+  the Duo under a running server: post-boot touches are not sent through legacy
+  input, and no `backboardd-*.ips` crash report appears.
+- [ ] After backboardd restarts (`repair-input`), touch and pose work without
+  restarting serve-sim: the helper exits and is respawned.
+- [ ] A touch that starts during a fold is held until SpringBoard's fold overlay
+  finishes (the "overlay reset" after "snapshot removed at postflight", plus
+  ~350 ms), then delivered to the panel it was aimed at. It is never redirected:
+  a viewer touch on the panel that folded away gets `ok:false "Fold in progress"`.
+  A pose sweep never blocks touches.
+- [ ] The first touch after the server starts goes to the active panel (it waits
+  for the first panel/hinge readback), not the cover by default.
+- [ ] `serve-sim tap`/`gesture` take display coordinates on both panels (the inner
+  panel's UI is landscape_left by default), so taps from a screenshot land.
 - [ ] Swipe-to-home works on cover and inner displays in every orientation.
   Detect the home edge in guest framebuffer coordinates and preserve its edge
   marker through begin, move, release, and cancellation.
@@ -144,6 +166,10 @@ Use [verification.md](verification.md) for historical validation; its earlier
    for actual app content, dimensions, and colors; do not accept exit code alone.
 8. Restart the server with the preview open and verify stream recovery.
 
+Touch reliability is measured end to end with the probe app and harness in
+`packages/serve-sim/scripts/` (see `duo-touch-probe/README.md`): delivery,
+accuracy, display and latency per pose and path, including fold transitions.
+
 Relevant automated suites in `packages/serve-sim/src/__tests__`:
 
 | Area | Suites |
@@ -151,6 +177,7 @@ Relevant automated suites in `packages/serve-sim/src/__tests__`:
 | One-mode preview and pose toolbar | `duo-preview.test.ts`, `device-hinge-controls.test.tsx`, `duo-pose-buttons.test.tsx` |
 | Physical anchors, rotation, pose identity | `duo-controls-position.test.ts` |
 | Bent-screen touch mapping | `duo-projection.test.ts`, `duo-ax-frame.test.ts`, `duo-home-gesture.test.ts` |
+| Touch routing, fold hold, Device Hub watch | `duo-guest-touch.test.ts`, `fold-gate.test.ts`, `device-hub-watch.test.ts`, `hid-input-ack.test.ts`, `touch-remap.test.ts` |
 | Static-frame redraw, rotation, one-shot ≤1500 settle sharpen, lifecycle | `device-session-lifecycle.test.ts`, `duo-preview-stream.test.ts` |
 | Panel selection and screenshots | `device-displays.test.ts`, `screenshot-toast.test.tsx` |
 | Stream framing | `mjpeg-frame-parser.test.ts`, `duo-frame-parser.test.ts` |

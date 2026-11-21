@@ -33,11 +33,24 @@ final class DuoHIDBridge {
         output = nil
     }
 
+    /// Send one command and wait for its OK/ERROR line. A helper that exits
+    /// without replying (it exits itself when the guest's backboardd is
+    /// replaced, e.g. by `repair-input`, because its HID services are dead) is
+    /// respawned and the command retried once: nothing was dispatched.
     func send(_ command: String) -> Bool {
+        switch attempt(command) {
+        case .reply(let ok): return ok
+        case .noReply: return attempt(command) == .reply(true)
+        }
+    }
+
+    private enum Outcome: Equatable { case reply(Bool), noReply }
+
+    private func attempt(_ command: String) -> Outcome {
         do {
             if process?.isRunning != true {
                 stop()
-                guard FileManager.default.isExecutableFile(atPath: executable) else { return false }
+                guard FileManager.default.isExecutableFile(atPath: executable) else { return .reply(false) }
                 let child = Process()
                 let stdin = Pipe(), stdout = Pipe()
                 child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
@@ -50,7 +63,7 @@ final class DuoHIDBridge {
                 input = stdin.fileHandleForWriting
                 output = stdout.fileHandleForReading
             }
-            guard let input, let output else { return false }
+            guard let input, let output else { return .reply(false) }
             try input.write(contentsOf: Data((command + "\n").utf8))
             let deadline = Date().addingTimeInterval(3)
             var reply = Data()
@@ -61,15 +74,18 @@ final class DuoHIDBridge {
                 guard let byte = try output.read(upToCount: 1), !byte.isEmpty else {
                     // Its own stderr (inherited above) says why, e.g. dyld refusing to start it.
                     fputs("[hid] Duo guest helper exited without replying to \"\(command)\": \(executable)\n", stderr)
-                    break
+                    stop()
+                    return .noReply
                 }
-                if byte[0] == 10 { return String(data: reply, encoding: .utf8) == "OK" }
+                if byte[0] == 10 { return .reply(String(data: reply, encoding: .utf8) == "OK") }
                 reply.append(byte)
             }
         } catch {
             print("[hid] Duo guest command failed: \(error)")
+            stop()
+            return .noReply
         }
         stop()
-        return false
+        return .reply(false)
     }
 }

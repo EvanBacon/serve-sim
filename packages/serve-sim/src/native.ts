@@ -44,7 +44,14 @@ interface SimHIDHandle {
   close(): Promise<void>;
   pose(name: string, fromDegrees: number): Promise<boolean>;
   hinge(degrees: number): Promise<boolean>;
+  /** Duo guest digitizer touch; absent in addons built before it existed. */
+  guestTouch?(display: GuestDisplay, type: TouchType, x: number, y: number, edge: number): Promise<boolean>;
+  guestMultiTouch?(display: GuestDisplay, type: TouchType, x1: number, y1: number, x2: number, y2: number): Promise<boolean>;
+  warmGuestHelper?(): Promise<boolean>;
 }
+
+/** CADisplay device names of the Duo's integrated panels: cover, inner. */
+export type GuestDisplay = "primary" | "primary-1";
 
 interface SimCaptureHandle {
   start(): Promise<void>;
@@ -395,6 +402,30 @@ export class NativeHid {
 
   multiTouch(type: TouchType, x1: number, y1: number, x2: number, y2: number, w: number, h: number): Promise<boolean> {
     return this.delivered("multiTouch", () => this.settled(() => this.handle.multiTouch(type, x1, y1, x2, y2, w, h)));
+  }
+
+  /**
+   * Duo touch through the guest helper's digitizer. Not gated on the legacy
+   * client's settle delay or Device Hub shadowing; false when unavailable so
+   * the caller can fall back to legacy input.
+   */
+  /** `edge` is the raw IndigoHIDEdge (0 none … 4 right), as for `touch`. */
+  guestTouch(display: GuestDisplay, type: TouchType, x: number, y: number, edge = 0): Promise<boolean> {
+    const fn = this.handle.guestTouch;
+    if (!fn) return Promise.resolve(false);
+    return this.delivered("guestTouch", this.viaDuoHelper(() => fn.call(this.handle, display, type, x, y, edge)));
+  }
+
+  guestMultiTouch(display: GuestDisplay, type: TouchType, x1: number, y1: number, x2: number, y2: number): Promise<boolean> {
+    const fn = this.handle.guestMultiTouch;
+    if (!fn) return Promise.resolve(false);
+    return this.delivered("guestMultiTouch", this.viaDuoHelper(() => fn.call(this.handle, display, type, x1, y1, x2, y2)));
+  }
+
+  warmGuestHelper(): Promise<boolean> {
+    const fn = this.handle.warmGuestHelper;
+    if (!fn) return Promise.resolve(false);
+    return this.delivered("warmGuestHelper", this.viaDuoHelper(() => fn.call(this.handle)));
   }
 
   async button(button: string, signal?: AbortSignal): Promise<boolean> {
