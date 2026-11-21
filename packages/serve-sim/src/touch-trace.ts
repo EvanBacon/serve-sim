@@ -28,6 +28,8 @@ export interface TouchTraceFields {
     followedCover: boolean | null;
   };
   shadowed: boolean | null;
+  /** Transport used for the gesture: guest digitizer or legacy Indigo. */
+  route?: string | null;
   result: unknown;
   elapsedMs: number;
 }

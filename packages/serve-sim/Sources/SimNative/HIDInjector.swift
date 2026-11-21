@@ -906,6 +906,40 @@ actor HIDInjector {
         if let target = DevicePose.touchTarget(width: width, height: height) { touchTarget = target }
     }
 
+    // MARK: - Guest touch (Duo)
+
+    /// Touch through the Duo guest helper's digitizer for `display` ("primary" =
+    /// cover, "primary-1" = inner). Independent of the legacy HID client, so it
+    /// works while Device Hub has disconnected legacy input and while the legacy
+    /// client is not ready. False when there is no Duo helper, the device isn't
+    /// booted, or the helper couldn't dispatch (the caller may fall back).
+    func sendGuestTouch(display: String, type: String, x: Double, y: Double) async -> Bool {
+        guard duoBridge != nil, Self.guestDisplays.contains(display), Self.guestPhases.contains(type),
+              (0...1).contains(x), (0...1).contains(y) else { return false }
+        let command = String(format: "touch %@ %@ %.6f %.6f", display, type, x, y)
+        let sent = await channel.gated { duoBridge?.send(command) == true }
+        touchTrace(["kind": "guest-touch", "display": display, "type": type, "x": x, "y": y, "sent": sent])
+        return sent
+    }
+
+    func sendGuestMultiTouch(display: String, type: String, x1: Double, y1: Double, x2: Double, y2: Double) async -> Bool {
+        guard duoBridge != nil, Self.guestDisplays.contains(display), Self.guestPhases.contains(type),
+              [x1, y1, x2, y2].allSatisfy({ (0...1).contains($0) }) else { return false }
+        let command = String(format: "touch2 %@ %@ %.6f %.6f %.6f %.6f", display, type, x1, y1, x2, y2)
+        let sent = await channel.gated { duoBridge?.send(command) == true }
+        touchTrace(["kind": "guest-multi", "display": display, "type": type, "sent": sent])
+        return sent
+    }
+
+    private static let guestDisplays: Set<String> = ["primary", "primary-1"]
+    private static let guestPhases: Set<String> = ["begin", "move", "end"]
+
+    /// Start the Duo guest helper ahead of the first touch (its startup is ~0.6 s).
+    func warmGuestHelper() async -> Bool {
+        guard duoBridge != nil else { return false }
+        return await channel.gated { duoBridge?.send("ping") == true }
+    }
+
     func setPose(_ name: String, fromDegrees: Double) -> Bool {
         guard let pose = DevicePose.preset(named: name), fromDegrees.isFinite,
               (0...180).contains(fromDegrees) else { return false }

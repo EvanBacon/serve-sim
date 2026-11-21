@@ -1,0 +1,121 @@
+import { describe, expect, test } from "bun:test";
+import { DeviceSession, type DeviceSessionDependencies } from "../device-session";
+import { deviceHubInputShadowedMessage } from "../device-hub-input";
+
+type Hid = DeviceSessionDependencies["hid"];
+const ACK = 0x84;
+const settle = () => new Promise((r) => setTimeout(r, 10));
+
+/** A started foldable session with a fake guest digitizer. */
+async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: string) => boolean } = {}) {
+  const calls: unknown[][] = [];
+  const hid: Hid = {
+    touch: async (...a) => { calls.push(["legacy", ...a]); return true; },
+    multiTouch: async (...a) => { calls.push(["legacyMulti", ...a]); return true; },
+    guestTouch: async (display, type, x, y) => { calls.push(["guest", display, type, x, y]); return opts.guest ? opts.guest(display, type) : true; },
+    guestMultiTouch: async (display, type) => { calls.push(["guestMulti", display, type]); return true; },
+    warmGuestHelper: async () => { calls.push(["warm"]); return true; },
+    isFoldable: async () => true,
+    button: async () => true, buttonHid: async () => true, key: async () => {}, scroll: async () => {},
+    digitalCrown: async () => {}, orientation: async () => false, memoryWarning: async () => {},
+    softwareKeyboard: async () => {}, caDebug: async () => false, hardwareKeyboard: async () => false,
+    pose: async () => false, hinge: async () => false,
+  };
+  let onDuoState!: (state: { hingeDegrees?: number; primaryPanel?: "cover" | "inner"; orientations: object }) => void;
+  const s = new DeviceSession("DUO", {
+    capture: {
+      start: async () => {}, stop: async () => {},
+      subscribeMjpeg: async () => () => {}, subscribeAvcc: async () => () => {},
+      subscribeSize: async (cb: (size: { width: number; height: number }) => void) => { cb({ width: 1398, height: 2034 }); return () => {}; },
+      snapshotJpeg: async () => null, setPreferredScreenSize: async () => {},
+    } as never,
+    hid,
+    readDeviceHubInputShadowed: async () => opts.shadowed ?? false,
+    watchDeviceHubInput: null,
+    createDuoMonitor: (_udid, onState) => { onDuoState = onState as never; return { close() {}, refreshOrientation() {} }; },
+  });
+  await s.start();
+  const replies: Record<string, unknown>[] = [];
+  let receive!: (data: Buffer) => void;
+  s.attachHidSocket({
+    send(frame: Buffer) { if (frame[0] === ACK) replies.push(JSON.parse(frame.subarray(1).toString())); },
+    close() {},
+    on(event: string, cb: (data: Buffer) => void) { if (event === "message") receive = cb; },
+  } as never);
+  const send = (tag: number, payload: unknown) => receive(Buffer.concat([Buffer.from([tag]), Buffer.from(JSON.stringify(payload))]));
+  return { s, calls, replies, send, duoState: (st: Parameters<typeof onDuoState>[0]) => onDuoState(st) };
+}
+
+describe("Duo guest-digitizer touch routing", () => {
+  test("warms the guest helper when the session starts", async () => {
+    const d = await duo();
+    expect(d.calls).toContainEqual(["warm"]);
+  });
+
+  test("touches go to the guest digitizer of the active panel, even while Device Hub shadows legacy input", async () => {
+    const d = await duo({ shadowed: true });
+    d.send(0x03, { type: "begin", x: 0.3, y: 0.4, ack: 1 });
+    d.send(0x03, { type: "end", x: 0.3, y: 0.4, ack: 2 });
+    await settle();
+    d.duoState({ hingeDegrees: 180, primaryPanel: "inner", orientations: {} });
+    await settle();
+    d.send(0x03, { type: "begin", x: 0.6, y: 0.2, ack: 3 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guest")).toEqual([
+      ["guest", "primary", "begin", 0.3, 0.4],
+      ["guest", "primary", "end", 0.3, 0.4],
+      ["guest", "primary-1", "begin", 0.6, 0.2],
+    ]);
+    expect(d.calls.some((c) => c[0] === "legacy")).toBe(false);
+    expect(d.replies.map((r) => r.ok)).toEqual([true, true, true]);
+  });
+
+  test("a home-edge swipe stays on legacy when legacy input is usable, and on guest when shadowed", async () => {
+    const d = await duo();
+    d.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 1 });
+    d.send(0x03, { type: "move", x: 0.5, y: 0.8, edge: 3, ack: 2 });
+    d.send(0x03, { type: "end", x: 0.5, y: 0.6, edge: 3, ack: 3 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "legacy" || c[0] === "guest").map((c) => c[0])).toEqual(["legacy", "legacy", "legacy"]);
+    const shadowed = await duo({ shadowed: true });
+    shadowed.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 1 });
+    await settle();
+    expect(shadowed.calls.filter((c) => c[0] === "legacy" || c[0] === "guest").map((c) => c[0])).toEqual(["guest"]);
+  });
+
+  test("a failed guest begin falls back to legacy for the whole gesture; a later failure never switches", async () => {
+    const d = await duo({ guest: (_display, type) => type !== "begin" });
+    d.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 1 });
+    await settle();
+    d.send(0x03, { type: "move", x: 0.2, y: 0.2, ack: 2 });
+    d.send(0x03, { type: "end", x: 0.2, y: 0.2, ack: 3 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "legacy" || c[0] === "guest").map((c) => [c[0], c[0] === "guest" ? c[2] : c[1]])).toEqual([
+      ["guest", "begin"], ["legacy", "begin"], ["legacy", "move"], ["legacy", "end"],
+    ]);
+    const mid = await duo({ guest: (_display, type) => type !== "move" });
+    mid.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 1 });
+    await settle();
+    mid.send(0x03, { type: "move", x: 0.2, y: 0.2, ack: 2 });
+    await settle();
+    expect(mid.replies.map((r) => r.ok)).toEqual([true, false]);
+    expect(mid.calls.some((c) => c[0] === "legacy")).toBe(false);
+  });
+
+  test("a failed guest begin while shadowed is refused, not sent through legacy", async () => {
+    const d = await duo({ shadowed: true, guest: () => false });
+    d.send(0x03, { type: "begin", x: 0.1, y: 0.1, ack: 1 });
+    await settle();
+    expect(d.replies).toEqual([{ ack: 1, ok: false, error: deviceHubInputShadowedMessage("DUO") }]);
+    expect(d.calls.some((c) => c[0] === "legacy")).toBe(false);
+  });
+
+  test("two-finger touches use the guest digitizer too", async () => {
+    const d = await duo({ shadowed: true });
+    d.send(0x05, { type: "begin", x1: 0.3, y1: 0.3, x2: 0.7, y2: 0.7 });
+    d.send(0x05, { type: "end", x1: 0.3, y1: 0.3, x2: 0.7, y2: 0.7 });
+    await settle();
+    expect(d.calls.filter((c) => c[0] === "guestMulti")).toEqual([["guestMulti", "primary", "begin"], ["guestMulti", "primary", "end"]]);
+    expect(d.calls.some((c) => c[0] === "legacyMulti")).toBe(false);
+  });
+});
