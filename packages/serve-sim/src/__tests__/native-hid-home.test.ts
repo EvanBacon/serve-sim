@@ -3,6 +3,7 @@ import { existsSync } from "fs";
 import {
   HOME_FRONTMOST_PROBE_TIMEOUT_MS,
   NativeHid,
+  SPOTLIGHT_BUNDLE_ID,
   SPRINGBOARD_BUNDLE_ID,
   homeButtonForFrontmost,
   homeButtonSessionRoute,
@@ -53,6 +54,19 @@ describe("homeButtonForFrontmost", () => {
   test("uses a short home-indicator flick only on a Face ID device in portrait with SpringBoard frontmost", () => {
     expect(homeButtonForFrontmost(faceIdPortrait)).toBe("flick_home");
     expect(homeButtonForFrontmost({ ...faceIdPortrait, orientation: "portrait_upside_down" })).toBe("flick_home");
+  });
+
+  // iOS 26.5 / 27.2: open Spotlight reports com.apple.Spotlight as frontmost.
+  // Launching SpringBoard (already running underneath) leaves Spotlight up;
+  // the flick dismisses it. Measured on real sims (iPhone 17 Pro / 18 Pro).
+  test("flicks when Spotlight is frontmost, with the same chrome/orientation/shadow gates", () => {
+    const spotlight = { ...faceIdPortrait, bundleId: SPOTLIGHT_BUNDLE_ID };
+    expect(SPOTLIGHT_BUNDLE_ID).toBe("com.apple.Spotlight");
+    expect(homeButtonForFrontmost(spotlight)).toBe("flick_home");
+    expect(homeButtonForFrontmost({ ...spotlight, supportsHomeIndicator: false })).toBe("home");
+    expect(homeButtonForFrontmost({ ...spotlight, orientation: "landscape_left" })).toBe("home");
+    expect(homeButtonForFrontmost({ ...spotlight, orientation: undefined })).toBe("home");
+    expect(homeButtonForFrontmost({ ...spotlight, inputShadowed: true })).toBe("home");
   });
 
   test("keeps the launch path when chrome, orientation, or Device Hub shadow is unknown or unsafe", () => {
@@ -159,6 +173,17 @@ describe("NativeHid.button home routing", () => {
   test("sends flick_home when SpringBoard is frontmost on a Face ID device in portrait", async () => {
     const { hid, buttons } = hidWith({
       axFrontmost: async () => JSON.stringify({ bundleId: SPRINGBOARD_BUNDLE_ID }),
+      getOrientation: () => "portrait",
+      supportsHomeIndicator: () => true,
+      isInputShadowed: () => false,
+    });
+    expect(await hid.button("home")).toBe(true);
+    expect(buttons).toEqual(["flick_home"]);
+  });
+
+  test("sends flick_home (not the no-op SpringBoard launch) when Spotlight is frontmost", async () => {
+    const { hid, buttons } = hidWith({
+      axFrontmost: async () => JSON.stringify({ pid: 23112, bundleId: "com.apple.Spotlight" }),
       getOrientation: () => "portrait",
       supportsHomeIndicator: () => true,
       isInputShadowed: () => false,
