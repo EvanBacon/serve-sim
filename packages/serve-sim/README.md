@@ -84,9 +84,8 @@ Duo touches (taps, drags, two-finger, `serve-sim tap`/`gesture`, `tap @eN`) go
 through touchscreen digitizers that `serve-sim-duo-hid` registers inside the
 simulator, one per panel. They keep working while Xcode 27 Device Hub is attached,
 which disconnects the legacy touch/keyboard path (Device Hub attaches to every
-simulator that boots while it is running). Only home-edge swipes still use the
-legacy path when it is available, because the system home gesture needs its edge
-flag. `serve-sim tap`/`gesture` coordinates are display (screenshot) coordinates on
+simulator that boots while it is running). Home-edge swipes carry their edge on
+that path too, so swipe-up-to-home works on both panels. `serve-sim tap`/`gesture` coordinates are display (screenshot) coordinates on
 the Duo too, remapped to the panel's orientation.
 
 A touch that starts while the Duo is folding is held until SpringBoard's fold

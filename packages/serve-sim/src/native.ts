@@ -45,7 +45,7 @@ interface SimHIDHandle {
   pose(name: string, fromDegrees: number): Promise<boolean>;
   hinge(degrees: number): Promise<boolean>;
   /** Duo guest digitizer touch; absent in addons built before it existed. */
-  guestTouch?(display: GuestDisplay, type: TouchType, x: number, y: number): Promise<boolean>;
+  guestTouch?(display: GuestDisplay, type: TouchType, x: number, y: number, edge: number): Promise<boolean>;
   guestMultiTouch?(display: GuestDisplay, type: TouchType, x1: number, y1: number, x2: number, y2: number): Promise<boolean>;
   warmGuestHelper?(): Promise<boolean>;
 }
@@ -409,10 +409,11 @@ export class NativeHid {
    * client's settle delay or Device Hub shadowing; false when unavailable so
    * the caller can fall back to legacy input.
    */
-  guestTouch(display: GuestDisplay, type: TouchType, x: number, y: number): Promise<boolean> {
+  /** `edge` is the raw IndigoHIDEdge (0 none … 4 right), as for `touch`. */
+  guestTouch(display: GuestDisplay, type: TouchType, x: number, y: number, edge = 0): Promise<boolean> {
     const fn = this.handle.guestTouch;
     if (!fn) return Promise.resolve(false);
-    return this.delivered("guestTouch", this.viaDuoHelper(() => fn.call(this.handle, display, type, x, y)));
+    return this.delivered("guestTouch", this.viaDuoHelper(() => fn.call(this.handle, display, type, x, y, edge)));
   }
 
   guestMultiTouch(display: GuestDisplay, type: TouchType, x1: number, y1: number, x2: number, y2: number): Promise<boolean> {

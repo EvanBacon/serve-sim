@@ -913,12 +913,17 @@ actor HIDInjector {
     /// works while Device Hub has disconnected legacy input and while the legacy
     /// client is not ready. False when there is no Duo helper, the device isn't
     /// booted, or the helper couldn't dispatch (the caller may fall back).
-    func sendGuestTouch(display: String, type: String, x: Double, y: Double) async -> Bool {
+    /// `edge` is the IndigoHIDEdge (0 none, 1 left, 2 top, 3 bottom, 4 right) in
+    /// the panel's native frame; the helper marks the digitizer event with it so
+    /// SpringBoard recognizes system edge swipes (home).
+    func sendGuestTouch(display: String, type: String, x: Double, y: Double, edge: UInt32 = 0) async -> Bool {
         guard duoBridge != nil, Self.guestDisplays.contains(display), Self.guestPhases.contains(type),
-              (0...1).contains(x), (0...1).contains(y) else { return false }
-        let command = String(format: "touch %@ %@ %.6f %.6f", display, type, x, y)
+              (0...1).contains(x), (0...1).contains(y), edge <= 4 else { return false }
+        let command = edge == 0
+            ? String(format: "touch %@ %@ %.6f %.6f", display, type, x, y)
+            : String(format: "touch %@ %@ %.6f %.6f %u", display, type, x, y, edge)
         let sent = await channel.gated { duoBridge?.send(command) == true }
-        touchTrace(["kind": "guest-touch", "display": display, "type": type, "x": x, "y": y, "sent": sent])
+        touchTrace(["kind": "guest-touch", "display": display, "type": type, "x": x, "y": y, "edge": Int(edge), "sent": sent])
         return sent
     }
 

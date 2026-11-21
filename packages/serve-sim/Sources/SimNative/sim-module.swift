@@ -135,9 +135,9 @@ private func u32(_ v: Int) -> UInt32 {
         return await injector.setHingeAngle(degrees: degrees)
     }
 
-    @NodeMethod func guestTouch(_ display: String, _ type: String, _ x: Double, _ y: Double) async throws -> Bool {
+    @NodeMethod func guestTouch(_ display: String, _ type: String, _ x: Double, _ y: Double, _ edge: Int) async throws -> Bool {
         try await setupTask.value
-        return await injector.sendGuestTouch(display: display, type: type, x: x, y: y)
+        return await injector.sendGuestTouch(display: display, type: type, x: x, y: y, edge: u32(edge))
     }
 
     @NodeMethod func guestMultiTouch(_ display: String, _ type: String, _ x1: Double, _ y1: Double,

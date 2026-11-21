@@ -1925,15 +1925,12 @@ export class DeviceSession {
   }
 
   /**
-   * Choose a gesture's transport at its begin. Duo touches use the guest
-   * digitizer (works while Device Hub has disconnected legacy input). A home
-   * edge swipe stays on legacy when it can, since only the Indigo edge flag
-   * makes SpringBoard treat it as a system gesture.
+   * Choose a gesture's transport at its begin. Duo touches, including home
+   * edge swipes (the guest digitizer carries the edge), use the guest helper:
+   * it works while Device Hub has disconnected legacy input.
    */
-  private async chooseRoute(edge: boolean): Promise<"guest" | "legacy"> {
-    if (!this.foldable || !this.hid.guestTouch) return "legacy";
-    if (edge && !(await this.legacyInputShadowed())) return "legacy";
-    return "guest";
+  private chooseRoute(): "guest" | "legacy" {
+    return this.foldable && this.hid.guestTouch ? "guest" : "legacy";
   }
 
   private serialTouch<T>(fn: () => Promise<T>): Promise<T> {
@@ -1979,12 +1976,12 @@ export class DeviceSession {
       if (type === "end") this.touchRoute = undefined;
       return false;
     }
-    if (type === "begin" || !this.touchRoute) this.touchRoute = await this.chooseRoute((m.edge ?? 0) !== 0);
+    if (type === "begin" || !this.touchRoute) this.touchRoute = this.chooseRoute();
     const route = this.touchRoute;
     if (type === "end") this.touchRoute = undefined;
     if (route === "guest") {
       this.recordTouchEvent(m);
-      if (await this.hid.guestTouch!(this.guestDisplay(), type, m.x, m.y)) return true;
+      if (await this.hid.guestTouch!(this.guestDisplay(), type, m.x, m.y, m.edge ?? 0)) return true;
       // Never switch transports mid-gesture; a failed begin may fall back.
       if (type !== "begin") return false;
       this.touchRoute = "legacy";

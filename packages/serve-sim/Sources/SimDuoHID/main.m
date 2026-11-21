@@ -209,11 +209,25 @@ static FingerFn fingerEvent;
 static void (*appendEvent)(CFTypeRef, CFTypeRef, uint32_t);
 static void (*setIntegerValue)(CFTypeRef, uint32_t, long);
 enum { kRange = 0x1, kTouch = 0x2, kPosition = 0x4, kIdentity = 0x20, kHand = 3, kDisplayIntegratedField = (11 << 16) | 25 };
+/// Event-mask bits for a touch that starts at a screen edge, by IndigoHIDEdge
+/// (1 left, 2 top, 3 bottom, 4 right): a from-edge flag (0x40000) plus the
+/// swipe direction. Copied from SimulatorKit's IndigoHIDMessageForMouseNSEvent,
+/// which ORs the same table into the legacy digitizer event mask; without them
+/// SpringBoard treats a bottom-edge swipe as an ordinary drag, not go-home.
+static uint32_t edgeMask(unsigned edge) {
+    switch (edge) {
+        case 1: return 0x02040000;
+        case 2: return 0x08040000;
+        case 3: return 0x01040000;
+        case 4: return 0x04040000;
+        default: return 0;
+    }
+}
 /// One hand event with `count` finger children. `type` is begin|move|end.
-static CFTypeRef touchEvent(const char *type, const double *xs, const double *ys, int count) {
+static CFTypeRef touchEvent(const char *type, const double *xs, const double *ys, int count, unsigned edge) {
     if (!digitizerEvent || !fingerEvent || !appendEvent || !setIntegerValue) return NULL;
     BOOL down = strcmp(type, "end") != 0;
-    uint32_t mask = strcmp(type, "move") == 0 ? kPosition : (kRange | kTouch | kIdentity);
+    uint32_t mask = (strcmp(type, "move") == 0 ? kPosition : (kRange | kTouch | kIdentity)) | edgeMask(edge);
     uint64_t now = mach_absolute_time();
     CFTypeRef hand = digitizerEvent(NULL, now, kHand, 0, 0, mask, 0, xs[0], ys[0], 0, 0, 0, down, down, 0);
     if (!hand) return NULL;
@@ -324,18 +338,18 @@ int main(int argc, char **argv) {
         while (getline(&line, &capacity, stdin) > 0) {
             @autoreleasepool {
                 double angle, from, milliseconds; unsigned page, usage, down, orientation; char extra;
-                double tx[2], ty[2]; char display[16], phase[8];
+                double tx[2], ty[2]; char display[16], phase[8]; unsigned edge = 0; int touchFields;
                 BOOL ok = NO;
                 if (strcmp(line, "ping\n") == 0) {
                     ok = YES;
-                } else if (sscanf(line, "touch %15s %7s %lf %lf %c", display, phase, &tx[0], &ty[0], &extra) == 4 &&
-                           validPhase(phase) && unit(tx[0]) && unit(ty[0])) {
+                } else if ((touchFields = sscanf(line, "touch %15s %7s %lf %lf %u %c", display, phase, &tx[0], &ty[0], &edge, &extra)) >= 4 &&
+                           touchFields <= 5 && validPhase(phase) && unit(tx[0]) && unit(ty[0]) && (touchFields == 4 || edge <= 4)) {
                     id screen = touchscreens[@(display)];
-                    if (screen) ok = sendEvent(screen, touchEvent(phase, tx, ty, 1));
+                    if (screen) ok = sendEvent(screen, touchEvent(phase, tx, ty, 1, touchFields == 5 ? edge : 0));
                 } else if (sscanf(line, "touch2 %15s %7s %lf %lf %lf %lf %c", display, phase, &tx[0], &ty[0], &tx[1], &ty[1], &extra) == 6 &&
                            validPhase(phase) && unit(tx[0]) && unit(ty[0]) && unit(tx[1]) && unit(ty[1])) {
                     id screen = touchscreens[@(display)];
-                    if (screen) ok = sendEvent(screen, touchEvent(phase, tx, ty, 2));
+                    if (screen) ok = sendEvent(screen, touchEvent(phase, tx, ty, 2, 0));
                 } else if (sscanf(line, "angle %lf %c", &angle, &extra) == 1 && isfinite(angle) && angle >= 0 && angle <= 180) {
                     atomic_fetch_add(&hingeGeneration, 1); // cancels a running sweep
                     __block BOOL sent = NO;

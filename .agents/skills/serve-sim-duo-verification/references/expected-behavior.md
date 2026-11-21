@@ -75,8 +75,11 @@ Use [verification.md](verification.md) for historical validation; its earlier
 - [ ] Touch goes through the guest helper's per-panel digitizers (`primary` =
   cover, `primary-1` = inner, bound by CADisplay uniqueId) and keeps working with
   Device Hub attached (`com.apple.coredevice.dtuhidd.active` = 1), without
-  `repair-input`. Only home-edge swipes use legacy Indigo, and only while it is
-  not shadowed. A legacy event is never sent while shadowed: it aborts backboardd.
+  `repair-input`. Home-edge swipes go the same way: the helper ORs the edge's
+  event-mask bits (SimulatorKit's table: left 0x02040000, top 0x08040000,
+  bottom 0x01040000, right 0x04040000), so swipe-up goes home on both panels
+  with Device Hub attached. A legacy event is never sent while shadowed: it
+  aborts backboardd.
 - [ ] The Device Hub flag is watched live in the guest (`watch-notify`). Reboot
   the Duo under a running server: post-boot touches are not sent through legacy
   input, and no `backboardd-*.ips` crash report appears.

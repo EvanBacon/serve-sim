@@ -14,7 +14,7 @@ async function duo(opts: { shadowed?: boolean; guest?: (display: string, type: s
   const hid: Hid = {
     touch: async (...a) => { calls.push(["legacy", ...a]); return true; },
     multiTouch: async (...a) => { calls.push(["legacyMulti", ...a]); return true; },
-    guestTouch: async (display, type, x, y) => { calls.push(["guest", display, type, x, y]); return opts.guest ? opts.guest(display, type) : true; },
+    guestTouch: async (display, type, x, y, edge) => { calls.push(edge ? ["guest", display, type, x, y, edge] : ["guest", display, type, x, y]); return opts.guest ? opts.guest(display, type) : true; },
     guestMultiTouch: async (display, type) => { calls.push(["guestMulti", display, type]); return true; },
     warmGuestHelper: async () => { calls.push(["warm"]); return true; },
     isFoldable: async () => true,
@@ -76,17 +76,20 @@ describe("Duo guest-digitizer touch routing", () => {
     expect(d.replies.map((r) => r.ok)).toEqual([true, true, true]);
   });
 
-  test("a home-edge swipe stays on legacy when legacy input is usable, and on guest when shadowed", async () => {
-    const d = await duo();
-    d.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 1 });
-    d.send(0x03, { type: "move", x: 0.5, y: 0.8, edge: 3, ack: 2 });
-    d.send(0x03, { type: "end", x: 0.5, y: 0.6, edge: 3, ack: 3 });
-    await settle();
-    expect(d.calls.filter((c) => c[0] === "legacy" || c[0] === "guest").map((c) => c[0])).toEqual(["legacy", "legacy", "legacy"]);
-    const shadowed = await duo({ shadowed: true });
-    shadowed.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 1 });
-    await settle();
-    expect(shadowed.calls.filter((c) => c[0] === "legacy" || c[0] === "guest").map((c) => c[0])).toEqual(["guest"]);
+  test("a home-edge swipe goes through the guest digitizer with its edge, shadowed or not", async () => {
+    for (const shadowed of [false, true]) {
+      const d = await duo({ shadowed });
+      d.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 1 });
+      d.send(0x03, { type: "move", x: 0.5, y: 0.8, edge: 3, ack: 2 });
+      d.send(0x03, { type: "end", x: 0.5, y: 0.6, edge: 3, ack: 3 });
+      await settle();
+      expect(d.calls.filter((c) => c[0] === "legacy" || c[0] === "guest")).toEqual([
+        ["guest", "primary", "begin", 0.5, 0.99, 3],
+        ["guest", "primary", "move", 0.5, 0.8, 3],
+        ["guest", "primary", "end", 0.5, 0.6, 3],
+      ]);
+      expect(d.replies.map((r) => r.ok)).toEqual([true, true, true]);
+    }
   });
 
   test("a failed guest begin falls back to legacy for the whole gesture; a later failure never switches", async () => {
@@ -188,7 +191,7 @@ describe("Duo guest-digitizer touch routing", () => {
   });
 
   test("legacy touches carry the touch panel's size, even before the first frame and after a fold", async () => {
-    const d = await duo({ size: null, noState: true, duoStateWaitMs: 0 });
+    const d = await duo({ size: null, noState: true, duoStateWaitMs: 0, guest: () => false });
     d.send(0x03, { type: "begin", x: 0.5, y: 0.99, edge: 3, ack: 1 });
     d.send(0x03, { type: "end", x: 0.5, y: 0.8, edge: 3, ack: 2 });
     await settle();
