@@ -41,12 +41,17 @@ export function AppPermissionsTool({
   const appKeyRef = useRef(appKey);
   appKeyRef.current = appKey;
 
+  // Every refresh takes a sequence number; only the latest reply is applied,
+  // so a slow poll can't overwrite the read that follows a grant/revoke.
+  const seqRef = useRef(0);
+
   const refresh = useCallback(async () => {
     if (!bundleId) return;
     const key = `${udid}|${bundleId}`;
+    const seq = ++seqRef.current;
     const res = await hostAction("permissionsStatus", { udid, bundleId });
-    // Drop replies for an app that's no longer in the foreground.
-    if (appKeyRef.current !== key) return;
+    // Drop superseded replies and replies for an app no longer in front.
+    if (seq !== seqRef.current || appKeyRef.current !== key) return;
     if (res.exitCode !== 0) {
       setLoadError(res.stderr.trim() || "Couldn't read permissions");
       return;
