@@ -260,6 +260,8 @@ export interface NativeHidDeps {
 }
 
 export const SPRINGBOARD_BUNDLE_ID = "com.apple.springboard";
+/** Spotlight runs as its own frontmost process over SpringBoard (iOS 26+). */
+export const SPOTLIGHT_BUNDLE_ID = "com.apple.Spotlight";
 
 /** Bound on the frontmost probe that chooses launch vs flick. */
 export const HOME_FRONTMOST_PROBE_TIMEOUT_MS = 400;
@@ -276,15 +278,17 @@ export type HomeButtonRoute = {
 /**
  * `hid.button("home")` launches SpringBoard to leave a foreground app (the
  * Indigo HID home press is dropped on Xcode 26+). That launch is a no-op when
- * SpringBoard is already frontmost, so App Library, folders, and inner home
- * pages on Face ID devices in portrait use a short home-indicator flick
+ * SpringBoard is already frontmost, so App Library, folders, inner home
+ * pages, and Spotlight (its own frontmost process on iOS 26+) on Face ID
+ * devices in portrait use a short home-indicator flick
  * instead of `swipe_home` (a long swipe can open the app switcher on page 1).
  * Home-button devices, landscape, Device Hub shadow, and an unknown
  * frontmost/orientation all stay on the launch path: a bottom-edge swipe on
  * those surfaces can open Control Center or miss the home indicator.
  */
 export function homeButtonForFrontmost(route: HomeButtonRoute): "home" | "flick_home" {
-  if (route.bundleId !== SPRINGBOARD_BUNDLE_ID) return "home";
+  // Spotlight sits over SpringBoard, so launching SpringBoard is a no-op there too.
+  if (route.bundleId !== SPRINGBOARD_BUNDLE_ID && route.bundleId !== SPOTLIGHT_BUNDLE_ID) return "home";
   if (route.inputShadowed) return "home";
   if (route.supportsHomeIndicator !== true) return "home";
   if (route.orientation == null || !PORTRAIT_ORIENTATIONS.has(route.orientation)) return "home";
