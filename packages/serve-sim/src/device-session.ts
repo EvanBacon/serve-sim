@@ -1411,7 +1411,7 @@ export class DeviceSession {
       case 0x03: {
         const raw = json<{ type: string; x: number; y: number; edge?: number; ack?: number }>();
         if (!raw) return false;
-        const refused = await this.inputRefusal();
+        const refused = this.inputRefusal(await this.legacyInputShadowed());
         if (refused !== null) return refused;
         const m = withoutAck(raw);
         this.recordTouchEvent(m);
@@ -1422,7 +1422,7 @@ export class DeviceSession {
         if (!raw) return false;
         const m = withoutAck(raw);
         if (m.page != null && m.usage != null) {
-          const refused = await this.inputRefusal();
+          const refused = this.inputRefusal(await this.legacyInputShadowed());
           if (refused !== null) return refused;
           this.recordHidEvent(tag, m);
           return this.hid.buttonHid(m.page, m.usage, (m.phase as "down" | "up" | "press") ?? "press");
@@ -1434,7 +1434,7 @@ export class DeviceSession {
         // would be dropped) rather than acknowledging a touch that was not
         // delivered.
         if (m.button !== "home") {
-          const refused = await this.inputRefusal();
+          const refused = this.inputRefusal(await this.legacyInputShadowed());
           if (refused !== null) return refused;
         }
         this.recordHidEvent(tag, m);
@@ -1443,7 +1443,7 @@ export class DeviceSession {
       case 0x05: {
         const m = json<{ type: string; x1: number; y1: number; x2: number; y2: number }>();
         if (!m) break;
-        const refused = await this.inputRefusal();
+        const refused = this.inputRefusal(await this.legacyInputShadowed());
         if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         return (await this.hid.multiTouch(m.type as "begin" | "move" | "end", m.x1, m.y1, m.x2, m.y2, W, H)) !== false;
@@ -1451,7 +1451,7 @@ export class DeviceSession {
       case 0x06: {
         const m = json<{ type: string; usage: number }>();
         if (!m) break;
-        const refused = await this.inputRefusal();
+        const refused = this.inputRefusal(await this.legacyInputShadowed());
         if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         const delivered = (await this.hid.key(m.type as "down" | "up", m.usage)) !== false;
@@ -1496,7 +1496,7 @@ export class DeviceSession {
       case 0x0a: {
         const m = json<{ delta: number }>();
         if (!m) break;
-        const refused = await this.inputRefusal();
+        const refused = this.inputRefusal(await this.legacyInputShadowed());
         if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         return (await this.hid.digitalCrown(m.delta)) !== false;
@@ -1505,7 +1505,7 @@ export class DeviceSession {
         // Payload deltas are a fraction of the display; scale to device pixels.
         const m = json<{ dx: number; dy: number; x?: number; y?: number }>();
         if (!m) break;
-        const refused = await this.inputRefusal();
+        const refused = this.inputRefusal(await this.legacyInputShadowed());
         if (refused !== null) return refused;
         this.recordHidEvent(tag, m);
         return (await this.hid.scroll(m.dx * W, m.dy * H, W, H, m.x, m.y)) !== false;
@@ -1922,12 +1922,13 @@ export class DeviceSession {
   }
 
   /**
-   * Gate for socket input behind the shadow probe: null to send, the shadowed
+   * Gate for socket input after the shadow probe: null to send, the shadowed
    * result, or false when close() landed while the first-frame probe ran. Its
    * socket is gone by then, so a begin/down sent now could never be ended.
+   * Synchronous so the stopped check runs in the caller's own continuation,
+   * right before it records and injects.
    */
-  private async inputRefusal(): Promise<ShadowedInputResult | false | null> {
-    const shadowed = await this.legacyInputShadowed();
+  private inputRefusal(shadowed: boolean): ShadowedInputResult | false | null {
     if (this.isStopped()) return false;
     return shadowed ? shadowedInputResult(this.udid) : null;
   }
