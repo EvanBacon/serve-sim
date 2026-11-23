@@ -20,6 +20,7 @@ import {
 } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs, type KeyEvent } from "./text-to-keys";
 import { PASTEBOARD_TEXT_LIMIT_BYTES, PASTE_KEY_EVENTS } from "./pasteboard";
+import { gestureStepFrames, parseGestureSteps, type GestureStep } from "./gesture-steps";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, isInDeviceSet, resolveDevice } from "./device";
@@ -1085,7 +1086,9 @@ function sendAckedInput(
         }
         const next = frames[index + 1];
         if (next) {
-          setTimeout(() => sendNext(index + 1), next.delayMs ?? 0);
+          // Held in `timer` so finish()/onerror cancel it: a failed sequence must
+          // not keep the CLI alive for the rest of a long step delay.
+          timer = setTimeout(() => sendNext(index + 1), next.delayMs ?? 0);
           return;
         }
         sentAll = true;
@@ -1243,20 +1246,20 @@ async function axDump(deviceArg?: string) {
 }
 
 async function gesture(jsonStr: string, deviceArg?: string, raw?: boolean) {
-  const state = await resolveInputTarget(deviceArg);
-
-  let touch: { type: string; x: number; y: number; edge?: number };
+  // Validate before touching the server so bad input fails fast, naming the step.
+  let steps: GestureStep[];
   try {
-    touch = JSON.parse(jsonStr);
-  } catch {
-    console.error("Invalid JSON:", jsonStr);
+    steps = parseGestureSteps(jsonStr);
+  } catch (error) {
+    console.error(`serve-sim: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
 
+  const state = await resolveInputTarget(deviceArg);
   const orientation = await touchInputOrientation(state, raw);
-  const rawTouch = displayTouchToRaw(touch, orientation);
-
-  await sendAckedInput(state, "gesture", [{ tag: 0x03, payload: rawTouch }]);
+  // All steps ride one acked send: split across CLI invocations, the finger
+  // stays down between calls and the held `begin` reads as a long-press.
+  await sendAckedInput(state, "gesture", gestureStepFrames(steps, orientation));
 }
 
 async function tap(xArg: string, yArg: string, deviceArg?: string, raw?: boolean) {
@@ -2712,8 +2715,11 @@ const rawOpt = [
 
 program
   .command("gesture")
-  .description("Send a touch gesture")
-  .argument("<json>", 'Gesture JSON, e.g. \'{"type":"begin","x":0.5,"y":0.5}\'')
+  .description("Send a touch gesture — one event, or an array of steps replayed on one socket (drag/swipe/scroll)")
+  .argument(
+    "<json>",
+    'Touch JSON: \'{"type":"begin","x":0.5,"y":0.5}\' or a sequence \'[{"type":"begin","x":0.5,"y":0.8},{"type":"move","x":0.5,"y":0.4},{"type":"end","x":0.5,"y":0.4}]\' (per-step optional "delayMs", default 16)',
+  )
   .option(...deviceOpt)
   .option(...rawOpt)
   .action((json: string, opts) => gesture(json, opts.device, opts.raw));

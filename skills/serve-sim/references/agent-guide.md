@@ -50,7 +50,7 @@ serve-sim settle                    # after openurl or any other action: wait, d
 
 If the ref is unknown, stale, or offscreen, the command exits 1 (`unknown_ref` / `stale_ref` / `offscreen` on stderr) and **nothing is tapped**. Take a new snapshot and retry. Never guess a coordinate because a lookup missed. A `503 input_shadowed` means Device Hub has disconnected legacy input: follow the `repair-input` path below, not a re-snapshot loop.
 
-Use `serve-sim tap <x> <y>` only when there is no accessibility target (a game canvas, a raw screenshot point). Coordinates are normalized 0..1, origin top-left. Prefer `tap` over `gesture` for a single-shot tap: two separate `gesture` begin/end calls open two WebSockets and often register as a long-press. Use `gesture` only for a drag or a multi-step sequence that must share one socket.
+Use `serve-sim tap <x> <y>` only when there is no accessibility target (a game canvas, a raw screenshot point). Coordinates are normalized 0..1, origin top-left. Prefer `tap` over `gesture` for a single-shot tap: with two separate `gesture` begin/end calls the finger stays down between them, so they often register as a long-press. Use `gesture` only for a drag or a multi-step sequence, sent as one JSON array in a single call.
 
 `--timeout` (default 3000 ms, max 30000) is a hard limit on settle. `settled: false` with `reason: "timeout"` still returns the current tree and exits 0. After a reboot, a SpringBoard restart, or an app relaunch, do not rely on old refs; take a fresh `ax --refs`.
 

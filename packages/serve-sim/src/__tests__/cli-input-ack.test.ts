@@ -145,6 +145,22 @@ describe("input commands propagate HID delivery failures (#136)", () => {
     }, 25_000);
   }
 
+  test("a failed gesture sequence exits promptly instead of waiting out the next step's delayMs", async () => {
+    frames.length = 0;
+    const steps = [
+      { type: "begin", x: 0.5, y: 0.8, delayMs: 10_000 },
+      { type: "move", x: 0.5, y: 0.4 },
+      { type: "end", x: 0.5, y: 0.4 },
+    ];
+    const r = await runCli(["gesture", JSON.stringify(steps), "-d", "ACK-FAIL"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("could not deliver");
+    // Only the first step went out; the pending step timer must not keep the
+    // process alive for the remaining 10s.
+    expect(frames).toHaveLength(1);
+    expect(r.ms).toBeLessThan(5_000);
+  }, 25_000);
+
   test("tap prints the server's Device Hub error and exits 1", async () => {
     const r = await runCli(["tap", "0.5", "0.5", "-d", "ACK-SHADOW"]);
     expect(r.status).toBe(1);
