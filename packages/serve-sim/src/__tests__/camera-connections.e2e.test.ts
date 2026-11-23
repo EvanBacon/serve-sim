@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync, execSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { clangArchArgs, parseServeSimArch } from "../serve-sim-arch";
+import { simctlArguments } from "../simctl";
 
 const BUNDLE_ID = "dev.servesim.camera-connection-test";
 const RESULT_FILE = "simcam-connection-result.json";
@@ -13,7 +14,7 @@ const TEST_SOURCE = join(PKG_DIR, "Tests/SimCameraConnectionTestApp/main.m");
 
 function bootedUdid(): string | null {
   try {
-    const out = execSync("xcrun simctl list devices booted -j", { encoding: "utf-8" });
+    const out = execFileSync("xcrun", simctlArguments(["list", "devices", "booted", "-j"]), { encoding: "utf-8" });
     const data = JSON.parse(out) as {
       devices: Record<string, Array<{ udid: string; state: string }>>;
     };
@@ -52,8 +53,9 @@ async function runTestApp(
     | "unique-id-lookup"
     | "format-description",
 ) {
+  const started = Date.now();
   try {
-    execFileSync("xcrun", ["simctl", "terminate", udid!, BUNDLE_ID], {
+    execFileSync("xcrun", simctlArguments(["terminate", udid!, BUNDLE_ID]), {
       stdio: "pipe",
     });
   } catch {}
@@ -63,7 +65,9 @@ async function runTestApp(
     } catch {}
   }
 
-  execFileSync("xcrun", ["simctl", "launch", udid!, BUNDLE_ID], {
+  const launchAt = Date.now();
+  const launched = execFileSync("xcrun", simctlArguments(["launch", udid!, BUNDLE_ID]), {
+    encoding: "utf-8",
     env: {
       ...process.env,
       SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: DYLIB,
@@ -71,11 +75,22 @@ async function runTestApp(
     },
   });
 
-  const deadline = Date.now() + 10_000;
+  const launchedAt = Date.now();
+  const deadline = launchedAt + 10_000;
   while (resultPath && !existsSync(resultPath) && Date.now() < deadline) {
     await Bun.sleep(100);
   }
-  expect(resultPath && existsSync(resultPath)).toBe(true);
+  // A missing result used to say only "Expected: true". Say where the time
+  // went (terminate, launch, wait) and whether the app is still running.
+  const missing = () => {
+    const running = spawnSync("xcrun", simctlArguments(["spawn", udid!, "launchctl", "list"]), { encoding: "utf-8", timeout: 10_000 });
+    const job = (running.stdout ?? "").split("\n").find((line) => line.includes(BUNDLE_ID));
+    return `no ${RESULT_FILE} from mode ${mode} ${Date.now() - launchedAt}ms after launch ` +
+      `(terminate ${launchAt - started}ms, launch ${launchedAt - launchAt}ms: ${launched.trim()}); ` +
+      `launchd job: ${job?.trim() ?? "none"}`;
+  };
+  const found = !!resultPath && existsSync(resultPath);
+  expect(found, found ? "" : missing()).toBe(true);
   const result = JSON.parse(readFileSync(resultPath!, "utf-8")) as {
     passed: boolean;
     message: string;
@@ -130,15 +145,15 @@ describeIfSimulator("synthetic camera connection graph", () => {
 </dict></plist>\n`);
 
     try {
-      execFileSync("xcrun", ["simctl", "uninstall", udid!, BUNDLE_ID]);
+      execFileSync("xcrun", simctlArguments(["uninstall", udid!, BUNDLE_ID]));
     } catch {}
-    execFileSync("xcrun", ["simctl", "install", udid!, appDir]);
+    execFileSync("xcrun", simctlArguments(["install", udid!, appDir]));
     // The recording checks add the microphone, as expo-camera and
     // VisionCamera do; a host without one skips that half.
-    execFileSync("xcrun", ["simctl", "privacy", udid!, "grant", "microphone", BUNDLE_ID]);
+    execFileSync("xcrun", simctlArguments(["privacy", udid!, "grant", "microphone", BUNDLE_ID]));
     const dataContainer = execFileSync(
       "xcrun",
-      ["simctl", "get_app_container", udid!, BUNDLE_ID, "data"],
+      simctlArguments(["get_app_container", udid!, BUNDLE_ID, "data"]),
       { encoding: "utf-8" },
     ).trim();
     resultPath = join(dataContainer, "Documents", RESULT_FILE);
@@ -149,7 +164,7 @@ describeIfSimulator("synthetic camera connection graph", () => {
 
   afterAll(() => {
     try {
-      execFileSync("xcrun", ["simctl", "uninstall", udid!, BUNDLE_ID]);
+      execFileSync("xcrun", simctlArguments(["uninstall", udid!, BUNDLE_ID]));
     } catch {}
     if (buildDir) rmSync(buildDir, { recursive: true, force: true });
   }, 30_000);

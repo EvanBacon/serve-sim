@@ -22,32 +22,104 @@ if (udid && !existsSync(CLI)) {
   throw new Error(`SERVE_SIM_E2E_SHUTDOWN_UDID is set but ${CLI} is missing; build the CLI first`);
 }
 const describeIfOptedIn = udid ? describe : describe.skip;
+// The serve-sim CLI reads SERVE_SIM_DEVICE_SET itself; pass the same set to the
+// test's own simctl calls so the test can run against a private-set simulator.
+const deviceSet = process.env.SERVE_SIM_DEVICE_SET?.trim() || undefined;
+const simctl = (...args: string[]): string[] => (deviceSet ? ["simctl", "--set", deviceSet, ...args] : ["simctl", ...args]);
 const RECONNECTED = "[hid] Simulator Booted again, reconnected HID client";
 const NO_SERVER = "No serve-sim server running";
 
-function tap(timeoutMs = 8_000): { status: number | null; stderr: string } {
-  const r = spawnSync("node", [CLI, "tap", "0.97", "0.03", "-d", udid!], { encoding: "utf-8", timeout: timeoutMs });
-  const detail = r.error ? String(r.error) : "";
+/** The foreground server's port, for the liveness probe in failure messages. */
+let serverPort: number | undefined;
+
+/** The device's state as simctl reports it, for failure messages. */
+function deviceState(): string {
+  const r = spawnSync("xcrun", simctl("list", "devices", "-j"), { encoding: "utf-8", timeout: 5_000 });
+  if (r.error || r.status !== 0) return `unknown (simctl list: ${r.error ?? `status ${r.status}`})`;
+  try {
+    const data = JSON.parse(r.stdout) as { devices: Record<string, Array<{ udid: string; state: string }>> };
+    for (const devices of Object.values(data.devices)) {
+      const d = devices.find((x) => x.udid === udid);
+      if (d) return d.state;
+    }
+  } catch {}
+  return "not listed";
+}
+
+/**
+ * Where things stood when a tap CLI hung: whether the server's event loop
+ * still answers HTTP, and the device's state. On CI the tap CLI has been
+ * killed at its timeout with no output, which this tells apart from a server
+ * that stopped answering or a device still between states.
+ * Capped at ~8s (curl 2s, simctl list 5s) so a hang in the post-boot test
+ * doesn't eat its 20s not-ready budget.
+ */
+function hangContext(): string {
+  let http = "server port unknown";
+  if (serverPort) {
+    const r = spawnSync(
+      "curl",
+      ["-s", "-o", "/dev/null", "-w", "%{http_code} in %{time_total}s", "-m", "2", `http://127.0.0.1:${serverPort}/api`],
+      { encoding: "utf-8", timeout: 3_000 },
+    );
+    http = r.status === 0 ? `server /api answered ${r.stdout}` : `server /api did not answer (curl exit ${r.status}, ${r.stdout})`;
+  }
+  return `${http}; device ${deviceState()}`;
+}
+
+interface TapResult { status: number | null; stderr: string; ms: number }
+
+function tap(timeoutMs = 8_000): TapResult {
+  const started = Date.now();
+  // serve-sim:cli/state debug lines (timestamped on a pipe) show how far a
+  // hung CLI got: state lookup, /config, WebSocket open, or the ack wait.
+  const r = spawnSync("node", [CLI, "tap", "0.97", "0.03", "-d", udid!], {
+    encoding: "utf-8",
+    timeout: timeoutMs,
+    env: { ...process.env, DEBUG: "serve-sim:cli,serve-sim:state" },
+  });
+  const ms = Date.now() - started;
+  const detail = r.error ? `${r.error}\n[test] tap CLI killed after ${ms}ms; ${hangContext()}` : "";
   const stderr = `${r.stderr ?? ""}${detail ? `\n${detail}` : ""}`;
-  return { status: r.status, stderr };
+  return { status: r.status, stderr, ms };
+}
+
+/** One line per tap attempt (offset from `since`, exit status, CLI wall time). */
+function timeline(attempts: ReadonlyArray<{ at: number; r: TapResult }>, since: number): string {
+  const lines = attempts.map(({ at, r }) => `  +${at - since}ms status=${r.status} took=${r.ms}ms`);
+  const shown = lines.length > 30 ? [`  … ${lines.length - 30} earlier`, ...lines.slice(-30)] : lines;
+  return `tap attempts (${attempts.length}):\n${shown.join("\n")}`;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Boot and wait. No `bootstatus -b`: on Xcode 27 it can stay blocked once Booted. */
 function bootAndWait(): void {
-  spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
-  execFileSync("xcrun", ["simctl", "bootstatus", udid!], { stdio: "ignore", timeout: 120_000 });
+  const started = Date.now();
+  const boot = spawnSync("xcrun", simctl("boot", udid!), { encoding: "utf-8" });
+  const booted = Date.now();
+  const status = spawnSync("xcrun", simctl("bootstatus", udid!), { encoding: "utf-8", timeout: 120_000 });
+  if (status.status === 0) return;
+  throw new Error(
+    `simctl bootstatus ${udid} failed after ${Date.now() - booted}ms ` +
+      `(status ${status.status}${status.error ? `, ${status.error}` : ""}); device ${deviceState()}\n` +
+      `simctl boot took ${booted - started}ms, exit ${boot.status}: ${(boot.stderr ?? "").trim()}\n` +
+      `bootstatus output:\n${status.stdout ?? ""}${status.stderr ?? ""}`,
+  );
 }
 
-async function tapUntilOk(timeoutMs: number): Promise<{ status: number | null; stderr: string }> {
-  const deadline = Date.now() + timeoutMs;
+async function tapUntilOk(timeoutMs: number): Promise<TapResult & { timeline: string }> {
+  const since = Date.now();
+  const deadline = since + timeoutMs;
+  const attempts: Array<{ at: number; r: TapResult }> = [];
   let last = tap();
+  attempts.push({ at: Date.now(), r: last });
   while (last.status !== 0 && Date.now() < deadline) {
     await sleep(500);
     last = tap();
+    attempts.push({ at: Date.now(), r: last });
   }
-  return last;
+  return { ...last, timeline: timeline(attempts, since) };
 }
 
 describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>"})`, () => {
@@ -58,13 +130,14 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     bootAndWait();
     try { execFileSync("node", [CLI, "--kill", udid!], { stdio: "pipe" }); } catch {}
     const port = 40_000 + Math.floor(Math.random() * 20_000);
+    serverPort = port;
     // Foreground (no --detach): unlike a detached helper it has no
     // --exit-on-simulator-shutdown watcher, so it stays up across the reboot.
     server = spawn("node", [CLI, udid!, "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"] });
     server.stdout!.on("data", (d) => { serverLog += d; });
     server.stderr!.on("data", (d) => { serverLog += d; });
     const ready = await tapUntilOk(45_000);
-    if (ready.status !== 0) throw new Error(`serve-sim server never accepted a tap: ${ready.stderr}\n${serverLog}`);
+    if (ready.status !== 0) throw new Error(`serve-sim server never accepted a tap: ${ready.stderr}\n${ready.timeline}\n${serverLog}`);
   }, 240_000);
 
   afterAll(async () => {
@@ -87,18 +160,22 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     // "could not deliver".
     expect(tap().status).toBe(0);
 
-    const shutdown = spawn("xcrun", ["simctl", "shutdown", udid!], { stdio: "ignore" });
+    const shutdown = spawn("xcrun", simctl("shutdown", udid!), { stdio: "ignore" });
     const issued = Date.now();
+    const shutdownExit = new Promise<number>((r) => shutdown.on("exit", () => r(Date.now())));
     let failure: { afterMs: number; stderr: string } | undefined;
+    const attempts: Array<{ at: number; r: TapResult }> = [];
     while (Date.now() - issued < 6_000) {
       const r = tap();
+      attempts.push({ at: Date.now(), r });
       if (r.status !== 0) { failure = { afterMs: Date.now() - issued, stderr: r.stderr }; break; }
     }
-    await new Promise((r) => shutdown.on("exit", r));
+    const shutdownMs = (await shutdownExit) - issued;
+    const context = () => `simctl shutdown exited at +${shutdownMs}ms\n${timeline(attempts, issued)}\n${serverLog}`;
 
-    if (!failure) throw new Error(`every tap in the 6s after \`simctl shutdown\` exited 0\n${serverLog}`);
-    expect(failure.stderr, `first undelivered tap at ${failure.afterMs}ms\n${failure.stderr}\n${serverLog}`).toContain("could not deliver the tap");
-    expect(failure.afterMs, `first undelivered tap at ${failure.afterMs}ms (stderr: ${failure.stderr})\n${serverLog}`).toBeLessThan(6_000);
+    if (!failure) throw new Error(`every tap in the 6s after \`simctl shutdown\` exited 0\n${context()}`);
+    expect(failure.stderr, `first undelivered tap at ${failure.afterMs}ms\n${failure.stderr}\n${context()}`).toContain("could not deliver the tap");
+    expect(failure.afterMs, `first undelivered tap at ${failure.afterMs}ms (stderr: ${failure.stderr})\n${context()}`).toBeLessThan(6_000);
     // The injector refused the tap, so the server was answering.
     expect(failure.stderr).not.toContain(NO_SERVER);
     expect(server!.exitCode).toBeNull();
@@ -130,13 +207,17 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     stampNotReady();
     server!.stdout!.on("data", onData);
     server!.stderr!.on("data", onData);
-    spawnSync("xcrun", ["simctl", "boot", udid!], { stdio: "ignore" });
+    const bootIssued = Date.now();
+    spawnSync("xcrun", simctl("boot", udid!), { stdio: "ignore" });
+    const bootReturnedMs = Date.now() - bootIssued;
     let firstOkAt: number | undefined;
     let lastFail = "";
+    const attempts: Array<{ at: number; r: TapResult }> = [];
     const deadline = Date.now() + 90_000;
     try {
       while (Date.now() < deadline) {
         const r = tap();
+        attempts.push({ at: Date.now(), r });
         await sleep(0);
         stampNotReady();
         if (r.status === 0) { firstOkAt = Date.now(); break; }
@@ -150,10 +231,16 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
       server!.stderr!.off("data", onData);
     }
     if (firstOkAt == null) {
-      throw new Error(`no successful tap within 90s of simctl boot\n${lastFail}\n${serverLog.slice(logAtStart)}`);
+      throw new Error(
+        `no successful tap within 90s of simctl boot (boot returned at +${bootReturnedMs}ms; device now ${deviceState()})\n` +
+          `${lastFail}\n${timeline(attempts, bootIssued)}\n${serverLog.slice(logAtStart)}`,
+      );
     }
     if (notReadyAt != null) {
-      expect(firstOkAt - notReadyAt).toBeLessThan(20_000);
+      expect(
+        firstOkAt - notReadyAt,
+        `first ok tap ${firstOkAt - notReadyAt}ms after the first not-ready log\n${timeline(attempts, bootIssued)}`,
+      ).toBeLessThan(20_000);
     }
     expect(server!.exitCode).toBeNull();
   }, 150_000);
@@ -162,7 +249,7 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     bootAndWait();
     const r = await tapUntilOk(30_000);
     expect(r.stderr).not.toContain(NO_SERVER);
-    expect(r.status).toBe(0);
+    expect(r.status, `no successful tap within 30s of bootstatus\n${r.stderr}\n${r.timeline}\n${serverLog}`).toBe(0);
     expect(server!.exitCode).toBeNull();
     // Without the rebuild the tap above also exits 0 but never reaches the guest.
     const deadline = Date.now() + 5_000;
@@ -172,35 +259,133 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
 
     // Prove the rebuilt client actually delivers: open Settings, tap General,
     // and assert the General screen (About) appears in the AX tree.
-    try { execFileSync("xcrun", ["simctl", "terminate", udid!, "com.apple.Preferences"], { stdio: "pipe" }); } catch {}
-    execFileSync("xcrun", ["simctl", "launch", udid!, "com.apple.Preferences"], { stdio: "pipe", timeout: 30_000 });
+    try { execFileSync("xcrun", simctl("terminate", udid!, "com.apple.Preferences"), { stdio: "pipe" }); } catch {}
+    execFileSync("xcrun", simctl("launch", udid!, "com.apple.Preferences"), { stdio: "pipe", timeout: 30_000 });
 
-    const axText = (): { status: number | null; stdout: string } => {
+    const axText = (): { status: number | null; stdout: string; stderr: string } => {
       const s = spawnSync("node", [CLI, "ax", "--refs", "--text", "-d", udid!], { encoding: "utf-8", timeout: 15_000 });
-      return { status: s.status, stdout: s.stdout ?? "" };
+      return { status: s.status, stdout: s.stdout ?? "", stderr: `${s.stderr ?? ""}${s.error ? `\n${s.error}` : ""}` };
+    };
+    // The last AX read, for a failure message: "never matched" alone doesn't
+    // say whether the AX call failed or the screen showed something else.
+    const describeAx = (s: { status: number | null; stdout: string; stderr: string } | undefined, reads: number) =>
+      s ? `last of ${reads} ax reads: status=${s.status}\nstderr: ${s.stderr.trim()}\nstdout:\n${s.stdout}` : "no ax reads";
+
+    let lastAx: ReturnType<typeof axText> | undefined;
+    let axReads = 0;
+    /** Poll the AX tree until `done` matches (returns the snapshot) or `ms` passes. */
+    const waitForAx = async (done: (text: string) => boolean, ms: number, intervalMs: number): Promise<string | undefined> => {
+      lastAx = undefined;
+      axReads = 0;
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        const s = axText();
+        lastAx = s;
+        axReads++;
+        if (s.status === 0 && done(s.stdout)) return s.stdout;
+        await sleep(intervalMs);
+      }
+      return undefined;
+    };
+    // A Settings sub-page other than General: a back button to "Settings"
+    // under some other heading. `tap @ref` re-resolves the ref against the
+    // live tree before tapping (ax-agent.ts act()), so landing here means it
+    // tapped stale coordinates: a product bug to surface, never retry past.
+    const otherSettingsPage = (text: string): string | undefined => {
+      if (/"About"/.test(text) || !/back button "Settings"/.test(text)) return undefined;
+      const heading = text.match(/^@e\d+ heading "([^"]*)"/m)?.[1];
+      return heading && heading !== "General" && heading !== "Settings" ? heading : undefined;
+    };
+    /** The "General" line of an `ax --refs --text` dump, and its frame in device points. */
+    const generalLine = (text: string) => {
+      const line = text.split("\n").find((l) => /^@e\d+\s+\S+\s+"General"/.test(l));
+      const f = line?.match(/\((-?[\d.]+),(-?[\d.]+) ([\d.]+)x([\d.]+)\)\s*$/);
+      return { line, frame: f ? { x: +f[1]!, y: +f[2]!, w: +f[3]!, h: +f[4]! } : undefined };
+    };
+    /** Lines of a dump whose frame contains point (x, y). */
+    const linesAt = (text: string, x: number, y: number) =>
+      text.split("\n").filter((l) => {
+        const f = l.match(/\((-?[\d.]+),(-?[\d.]+) ([\d.]+)x([\d.]+)\)\s*$/);
+        return !!f && x >= +f[1]! && x <= +f[1]! + +f[3]! && y >= +f[2]! && y <= +f[2]! + +f[4]!;
+      });
+    /**
+     * The capture's content-change counter (what act() compares to skip its
+     * pre-tap re-read), from `/api/diagnostics`. Two reads 1s apart show
+     * whether it is advancing. Capped so a slow collection can't stall.
+     */
+    const frameCounters = async (): Promise<string> => {
+      const read = async () => {
+        try {
+          const res = await fetch(`http://127.0.0.1:${serverPort}/api/diagnostics?device=${udid}`, { signal: AbortSignal.timeout(4_000) });
+          if (!res.ok) return `HTTP ${res.status}`;
+          const found: Record<string, unknown> = {};
+          const walk = (v: unknown) => {
+            if (!v || typeof v !== "object") return;
+            for (const [k, x] of Object.entries(v)) {
+              if (k === "content_change_count" || k === "frame_count" || k === "last_frame_age_ms" || k === "phase") found[k] = x;
+              else walk(x);
+            }
+          };
+          walk(await res.json());
+          return JSON.stringify(found);
+        } catch (e) {
+          return `unavailable (${e})`;
+        }
+      };
+      const first = await read();
+      await sleep(1_000);
+      return `first ${first}; +1s ${await read()}`;
     };
 
-    let snapshot = "";
-    const settingsDeadline = Date.now() + 20_000;
-    while (Date.now() < settingsDeadline) {
-      const s = axText();
-      if (s.status === 0 && /"General"/.test(s.stdout)) { snapshot = s.stdout; break; }
-      await sleep(500);
-    }
-    if (!/"General"/.test(snapshot)) throw new Error(`Settings did not show a General row after launch:\n${snapshot}`);
+    // The Settings root (no back button), not a page still animating away.
+    const snapshot = await waitForAx((text) => /"General"/.test(text) && !/back button "Settings"/.test(text), 20_000, 500);
+    if (!snapshot) throw new Error(`Settings did not show a General row after launch:\n${describeAx(lastAx, axReads)}`);
+    const snapshotAt = Date.now();
     const generalRef = snapshot.match(/(@e\d+)\s+\S+\s+"General"/)?.[1];
     if (!generalRef) throw new Error(`could not find a General ref in:\n${snapshot}`);
+    const tapStarted = Date.now();
     const tapped = spawnSync("node", [CLI, "tap", generalRef, "-d", udid!], { encoding: "utf-8", timeout: 15_000 });
-    expect(tapped.status).toBe(0);
+    const tapDetail = `tap ${generalRef} (${tapStarted - snapshotAt}ms after its snapshot, took ${Date.now() - tapStarted}ms): ` +
+      `status=${tapped.status}${tapped.error ? ` (${tapped.error})` : ""}\nstdout: ${tapped.stdout ?? ""}\nstderr: ${tapped.stderr ?? ""}`;
+    expect(tapped.status, tapDetail).toBe(0);
     expect(tapped.stderr).not.toContain(NO_SERVER);
 
-    let after = "";
-    const generalDeadline = Date.now() + 15_000;
-    while (Date.now() < generalDeadline) {
-      const s = axText();
-      if (s.status === 0 && /"About"/.test(s.stdout)) { after = s.stdout; break; }
-      await sleep(300);
+    const after = await waitForAx((text) => /"About"/.test(text) || otherSettingsPage(text) !== undefined, 15_000, 300);
+    if (after && /"About"/.test(after)) return;
+    const afterAx = describeAx(lastAx, axReads);
+    const other = after ? otherSettingsPage(after) : undefined;
+    if (!after || !other) {
+      throw new Error(`tapping General should open the General screen (About row)\n${tapDetail}\nsnapshot the ref came from:\n${snapshot}\n${afterAx}`);
     }
-    if (!/"About"/.test(after)) throw new Error(`tapping General should open the General screen (About row):\n${after}`);
+
+    // Wrong page. Gather what tells a stale tap point apart from stale AX
+    // data: General's frame then vs now, what sits at the old centre now, and
+    // the frame counter. Diagnostics only; the test fails either way.
+    const counters = await frameCounters();
+    const then = generalLine(snapshot);
+    let fresh = "no fresh read (no back button on the wrong page)";
+    const backRef = after.match(/(@e\d+) back button "Settings"/)?.[1];
+    if (backRef) {
+      const back = spawnSync("node", [CLI, "tap", backRef, "-d", udid!], { encoding: "utf-8", timeout: 10_000 });
+      const root = back.status === 0
+        ? await waitForAx((text) => /"General"/.test(text) && !/back button "Settings"/.test(text), 8_000, 500)
+        : undefined;
+      if (!root) {
+        fresh = `no fresh root read (back tap status=${back.status}${back.error ? `, ${back.error}` : ""}); ${describeAx(lastAx, axReads)}`;
+      } else {
+        const now = generalLine(root);
+        const at = then.frame ? linesAt(root, then.frame.x + then.frame.w / 2, then.frame.y + then.frame.h / 2) : [];
+        fresh = `General now: ${now.line ?? "(missing)"}\n` +
+          `at the snapshot's General centre now: ${at.length ? at.join(" | ") : "(nothing)"}\n` +
+          `fresh root read:\n${root}`;
+      }
+    }
+    throw new Error(
+      `tap ${generalRef} ("General") opened the "${other}" page instead of General. ` +
+        `act() re-resolves refs against the live tree before tapping, so this is a stale tap point or stale AX data, not test timing.\n` +
+        `General in the snapshot the ref came from: ${then.line ?? "(missing)"}\n${fresh}\n` +
+        `content-change counter (/api/diagnostics): ${counters}\n${tapDetail}\n` +
+        `snapshot the ref came from:\n${snapshot}\nwrong page (${afterAx})`,
+    );
   }, 180_000);
 });
