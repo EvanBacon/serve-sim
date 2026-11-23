@@ -1086,7 +1086,9 @@ function sendAckedInput(
         }
         const next = frames[index + 1];
         if (next) {
-          setTimeout(() => sendNext(index + 1), next.delayMs ?? 0);
+          // Held in `timer` so finish()/onerror cancel it: a failed sequence must
+          // not keep the CLI alive for the rest of a long step delay.
+          timer = setTimeout(() => sendNext(index + 1), next.delayMs ?? 0);
           return;
         }
         sentAll = true;

@@ -32,7 +32,7 @@
       "prompt": "Stream my simulator so I can share the URL remotely. Then drag down from the top edge to open Notification Center.",
       "expected_behavior": [
         "Runs `npx serve-sim --detach -q` and surfaces the returned URL to the user.",
-        "Issues a gesture sequence (begin → move → end) with `edge: 2` (top), starting at low y (~0.02) and dragging down to y ~0.4.",
+        "Issues a gesture sequence of `begin`, many small `move` steps (~20, a few hundredths of y each), then `end`, all with `edge: 2` (top), starting at the very top edge (y ≲ 0.02) and dragging down to y ~0.4 or lower. A single large move (`begin` + one `move` + `end`) does NOT pass — it does not open Notification Center.",
         "Sends the whole sequence as a JSON array in ONE `npx serve-sim gesture '<json>'` call with valid normalized coordinates (not one call per step).",
         "Does NOT use `tap` for this multi-step gesture."
       ],
