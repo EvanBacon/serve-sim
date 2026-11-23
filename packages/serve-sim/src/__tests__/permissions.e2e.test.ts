@@ -123,9 +123,15 @@ async function locationAuthEventually(bundleId: string, expected: number): Promi
  * clients.plist, and what the bundle's entry holds now.
  */
 function locationMismatch(bundleId: string, cliMs: number, pollMs: number): string {
-  const plist = join(libDir(), "Caches/locationd/clients.plist");
-  if (!existsSync(plist)) return `${plist} missing after a ${cliMs}ms CLI call and ${pollMs}ms of polling`;
-  const mtime = statSync(plist).mtime;
+  let plist: string;
+  let mtime: Date;
+  try {
+    plist = join(libDir(), "Caches/locationd/clients.plist");
+    if (!existsSync(plist)) return `${plist} missing after a ${cliMs}ms CLI call and ${pollMs}ms of polling`;
+    mtime = statSync(plist).mtime;
+  } catch (e) {
+    return `CLI call took ${cliMs}ms, polled ${pollMs}ms; could not stat clients.plist: ${e}`;
+  }
   let xml: string;
   try {
     xml = execSync(`plutil -convert xml1 -o - "${plist}"`, { encoding: "utf-8", timeout: 5_000 });

@@ -33,6 +33,19 @@ const describeIfSimulator = udid && existsSync(DYLIB) ? describe : describe.skip
 let buildDir: string | null = null;
 let resultPath: string | null = null;
 
+/** Under bun's 20s per-test timeout, with room for launchdJob(5_000) after it. */
+const LAUNCH_TIMEOUT_MS = 8_000;
+
+/** The test app's `launchctl list` line in the guest, "none", or why the query failed. */
+function launchdJob(timeoutMs: number): string {
+  const running = spawnSync("xcrun", simctlArguments(["spawn", udid!, "launchctl", "list"]), { encoding: "utf-8", timeout: timeoutMs });
+  if (running.error || running.status !== 0 || running.signal) {
+    return `query failed (${running.error?.message ?? `status ${running.status} signal ${running.signal}`}): ` +
+      `${(running.stderr ?? "").trim()}`;
+  }
+  return (running.stdout ?? "").split("\n").find((line) => line.includes(BUNDLE_ID))?.trim() ?? "none";
+}
+
 async function runTestApp(
   mode:
     | "graph"
@@ -66,14 +79,37 @@ async function runTestApp(
   }
 
   const launchAt = Date.now();
-  const launched = execFileSync("xcrun", simctlArguments(["launch", udid!, BUNDLE_ID]), {
-    encoding: "utf-8",
-    env: {
-      ...process.env,
-      SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: DYLIB,
-      SIMCTL_CHILD_SIMCAM_CONNECTION_TEST_MODE: mode,
-    },
-  });
+  let launched: string;
+  try {
+    // A normal launch takes ~1-4s. On CI it has hung until bun's 20s test
+    // timeout (SIGTERM, no output), which loses every diagnostic below, so
+    // stop it at 8s and leave the 5s launchd query room inside that budget.
+    launched = execFileSync("xcrun", simctlArguments(["launch", udid!, BUNDLE_ID]), {
+      encoding: "utf-8",
+      timeout: LAUNCH_TIMEOUT_MS,
+      env: {
+        ...process.env,
+        SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: DYLIB,
+        SIMCTL_CHILD_SIMCAM_CONNECTION_TEST_MODE: mode,
+      },
+    });
+  } catch (e) {
+    const err = e as { message?: string; signal?: string | null; status?: number | null; stdout?: unknown; stderr?: unknown };
+    let job: string;
+    try {
+      job = launchdJob(5_000);
+    } catch (diag) {
+      job = `diagnostics failed: ${diag}`;
+    }
+    throw new Error(
+      `simctl launch for mode ${mode} failed after ${Date.now() - launchAt}ms ` +
+        `(timeout ${LAUNCH_TIMEOUT_MS}ms, terminate took ${launchAt - started}ms; ` +
+        `status ${err.status ?? null} signal ${err.signal ?? null}): ${err.message ?? String(e)}\n` +
+        `stdout: ${String(err.stdout ?? "").trim()}\nstderr: ${String(err.stderr ?? "").trim()}\n` +
+        `launchd job: ${job}`,
+      { cause: e },
+    );
+  }
 
   const launchedAt = Date.now();
   const deadline = launchedAt + 10_000;
@@ -83,11 +119,10 @@ async function runTestApp(
   // A missing result used to say only "Expected: true". Say where the time
   // went (terminate, launch, wait) and whether the app is still running.
   const missing = () => {
-    const running = spawnSync("xcrun", simctlArguments(["spawn", udid!, "launchctl", "list"]), { encoding: "utf-8", timeout: 10_000 });
-    const job = (running.stdout ?? "").split("\n").find((line) => line.includes(BUNDLE_ID));
+    const job = launchdJob(10_000);
     return `no ${RESULT_FILE} from mode ${mode} ${Date.now() - launchedAt}ms after launch ` +
       `(terminate ${launchAt - started}ms, launch ${launchedAt - launchAt}ms: ${launched.trim()}); ` +
-      `launchd job: ${job?.trim() ?? "none"}`;
+      `launchd job: ${job}`;
   };
   const found = !!resultPath && existsSync(resultPath);
   expect(found, found ? "" : missing()).toBe(true);

@@ -51,8 +51,8 @@ function deviceState(): string {
  * still answers HTTP, and the device's state. On CI the tap CLI has been
  * killed at its timeout with no output, which this tells apart from a server
  * that stopped answering or a device still between states.
- * Capped at ~8s (curl 2s, simctl list 5s) so a hang in the post-boot test
- * doesn't eat its 20s not-ready budget.
+ * Capped at ~8s (curl 2s, simctl list 5s), and only collected once a caller
+ * has given up retrying (withHangContext), so it never eats a retry window.
  */
 function hangContext(): string {
   let http = "server port unknown";
@@ -67,7 +67,7 @@ function hangContext(): string {
   return `${http}; device ${deviceState()}`;
 }
 
-interface TapResult { status: number | null; stderr: string; ms: number }
+interface TapResult { status: number | null; stderr: string; ms: number; hung: boolean }
 
 function tap(timeoutMs = 8_000): TapResult {
   const started = Date.now();
@@ -79,9 +79,16 @@ function tap(timeoutMs = 8_000): TapResult {
     env: { ...process.env, DEBUG: "serve-sim:cli,serve-sim:state" },
   });
   const ms = Date.now() - started;
-  const detail = r.error ? `${r.error}\n[test] tap CLI killed after ${ms}ms; ${hangContext()}` : "";
+  // No hangContext() here: it takes up to ~8s and would eat the caller's
+  // retry window. Callers add it via withHangContext() once they give up.
+  const detail = r.error ? `${r.error}\n[test] tap CLI killed after ${ms}ms` : "";
   const stderr = `${r.stderr ?? ""}${detail ? `\n${detail}` : ""}`;
-  return { status: r.status, stderr, ms };
+  return { status: r.status, stderr, ms, hung: !!r.error };
+}
+
+/** `r`'s stderr, plus server/device state if the tap CLI hung. For terminal failures only. */
+function withHangContext(r: TapResult): string {
+  return r.hung ? `${r.stderr}\n[test] at failure: ${hangContext()}` : r.stderr;
 }
 
 /** One line per tap attempt (offset from `since`, exit status, CLI wall time). */
@@ -119,7 +126,9 @@ async function tapUntilOk(timeoutMs: number): Promise<TapResult & { timeline: st
     last = tap();
     attempts.push({ at: Date.now(), r: last });
   }
-  return { ...last, timeline: timeline(attempts, since) };
+  // Terminal failure: only now is there time to spend on hang diagnostics.
+  const stderr = last.status === 0 ? last.stderr : withHangContext(last);
+  return { ...last, stderr, timeline: timeline(attempts, since) };
 }
 
 describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>"})`, () => {
@@ -168,7 +177,7 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     while (Date.now() - issued < 6_000) {
       const r = tap();
       attempts.push({ at: Date.now(), r });
-      if (r.status !== 0) { failure = { afterMs: Date.now() - issued, stderr: r.stderr }; break; }
+      if (r.status !== 0) { failure = { afterMs: Date.now() - issued, stderr: withHangContext(r) }; break; }
     }
     const shutdownMs = (await shutdownExit) - issued;
     const context = () => `simctl shutdown exited at +${shutdownMs}ms\n${timeline(attempts, issued)}\n${serverLog}`;
@@ -182,7 +191,7 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     // It still answers once the device is fully down.
     const down = tap();
     expect(down.status).not.toBe(0);
-    expect(down.stderr).toContain("could not deliver the tap");
+    expect(down.stderr, withHangContext(down)).toContain("could not deliver the tap");
     expect(down.stderr).not.toContain(NO_SERVER);
   }, 60_000);
 
@@ -212,6 +221,7 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     const bootReturnedMs = Date.now() - bootIssued;
     let firstOkAt: number | undefined;
     let lastFail = "";
+    let lastTap: TapResult | undefined;
     const attempts: Array<{ at: number; r: TapResult }> = [];
     const deadline = Date.now() + 90_000;
     try {
@@ -221,6 +231,7 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
         await sleep(0);
         stampNotReady();
         if (r.status === 0) { firstOkAt = Date.now(); break; }
+        lastTap = r;
         lastFail = `status=${r.status} exit=${server!.exitCode}\n${r.stderr}`;
         expect(r.stderr, lastFail).not.toContain(NO_SERVER);
         if (server!.exitCode != null) throw new Error(`serve-sim server exited ${server!.exitCode} while waiting for a post-boot tap\n${lastFail}\n${serverLog.slice(logAtStart)}`);
@@ -233,7 +244,7 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     if (firstOkAt == null) {
       throw new Error(
         `no successful tap within 90s of simctl boot (boot returned at +${bootReturnedMs}ms; device now ${deviceState()})\n` +
-          `${lastFail}\n${timeline(attempts, bootIssued)}\n${serverLog.slice(logAtStart)}`,
+          `${lastFail}${lastTap?.hung ? `\n[test] at failure: ${hangContext()}` : ""}\n${timeline(attempts, bootIssued)}\n${serverLog.slice(logAtStart)}`,
       );
     }
     if (notReadyAt != null) {
@@ -245,7 +256,12 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     expect(server!.exitCode).toBeNull();
   }, 150_000);
 
+  const LANDS_TIMEOUT_MS = 180_000;
   test("after the same simulator boots again, a tap on the guest lands", async () => {
+    // Wrong-page diagnostics below are bounded by this so the wrong-page
+    // error is always thrown before bun's test timeout replaces it.
+    const diagDeadline = Date.now() + LANDS_TIMEOUT_MS - 10_000;
+    const diagLeft = () => diagDeadline - Date.now();
     bootAndWait();
     const r = await tapUntilOk(30_000);
     expect(r.stderr).not.toContain(NO_SERVER);
@@ -262,8 +278,8 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     try { execFileSync("xcrun", simctl("terminate", udid!, "com.apple.Preferences"), { stdio: "pipe" }); } catch {}
     execFileSync("xcrun", simctl("launch", udid!, "com.apple.Preferences"), { stdio: "pipe", timeout: 30_000 });
 
-    const axText = (): { status: number | null; stdout: string; stderr: string } => {
-      const s = spawnSync("node", [CLI, "ax", "--refs", "--text", "-d", udid!], { encoding: "utf-8", timeout: 15_000 });
+    const axText = (timeoutMs = 15_000): { status: number | null; stdout: string; stderr: string } => {
+      const s = spawnSync("node", [CLI, "ax", "--refs", "--text", "-d", udid!], { encoding: "utf-8", timeout: timeoutMs });
       return { status: s.status, stdout: s.stdout ?? "", stderr: `${s.stderr ?? ""}${s.error ? `\n${s.error}` : ""}` };
     };
     // The last AX read, for a failure message: "never matched" alone doesn't
@@ -273,13 +289,17 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
 
     let lastAx: ReturnType<typeof axText> | undefined;
     let axReads = 0;
-    /** Poll the AX tree until `done` matches (returns the snapshot) or `ms` passes. */
-    const waitForAx = async (done: (text: string) => boolean, ms: number, intervalMs: number): Promise<string | undefined> => {
+    /**
+     * Poll the AX tree until `done` matches (returns the snapshot) or `ms`
+     * passes. With `bounded`, each read's timeout is also capped to the time
+     * left (diagnostics only; the polls under test keep the 15s read timeout).
+     */
+    const waitForAx = async (done: (text: string) => boolean, ms: number, intervalMs: number, bounded = false): Promise<string | undefined> => {
       lastAx = undefined;
       axReads = 0;
       const deadline = Date.now() + ms;
       while (Date.now() < deadline) {
-        const s = axText();
+        const s = axText(bounded ? Math.max(1, Math.min(15_000, deadline - Date.now())) : 15_000);
         lastAx = s;
         axReads++;
         if (s.status === 0 && done(s.stdout)) return s.stdout;
@@ -360,15 +380,19 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
 
     // Wrong page. Gather what tells a stale tap point apart from stale AX
     // data: General's frame then vs now, what sits at the old centre now, and
-    // the frame counter. Diagnostics only; the test fails either way.
-    const counters = await frameCounters();
+    // the frame counter. Diagnostics only; the test fails either way, and
+    // each step is skipped or shortened to fit the time left before the test
+    // timeout so this error is never replaced by a timeout.
+    const counters = diagLeft() > 10_000 ? await frameCounters() : `skipped (${diagLeft()}ms left before the test timeout)`;
     const then = generalLine(snapshot);
     let fresh = "no fresh read (no back button on the wrong page)";
     const backRef = after.match(/(@e\d+) back button "Settings"/)?.[1];
-    if (backRef) {
-      const back = spawnSync("node", [CLI, "tap", backRef, "-d", udid!], { encoding: "utf-8", timeout: 10_000 });
-      const root = back.status === 0
-        ? await waitForAx((text) => /"General"/.test(text) && !/back button "Settings"/.test(text), 8_000, 500)
+    if (backRef && diagLeft() < 3_000) {
+      fresh = `fresh root read skipped (${diagLeft()}ms left before the test timeout)`;
+    } else if (backRef) {
+      const back = spawnSync("node", [CLI, "tap", backRef, "-d", udid!], { encoding: "utf-8", timeout: Math.min(10_000, diagLeft() - 1_000) });
+      const root = back.status === 0 && diagLeft() > 1_000
+        ? await waitForAx((text) => /"General"/.test(text) && !/back button "Settings"/.test(text), Math.min(8_000, diagLeft()), 500, true)
         : undefined;
       if (!root) {
         fresh = `no fresh root read (back tap status=${back.status}${back.error ? `, ${back.error}` : ""}); ${describeAx(lastAx, axReads)}`;
@@ -387,5 +411,5 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
         `content-change counter (/api/diagnostics): ${counters}\n${tapDetail}\n` +
         `snapshot the ref came from:\n${snapshot}\nwrong page (${afterAx})`,
     );
-  }, 180_000);
+  }, LANDS_TIMEOUT_MS);
 });
