@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "child_process";
 import { randomUUID } from "crypto";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -71,6 +71,7 @@ function spawnFake(t: ReturnType<typeof setup>, extra: { arg?: string; width?: n
 }
 
 beforeAll(() => {
+  mkdirSync(CAMERA_STATE_DIR, { recursive: true });
   dir = mkdtempSync(join(tmpdir(), "serve-sim-camspawn-"));
   helperBin = join(dir, "serve-sim-camera-helper");
   writeFileSync(helperBin, FAKE_HELPER);
