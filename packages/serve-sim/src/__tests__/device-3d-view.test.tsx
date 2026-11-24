@@ -10,7 +10,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { Device3DView, type Device3DModule } from "../client/components/device-3d-view";
 import { ThreeDToolbarButton } from "../client/components/three-d-toolbar-button";
 import { DEVICE_3D_CHUNK_MARKERS } from "../client/device-3d/markers";
-import type { Device3DHandle, ScreenHit } from "../client/device-3d/index";
+import { isDirectMjpegSurface, type Device3DHandle, type ScreenHit } from "../client/device-3d/index";
 import type { ScreenTouch } from "../client/utils/device-3d-mapping";
 import { SimulatorToolbar } from "../client/simulator/SimulatorToolbar";
 import { simMiddleware } from "../middleware";
@@ -235,5 +235,54 @@ describe("Device3DView", () => {
     });
     root = undefined;
     expect(calls.touches.map((t) => t.type)).toEqual(["begin", "end"]);
+  });
+
+  test("remounts once after a WebGL context loss, then reports the failure", async () => {
+    const { mod, handle } = fakeModule(() => null);
+    const errors: unknown[] = [];
+    await mount(mod, { onError: (error) => errors.push(error) });
+    const first = (mod.mountDevice3D as ReturnType<typeof mock>).mock.calls[0]![1] as { onContextLost: () => void };
+    await act(async () => {
+      first.onContextLost();
+    });
+    expect(handle.dispose).toHaveBeenCalledTimes(1);
+    expect(mod.mountDevice3D).toHaveBeenCalledTimes(2);
+    expect(errors).toEqual([]);
+    const second = (mod.mountDevice3D as ReturnType<typeof mock>).mock.calls[1]![1] as { onContextLost: () => void };
+    await act(async () => {
+      second.onContextLost();
+    });
+    expect(mod.mountDevice3D).toHaveBeenCalledTimes(2);
+    expect(errors).toHaveLength(1);
+  });
+});
+
+describe("isDirectMjpegSurface", () => {
+  test("matches only the live /stream.mjpeg image, not canvases or relay blobs", () => {
+    const dom = new Window({ url: "http://localhost:3510/" });
+    const img = (src: string) => {
+      const el = dom.document.createElement("img");
+      el.setAttribute("src", src);
+      return el as unknown as HTMLImageElement;
+    };
+    const canvas = dom.document.createElement("canvas") as unknown as HTMLCanvasElement;
+    const prevDoc = (globalThis as { document?: unknown }).document;
+    const prevHTMLImage = (globalThis as { HTMLImageElement?: unknown }).HTMLImageElement;
+    const prevHTMLCanvas = (globalThis as { HTMLCanvasElement?: unknown }).HTMLCanvasElement;
+    (globalThis as { HTMLImageElement: unknown }).HTMLImageElement = (dom as unknown as { HTMLImageElement: unknown }).HTMLImageElement;
+    (globalThis as { HTMLCanvasElement: unknown }).HTMLCanvasElement = (dom as unknown as { HTMLCanvasElement: unknown }).HTMLCanvasElement;
+    try {
+      expect(isDirectMjpegSurface(img("http://localhost:3510/stream.mjpeg"))).toBe(true);
+      expect(isDirectMjpegSurface(img("/stream.mjpeg"))).toBe(true);
+      expect(isDirectMjpegSurface(img("/stream.mjpeg?udid=abc"))).toBe(true);
+      expect(isDirectMjpegSurface(img("blob:http://localhost:3510/1"))).toBe(false);
+      expect(isDirectMjpegSurface(canvas)).toBe(false);
+      expect(isDirectMjpegSurface(null)).toBe(false);
+    } finally {
+      (globalThis as { HTMLImageElement?: unknown }).HTMLImageElement = prevHTMLImage;
+      (globalThis as { HTMLCanvasElement?: unknown }).HTMLCanvasElement = prevHTMLCanvas;
+      void prevDoc;
+      void dom.happyDOM.close();
+    }
   });
 });

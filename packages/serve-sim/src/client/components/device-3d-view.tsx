@@ -1,4 +1,4 @@
-import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 // Type-only: erased from the main bundle. The renderer itself is fetched on
 // demand from the server (see loadDevice3DModule) the first time 3D opens.
 import type { Device3DHandle, Device3DOptions, ScreenHit } from "../device-3d/index";
@@ -71,12 +71,14 @@ export function Device3DView({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<Device3DHandle | null>(null);
   const gestureRef = useRef<Gesture | null>(null);
+  const [rendererEpoch, setRendererEpoch] = useState(0);
+  const contextLostRetries = useRef(0);
   const dark = useTheme().resolved === "dark";
 
   const latest = useRef({ chrome, deviceType, deviceDegrees, streamConfig, sourceRoot, dark, reducedMotion, onTouch, onReady, onError, onClose });
   latest.current = { chrome, deviceType, deviceDegrees, streamConfig, sourceRoot, dark, reducedMotion, onTouch, onReady, onError, onClose };
 
-  // Mount once the chunk arrives; tear everything down on close.
+  // Mount once the chunk arrives; remount after a context loss; tear down on close.
   useEffect(() => {
     let cancelled = false;
     void load().then(
@@ -93,6 +95,15 @@ export function Device3DView({
             sourceRoot: l.sourceRoot,
             dark: l.dark,
             reducedMotion: l.reducedMotion,
+            onContextLost: () => {
+              if (cancelled) return;
+              if (contextLostRetries.current >= 1) {
+                l.onError?.(new Error("The 3D view lost its WebGL context."));
+                return;
+              }
+              contextLostRetries.current += 1;
+              setRendererEpoch((n) => n + 1);
+            },
           });
           l.onReady?.();
         } catch (error) {
@@ -112,7 +123,7 @@ export function Device3DView({
       handleRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [load]);
+  }, [load, rendererEpoch]);
 
   useEffect(() => {
     handleRef.current?.update({

@@ -145,30 +145,39 @@ export interface SceneMatrices {
 
 /** Visible height (in canvas fractions) reserved below the device for the shadow. */
 const SHADOW_ROOM = 0.05;
+/** World-space gap between the lowest point of the body and the contact-shadow plane. */
+const SHADOW_GAP = 0.035;
 const FIT_MARGIN = 1.03;
+/** Covers near-edge perspective the view-space half-extents miss. */
+const ORBIT_FIT = 1.05;
 
 export function sceneMatrices(model: Device3DModel, view: ViewState, aspect: number): SceneMatrices {
   const rotation = multiply(rotationY(view.yaw), rotationZ(view.roll));
-  // Fit the rolled, face-on silhouette into the frustum (yaw only narrows it).
   const c = Math.abs(Math.cos(view.roll));
   const s = Math.abs(Math.sin(view.roll));
   const extentX = c * model.width + s * model.height;
   const extentY = s * model.width + c * model.height;
   const t = Math.tan(FOV_Y / 2);
   const safeAspect = aspect > 0 ? aspect : 1;
-  // Sideways fit also allows for the near edge swinging toward the camera at
-  // the resting yaw. Fixed (not the live yaw) so orbiting never zooms.
+  // Bound the fit over every orbit yaw and pitch, not the live pose, so turning
+  // the device never zooms. After roll, yaw swings the horizontal half-extent
+  // and the thickness in xz (radius). Pitch then projects that depth onto the
+  // vertical axis — which is how a landscape device end-on used to clip.
+  const radius = Math.hypot(extentX / 2, model.depth / 2);
+  const targetY = -extentY * SHADOW_ROOM * 0.5;
+  const spanY = Math.max(Math.abs(extentY / 2 - targetY), Math.abs(-extentY / 2 - SHADOW_GAP - targetY));
+  let viewY = 0;
+  for (const pitch of [0, MIN_PITCH, MAX_PITCH]) {
+    viewY = Math.max(viewY, Math.abs(Math.cos(pitch)) * spanY + Math.abs(Math.sin(pitch)) * radius);
+  }
   const distance =
-    Math.max(
-      (extentY * FIT_MARGIN * (1 + SHADOW_ROOM)) / (2 * t),
-      (extentX * FIT_MARGIN) / (2 * t * safeAspect) + (extentX / 2) * Math.abs(Math.sin(DEFAULT_YAW)),
-    ) + model.depth / 2;
+    Math.max(viewY * FIT_MARGIN / t, (radius * FIT_MARGIN) / (t * safeAspect)) * ORBIT_FIT;
   // Lowest point of the rotated body: sum of the half axes' downward reach.
   const ax = transformDir(rotation, [model.width / 2, 0, 0]);
   const ay = transformDir(rotation, [0, model.height / 2, 0]);
   const az = transformDir(rotation, [0, 0, model.depth / 2]);
   const bottomY = -(Math.abs(ax[1]!) + Math.abs(ay[1]!) + Math.abs(az[1]!));
-  const groundY = bottomY - 0.035;
+  const groundY = bottomY - SHADOW_GAP;
   // Aim a touch low so the device floats with room for its shadow.
   const target = [0, -extentY * SHADOW_ROOM * 0.5, 0];
   const eye = [

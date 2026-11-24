@@ -17,6 +17,15 @@ describe("3D screen mapping", () => {
     expect(screenUvToRawMatrix(0, portrait)).toEqual([1, 0, 0, 1, 0, 0]);
   });
 
+  test("stream input orientation maps screen corners to fixed raw points", () => {
+    const upsideDown = { width: 1206, height: 2622, orientation: "portrait_upside_down" as const };
+    const landscapeRight = { width: 1206, height: 2622, orientation: "landscape_right" as const };
+    expect(rawPointForScreenUv({ u: 0, v: 0 }, 0, landscapeLeft)).toEqual({ x: 0, y: 1 });
+    expect(rawPointForScreenUv({ u: 0, v: 0 }, 90, landscapeLeft)).toEqual({ x: 0, y: 0 });
+    expect(rawPointForScreenUv({ u: 0, v: 0 }, 0, upsideDown)).toEqual({ x: 1, y: 1 });
+    expect(rawPointForScreenUv({ u: 0, v: 0 }, 0, landscapeRight)).toEqual({ x: 1, y: 0 });
+  });
+
   test("quarter turns move the portrait screen into the upright display", () => {
     // Device turned 90° clockwise: its top-left corner lands top-right.
     expect(displayPointForScreenUv({ u: 0, v: 0 }, 90)).toEqual({ x: 1, y: 0 });

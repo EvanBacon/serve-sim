@@ -53,6 +53,32 @@ describe("scene math", () => {
       }
     }
   });
+
+  test("the device stays in the canvas at every permitted orbit pose", () => {
+    const corners = [
+      [-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
+      [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1],
+    ] as const;
+    for (const roll of [0, -Math.PI / 2]) {
+      for (const yaw of [0, Math.PI / 2, Math.PI]) {
+        for (const pitch of [MIN_PITCH, MAX_PITCH]) {
+          for (const aspect of [0.6, 1.8]) {
+            const scene = sceneMatrices(model, { yaw, pitch, roll }, aspect);
+            for (const [x, y, z] of corners) {
+              const p = projectToNdc(scene, [(x * model.width) / 2, (y * model.height) / 2, (z * model.depth) / 2]);
+              expect(Math.abs(p.x)).toBeLessThanOrEqual(1);
+              expect(Math.abs(p.y)).toBeLessThanOrEqual(1);
+            }
+          }
+        }
+      }
+    }
+    // Landscape, end-on, looked down from the max pitch — this pose used to clip.
+    const scene = sceneMatrices(model, { roll: -Math.PI / 2, yaw: Math.PI / 2, pitch: MAX_PITCH }, 1.8);
+    const mid = projectToNdc(scene, [0, -model.height / 2, 0]);
+    expect(Math.abs(mid.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(mid.y)).toBeLessThanOrEqual(1);
+  });
 });
 
 describe("pickScreen", () => {

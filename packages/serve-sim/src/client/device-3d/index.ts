@@ -46,6 +46,8 @@ export interface Device3DOptions {
   sourceRoot: HTMLElement;
   dark: boolean;
   reducedMotion: boolean;
+  /** Fired when the WebGL context is lost mid-session (not during dispose). */
+  onContextLost?: () => void;
 }
 
 export interface Device3DHandle {
@@ -195,6 +197,18 @@ export function findStreamSurface(root: ParentNode): SourceElement | null {
   return root.querySelector<SourceElement>("canvas[data-stream-surface], img[data-stream-surface]");
 }
 
+/** Direct `/stream.mjpeg` <img> (not an AVCC canvas or a relay blob: image). */
+export function isDirectMjpegSurface(el: SourceElement | null): el is HTMLImageElement {
+  if (!(el instanceof HTMLImageElement)) return false;
+  const src = el.currentSrc || el.src;
+  if (!src || src.startsWith("blob:") || src.startsWith("data:")) return false;
+  try {
+    return new URL(src, "http://local/").pathname.endsWith("/stream.mjpeg");
+  } catch {
+    return /stream\.mjpeg(?:$|\?)/i.test(src);
+  }
+}
+
 export function mountDevice3D(host: HTMLElement, initial: Device3DOptions): Device3DHandle {
   let options = { ...initial };
   const canvas = document.createElement("canvas");
@@ -270,18 +284,38 @@ export function mountDevice3D(host: HTMLElement, initial: Device3DOptions): Devi
 
   // Stream surface tracking: re-bind when the viewer swaps <canvas>/<img>.
   let source: SourceElement | null = null;
+  let mjpegRefresh = 0;
   const onFrame = () => {
     frameDirty = true;
     invalidate();
+  };
+  const stopMjpegRefresh = () => {
+    if (mjpegRefresh) cancelAnimationFrame(mjpegRefresh);
+    mjpegRefresh = 0;
+  };
+  const startMjpegRefresh = () => {
+    stopMjpegRefresh();
+    const pump = () => {
+      mjpegRefresh = 0;
+      if (disposed || !isDirectMjpegSurface(source)) return;
+      onFrame();
+      mjpegRefresh = requestAnimationFrame(pump);
+    };
+    mjpegRefresh = requestAnimationFrame(pump);
   };
   const bindSource = () => {
     const next = findStreamSurface(options.sourceRoot);
     if (next === source) return;
     source?.removeEventListener("load", onFrame);
     source?.removeEventListener(STREAM_FRAME_EVENT, onFrame);
+    stopMjpegRefresh();
     source = next;
     source?.addEventListener("load", onFrame);
     source?.addEventListener(STREAM_FRAME_EVENT, onFrame);
+    // Chromium fires `load` only for the first multipart part of a direct
+    // MJPEG <img>; later JPEGs replace the bitmap in place. AVCC canvases
+    // and relay blob images keep using their events.
+    if (isDirectMjpegSurface(source)) startMjpegRefresh();
     onFrame();
   };
   let observer = new MutationObserver(bindSource);
@@ -294,6 +328,7 @@ export function mountDevice3D(host: HTMLElement, initial: Device3DOptions): Devi
   const onContextLost = (event: Event) => {
     event.preventDefault();
     contextLost = true;
+    if (!disposed) options.onContextLost?.();
   };
   canvas.addEventListener("webglcontextlost", onContextLost);
 
@@ -540,6 +575,7 @@ export function mountDevice3D(host: HTMLElement, initial: Device3DOptions): Devi
       raf = 0;
       observer.disconnect();
       resizeObserver.disconnect();
+      stopMjpegRefresh();
       source?.removeEventListener("load", onFrame);
       source?.removeEventListener(STREAM_FRAME_EVENT, onFrame);
       source = null;
