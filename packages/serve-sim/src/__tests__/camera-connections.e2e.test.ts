@@ -118,8 +118,10 @@ async function runTestApp(
   }
   // A missing result used to say only "Expected: true". Say where the time
   // went (terminate, launch, wait) and whether the app is still running.
+  // Fit the launchd query in what's left of the 20s test budget, keeping 1s
+  // to report the failure, so bun's timeout doesn't swallow the message.
   const missing = () => {
-    const job = launchdJob(10_000);
+    const job = launchdJob(Math.max(500, 20_000 - (Date.now() - started) - 1_000));
     return `no ${RESULT_FILE} from mode ${mode} ${Date.now() - launchedAt}ms after launch ` +
       `(terminate ${launchAt - started}ms, launch ${launchedAt - launchAt}ms: ${launched.trim()}); ` +
       `launchd job: ${job}`;
