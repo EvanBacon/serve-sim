@@ -70,6 +70,7 @@
     "src/preview-initial-state.ts",
     "src/recording-index.ts",
     "src/recording.ts",
+    "src/remote-actions.ts",
     "src/request-trust.ts",
     "src/rolling-buffer.ts",
     "src/runtime.ts",

@@ -420,7 +420,7 @@ describe("grid, DevTools, and helper routes require auth remotely", () => {
   });
 
   test("DevTools and helper HTTP routes are refused remotely without the token", async () => {
-    for (const path of ["/devtools", `/helper/${DEVICE}/config`, `/helper/${DEVICE}/stream.mjpeg`, "/api/event-log", "/grid/api"]) {
+    for (const path of ["/devtools", `/helper/${DEVICE}/config`, `/helper/${DEVICE}/stream.mjpeg`, `/helper/${DEVICE}/screenshot`, "/api/event-log", "/grid/api"]) {
       expect((await send(noToken.port, path, { headers: PROXY })).status).toBe(403);
       expect((await send(withToken.port, path, { headers: PROXY })).status).toBe(401);
     }

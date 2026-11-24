@@ -12,7 +12,7 @@ xcrun simctl list devices booted
 serve-sim --list -q
 ```
 
-3. If a serve-sim server is already running for the device you need, use it. Pass `-d <udid|name>` when more than one simulator is booted, and `--url` / `SERVE_SIM_URL` (plus `--auth-token` / `SERVE_SIM_AUTH_TOKEN` when the preview requires it) instead of starting another server.
+3. If a serve-sim server is already running for the device you need, use it. Pass `-d <udid|name>` when more than one simulator is booted, and `--url` / `SERVE_SIM_URL` (plus `--auth-token` / `SERVE_SIM_AUTH_TOKEN` when the preview requires it) instead of starting another server. On a machine without a simulator (Linux, a cloud agent), `serve-sim connect <url>` saves the remote URL so you can drop `--url`; `serve-sim screenshot` and `serve-sim open <url>` work remotely too ([docs/remote.md](../../../docs/remote.md)).
 4. If you must start a server, use `--detach -q` and pick a **free** `--port`. Do not assume 3200 or 3100 are yours: those are only the defaults, and a person may already be previewing there. Print the returned `url` so they can open it.
 5. Do not `serve-sim --kill` a helper you did not start, unless the user asked you to stop it.
 
