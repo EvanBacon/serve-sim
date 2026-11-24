@@ -54,6 +54,7 @@ import {
 import { createExecUpgradeHandler, EXEC_DISABLED_MESSAGE, type UiRequestHandler } from "./exec-ws";
 import { createHostRpcHandler } from "./host-rpc";
 import { createPasteboardRoute, type DevicectlRunner } from "./pasteboard";
+import { createOpenUrlRoute, handleScreenshotRequest, type HostRunner } from "./remote-actions";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
@@ -919,6 +920,11 @@ function serveHelperInProcess(req: SimReq, res: SimRes, device: string | null, u
     case "/buffer/start": void session.handleBuffer(req, res, "start"); return true;
     case "/buffer/stop": void session.handleBuffer(req, res, "stop"); return true;
     case "/buffer/frame": void session.handleBuffer(req, res, "frame"); return true;
+    case "/screenshot": {
+      const s = session;
+      void handleScreenshotRequest(req, res, device, { snapshotJpeg: () => s.snapshotJpeg(), simctlArgs: simctlArguments });
+      return true;
+    }
     default: return false;
   }
 }
@@ -1506,8 +1512,10 @@ export interface SimMiddlewareOptions {
   diagnostics?: DiagnosticsOptions;
   /** Test hook: runs `xcrun devicectl …` for `POST /pasteboard`. */
   pasteboardRunner?: DevicectlRunner;
+  /** Test hook: runs `xcrun simctl openurl …` for `POST /openurl`. */
+  openUrlRunner?: HostRunner;
   /**
-   * Test hook: whether this server streams `udid` (gates `POST /pasteboard`).
+   * Test hook: whether this server streams `udid` (gates `POST /pasteboard` and `POST /openurl`).
    * Default: a live serve-sim state for that UDID, and the pinned device if any.
    */
   servesDevice?: (udid: string) => Promise<boolean>;
@@ -1679,6 +1687,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     pressHome: async (udid, signal) => {
       return getDeviceSession(udid).pressHome(signal);
     },
+  });
+
+  const handleOpenUrlRequest = createOpenUrlRoute({
+    simctlArgs: simctlArguments,
+    run: options?.openUrlRunner,
+    servesDevice: options?.servesDevice ?? (async (udid) => {
+      if (options?.device && options.device !== udid) return false;
+      return selectServeSimState(await readServeSimStates(), udid) !== null;
+    }),
   });
 
   // Unicode text → guest pasteboard via CoreDevice, verified by readback.
@@ -2511,6 +2528,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // pasteboard.ts. Inserting it is the client's follow-up Cmd+V.
     if (url === base + "/pasteboard" && req.method === "POST") {
       handlePasteboardRequest(req, res, requestedDevice ?? options?.device ?? null);
+      return;
+    }
+
+    // POST /openurl?device=<udid> — `{url}` → `simctl openurl` (fixed argv,
+    // validated URL; see remote-actions.ts). Same auth gate as above.
+    if (url === base + "/openurl" && req.method === "POST") {
+      handleOpenUrlRequest(req, res, requestedDevice ?? options?.device ?? null);
       return;
     }
 
