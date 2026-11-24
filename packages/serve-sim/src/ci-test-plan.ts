@@ -58,6 +58,24 @@ export function needsDarwinE2E(changedFiles: string[]): boolean {
   return changedFiles.some((file) => !isDarwinSkipPath(file));
 }
 
+/**
+ * One-line summary of `udid` from `simctl list devices -j` output, logged by
+ * the CI runner when a reboot step fails so the log shows the real state.
+ */
+export function describeSimulatorState(listJson: string, udid: string): string {
+  let devices: Record<string, Array<{ udid?: string; state?: string; isAvailable?: boolean }>>;
+  try {
+    devices = (JSON.parse(listJson) as { devices: typeof devices }).devices ?? {};
+  } catch {
+    return `${udid} state unknown (unparseable simctl list output: ${listJson.slice(0, 200).trim()})`;
+  }
+  for (const [runtime, list] of Object.entries(devices)) {
+    const device = Array.isArray(list) ? list.find((d) => d?.udid === udid) : undefined;
+    if (device) return `${udid} state=${device.state} isAvailable=${device.isAvailable} runtime=${runtime}`;
+  }
+  return `${udid} not listed by simctl`;
+}
+
 function normalizeRepoPath(file: string): string {
   return file.replaceAll("\\", "/").replace(/^\.\//, "");
 }

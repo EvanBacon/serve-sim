@@ -15,6 +15,7 @@ import {
   DARWIN_INTEGRATION_TEST_FILES,
   SIM_E2E_TEST_FILES,
   SIM_SHUTDOWN_E2E_TEST_FILE,
+  describeSimulatorState,
 } from "../src/ci-test-plan";
 
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -40,31 +41,52 @@ function alreadyBooted(result: ReturnType<typeof spawnSync>): boolean {
   return /current state: Booted|already booted/i.test(text);
 }
 
+/** Run a reboot step, logging how long it took and how it exited. */
+function timed<T extends ReturnType<typeof spawnSync>>(step: string, run: () => T): T {
+  const start = Date.now();
+  const result = run();
+  const exit = result.signal ? `signal ${result.signal}` : `status ${result.status}`;
+  console.warn(`reboot step ${step}: ${exit} after ${Date.now() - start}ms`);
+  return result;
+}
+
+/** The simulator's state per `simctl list`, for failure logs. */
+function simulatorState(): string {
+  const list = spawnSync("xcrun", ["simctl", "list", "devices", "-j"], { encoding: "utf-8", timeout: 30_000 });
+  if (list.status !== 0) return `${udid} state unknown (simctl list status ${list.status}, signal ${list.signal})`;
+  return describeSimulatorState(list.stdout, udid);
+}
+
 function rebootSimulator(): boolean {
   if (!udid) {
     console.error("UDID unset; cannot reboot simulator for retry");
     return false;
   }
-  console.warn(`Rebooting simulator ${udid} before retry`);
-  spawnSync("xcrun", ["simctl", "shutdown", udid], { stdio: "inherit" });
+  console.warn(`Rebooting simulator ${udid} before retry (${simulatorState()})`);
+  timed("shutdown", () => spawnSync("xcrun", ["simctl", "shutdown", udid], { stdio: "inherit" }));
   spawnSync("sleep", ["3"], { stdio: "inherit" });
-  const boot = spawnSync("xcrun", ["simctl", "boot", udid], { encoding: "utf-8" });
+  const boot = timed("boot", () => spawnSync("xcrun", ["simctl", "boot", udid], { encoding: "utf-8" }));
   if (boot.stdout) process.stdout.write(boot.stdout);
   if (boot.stderr) process.stderr.write(boot.stderr);
   // Shutdown can lose the race with a detached server. "Already booted" is a
   // usable simulator, not a reason to skip the retry.
   if (boot.status !== 0 && !alreadyBooted(boot)) {
-    console.error(`simctl boot ${udid} failed (status ${boot.status}); skipping retry`);
+    console.error(`simctl boot ${udid} failed (status ${boot.status}); skipping retry (${simulatorState()})`);
     return false;
   }
   // No `-b`: on Xcode 27 the boot-and-monitor form can stay blocked after the
   // device is already Booted.
-  const bootstatus = spawnSync("xcrun", ["simctl", "bootstatus", udid], {
+  const bootstatus = timed("bootstatus", () => spawnSync("xcrun", ["simctl", "bootstatus", udid], {
     stdio: "inherit",
     timeout: 90_000,
-  });
+  }));
   if (bootstatus.status !== 0) {
-    console.error(`simctl bootstatus ${udid} failed (status ${bootstatus.status}); skipping retry`);
+    // Status null with signal SIGTERM means the 90s timeout killed it. Not
+    // reproduced locally (Xcode 27.0, iOS 27.2: ~2s), so log the real state.
+    console.error(
+      `simctl bootstatus ${udid} failed (status ${bootstatus.status}, signal ${bootstatus.signal}); ` +
+        `skipping retry (${simulatorState()})`,
+    );
     return false;
   }
   spawnSync("open", ["-ga", "Simulator"], { stdio: "inherit" });
