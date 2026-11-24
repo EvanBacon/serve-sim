@@ -20,7 +20,7 @@ import {
 } from "./state";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs, type KeyEvent } from "./text-to-keys";
 import { PASTEBOARD_TEXT_LIMIT_BYTES, PASTE_KEY_EVENTS } from "./pasteboard";
-import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
+import { dirnameOf, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
 import { findBootedDevice, isInDeviceSet, resolveDevice } from "./device";
 import {
@@ -29,7 +29,6 @@ import {
   collectKillPids,
   dropStateFileIfDead,
   formatListPayload,
-  isProcessAlive,
   parseDeviceState,
   persistRecoveredState,
   resolveLiveHelperState,
@@ -93,6 +92,7 @@ import {
   readInjectedCameraBundles as readInjectedBundles,
   sendCameraHelperCommand as sendHelperCommand,
 } from "./camera-helper";
+import { type CamSourceKind, spawnCameraHelper, stopExistingHelper } from "./camera-helper-process";
 import { resolveDeviceSet, sameDeviceSet, simctlArguments, simctlBootStatusArguments } from "./simctl";
 import { execCommandLine } from "./shell-quote";
 import { reExecArgs, selfServeSimBin } from "./self-bin";
@@ -1852,69 +1852,6 @@ function recordInjectedBundle(udid: string, bundleId: string, helperPid: number)
   if (!existsSync(SIMCAM_STATE_DIR)) mkdirSync(SIMCAM_STATE_DIR, { recursive: true });
   writeFileSync(helperBundlesFile(udid), JSON.stringify(next));
 }
-
-function clearInjectedBundles(udid: string): void {
-  try { unlinkSync(helperBundlesFile(udid)); } catch {}
-}
-
-function stopExistingHelper(udid: string) {
-  const pf = helperPidFile(udid);
-  if (!existsSync(pf)) return;
-  const pid = Number(readFileSync(pf, "utf-8").trim());
-  if (Number.isFinite(pid) && isProcessAlive(pid)) {
-    try { process.kill(pid, "SIGTERM"); } catch {}
-    // Give it a moment to clean up the shm region.
-    const start = Date.now();
-    while (isProcessAlive(pid) && Date.now() - start < 1500) sleepSync(50);
-  }
-  try { unlinkSync(pf); } catch {}
-  clearInjectedBundles(udid);
-}
-
-function spawnCameraHelper(args: {
-  udid: string;
-  helperBin: string;
-  shmName: string;
-  socketPath: string;
-  source: CamSourceKind;
-  arg?: string;
-  width?: number;
-  height?: number;
-}): number {
-  if (!existsSync(SIMCAM_STATE_DIR)) mkdirSync(SIMCAM_STATE_DIR, { recursive: true });
-  const logPath = join(SIMCAM_STATE_DIR, `${args.udid}.log`);
-  const out = openSync(logPath, "a");
-  const argv = [
-    "--shm", args.shmName,
-    "--socket", args.socketPath,
-    "--source", args.source,
-  ];
-  if (args.arg) argv.push("--arg", args.arg);
-  if (args.width) argv.push("--width", String(args.width));
-  if (args.height) argv.push("--height", String(args.height));
-  const child = nodeSpawn(args.helperBin, argv, {
-    detached: true,
-    stdio: ["ignore", out, out],
-  });
-  child.unref();
-  closeSync(out);
-  if (!child.pid) throw new Error("failed to spawn camera helper");
-  writeFileSync(helperPidFile(args.udid), String(child.pid));
-  clearInjectedBundles(args.udid);
-  // Wait briefly until the helper has populated the shm header AND the
-  // control socket is listening (proves it's healthy and ready for switch).
-  const start = Date.now();
-  while (Date.now() - start < 3000) {
-    if (!isProcessAlive(child.pid)) {
-      throw new Error(`camera helper exited early — see log at ${logPath}`);
-    }
-    if (existsSync(args.socketPath)) break;
-    sleepSync(50);
-  }
-  return child.pid;
-}
-
-type CamSourceKind = "placeholder" | "webcam" | "image" | "video";
 
 interface ResolvedSource { kind: CamSourceKind; arg?: string }
 
