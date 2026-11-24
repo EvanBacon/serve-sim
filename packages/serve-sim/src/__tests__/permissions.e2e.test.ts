@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, execSync } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { join } from "path";
 import { simctlArguments, simulatorDevicesDir } from "../simctl";
 
@@ -117,6 +117,39 @@ async function locationAuthEventually(bundleId: string, expected: number): Promi
   return last;
 }
 
+/**
+ * For a location readback that never reached the expected value: how long
+ * the CLI call took, how long the poll ran, when locationd last wrote
+ * clients.plist, and what the bundle's entry holds now.
+ */
+function locationMismatch(bundleId: string, cliMs: number, pollMs: number): string {
+  let plist: string;
+  let mtime: Date;
+  try {
+    plist = join(libDir(), "Caches/locationd/clients.plist");
+    if (!existsSync(plist)) return `${plist} missing after a ${cliMs}ms CLI call and ${pollMs}ms of polling`;
+    mtime = statSync(plist).mtime;
+  } catch (e) {
+    return `CLI call took ${cliMs}ms, polled ${pollMs}ms; could not stat clients.plist: ${e}`;
+  }
+  let xml: string;
+  try {
+    xml = execSync(`plutil -convert xml1 -o - "${plist}"`, { encoding: "utf-8", timeout: 5_000 });
+  } catch (e) {
+    return `CLI call took ${cliMs}ms, polled ${pollMs}ms; clients.plist last written ${mtime.toISOString()}; plutil failed: ${e}`;
+  }
+  const at = xml.indexOf(`<key>i${bundleId}:</key>`);
+  const entry = at < 0 ? "(no entry)" : xml.slice(at, xml.indexOf("</dict>", at) + "</dict>".length).slice(0, 1_500);
+  return `CLI call took ${cliMs}ms, polled ${pollMs}ms; clients.plist last written ${mtime.toISOString()} ` +
+    `(${Date.now() - mtime.getTime()}ms ago)\n${entry}`;
+}
+
+function timed(run: () => void): number {
+  const started = Date.now();
+  run();
+  return Date.now() - started;
+}
+
 // Each case shells the built CLI a few times, and a cold `simctl privacy`
 // call (location) can take several seconds on a fresh CI sim — comfortably
 // past bun's 5s default. The beforeAll reset-all also cascades through every
@@ -180,13 +213,17 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
   }, T);
 
   test("grant location --value always writes Authorization=4", async () => {
-    cli("grant", "location", REAL_APP, "--value", "always");
-    expect(await locationAuthEventually(REAL_APP, 4)).toBe(4);
+    const cliMs = timed(() => cli("grant", "location", REAL_APP, "--value", "always"));
+    const polled = Date.now();
+    const auth = await locationAuthEventually(REAL_APP, 4);
+    expect(auth, auth === 4 ? "" : locationMismatch(REAL_APP, cliMs, Date.now() - polled)).toBe(4);
   }, T);
 
   test("revoke location downgrades Authorization to never (1)", async () => {
-    cli("revoke", "location", REAL_APP);
-    expect(await locationAuthEventually(REAL_APP, 1)).toBe(1);
+    const cliMs = timed(() => cli("revoke", "location", REAL_APP));
+    const polled = Date.now();
+    const auth = await locationAuthEventually(REAL_APP, 1);
+    expect(auth, auth === 1 ? "" : locationMismatch(REAL_APP, cliMs, Date.now() - polled)).toBe(1);
     cli("reset", "location", REAL_APP);
   }, T);
 
