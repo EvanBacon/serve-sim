@@ -121,7 +121,8 @@ async function runTestApp(
   // Fit the launchd query in what's left of the 20s test budget, keeping 1s
   // to report the failure, so bun's timeout doesn't swallow the message.
   const missing = () => {
-    const job = launchdJob(Math.max(500, 20_000 - (Date.now() - started) - 1_000));
+    const remaining = 20_000 - (Date.now() - started) - 1_000;
+    const job = remaining >= 500 ? launchdJob(remaining) : "not queried (test budget exhausted)";
     return `no ${RESULT_FILE} from mode ${mode} ${Date.now() - launchedAt}ms after launch ` +
       `(terminate ${launchAt - started}ms, launch ${launchedAt - launchAt}ms: ${launched.trim()}); ` +
       `launchd job: ${job}`;
