@@ -21,7 +21,7 @@ export function generateAuthToken(bytes: () => Buffer = () => randomBytes(32)): 
 }
 
 /** First executable `name` on `PATH`, or undefined. */
-function findOnPath(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+export function findOnPath(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   for (const dir of (env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
     const candidate = join(dir, name);
