@@ -5,6 +5,7 @@ import {
   isAvccSupported,
   type AvccChunkType,
 } from "../avcc-codec.js";
+import { STREAM_FRAME_EVENT } from "./stream-frame-event";
 
 export interface UseAvccStreamOptions {
   /** Base server URL, e.g. "http://localhost:3100". */
@@ -88,6 +89,7 @@ export function useAvccStream({
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.drawImage(source, 0, 0, width, height);
+      canvas.dispatchEvent(new Event(STREAM_FRAME_EVENT));
       callbacks.current.onFrame?.();
       if (!painted) {
         painted = true;

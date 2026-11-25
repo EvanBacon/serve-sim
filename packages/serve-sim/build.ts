@@ -24,6 +24,8 @@ import { spawnSync } from "child_process";
 import tailwindPlugin from "bun-plugin-tailwind";
 import { parseServeSimArch } from "./src/serve-sim-arch";
 import { themeBootScript } from "./src/client/utils/theme";
+import { DEVICE_3D_CHUNK_MARKERS } from "./src/client/device-3d/markers";
+import { gzipSync } from "zlib";
 
 const root = import.meta.dir;
 const distDir = resolve(root, "dist");
@@ -87,6 +89,20 @@ const tailwindCss = await buildTailwindCss();
 const clientJs = await bundleBrowserClient("src/client/client.tsx");
 console.log(`client bundle     ${kb(clientJs.length)}`);
 
+// ─── 1b. Lazy 3D device view chunk ───────────────────────────────────────
+// A separate browser entry the page `import()`s only when the user opens 3D,
+// served at `<base>/device-3d.js`. It must never leak into the inlined client.
+const device3dJs = await bundleBrowserClient("src/client/device-3d/index.ts");
+mkdirSync(resolve(distDir, "client"), { recursive: true });
+writeFileSync(resolve(distDir, "client/device-3d.js"), device3dJs);
+console.log(`3d chunk          ${kb(device3dJs.length)}  (gzip ${kb(gzipSync(device3dJs).length)})`);
+const leaked = DEVICE_3D_CHUNK_MARKERS.filter((marker) => clientJs.includes(marker));
+if (leaked.length > 0) {
+  console.error(`3D renderer code leaked into the inlined client bundle: ${leaked.join(", ")}`);
+  process.exit(1);
+}
+const device3dB64 = Buffer.from(device3dJs).toString("base64");
+
 // ─── 2. Inline client into preview HTML, base64-encode for the define ────
 
 // Committed ICO copy of Simulator.app's AppIcon, inlined as a data URI so the
@@ -120,6 +136,7 @@ const pkgVersion = JSON.parse(
 const PREVIEW_DEFINE = {
   __PREVIEW_HTML_B64__: JSON.stringify(htmlB64),
   __SERVE_SIM_VERSION__: JSON.stringify(pkgVersion),
+  __DEVICE_3D_JS_B64__: JSON.stringify(device3dB64),
 };
 
 // ─── 3. Middleware ESM (serve-sim/middleware) ─────────────────────────────
@@ -212,6 +229,7 @@ const compile = spawnSync(
     "--outfile", resolve(distDir, "serve-sim"),
     "--define", `__PREVIEW_HTML_B64__=${JSON.stringify(htmlB64)}`,
     "--define", `__SERVE_SIM_VERSION__=${JSON.stringify(pkgVersion)}`,
+    "--define", `__DEVICE_3D_JS_B64__=${JSON.stringify(device3dB64)}`,
     // `ws` must stay a runtime-resolved specifier so Bun substitutes its
     // native implementation — bundling the Node implementation breaks
     // upgrades (raw handshake writes never flush under Bun's node:http).

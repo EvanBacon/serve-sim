@@ -34,6 +34,8 @@ import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
 import { AxToolbarButton } from "./components/ax-toolbar-button";
 import { ChromeToolbarButton } from "./components/chrome-toolbar-button";
+import { Device3DView } from "./components/device-3d-view";
+import { ThreeDToolbarButton } from "./components/three-d-toolbar-button";
 import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
@@ -561,6 +563,20 @@ function AppWithConfig({
     });
   }, [hideChrome]);
   const foldable = (displays?.length ?? 0) > 1;
+  // Opt-in 3D device view for iPhone / iPad. Off by default; the renderer is a
+  // separate chunk fetched the first time it opens (see Device3DView). The 2D
+  // stream keeps decoding underneath and doubles as the 3D screen texture.
+  // Foldables already render in 3D (DuoThreeDView).
+  const [threeD, setThreeD] = useState(false);
+  const [threeDReady, setThreeDReady] = useState(false);
+  const threeDAvailable = !foldable && (deviceType === "iphone" || deviceType === "ipad");
+  const threeDOpen = threeD && threeDAvailable;
+  const closeThreeD = useCallback(() => {
+    setThreeD(false);
+    setThreeDReady(false);
+  }, []);
+  // Switching devices drops back to 2D: 3D is a per-look choice, not a mode.
+  useEffect(() => closeThreeD(), [config.device, closeThreeD]);
   // The server can pin the stream codec (`serve-sim --codec mjpeg`) for hosts
   // whose hardware can't encode H.264 — e.g. VMs lacking the high/low-latency
   // H.264 profiles. Treat that as a hard override the viewer can't switch off.
@@ -1307,8 +1323,20 @@ function AppWithConfig({
             const turnedScreen = (
               <DeviceRotorScreen degrees={deviceDegrees}>{screenContent}</DeviceRotorScreen>
             );
+            // While 3D is showing, the 2D view stays mounted (it is the
+            // decoder feeding the 3D screen) but is hidden from sight and input.
+            const hide2D = threeDOpen && threeDReady;
+            const view2D = (content: ReactNode) => (
+              <div
+                data-sim-2d
+                style={{ display: "contents", visibility: hide2D ? "hidden" : undefined }}
+                aria-hidden={hide2D || undefined}
+              >
+                {content}
+              </div>
+            );
             if (!wrapChrome) {
-              return (
+              return view2D(
                 <DeviceRotor
                   degrees={deviceDegrees}
                   reducedMotion={reducedMotion}
@@ -1325,7 +1353,7 @@ function AppWithConfig({
             // border. Containing (not covering) keeps the stream from ever
             // overflowing past the bezel. `framed` hides that chrome without
             // swapping this wrapper (and the stream inside it).
-            return (
+            return view2D(
               <DeviceRotor
                 degrees={deviceDegrees}
                 reducedMotion={reducedMotion}
@@ -1350,6 +1378,23 @@ function AppWithConfig({
               </DeviceRotor>
             );
           })()}
+          {threeDOpen && (
+            <Device3DView
+              chrome={activeChrome ?? null}
+              deviceType={deviceType}
+              deviceDegrees={deviceDegrees}
+              streamConfig={activeStreamConfig}
+              sourceRoot={simContainerRef.current}
+              reducedMotion={reducedMotion}
+              onTouch={onStreamTouch}
+              onReady={() => setThreeDReady(true)}
+              onError={(error) => {
+                closeThreeD();
+                toast.error(`3D view is unavailable${error instanceof Error && error.message ? `: ${error.message}` : "."}`);
+              }}
+              onClose={closeThreeD}
+            />
+          )}
           {mediaDrop.isDragOver && (
             <div
               // No backdrop-blur here: the canvas underneath repaints every
@@ -1362,7 +1407,7 @@ function AppWithConfig({
               <span className="text-[13px] font-medium">Drop media or .ipa</span>
             </div>
           )}
-          {!foldable && (
+          {!foldable && !threeDOpen && (
             <>
               <SimulatorResizeCornerHandle
                 simulatorResize={simulatorResize}
@@ -1435,10 +1480,16 @@ function AppWithConfig({
               />
               <RecordToolbarButton state={screenRecording.state} onToggle={screenRecording.toggle} />
               <SimulatorToolbar.RotateButton title="Rotate device" />
-              {!foldable && !!activeChrome && (
+              {!foldable && !!activeChrome && !threeDOpen && (
                 <ChromeToolbarButton
                   hideChrome={hideChrome}
                   onToggle={() => setHideChrome((hidden) => !hidden)}
+                />
+              )}
+              {threeDAvailable && (
+                <ThreeDToolbarButton
+                  active={threeDOpen}
+                  onToggle={() => (threeDOpen ? closeThreeD() : setThreeD(true))}
                 />
               )}
               {foldable && (

@@ -88,6 +88,18 @@ export type SimMiddleware = {
 
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
+// The lazily loaded 3D device view chunk (see build.ts). Absent when running
+// from source without a build; the route then 404s and the page stays 2D.
+declare const __DEVICE_3D_JS_B64__: string | undefined;
+let _device3dJs: Buffer | null | undefined;
+function loadDevice3dJs(): Buffer | null {
+  if (_device3dJs === undefined) {
+    _device3dJs = typeof __DEVICE_3D_JS_B64__ === "string" && __DEVICE_3D_JS_B64__
+      ? Buffer.from(__DEVICE_3D_JS_B64__, "base64")
+      : null;
+  }
+  return _device3dJs;
+}
 const STATE_DIR = join(tmpdir(), "serve-sim");
 // Last logged result of a GET /api selection, used to suppress the
 // once-every-poll duplicate debugMw lines (the UI polls /api every ~2s).
@@ -1818,6 +1830,23 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
         res.end(err instanceof Error ? err.message : "Failed to load DevTools frontend");
       }
+      return;
+    }
+
+    // The 3D device view chunk: only requested when a viewer opens 3D.
+    if (pathname === `${base.replace(/\/$/, "")}/device-3d.js`) {
+      const js = loadDevice3dJs();
+      if (!js) {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("3D view is not built");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "text/javascript; charset=utf-8",
+        "Content-Length": js.length,
+        "Cache-Control": "no-cache",
+      });
+      res.end(req.method === "HEAD" ? undefined : js);
       return;
     }
 

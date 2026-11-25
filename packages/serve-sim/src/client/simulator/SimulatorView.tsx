@@ -26,7 +26,7 @@ import { isAvccSupported } from "../avcc-codec.js";
 import { inkFill, inkText } from "../utils/theme.js";
 
 // Custom round cursor matching the finger dot indicator
-const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='rgba(255,255,255,0.45)' stroke='rgba(0,0,0,0.55)' stroke-width='1.25' filter='drop-shadow(0 1px 2px rgba(0,0,0,0.45))'/%3E%3C/svg%3E") 12 12, pointer`;
+export const FINGER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='9' fill='rgba(255,255,255,0.45)' stroke='rgba(0,0,0,0.55)' stroke-width='1.25' filter='drop-shadow(0 1px 2px rgba(0,0,0,0.45))'/%3E%3C/svg%3E") 12 12, pointer`;
 
 // Scale applied to the AVCC <canvas> so its antialiased layer edge overshoots
 // the surface's overflow:hidden clip (see canvasStyle below). ~0.4% covers a
@@ -872,11 +872,12 @@ export function SimulatorView({
           } as CSSProperties}
         >
         {useAvcc ? (
-          <canvas ref={canvasRef} style={canvasStyle} />
+          <canvas ref={canvasRef} data-stream-surface="" style={canvasStyle} />
         ) : (
           <img
             ref={imgRef}
             src={relayMode ? undefined : streamUrl}
+            data-stream-surface={relayMode ? undefined : ""}
             draggable={false}
             onLoad={(e) => {
               const el = e.currentTarget;
@@ -895,6 +896,7 @@ export function SimulatorView({
         {relayMode && !useAvcc && (
           <img
             ref={relayImgRef}
+            data-stream-surface=""
             draggable={false}
             onLoad={(e) => {
               const el = e.currentTarget;

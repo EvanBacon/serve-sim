@@ -34,6 +34,7 @@ import { themeBootScript } from "./src/client/utils/theme";
 const PORT = Number(process.env.PORT) || 3200;
 const CLIENT_DIR = resolve(import.meta.dir, "src/client");
 const CLIENT_ENTRY = resolve(CLIENT_DIR, "client.tsx");
+const DEVICE_3D_ENTRY = resolve(CLIENT_DIR, "device-3d/index.ts");
 const PKG_ROOT = resolve(import.meta.dir);
 const SERVE_SIM_BIN_CANDIDATES = [
   join(PKG_ROOT, "src", "index.ts"),
@@ -115,6 +116,26 @@ async function buildClient() {
   signalReload();
 }
 
+// The 3D device view is its own lazily imported chunk, like production
+// (`/device-3d.js`); rebuilt alongside the client.
+let device3dJs = "";
+async function buildDevice3d() {
+  const result = await Bun.build({
+    entrypoints: [DEVICE_3D_ENTRY],
+    minify: false,
+    target: "browser",
+    format: "esm",
+    define: { "process.env.NODE_ENV": '"development"' },
+  });
+  if (result.success) {
+    device3dJs = await result.outputs[0]!.text();
+    console.log(`\x1b[32m✓\x1b[0m Bundled device-3d (${(device3dJs.length / 1024).toFixed(0)} KB)`);
+  } else {
+    device3dJs = "";
+    console.error("\x1b[31m✗\x1b[0m device-3d build failed:\n" + result.logs.map((l) => String(l)).join("\n"));
+  }
+}
+
 function cssCommentEscape(value: string): string {
   return value
     .replace(/\*\//g, "* /")
@@ -145,7 +166,7 @@ async function buildTailwindCss() {
   signalReload();
 }
 
-await Promise.all([buildClient(), buildTailwindCss()]);
+await Promise.all([buildClient(), buildDevice3d(), buildTailwindCss()]);
 lastTailwindContentSignature = readTailwindContentSignature();
 
 watch(CLIENT_DIR, { recursive: true }, (_event, filename) => {
@@ -201,7 +222,7 @@ function scheduleWatchedBuild() {
       pendingTailwindBuild || (pendingClientBuild && contentChanged);
     pendingClientBuild = false;
     pendingTailwindBuild = false;
-    if (shouldBuildClient) void buildClient();
+    if (shouldBuildClient) void buildDevice3d().then(buildClient);
     if (shouldBuildTailwind) void buildTailwindCss();
   }, 75);
 }
@@ -263,6 +284,14 @@ async function devMiddleware(req: IncomingMessage, res: ServerResponse, next: ()
   const path = (req.url ?? "").split("?")[0];
 
   if (path === "/__dev/reload") return handleDevReload(req, res);
+  if (path === "/device-3d.js") {
+    res.writeHead(device3dJs ? 200 : 500, {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    res.end(device3dJs || "throw new Error('device-3d build failed; see the dev server log');");
+    return;
+  }
   if (path === "/" || path === "") {
     const device = new URLSearchParams((req.url ?? "").split("?")[1] ?? "").get("device");
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
