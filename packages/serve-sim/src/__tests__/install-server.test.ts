@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
-import { createServer, request, type Server } from "http";
+import { createServer, type Server } from "http";
+import { connect } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -13,6 +14,7 @@ import {
   installUrls,
   itmsServicesUrl,
   parseRange,
+  strictTargetPath,
   xmlEscape,
   type InstallServerOptions,
 } from "../install-server";
@@ -54,15 +56,33 @@ async function start(extra: Partial<InstallServerOptions> = {}, activate = true)
   return { cap, install };
 }
 
+/**
+ * One request over a raw socket, so the target reaches the server byte for
+ * byte. `http.request` can't be used: bun 1.3's client normalises `/a/../b`
+ * and `%2e` in `path` before sending.
+ */
 function get(path: string, opts: { method?: string; headers?: Record<string, string> } = {}): Promise<Res> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: "127.0.0.1", port, path, method: opts.method ?? "GET", headers: opts.headers }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve({ status: res.statusCode!, headers: res.headers, body: Buffer.concat(chunks) }));
+    const head = [`${opts.method ?? "GET"} ${path} HTTP/1.1`, "Host: 127.0.0.1", "Connection: close"];
+    for (const [k, v] of Object.entries(opts.headers ?? {})) head.push(`${k}: ${v}`);
+    const chunks: Buffer[] = [];
+    const sock = connect(port, "127.0.0.1", () => sock.write(`${head.join("\r\n")}\r\n\r\n`));
+    sock.on("data", (c: Buffer) => chunks.push(c));
+    sock.on("error", reject);
+    sock.on("close", () => {
+      const raw = Buffer.concat(chunks);
+      const split = raw.indexOf("\r\n\r\n");
+      if (split < 0) return reject(new Error(`No HTTP response for ${path}`));
+      const [statusLine, ...lines] = raw.subarray(0, split).toString("latin1").split("\r\n");
+      const headers: Record<string, string> = {};
+      for (const line of lines) {
+        const i = line.indexOf(":");
+        const k = line.slice(0, i).trim().toLowerCase();
+        const v = line.slice(i + 1).trim();
+        headers[k] = headers[k] === undefined ? v : `${headers[k]}, ${v}`;
+      }
+      resolve({ status: Number(statusLine!.split(" ")[1]), headers, body: raw.subarray(split + 4) });
     });
-    req.on("error", reject);
-    req.end();
   });
 }
 
@@ -137,6 +157,14 @@ describe("manifest and links", () => {
     expect(xmlEscape(`<a href="x">'&'</a>`)).toBe("&lt;a href=&quot;x&quot;&gt;&apos;&amp;&apos;&lt;/a&gt;");
   });
 
+  test("xmlEscape drops characters XML 1.0 forbids and keeps valid ones", () => {
+    expect(xmlEscape("a\u0000b\u0007c\u000Bd\u000Ce\u001Ff\uFFFEg\uFFFF")).toBe("abcdefg");
+    expect(xmlEscape("lone\uD800 \uDC00x")).toBe("lone x");
+    expect(xmlEscape("tab\tlf\ncr\r \u00E9 \u{1F600}")).toBe("tab\tlf\ncr\r \u00E9 \u{1F600}");
+    const manifest = buildManifest({ ipaUrl: "https://x/app.ipa", bundleId: "com.x", version: "1", title: "Bad\u0001\uD83DName" });
+    expect((parseXmlPlist(manifest) as any).items[0].metadata.title).toBe("BadName");
+  });
+
   test("install page escapes values, has one Install link and no scripts or external resources", () => {
     const html = buildInstallPage({
       appName: "<script>alert(1)</script>",
@@ -185,6 +213,21 @@ describe("parseRange", () => {
   });
 });
 
+describe("strictTargetPath", () => {
+  test("strips the query and keeps ordinary paths", () => {
+    expect(strictTargetPath("/install/abc/")).toBe("/install/abc/");
+    expect(strictTargetPath("/install/abc/app.ipa?x=1")).toBe("/install/abc/app.ipa");
+    expect(strictTargetPath("/install/abc/.hidden..x")).toBe("/install/abc/.hidden..x");
+  });
+  test("refuses non-origin-form targets, dot segments, backslashes and encoded separators", () => {
+    for (const bad of [
+      "", "*", "install/a/", "//a/b", "http://h/install/a/",
+      "/a/./b", "/a/../b", "/a/.", "/a/..", "/..", "/./",
+      "/a/%2e/b", "/a/%2E%2E/b", "/a%2fb", "/a%2Fb", "/a%5cb", "/a%5Cb", "/a\\b", "/a#b", "/a?q=%2e",
+    ]) expect({ bad, path: strictTargetPath(bad) }).toEqual({ bad, path: null });
+  });
+});
+
 describe("routing", () => {
   test("page, manifest, ipa and icon on the right cap", async () => {
     const icon = fakePng(false, 50);
@@ -199,7 +242,7 @@ describe("routing", () => {
 
     const manifest = await get(`/install/${cap}/manifest.plist`);
     expect(manifest.status).toBe(200);
-    expect(manifest.headers["content-type"]).toBe("application/xml; charset=utf-8");
+    expect(manifest.headers["content-type"]).toBe("text/xml; charset=utf-8");
     const plist = parseXmlPlist(manifest.body.toString()) as any;
     expect(plist.items[0].assets[0]).toEqual({ kind: "software-package", url: `${ORIGIN}/install/${cap}/app.ipa` });
     expect(plist.items[0].metadata.title).toBe('OTA <Test> & "Co"');
@@ -257,6 +300,19 @@ describe("routing", () => {
       `/install/${cap}/icon.png`, // no icon this run
       `/install/${cap}/app.ipa/`,
       `/install/${cap}/../${cap}/app.ipa`,
+      `/install/x/../${cap}/app.ipa`,
+      `/install/${cap}/./app.ipa`,
+      `/install/./${cap}/app.ipa`,
+      `/install/${cap}/app.ipa/..`,
+      `/install/${cap}/.`,
+      `/install/${cap}/%2e/app.ipa`,
+      `/install/${cap}%2Fapp.ipa`,
+      `/install/${cap}/app%2eipa`,
+      `/install/${cap}%5capp.ipa`,
+      `/install/${cap}\\app.ipa`,
+      `/install/${cap}/app.ipa?x=%2e`,
+      `//install/${cap}/`,
+      `http://127.0.0.1/install/${cap}/`,
       `/install/${cap}/Info.plist`,
       `/install/${cap}/manifest.plist.bak`,
       `/install/${other}/?token=x`,

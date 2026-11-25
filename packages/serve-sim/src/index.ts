@@ -3041,7 +3041,7 @@ program
   .option("--public-origin <url>", "Serve through an https tunnel/proxy you already run to this port instead of cloudflared")
   .option("-p, --port <port>", "Local port (default: first free from 3412; bound to 127.0.0.1)", (v) => parseInt(v, 10))
   .option("--ttl <duration>", "How long the link works, e.g. 30m, 2h (default 30m, max 24h)")
-  .option("--once", "Stop after the .ipa has been downloaded once")
+  .option("--once", "Revoke the link after one full download of the .ipa, then exit 60s later")
   .option("--udid <udid>", "Check whether this device is in the provisioning profile")
   .option("--json", "Print one JSON object (URLs, expiry, app info, warnings) instead of the QR banner")
   .addHelpText(
@@ -3056,7 +3056,9 @@ The build must be Ad Hoc / Development with the phone's UDID in its profile (or 
 Anyone with the link can download the .ipa while it's live. See docs/install.md.`,
   )
   .action(async (path: string, _opts, command: Command) => {
-    // Root -p / --public-origin also match after the subcommand name.
+    // Root -p / --public-origin also match after the subcommand name. This is
+    // only safe while those root options have no default: a root default would
+    // show up here and count as an explicit install --port (strict, no fallback).
     const o = command.optsWithGlobals() as { publicOrigin?: string; port?: number; ttl?: string; once?: boolean; json?: boolean; udid?: string };
     process.exitCode = await installCommand(path, o);
   });

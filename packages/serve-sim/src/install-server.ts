@@ -24,9 +24,17 @@ export function generateCapability(bytes: () => Buffer = () => randomBytes(32)):
   return bytes().toString("base64url");
 }
 
-/** @lintignore Exported for tests. */
+// Characters XML 1.0 forbids: C0 controls other than tab/LF/CR, U+FFFE/U+FFFF and lone surrogates.
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const XML_INVALID = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * Escape for XML/HTML text and attributes, dropping characters XML 1.0 can't carry.
+ * @lintignore Exported for tests.
+ */
 export function xmlEscape(value: string): string {
   return value
+    .replace(XML_INVALID, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -223,6 +231,25 @@ export interface InstallServerOptions {
   onRevoked?: (reason: "expired" | "once" | "manual") => void;
 }
 
+/**
+ * The pathname of a raw request target, with the query stripped, or null when
+ * the target must be refused: not origin-form (`/...`), or containing a dot
+ * segment, a backslash, or a percent-encoded dot, slash or backslash. HTTP
+ * clients and proxies disagree about normalising those (bun 1.3's
+ * `http.request` collapses `/a/../b` before sending, Node's doesn't), so they
+ * are rejected outright rather than resolved. Nothing here goes through
+ * `new URL()`, which would normalise them.
+ * @lintignore Exported for tests.
+ */
+export function strictTargetPath(rawUrl: string): string | null {
+  if (!rawUrl.startsWith("/") || rawUrl.startsWith("//")) return null;
+  if (/[\\#]|%(?:2e|2f|5c)/i.test(rawUrl)) return null;
+  const q = rawUrl.indexOf("?");
+  const path = q >= 0 ? rawUrl.slice(0, q) : rawUrl;
+  if (path.split("/").some((seg) => seg === "." || seg === "..")) return null;
+  return path;
+}
+
 const ROUTE_RE = /^\/install\/([^/]+)\/(|manifest\.plist|app\.ipa|icon\.png)$/;
 
 export class InstallServer {
@@ -285,10 +312,8 @@ export class InstallServer {
   readonly handle = (req: IncomingMessage, res: ServerResponse): void => {
     for (const [k, v] of Object.entries(BASE_HEADERS)) res.setHeader(k, v);
     const method = req.method ?? "GET";
-    const rawUrl = req.url ?? "/";
-    const q = rawUrl.indexOf("?");
-    const path = q >= 0 ? rawUrl.slice(0, q) : rawUrl;
-    const m = ROUTE_RE.exec(path);
+    const path = strictTargetPath(req.url ?? "");
+    const m = path === null ? null : ROUTE_RE.exec(path);
 
     if (this.publicOrigin && !this.revoked && this.now() >= this.expiresAt) this.revoke("expired");
     if (!m || (method !== "GET" && method !== "HEAD") || !this.publicOrigin || !this.isLive || !this.capMatches(m[1]!)) {
@@ -302,7 +327,7 @@ export class InstallServer {
         return;
       case "manifest.plist":
         this.opts.onEvent?.("manifest");
-        this.send(res, method, 200, "application/xml; charset=utf-8", Buffer.from(this.manifest));
+        this.send(res, method, 200, "text/xml; charset=utf-8", Buffer.from(this.manifest));
         return;
       case "icon.png":
         if (!this.opts.icon) {

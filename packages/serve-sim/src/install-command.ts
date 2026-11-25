@@ -24,6 +24,8 @@ import {
 
 const INSTALL_DEFAULT_PORT = 3412;
 const DEFAULT_TTL_MS = 30 * 60_000;
+/** After a `--once` download: the link is revoked, but the tunnel stays up this long so the relay can finish sending it. */
+const ONCE_GRACE_MS = 60_000;
 const MAX_TTL_MS = 24 * 60 * 60_000;
 
 /**
@@ -236,6 +238,26 @@ export interface InstallCommandOptions {
   udid?: string;
 }
 
+/** Cancels a timer started by {@link InstallCommandDeps.setTimer}. */
+type CancelTimer = () => void;
+
+/** Seams for tests; production uses the defaults. */
+export interface InstallCommandDeps {
+  startQuickTunnel?: typeof startQuickTunnel;
+  findOnPath?: (name: string) => string | undefined;
+  prepareIpa?: (input: string) => PreparedIpa;
+  now?: () => number;
+  setTimer?: (fn: () => void, ms: number) => CancelTimer;
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+  onceGraceMs?: number;
+}
+
+const defaultSetTimer = (fn: () => void, ms: number): CancelTimer => {
+  const t = setTimeout(fn, ms);
+  return () => clearTimeout(t);
+};
+
 const EVENT_TEXT: Record<InstallEvent, string> = {
   page: "Install page opened",
   manifest: "Manifest fetched",
@@ -244,8 +266,12 @@ const EVENT_TEXT: Record<InstallEvent, string> = {
 };
 
 /** Runs until Ctrl+C, expiry or (with --once) one full download. Resolves with the exit code. */
-export async function installCommand(input: string, opts: InstallCommandOptions): Promise<number> {
-  const err = (line: string) => console.error(line);
+export async function installCommand(input: string, opts: InstallCommandOptions, deps: InstallCommandDeps = {}): Promise<number> {
+  const err = deps.err ?? ((line: string) => console.error(line));
+  const out = deps.out ?? ((line: string) => console.log(line));
+  const clock = deps.now ?? Date.now;
+  const setTimer = deps.setTimer ?? defaultSetTimer;
+  const graceMs = deps.onceGraceMs ?? ONCE_GRACE_MS;
   const ttlMs = opts.ttl === undefined ? DEFAULT_TTL_MS : parseTtl(opts.ttl);
   if (ttlMs === null) {
     err(`Invalid --ttl ${opts.ttl}. Use e.g. 30m, 2h, 90s (max 24h).`);
@@ -263,7 +289,7 @@ export async function installCommand(input: string, opts: InstallCommandOptions)
       publicOrigin = normalizePublicOrigin(opts.publicOrigin);
       if (!publicOrigin.startsWith("https://")) throw new Error("--public-origin must be https: iOS only installs OTA over HTTPS.");
     } else {
-      cloudflared = findOnPath("cloudflared");
+      cloudflared = (deps.findOnPath ?? findOnPath)("cloudflared");
       if (!cloudflared) throw new Error(CLOUDFLARED_INSTALL_HINT);
     }
   } catch (error) {
@@ -274,7 +300,7 @@ export async function installCommand(input: string, opts: InstallCommandOptions)
   let prepared: PreparedIpa;
   let info: IpaInfo;
   try {
-    prepared = prepareIpa(input);
+    prepared = (deps.prepareIpa ?? prepareIpa)(input);
   } catch (error) {
     err((error as Error).message);
     return 1;
@@ -288,32 +314,36 @@ export async function installCommand(input: string, opts: InstallCommandOptions)
   }
   const udid: UdidCheck | undefined = opts.udid ? { udid: opts.udid.trim(), status: udidStatus(info.profile, opts.udid) } : undefined;
   const ipaSize = statSync(prepared.ipaPath).size;
-  const log = opts.json ? err : (line: string) => console.log(line);
+  const log = opts.json ? err : out;
 
   let finish!: (code: number) => void;
   const done = new Promise<number>((r) => { finish = r; });
   let stopTunnel: (() => void) | undefined;
-  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  const timers: CancelTimer[] = [];
   let stopped = false;
   const httpServer = createServer();
+  const onSignal = () => shutdown(0, "\n  Stopped. The install link no longer works.");
+  const onExit = () => {
+    stopTunnel?.();
+    prepared.cleanup();
+  };
   const shutdown = (code: number, message?: string) => {
     if (stopped) return;
     stopped = true;
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    process.off("exit", onExit);
     if (message) log(message);
-    if (expiryTimer) clearTimeout(expiryTimer);
+    for (const cancel of timers.splice(0)) cancel();
     stopTunnel?.();
     httpServer.close();
     httpServer.closeAllConnections?.();
     prepared.cleanup();
     finish(code);
   };
-  const onSignal = () => shutdown(0, "\n  Stopped. The install link no longer works.");
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
-  process.on("exit", () => {
-    stopTunnel?.();
-    prepared.cleanup();
-  });
+  process.on("exit", onExit);
 
   const install = new InstallServer({
     cap: generateCapability(),
@@ -325,10 +355,17 @@ export async function installCommand(input: string, opts: InstallCommandOptions)
     build: info.build,
     icon: info.icon,
     once: !!opts.once,
+    now: clock,
     onEvent: (event) => log(`  › ${EVENT_TEXT[event]}${event === "ipa-complete" ? ` (${formatBytes(ipaSize)})` : ""}`),
     onRevoked: (reason) => {
-      if (reason === "once") setImmediate(() => shutdown(0, "  Downloaded once (--once); link revoked. Stopped."));
-      else if (reason === "expired") shutdown(0, "  Link expired. Stopped.");
+      if (reason === "once") {
+        // `finish` only means the bytes reached cloudflared's socket, not the phone: new requests
+        // 404 from now on, but keep the tunnel up while the relay drains.
+        log(`  Downloaded once; link revoked. Exiting in ${Math.round(graceMs / 1000)}s (Ctrl+C to exit now).`);
+        timers.push(setTimer(() => shutdown(0, "  Stopped."), graceMs));
+      } else if (reason === "expired") {
+        shutdown(0, "  Link expired. Stopped.");
+      }
     },
   });
   httpServer.on("request", install.handle);
@@ -338,7 +375,7 @@ export async function installCommand(input: string, opts: InstallCommandOptions)
     if (!publicOrigin) {
       const target = tunnelTargetUrl("127.0.0.1", port);
       if (!opts.json) log(`  Starting cloudflared quick tunnel to ${target}...`);
-      const tunnel = await startQuickTunnel({
+      const tunnel = await (deps.startQuickTunnel ?? startQuickTunnel)({
         bin: cloudflared!,
         targetUrl: target,
         onSpawn: (stop) => { stopTunnel = stop; },
@@ -353,13 +390,13 @@ export async function installCommand(input: string, opts: InstallCommandOptions)
   }
   if (stopped) return done;
 
-  const now = Date.now();
+  const now = clock();
   const expiresAt = now + ttlMs;
   const urls = install.activate(publicOrigin, expiresAt);
-  expiryTimer = setTimeout(() => install.revoke("expired"), ttlMs);
+  timers.push(setTimer(() => install.revoke("expired"), ttlMs));
 
   if (opts.json) {
-    console.log(JSON.stringify(installJson({ info, urls, expiresAt, once: !!opts.once, udid })));
+    out(JSON.stringify(installJson({ info, urls, expiresAt, once: !!opts.once, udid })));
   } else {
     const color = process.stdout.isTTY === true && !process.env.NO_COLOR;
     const qr = renderQrHalfBlocks(encodeQr(urls.page, { ecc: "M" }), { color });
