@@ -258,4 +258,25 @@ describe("installCommand lifecycle", () => {
     expect(h.cleanups).toBe(1);
     expect(listenerCounts()).toEqual(before);
   });
+
+  test("zip errors are sanitized: encrypted Info.plist under an ESC app directory name", async () => {
+    const zip = makeIpa({ appName: "Evil\x1b]52;c;cGF5bG9hZA==\x07\x1b[2J" });
+    // Set the encrypted flag on Info.plist's central directory record.
+    const at = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    zip.writeUInt16LE(zip.readUInt16LE(at + 8) | 0x1, at + 8);
+    const evilPath = join(dir, "evil.ipa");
+    writeFileSync(evilPath, zip);
+    const err: string[] = [];
+    const code = await installCommand(evilPath, { json: true }, {
+      findOnPath: () => "/fake/cloudflared",
+      prepareIpa: (input) => ({ ipaPath: input, cleanup: () => {} }),
+      out: () => {},
+      err: (l) => err.push(l),
+    });
+    expect(code).toBe(1);
+    const text = err.join("\n");
+    expect(text).toMatch(/^Could not read evil\.ipa: /);
+    // eslint-disable-next-line no-control-regex -- asserting no control characters leak
+    expect(text).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/);
+  });
 });

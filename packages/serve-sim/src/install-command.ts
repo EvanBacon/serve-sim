@@ -11,7 +11,7 @@ import { createServer, type Server } from "http";
 import { tmpdir } from "os";
 import { basename, join, resolve } from "path";
 import { stripVTControlCharacters } from "util";
-import { inspectIpa, profileKindLabel, udidStatus, type IpaInfo } from "./install-ipa";
+import { inspectIpa, profileKindLabel, sanitizeIpaString, udidStatus, type IpaInfo } from "./install-ipa";
 import { encodeQr, renderQrHalfBlocks } from "./install-qr";
 import { InstallServer, generateCapability, type InstallEvent, type InstallUrls } from "./install-server";
 import {
@@ -309,7 +309,7 @@ export async function installCommand(input: string, opts: InstallCommandOptions,
     info = inspectIpa(prepared.ipaPath);
   } catch (error) {
     prepared.cleanup();
-    err(`Could not read ${basename(input)}: ${(error as Error).message}`);
+    err(`Could not read ${basename(input)}: ${sanitizeIpaString((error as Error).message)}`);
     return 1;
   }
   const udid: UdidCheck | undefined = opts.udid ? { udid: opts.udid.trim(), status: udidStatus(info.profile, opts.udid) } : undefined;

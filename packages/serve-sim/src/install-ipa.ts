@@ -20,6 +20,8 @@ export interface ProfileInfo {
   uuid?: string;
   expiresAt?: string;
   expired: boolean;
+  /** ExpirationDate was present but didn't parse; expiry can't be checked. */
+  expirationUnparseable?: boolean;
   applicationIdentifier?: string;
   /** False when the profile's app id doesn't cover the bundle id. */
   bundleIdMatches: boolean;
@@ -90,7 +92,9 @@ export function classifyProfile(profile: PlistDict, bundleId: string, now: Date 
     : devices.length > 0
       ? getTaskAllow ? "development" : "ad-hoc"
       : "app-store";
-  const expiration = profile.ExpirationDate instanceof Date ? profile.ExpirationDate : undefined;
+  const rawExpiration = profile.ExpirationDate instanceof Date ? profile.ExpirationDate : undefined;
+  const expirationUnparseable = rawExpiration !== undefined && !Number.isFinite(rawExpiration.getTime());
+  const expiration = expirationUnparseable ? undefined : rawExpiration;
   const applicationIdentifier = str(entitlements["application-identifier"]);
   return {
     kind,
@@ -100,6 +104,7 @@ export function classifyProfile(profile: PlistDict, bundleId: string, now: Date 
     uuid: str(profile.UUID),
     expiresAt: expiration?.toISOString(),
     expired: expiration ? expiration.getTime() < now.getTime() : false,
+    ...(expirationUnparseable ? { expirationUnparseable } : {}),
     applicationIdentifier,
     bundleIdMatches: applicationIdentifier ? appIdMatches(applicationIdentifier, bundleId) : true,
     getTaskAllow,
@@ -129,6 +134,7 @@ function installWarnings(info: { hasProfileEntry: boolean; hasCodeSignature: boo
   if (p.kind === "app-store") {
     out.push("App Store / TestFlight profile: iOS won't install it OTA. Export with Release Testing (Ad Hoc) or Debugging (Development).");
   }
+  if (p.expirationUnparseable) out.push("Provisioning profile has an unparseable expiration date; can't check expiry.");
   if (p.expired) out.push(`Provisioning profile expired ${p.expiresAt?.slice(0, 10) ?? ""}`.trim() + ".");
   if (!p.bundleIdMatches) {
     out.push(`Profile app id ${p.applicationIdentifier} doesn't match bundle id ${info.bundleId}.`);
@@ -144,6 +150,7 @@ function findApp(zip: ZipReader): { appDir: string; infoPlist: ZipEntry } {
     throw new Error(`Expected one app in Payload/, found ${candidates.length}: ${names}`);
   }
   const infoPlist = candidates[0]!;
+  if (sanitizeIpaString(infoPlist.name) !== infoPlist.name) throw new Error("App directory name in Payload/ contains control characters");
   return { appDir: infoPlist.name.slice(0, -"Info.plist".length), infoPlist };
 }
 

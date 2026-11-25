@@ -48,6 +48,15 @@ describe("provisioning profile classification", () => {
     expect(p.expiresAt).toBe("2026-11-01T00:00:00.000Z");
   });
 
+  test("an unparseable ExpirationDate is flagged, not fatal", () => {
+    const dict = extractProvisionPlist(mobileprovision({ devices: [UDID] }));
+    const p = classifyProfile({ ...dict, ExpirationDate: new Date(NaN) }, "com.example.app", NOW);
+    expect(p.expirationUnparseable).toBe(true);
+    expect(p.expiresAt).toBeUndefined();
+    expect(p.expired).toBe(false);
+    expect(p.kind).toBe("ad-hoc");
+  });
+
   test("bundle id mismatch and wildcards", () => {
     expect(classify({ devices: [UDID], appId: "ABCDE12345.com.other.app" }).bundleIdMatches).toBe(false);
     expect(classify({ devices: [UDID], appId: "ABCDE12345.*" }).bundleIdMatches).toBe(true);
@@ -113,6 +122,21 @@ describe("inspectIpa", () => {
     expect(info.signed).toBe(true);
     expect(info.profile).toBeUndefined();
     expect(info.warnings).toEqual([expect.stringMatching(/^embedded\.mobileprovision is unreadable/)]);
+  });
+
+  test("an unparseable ExpirationDate warns instead of making the profile unreadable", () => {
+    const raw = mobileprovision({ devices: [UDID] });
+    const from = "<date>2027-01-01T00:00:00Z</date>";
+    const i = raw.indexOf(from);
+    const profile = Buffer.concat([raw.subarray(0, i), Buffer.from("<date>not a date</date>"), raw.subarray(i + from.length)]);
+    const info = inspectIpa(ipaFile(makeIpa({ profile })), NOW);
+    expect(info.profile?.kind).toBe("ad-hoc");
+    expect(info.warnings).toEqual([expect.stringMatching(/unparseable expiration date/)]);
+  });
+
+  test("control characters in the app directory name are rejected", () => {
+    const zip = makeIpa({ appName: "Evil\x1b[2J" });
+    expect(() => inspectIpa(ipaFile(zip), NOW)).toThrow(/^App directory name in Payload\/ contains control characters$/);
   });
 
   test("more than one Payload/*.app is an error", () => {
