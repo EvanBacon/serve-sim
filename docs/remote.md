@@ -2,6 +2,8 @@
 
 Drive a simulator on your Mac from another machine: a Linux box, a CI runner, or a cloud coding agent. The Mac runs the simulator and a serve-sim preview behind a tunnel; the other machine runs ordinary `serve-sim` commands against it. Nothing on the client side needs macOS, Xcode or `simctl`.
 
+To install a real build on a physical iPhone over the same kind of tunnel (OTA, works on cellular), see [Install on your iPhone from anywhere](install.md) (`serve-sim install <app.ipa>`).
+
 ## On the Mac
 
 ```sh
