@@ -141,6 +141,9 @@ serve-sim open <url> [-d udid]        Open a URL or deep link (simctl openurl)
 serve-sim connect <url>               Send commands to a remote serve-sim (saves the
                                       URL only; token from SERVE_SIM_AUTH_TOKEN)
 serve-sim disconnect                  Forget it; back to the local simulator
+serve-sim install <app.ipa>           Install a signed build on your physical iPhone from
+                                      anywhere (OTA via a quick tunnel; prints a QR;
+                                      --once, --ttl, --udid, --json). See docs/install.md
 serve-sim control [status|start|stop] Persistent control process that keeps short
                                       commands fast (automatic; see below)
 
@@ -250,7 +253,7 @@ Helpers started by `--detach` or `--no-preview` exit after their target simulato
 
 ### Remote access (`--auth-token`)
 
-To drive this Mac's simulator from Linux or a cloud agent, run `serve-sim --tunnel` and follow the `serve-sim connect` recipe it prints. See [docs/remote.md](https://github.com/EvanBacon/serve-sim/blob/main/docs/remote.md).
+To drive this Mac's simulator from Linux or a cloud agent, run `serve-sim --tunnel` and follow the `serve-sim connect` recipe it prints. See [docs/remote.md](https://github.com/EvanBacon/serve-sim/blob/main/docs/remote.md). To put a real build on your physical iPhone from anywhere, use `serve-sim install <app.ipa>`; see [docs/install.md](https://github.com/EvanBacon/serve-sim/blob/main/docs/install.md).
 
 Requests that don't come straight from this machine — LAN clients, tunnels, reverse proxies — are refused unless the server is started with `--auth-token <token>` (or `SERVE_SIM_AUTH_TOKEN`). CLI and scripted clients send `Authorization: Bearer <token>`. To share the preview with a browser, send the link with the token in the URL fragment:
 
