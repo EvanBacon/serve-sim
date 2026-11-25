@@ -7,6 +7,7 @@ import {
   DARWIN_INTEGRATION_TEST_FILES,
   SIM_E2E_TEST_FILES,
   SIM_SHUTDOWN_E2E_TEST_FILE,
+  bootstatusOutcome,
   describeSimulatorState,
   isDarwinSkipPath,
   isDarwinTestFile,
@@ -104,6 +105,32 @@ describe("CI workflow factory invariants", () => {
     expect(describeSimulatorState("not json", "UDID-1")).toMatch(/^UDID-1 state unknown \(unparseable simctl list output/);
     expect(describeSimulatorState("null", "UDID-1")).toMatch(/^UDID-1 state unknown/);
     expect(describeSimulatorState('{"devices":{"r":"x","s":[null]}}', "UDID-1")).toBe("UDID-1 not listed by simctl");
+  });
+
+  test("bootstatus failing on a Booted device falls back to a bounded readiness probe", () => {
+    // CI: bootstatus hung until SIGTERM while simctl list said Booted.
+    const runner = readFileSync(join(REPO, "packages/serve-sim/scripts/run-sim-e2e.ts"), "utf-8");
+    const reboot = runner.slice(runner.indexOf("function rebootSimulator"), runner.indexOf("for (const file of"));
+    expect(reboot).toMatch(/bootstatusOutcome\(bootstatus\.status, listJson, udid\) !== "probe"/);
+    expect(reboot).toContain("probeReady()");
+    expect(reboot).toContain("overriding bootstatus");
+    expect(runner).toMatch(/function probeReady[\s\S]*"spawn", udid[\s\S]*timeout: Math\.min\(10_000, Math\.max\(1_000, deadline - Date\.now\(\)\)\)/);
+    expect(runner).toMatch(/function probeReady\(\)[^{]*\{\s*const deadline = Date\.now\(\) \+ 30_000/);
+  });
+
+  test("bootstatusOutcome probes only when simctl list reports the device Booted", () => {
+    const list = (state: string) =>
+      JSON.stringify({ devices: { "com.apple.CoreSimulator.SimRuntime.iOS-26-4": [{ udid: "U", state, isAvailable: true }] } });
+    expect(bootstatusOutcome(0, undefined, "U")).toBe("ready");
+    expect(bootstatusOutcome(0, list("Shutdown"), "U")).toBe("ready");
+    // Killed by the timeout (status null) or a non-zero exit, device Booted.
+    expect(bootstatusOutcome(null, list("Booted"), "U")).toBe("probe");
+    expect(bootstatusOutcome(1, list("Booted"), "U")).toBe("probe");
+    expect(bootstatusOutcome(null, list("Booting"), "U")).toBe("fail");
+    expect(bootstatusOutcome(null, list("Shutdown"), "U")).toBe("fail");
+    expect(bootstatusOutcome(null, list("Booted"), "OTHER")).toBe("fail");
+    expect(bootstatusOutcome(null, undefined, "U")).toBe("fail");
+    expect(bootstatusOutcome(null, "not json", "U")).toBe("fail");
   });
 
   test("the shutdown e2e runs last, opted in on the CI-owned simulator", () => {

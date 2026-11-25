@@ -15,6 +15,7 @@ import {
   DARWIN_INTEGRATION_TEST_FILES,
   SIM_E2E_TEST_FILES,
   SIM_SHUTDOWN_E2E_TEST_FILE,
+  bootstatusOutcome,
   describeSimulatorState,
 } from "../src/ci-test-plan";
 
@@ -50,11 +51,36 @@ function timed<T extends ReturnType<typeof spawnSync>>(step: string, run: () => 
   return result;
 }
 
-/** The simulator's state per `simctl list`, for failure logs. */
-function simulatorState(): string {
+/** `simctl list devices -j` output, or undefined if simctl failed. */
+function listDevices(): string | undefined {
   const list = spawnSync("xcrun", ["simctl", "list", "devices", "-j"], { encoding: "utf-8", timeout: 30_000 });
-  if (list.status !== 0) return `${udid} state unknown (simctl list status ${list.status}, signal ${list.signal})`;
-  return describeSimulatorState(list.stdout, udid);
+  return list.status === 0 ? list.stdout : undefined;
+}
+
+/** The simulator's state per `simctl list`, for failure logs. */
+function simulatorState(listJson = listDevices()): string {
+  if (listJson === undefined) return `${udid} state unknown (simctl list failed)`;
+  return describeSimulatorState(listJson, udid);
+}
+
+/**
+ * Whether the simulator's launchd answers `simctl spawn` within 30s. Used when
+ * bootstatus hung on a device that `simctl list` already reports as Booted.
+ */
+function probeReady(): boolean {
+  const deadline = Date.now() + 30_000;
+  for (let attempt = 1; ; attempt++) {
+    const probe = timed(`readiness probe ${attempt}`, () =>
+      spawnSync("xcrun", ["simctl", "spawn", udid, "launchctl", "print", "system"], {
+        stdio: "ignore",
+        // Never run past the 30s deadline, however late the last try starts.
+        timeout: Math.min(10_000, Math.max(1_000, deadline - Date.now())),
+      }),
+    );
+    if (probe.status === 0) return true;
+    if (Date.now() + 2_000 >= deadline) return false;
+    spawnSync("sleep", ["2"]);
+  }
 }
 
 function rebootSimulator(): boolean {
@@ -75,19 +101,26 @@ function rebootSimulator(): boolean {
     return false;
   }
   // No `-b`: on Xcode 27 the boot-and-monitor form can stay blocked after the
-  // device is already Booted.
+  // device is already Booted. Plain bootstatus can too: on the macOS runner
+  // (iOS 26.4) it hung until the timeout killed it with the device Booted.
+  // A healthy reboot finishes it in seconds, so 60s is plenty before falling
+  // back to the probe.
   const bootstatus = timed("bootstatus", () => spawnSync("xcrun", ["simctl", "bootstatus", udid], {
     stdio: "inherit",
-    timeout: 90_000,
+    timeout: 60_000,
   }));
   if (bootstatus.status !== 0) {
-    // Status null with signal SIGTERM means the 90s timeout killed it. Not
-    // reproduced locally (Xcode 27.0, iOS 27.2: ~2s), so log the real state.
-    console.error(
-      `simctl bootstatus ${udid} failed (status ${bootstatus.status}, signal ${bootstatus.signal}); ` +
-        `skipping retry (${simulatorState()})`,
-    );
-    return false;
+    const listJson = listDevices();
+    const failure = `simctl bootstatus ${udid} failed (status ${bootstatus.status}, signal ${bootstatus.signal})`;
+    if (bootstatusOutcome(bootstatus.status, listJson, udid) !== "probe") {
+      console.error(`${failure}; skipping retry (${simulatorState(listJson)})`);
+      return false;
+    }
+    if (!probeReady()) {
+      console.error(`${failure} and the readiness probe failed; skipping retry (${simulatorState()})`);
+      return false;
+    }
+    console.warn(`${failure}, but ${udid} is Booted and answers simctl spawn; overriding bootstatus and retrying`);
   }
   spawnSync("open", ["-ga", "Simulator"], { stdio: "inherit" });
   return true;
