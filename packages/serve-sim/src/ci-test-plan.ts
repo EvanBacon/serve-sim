@@ -58,6 +58,55 @@ export function needsDarwinE2E(changedFiles: string[]): boolean {
   return changedFiles.some((file) => !isDarwinSkipPath(file));
 }
 
+/**
+ * One-line summary of `udid` from `simctl list devices -j` output, logged by
+ * the CI runner when a reboot step fails so the log shows the real state.
+ */
+export function describeSimulatorState(listJson: string, udid: string): string {
+  const found = findSimulator(listJson, udid);
+  if (found === "unparseable") {
+    return `${udid} state unknown (unparseable simctl list output: ${listJson.slice(0, 200).trim()})`;
+  }
+  if (!found) return `${udid} not listed by simctl`;
+  return `${udid} state=${found.device.state} isAvailable=${found.device.isAvailable} runtime=${found.runtime}`;
+}
+
+/**
+ * What the CI runner does after `simctl bootstatus` during a reboot. On the
+ * macOS runner (Xcode 27, iOS 26.4) bootstatus can hang until its timeout
+ * kills it even though `simctl list` already says Booted. Then a readiness
+ * probe decides instead of skipping the retry. Anything not Booted fails.
+ */
+export function bootstatusOutcome(
+  status: number | null,
+  listJson: string | undefined,
+  udid: string,
+): "ready" | "probe" | "fail" {
+  if (status === 0) return "ready";
+  if (listJson === undefined) return "fail";
+  const found = findSimulator(listJson, udid);
+  return found && found !== "unparseable" && found.device.state === "Booted" ? "probe" : "fail";
+}
+
+type ListedSimulator = { udid?: string; state?: string; isAvailable?: boolean };
+
+function findSimulator(
+  listJson: string,
+  udid: string,
+): { runtime: string; device: ListedSimulator } | "unparseable" | undefined {
+  let devices: Record<string, ListedSimulator[]>;
+  try {
+    devices = (JSON.parse(listJson) as { devices: typeof devices }).devices ?? {};
+  } catch {
+    return "unparseable";
+  }
+  for (const [runtime, list] of Object.entries(devices)) {
+    const device = Array.isArray(list) ? list.find((d) => d?.udid === udid) : undefined;
+    if (device) return { runtime, device };
+  }
+  return undefined;
+}
+
 function normalizeRepoPath(file: string): string {
   return file.replaceAll("\\", "/").replace(/^\.\//, "");
 }
