@@ -71,7 +71,7 @@ On macOS you can also pass a signed `.app` or an `.xcarchive` directly; serve-si
 
 ```sh
 serve-sim install MyApp.ipa                     # quick tunnel, link lives 30 minutes
-serve-sim install MyApp.ipa --once --ttl 10m    # stop after one complete download, or 10 minutes
+serve-sim install MyApp.ipa --once --ttl 10m    # revoke after one complete download, or 10 minutes
 serve-sim install MyApp.ipa --udid 00008101-001A2B3C4D5E6F70
 serve-sim install MyApp.ipa --json              # one JSON object: urls, expiresAt, app, profile, warnings
 serve-sim install MyApp.ipa -p 3412 --public-origin https://ota.example.com   # your own https tunnel/proxy to that port
@@ -80,7 +80,7 @@ serve-sim install MyApp.ipa -p 3412 --public-origin https://ota.example.com   # 
 | Option | Meaning |
 | --- | --- |
 | `--ttl <duration>` | How long the link works: `30m` (default), `2h`, `90s`; max `24h`. |
-| `--once` | Revoke the link and exit once the .ipa has been downloaded completely. |
+| `--once` | Revoke the link once the .ipa has been downloaded completely, then exit 60 s later (the tunnel stays up so the relay can finish sending it). |
 | `-p, --port <n>` | Local port (default: first free from 3412). The server binds to `127.0.0.1` only. |
 | `--public-origin <url>` | Skip cloudflared and use an https origin you already forward to that port (named tunnel, ngrok, Tailscale Funnel). Must be https; iOS refuses OTA over http. |
 | `--udid <udid>` | Check whether a device is in the profile. |

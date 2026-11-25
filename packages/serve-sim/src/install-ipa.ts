@@ -44,12 +44,27 @@ function isDict(value: PlistValue | undefined): value is PlistDict {
   return !!value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date) && !Buffer.isBuffer(value);
 }
 
+// C0/C1 controls (incl. ESC, so no CSI/OSC reaches the terminal), DEL and lone surrogates.
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const UNSAFE_CHARS = /[\u0000-\u001F\u007F-\u009F]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * Strip characters that could drive a terminal or break the manifest from a string taken out of the .ipa.
+ * @lintignore Exported for tests.
+ */
+export function sanitizeIpaString(value: string): string {
+  return value.replace(UNSAFE_CHARS, "");
+}
+
+// Every string read from Info.plist or the profile goes through these two.
 function str(value: PlistValue | undefined): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const clean = sanitizeIpaString(value);
+  return clean !== "" ? clean : undefined;
 }
 
 function strings(value: PlistValue | undefined): string[] {
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string").map(sanitizeIpaString) : [];
 }
 
 /**
@@ -104,11 +119,11 @@ export function profileKindLabel(kind: ProfileKind): string {
 }
 
 /** Warnings about installing this build OTA. Empty means it should install. */
-function installWarnings(info: { signed: boolean; profile?: ProfileInfo; bundleId: string }): string[] {
+function installWarnings(info: { hasProfileEntry: boolean; hasCodeSignature: boolean; profile?: ProfileInfo; bundleId: string }): string[] {
   const out: string[] = [];
-  if (!info.signed || !info.profile) {
-    out.push("Unsigned (no embedded.mobileprovision or _CodeSignature): not installable OTA. Export an Ad Hoc / Development build.");
-  }
+  const exportHint = "Export an Ad Hoc / Development build.";
+  if (!info.hasProfileEntry) out.push(`No embedded.mobileprovision: iOS won't install it OTA. ${exportHint}`);
+  if (!info.hasCodeSignature) out.push(`No _CodeSignature: the app isn't code signed, so iOS won't install it. ${exportHint}`);
   const p = info.profile;
   if (!p) return out;
   if (p.kind === "app-store") {
@@ -124,6 +139,10 @@ function installWarnings(info: { signed: boolean; profile?: ProfileInfo; bundleI
 function findApp(zip: ZipReader): { appDir: string; infoPlist: ZipEntry } {
   const candidates = zip.entries.filter((e) => /^Payload\/[^/]+\.app\/Info\.plist$/.test(e.name));
   if (candidates.length === 0) throw new Error("Not an iOS app archive: no Payload/<Name>.app/Info.plist");
+  if (candidates.length > 1) {
+    const names = candidates.map((e) => sanitizeIpaString(e.name.slice("Payload/".length, -"/Info.plist".length))).join(", ");
+    throw new Error(`Expected one app in Payload/, found ${candidates.length}: ${names}`);
+  }
   const infoPlist = candidates[0]!;
   return { appDir: infoPlist.name.slice(0, -"Info.plist".length), infoPlist };
 }
@@ -172,7 +191,7 @@ export function inspectIpa(path: string, now: Date = new Date()): IpaInfo {
     if (!isDict(info)) throw new Error("Info.plist is not a dictionary");
     const bundleId = str(info.CFBundleIdentifier);
     if (!bundleId) throw new Error("Info.plist has no CFBundleIdentifier");
-    const dirName = appDir.slice("Payload/".length, -".app/".length);
+    const dirName = sanitizeIpaString(appDir.slice("Payload/".length, -".app/".length));
     const appName = str(info.CFBundleDisplayName) ?? str(info.CFBundleName) ?? dirName;
     const version = str(info.CFBundleShortVersionString) ?? str(info.CFBundleVersion) ?? "0";
     const build = str(info.CFBundleVersion) ?? version;
@@ -185,11 +204,11 @@ export function inspectIpa(path: string, now: Date = new Date()): IpaInfo {
       try {
         profile = classifyProfile(extractProvisionPlist(zip.readEntry(profileEntry, MAX_PROFILE)), bundleId, now);
       } catch (error) {
-        warnings.push(`Could not read embedded.mobileprovision: ${(error as Error).message}`);
+        warnings.push(`embedded.mobileprovision is unreadable (${sanitizeIpaString((error as Error).message)}); can't check devices, expiry or app id.`);
       }
     }
     const signed = !!profileEntry && !!codeResources;
-    warnings.push(...installWarnings({ signed, profile, bundleId }));
+    warnings.push(...installWarnings({ hasProfileEntry: !!profileEntry, hasCodeSignature: !!codeResources, profile, bundleId }));
     let icon: Buffer | undefined;
     try {
       icon = findIcon(zip, appDir, info);

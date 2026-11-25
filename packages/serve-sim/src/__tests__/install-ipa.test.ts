@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { appIdMatches, classifyProfile, inspectIpa, pngKind, udidStatus } from "../install-ipa";
+import { appIdMatches, classifyProfile, inspectIpa, pngKind, sanitizeIpaString, udidStatus } from "../install-ipa";
 import { extractProvisionPlist } from "../install-plist";
 import { fakePng, makeIpa, makeZip, mobileprovision, xmlPlist, type ProfileFixture } from "./install-fixtures";
 
@@ -91,13 +91,64 @@ describe("inspectIpa", () => {
   test("unsigned: no profile, no CodeResources", () => {
     const info = inspectIpa(ipaFile(makeIpa({ profile: null, codeResources: false })), NOW);
     expect(info.signed).toBe(false);
-    expect(info.warnings.join("\n")).toMatch(/Unsigned.*not installable OTA/);
+    expect(info.warnings).toHaveLength(2);
+    expect(info.warnings[0]).toMatch(/^No embedded\.mobileprovision/);
+    expect(info.warnings[1]).toMatch(/^No _CodeSignature/);
   });
 
-  test("profile but no CodeResources is still unsigned", () => {
+  test("profile but no CodeResources: only the _CodeSignature warning", () => {
     const info = inspectIpa(ipaFile(makeIpa({ codeResources: false })), NOW);
     expect(info.signed).toBe(false);
-    expect(info.warnings[0]).toMatch(/Unsigned/);
+    expect(info.profile).toBeDefined();
+    expect(info.warnings).toEqual([expect.stringMatching(/^No _CodeSignature/)]);
+  });
+
+  test("CodeResources but no profile: only the embedded.mobileprovision warning", () => {
+    const info = inspectIpa(ipaFile(makeIpa({ profile: null })), NOW);
+    expect(info.warnings).toEqual([expect.stringMatching(/^No embedded\.mobileprovision/)]);
+  });
+
+  test("an unreadable profile says so, without claiming the build is unsigned", () => {
+    const info = inspectIpa(ipaFile(makeIpa({ profile: Buffer.from([0x30, 0x82, 0, 0]) })), NOW);
+    expect(info.signed).toBe(true);
+    expect(info.profile).toBeUndefined();
+    expect(info.warnings).toEqual([expect.stringMatching(/^embedded\.mobileprovision is unreadable/)]);
+  });
+
+  test("more than one Payload/*.app is an error", () => {
+    const zip = makeIpa({ extra: [{ name: "Payload/Second.app/Info.plist", data: xmlPlist({ CFBundleIdentifier: "com.x" }) }] });
+    expect(() => inspectIpa(ipaFile(zip), NOW)).toThrow(/Expected one app in Payload\/, found 2: Example\.app, Second\.app/);
+  });
+
+  test("control characters and lone surrogates are stripped from every plist/profile string", () => {
+    const evil = "\x1b]52;c;cGF5bG9hZA==\x07\x1b[2J\u009b31m";
+    const info = xmlPlist({
+      CFBundleIdentifier: `com.example.app${evil}`,
+      CFBundleDisplayName: `OTA${evil} Test`,
+      CFBundleShortVersionString: `1.0${evil}`,
+      CFBundleVersion: `7\r\n`,
+    });
+    const splice = (buf: Buffer, from: string, to: string) => {
+      const i = buf.indexOf(from);
+      return Buffer.concat([buf.subarray(0, i), Buffer.from(to, "utf8"), buf.subarray(i + from.length)]);
+    };
+    const raw = mobileprovision({ devices: [`${UDID}${evil}`], appId: `ABCDE12345.com.other${evil}` });
+    const profile = splice(splice(raw, "Test Profile", `Test${evil} Profile`), "Example Team", `Example${evil} Team`);
+    const r = inspectIpa(ipaFile(makeIpa({ info, profile })), NOW);
+    const everything = JSON.stringify({ ...r, icon: undefined });
+    expect(everything).not.toMatch(/\\u00(?:1b|07|9b|0d|0a)|\\ud800/i);
+    expect(r.bundleId).toBe("com.example.app]52;c;cGF5bG9hZA==[2J31m");
+    expect(r.appName).toBe("OTA]52;c;cGF5bG9hZA==[2J31m Test");
+    expect(r.build).toBe("7");
+    expect(r.profile?.name).toBe("Test]52;c;cGF5bG9hZA==[2J31m Profile");
+    expect(r.profile?.teamName).toBe("Example]52;c;cGF5bG9hZA==[2J31m Team");
+    expect(r.profile?.devices[0]).toBe(`${UDID}]52;c;cGF5bG9hZA==[2J31m`);
+    for (const w of r.warnings) expect([...w].filter((c) => c.charCodeAt(0) < 0x20 || (c.charCodeAt(0) >= 0x7f && c.charCodeAt(0) <= 0x9f))).toEqual([]);
+  });
+
+  test("sanitizeIpaString keeps printable text, including emoji and accents", () => {
+    expect(sanitizeIpaString("Café \u{1F600} \u4E2D\u6587")).toBe("Café \u{1F600} \u4E2D\u6587");
+    expect(sanitizeIpaString("a\u0000b\u007fc\u0085d\uDC00e")).toBe("abcde");
   });
 
   test("app store, expired and mismatch warnings", () => {
