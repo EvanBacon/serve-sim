@@ -57,8 +57,11 @@ function listDevices(): string | undefined {
   return list.status === 0 ? list.stdout : undefined;
 }
 
-/** The simulator's state per `simctl list`, for failure logs. */
-function simulatorState(listJson = listDevices()): string {
+/**
+ * The simulator's state per a `simctl list` result, for failure logs. Takes
+ * the listing explicitly so a failed one is reported as-is, not re-run.
+ */
+function simulatorState(listJson: string | undefined): string {
   if (listJson === undefined) return `${udid} state unknown (simctl list failed)`;
   return describeSimulatorState(listJson, udid);
 }
@@ -88,7 +91,7 @@ function rebootSimulator(): boolean {
     console.error("UDID unset; cannot reboot simulator for retry");
     return false;
   }
-  console.warn(`Rebooting simulator ${udid} before retry (${simulatorState()})`);
+  console.warn(`Rebooting simulator ${udid} before retry (${simulatorState(listDevices())})`);
   timed("shutdown", () => spawnSync("xcrun", ["simctl", "shutdown", udid], { stdio: "inherit" }));
   spawnSync("sleep", ["3"], { stdio: "inherit" });
   const boot = timed("boot", () => spawnSync("xcrun", ["simctl", "boot", udid], { encoding: "utf-8" }));
@@ -97,7 +100,7 @@ function rebootSimulator(): boolean {
   // Shutdown can lose the race with a detached server. "Already booted" is a
   // usable simulator, not a reason to skip the retry.
   if (boot.status !== 0 && !alreadyBooted(boot)) {
-    console.error(`simctl boot ${udid} failed (status ${boot.status}); skipping retry (${simulatorState()})`);
+    console.error(`simctl boot ${udid} failed (status ${boot.status}); skipping retry (${simulatorState(listDevices())})`);
     return false;
   }
   // No `-b`: on Xcode 27 the boot-and-monitor form can stay blocked after the
@@ -117,7 +120,7 @@ function rebootSimulator(): boolean {
       return false;
     }
     if (!probeReady()) {
-      console.error(`${failure} and the readiness probe failed; skipping retry (${simulatorState()})`);
+      console.error(`${failure} and the readiness probe failed; skipping retry (${simulatorState(listDevices())})`);
       return false;
     }
     console.warn(`${failure}, but ${udid} is Booted and answers simctl spawn; overriding bootstatus and retrying`);

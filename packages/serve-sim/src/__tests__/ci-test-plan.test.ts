@@ -85,7 +85,7 @@ describe("CI workflow factory invariants", () => {
     for (const step of ["shutdown", "boot", "bootstatus"]) {
       expect(reboot).toContain(`timed("${step}"`);
     }
-    expect(reboot).toMatch(/bootstatus[\s\S]*signal[\s\S]*simulatorState\(\)/);
+    expect(reboot).toMatch(/bootstatus[\s\S]*signal[\s\S]*simulatorState\(listDevices\(\)\)/);
     expect(runner).toMatch(/function simulatorState[\s\S]*describeSimulatorState\(/);
   });
 
