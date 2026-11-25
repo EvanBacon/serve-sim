@@ -179,7 +179,7 @@ export function makeIpa(f: IpaFixture = {}): Buffer {
     { name: `${app}Info.plist`, data: f.info ?? xmlPlist({ CFBundleIdentifier: "com.example.app", CFBundleName: "Example", CFBundleShortVersionString: "1.0", CFBundleVersion: "1" }) },
     { name: `${app}Example`, data: Buffer.alloc(2048, 7), store: true },
   ];
-  if (f.profile !== null) files.push({ name: `${app}embedded.mobileprovision`, data: f.profile ?? mobileprovision({ devices: ["00008140-000A3C3102DB001C"] }) });
+  if (f.profile !== null) files.push({ name: `${app}embedded.mobileprovision`, data: f.profile ?? mobileprovision({ devices: ["00008101-001A2B3C4D5E6F70"] }) });
   if (f.codeResources !== false) files.push({ name: `${app}_CodeSignature/CodeResources`, data: xmlPlist({ files: {} }) });
   for (const e of f.extra ?? []) files.push({ ...e, name: e.name.startsWith("Payload/") ? e.name : `${app}${e.name}` });
   return makeZip(files);

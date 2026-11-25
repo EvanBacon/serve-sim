@@ -13,7 +13,7 @@ It prints the app, its signing summary, a QR code and the links:
   OTA Test 1.0 (7)
   Bundle:   com.example.app
   Signing:  Development profile, team Example (ABCDE12345), expires 2026-11-29
-  Devices:  1 provisioned: 00008140-000A3C3102DB001C
+  Devices:  1 provisioned: 00008101-001A2B3C4D5E6F70
             Your iPhone must be in this list; find its UDID with `xcrun devicectl list devices`.
 
   Scan with the iPhone Camera, or open the page in Safari:
@@ -72,7 +72,7 @@ On macOS you can also pass a signed `.app` or an `.xcarchive` directly; serve-si
 ```sh
 serve-sim install MyApp.ipa                     # quick tunnel, link lives 30 minutes
 serve-sim install MyApp.ipa --once --ttl 10m    # stop after one complete download, or 10 minutes
-serve-sim install MyApp.ipa --udid 00008140-000A3C3102DB001C
+serve-sim install MyApp.ipa --udid 00008101-001A2B3C4D5E6F70
 serve-sim install MyApp.ipa --json              # one JSON object: urls, expiresAt, app, profile, warnings
 serve-sim install MyApp.ipa -p 3412 --public-origin https://ota.example.com   # your own https tunnel/proxy to that port
 ```

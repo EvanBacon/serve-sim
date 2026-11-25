@@ -7,7 +7,7 @@ import { extractProvisionPlist } from "../install-plist";
 import { fakePng, makeIpa, makeZip, mobileprovision, xmlPlist, type ProfileFixture } from "./install-fixtures";
 
 const NOW = new Date("2026-11-24T12:00:00Z");
-const UDID = "00008140-000A3C3102DB001C";
+const UDID = "00008101-001A2B3C4D5E6F70";
 const dir = mkdtempSync(join(tmpdir(), "install-ipa-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 let n = 0;

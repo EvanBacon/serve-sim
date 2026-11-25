@@ -3050,7 +3050,7 @@ program
 Examples:
   serve-sim install MyApp.ipa                 Prints a QR code; scan it with the iPhone Camera
   serve-sim install MyApp.ipa --once --ttl 10m
-  serve-sim install build/MyApp.xcarchive --udid 00008140-000A3C3102DB001C
+  serve-sim install build/MyApp.xcarchive --udid 00008101-001A2B3C4D5E6F70
 
 The build must be Ad Hoc / Development with the phone's UDID in its profile (or Enterprise).
 Anyone with the link can download the .ipa while it's live. See docs/install.md.`,
