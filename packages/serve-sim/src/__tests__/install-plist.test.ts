@@ -98,6 +98,52 @@ describe("binary plist", () => {
   });
 });
 
+/** A bplist00 whose only object is `object`. */
+function singleObjectBplist(object: Buffer): Buffer {
+  const header = Buffer.from("bplist00", "latin1");
+  const trailer = Buffer.alloc(32);
+  trailer[6] = 1;
+  trailer[7] = 1;
+  trailer.writeBigUInt64BE(1n, 8);
+  trailer.writeBigUInt64BE(0n, 16);
+  trailer.writeBigUInt64BE(BigInt(header.length + object.length), 24);
+  return Buffer.concat([header, object, Buffer.from([header.length]), trailer]);
+}
+
+describe("binary plist numbers", () => {
+  const int128 = (hi: bigint, lo: bigint) => {
+    const b = Buffer.alloc(17);
+    b[0] = 0x14;
+    b.writeBigInt64BE(hi, 1);
+    b.writeBigUInt64BE(lo, 9);
+    return singleObjectBplist(b);
+  };
+  test("16-byte integers that fit in 64 bits", () => {
+    expect(parseBinaryPlist(int128(0n, 5n))).toBe(5);
+    expect(parseBinaryPlist(int128(0n, 0xffffffffffffffffn))).toBe(0xffffffffffffffffn);
+    expect(parseBinaryPlist(int128(-1n, 0xfffffffffffffffbn))).toBe(-5);
+  });
+  test("16-byte integers wider than 64 bits are unsupported", () => {
+    expect(() => parseBinaryPlist(int128(1n, 0n))).toThrow(/unsupported 128-bit integer/);
+    expect(() => parseBinaryPlist(int128(-2n, 0n))).toThrow(/unsupported 128-bit integer/);
+  });
+  test("reals: 4 and 8 bytes; anything else throws", () => {
+    const f = Buffer.alloc(5);
+    f[0] = 0x22;
+    f.writeFloatBE(1.5, 1);
+    expect(parseBinaryPlist(singleObjectBplist(f))).toBe(1.5);
+    const d = Buffer.alloc(9);
+    d[0] = 0x23;
+    d.writeDoubleBE(2.25, 1);
+    expect(parseBinaryPlist(singleObjectBplist(d))).toBe(2.25);
+    for (const marker of [0x20, 0x21, 0x24]) {
+      const odd = Buffer.alloc(17);
+      odd[0] = marker;
+      expect(() => parseBinaryPlist(singleObjectBplist(odd))).toThrow(/unsupported real size/);
+    }
+  });
+});
+
 test("binary plist: shared references can't expand exponentially", () => {
   // 30 arrays, each [next, next]: 2^30 visits if expanded naively.
   const header = Buffer.from("bplist00", "latin1");

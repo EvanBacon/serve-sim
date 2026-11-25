@@ -48,6 +48,21 @@ describe("ZipReader", () => {
     r.close();
   });
 
+  test("ignores an EOCD signature inside the archive comment", () => {
+    const zip = makeZip([{ name: "a", data: "x", store: true }]);
+    // A fake EOCD (pointing nowhere) inside the comment, followed by padding.
+    const fake = Buffer.alloc(22);
+    fake.writeUInt32LE(0x06054b50, 0);
+    fake.writeUInt16LE(1, 10);
+    fake.writeUInt32LE(46, 12);
+    fake.writeUInt32LE(0x7fffffff, 16);
+    const comment = Buffer.concat([fake, Buffer.from("tail")]);
+    zip.writeUInt16LE(comment.length, zip.length - 2);
+    const r = ZipReader.open(write(Buffer.concat([zip, comment])));
+    expect(r.readEntry(r.get("a")!, 10).toString()).toBe("x");
+    r.close();
+  });
+
   test("caps the inflated size (zip bomb)", () => {
     const bomb = Buffer.alloc(4 * 1024 * 1024); // deflates to a few KB
     const path = write(makeZip([{ name: "bomb", data: bomb }]));

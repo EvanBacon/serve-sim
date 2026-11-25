@@ -84,7 +84,8 @@ export class ZipReader {
     const tail = this.read(tailStart, tailLength);
     let eocd = -1;
     for (let i = tail.length - 22; i >= 0; i--) {
-      if (tail.readUInt32LE(i) === EOCD_SIG) { eocd = i; break; }
+      // The comment must run exactly to the end of the file; a signature inside a comment doesn't count.
+      if (tail.readUInt32LE(i) === EOCD_SIG && i + 22 + tail.readUInt16LE(i + 20) === tail.length) { eocd = i; break; }
     }
     if (eocd < 0) throw new Error("Not a zip file (no end of central directory)");
 

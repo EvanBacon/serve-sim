@@ -228,11 +228,18 @@ export function parseBinaryPlist(buf: Buffer): PlistValue {
           const v = buf.readBigInt64BE(at + 1);
           return v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v;
         }
-        if (size === 16) return buf.readBigInt64BE(at + 9);
+        if (size === 16) {
+          // 128-bit: only values that fit in 64 bits (CF writes unsigned 64-bit ints this way).
+          const v = (buf.readBigInt64BE(at + 1) << 64n) | buf.readBigUInt64BE(at + 9);
+          if (v < -(1n << 63n) || v >= 1n << 64n) throw new Error("Invalid binary plist: unsupported 128-bit integer");
+          return v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v;
+        }
         return uint(at + 1, size);
       }
       case 0x2:
-        return low === 2 ? buf.readFloatBE(at + 1) : buf.readDoubleBE(at + 1);
+        if (low === 2) return buf.readFloatBE(at + 1);
+        if (low === 3) return buf.readDoubleBE(at + 1);
+        throw new Error(`Invalid binary plist: unsupported real size ${1 << low}`);
       case 0x3:
         return new Date(APPLE_EPOCH_MS + buf.readDoubleBE(at + 1) * 1000);
       case 0x4: {
