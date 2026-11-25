@@ -1955,7 +1955,7 @@ async function ensureHelperWithSource(opts: {
   // Need to start a fresh helper. Pre-emptively reap any stale state.
   stopExistingHelper(opts.udid);
   const helper = (!opts.forceBuild && locateCameraHelper()) || buildCameraHelper();
-  const pid = spawnCameraHelper({
+  const pid = await spawnCameraHelper({
     udid: opts.udid,
     helperBin: helper,
     shmName,

@@ -34,7 +34,7 @@ export function stopExistingHelper(udid: string) {
   clearInjectedBundles(udid);
 }
 
-export function spawnCameraHelper(args: {
+export async function spawnCameraHelper(args: {
   udid: string;
   helperBin: string;
   shmName: string;
@@ -43,7 +43,7 @@ export function spawnCameraHelper(args: {
   arg?: string;
   width?: number;
   height?: number;
-}): number {
+}): Promise<number> {
   if (!existsSync(CAMERA_STATE_DIR)) mkdirSync(CAMERA_STATE_DIR, { recursive: true });
   const logPath = join(CAMERA_STATE_DIR, `${args.udid}.log`);
   const out = openSync(logPath, "a");
@@ -59,6 +59,11 @@ export function spawnCameraHelper(args: {
     detached: true,
     stdio: ["ignore", out, out],
   });
+  // A helper that dies at startup stays an unreaped zombie — which still
+  // answers kill(pid, 0) — until the event loop runs and reaps it, so the
+  // wait below has to yield to the loop and watch for the exit event.
+  let exited = false;
+  child.once("exit", () => { exited = true; });
   child.unref();
   closeSync(out);
   if (!child.pid) throw new Error("failed to spawn camera helper");
@@ -68,11 +73,11 @@ export function spawnCameraHelper(args: {
   // control socket is listening (proves it's healthy and ready for switch).
   const start = Date.now();
   while (Date.now() - start < 3000) {
-    if (!isProcessAlive(child.pid)) {
+    if (exited || !isProcessAlive(child.pid)) {
       throw new Error(`camera helper exited early — see log at ${logPath}`);
     }
     if (existsSync(args.socketPath)) break;
-    sleepSync(50);
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return child.pid;
 }
