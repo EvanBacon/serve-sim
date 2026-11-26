@@ -16,6 +16,7 @@
 `helper.uptime_ms`). Clipboard path for #174 follows the same pattern
 (`payload_bytes`, `method`, `verified_readback`, `clipboard.send_ms`).
 
+**Maintenance (2026-11-26):** #103 remains the highest-priority silent failure. Repros continue to show client JS frame-reader stalls into infinite Connecting while server `/stream.mjpeg` stays healthy. Proposed `stream.stall` + `producer_live` (from existing `streamHealth`) plus omit-on-no-frame for `stream.ttff_ms` is still the minimal additive change that makes the hang recordable without new client ingest. Error-repro fields for input (#153, #136) and timing spans remain next after that. No implementation this pass; design-only.
 
 **Maintenance (2026-11-24):** #103 remains the highest-priority silent failure for this design. Repros confirm client JS frame-reader stalls into infinite Connecting while server `/stream.mjpeg` stays healthy. Proposed `stream.stall` + `producer_live` (from existing `streamHealth`) plus omit-on-no-frame for `stream.ttff_ms` is the minimal additive change that makes the hang recordable without new client ingest. No implementation this pass.
 
