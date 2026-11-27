@@ -7,6 +7,8 @@
  * (the 3D stream's 503), a rejected fetch is the old ERR_EMPTY_RESPONSE, and a
  * body that ends is an interrupted stream.
  */
+import { noteStreamChunk, type StreamReadStats } from "./stream-stale-diagnostics";
+
 export type StreamError = {
   /** HTTP status, or 0 when there was no response. */
   status: number;
@@ -62,7 +64,10 @@ export async function runStreamWithRetry(options: {
   onClose?: () => void;
   fetch?: typeof fetch;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Read-side counters for the stale-stream warning; updated in place. */
+  stats?: StreamReadStats;
 }): Promise<void> {
+  const stats = options.stats;
   const doFetch = options.fetch ?? fetch;
   const sleep = options.sleep ?? abortableSleep;
   let failures = 0;
@@ -78,12 +83,15 @@ export async function runStreamWithRetry(options: {
       } else {
         const push = options.connect();
         const reader = res.body.getReader();
+        if (stats) stats.connections++;
         let ended = false;
         try {
           while (true) {
-            const { done, value } = await reader.read();
+            if (stats) stats.readPending = true;
+            const { done, value } = await reader.read().finally(() => { if (stats) stats.readPending = false; });
             if (done) { ended = true; break; }
             if (!value?.length) continue;
+            noteStreamChunk(stats, value.length);
             if (!opened) {
               opened = true;
               failures = 0;
