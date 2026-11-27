@@ -73,8 +73,14 @@ import { RECORD_INSPECT_VERBS, recordInspect, recordInspectArgv } from "./record
 import { cliInputOrientation, configUrlForWsUrl, displayTouchToRaw } from "./touch-remap";
 import type { SimulatorOrientation } from "./client/types";
 
-/** Env var naming a remote preview for the input subcommands (same as --url). */
-const REMOTE_URL_ENV = "SERVE_SIM_URL";
+import {
+  REMOTE_URL_ENV,
+  describeRemoteUrlSource,
+  loadRemoteProfile,
+  resolveRemoteUrl,
+} from "./remote-profile";
+import { connectCommand, disconnectCommand, openUrlCommand, screenshotCommand } from "./remote-commands";
+import { planTunnel, tunnelOnListening } from "./tunnel";
 import {
   parsePreviewPanes,
   parseSimulatorTheme,
@@ -732,9 +738,13 @@ function killStreams(deviceArg?: string) {
 /** Options shared by the input subcommands for driving a remote server. */
 let remoteInputOptions: { url?: string; authToken?: string } = {};
 
+/** `--url`, then `SERVE_SIM_URL`, then the `serve-sim connect` profile; undefined = local. */
+function remoteInputTarget() {
+  return resolveRemoteUrl({ flag: remoteInputOptions.url, env: process.env, profile: () => loadRemoteProfile() });
+}
+
 function remoteInputUrl(): string | undefined {
-  const value = (remoteInputOptions.url ?? process.env[REMOTE_URL_ENV] ?? "").trim();
-  return value === "" ? undefined : value;
+  return remoteInputTarget()?.url;
 }
 
 /** A server the input subcommands can reach, local or remote. */
@@ -752,7 +762,8 @@ interface InputTarget {
 
 /**
  * Resolve where an input subcommand sends its frames. Without `--url` /
- * `SERVE_SIM_URL` this reads the local state file in `$TMPDIR/serve-sim`.
+ * `SERVE_SIM_URL` / a `serve-sim connect` profile this reads the local state
+ * file in `$TMPDIR/serve-sim`.
  * With one, it asks the remote preview's `/api` which simulator it serves
  * (pass a UDID with `-d` to pick one) and connects to
  * `<url>/helper/<udid>/ws`, sending `--auth-token` / `SERVE_SIM_AUTH_TOKEN`
@@ -761,8 +772,8 @@ interface InputTarget {
 async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
   const token = resolveAuthToken(remoteInputOptions.authToken);
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const remoteUrl = remoteInputUrl();
-  if (!remoteUrl) {
+  const remote = remoteInputTarget();
+  if (!remote) {
     const state = readState(deviceArg);
     if (!state) {
       console.error("No serve-sim server running. Run `serve-sim` first.");
@@ -773,9 +784,9 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
 
   let base: URL;
   try {
-    base = new URL(remoteUrl.endsWith("/") ? remoteUrl : `${remoteUrl}/`);
+    base = new URL(remote.url.endsWith("/") ? remote.url : `${remote.url}/`);
   } catch {
-    console.error(`Invalid --url / ${REMOTE_URL_ENV}: ${remoteUrl}`);
+    console.error(`Invalid remote URL from ${describeRemoteUrlSource(remote.source)}: ${remote.url}`);
     process.exit(1);
   }
   const api = new URL("api", base);
@@ -784,7 +795,10 @@ async function resolveInputTarget(deviceArg?: string): Promise<InputTarget> {
   try {
     res = await fetch(api, { headers });
   } catch (err) {
-    console.error(`Failed to reach serve-sim at ${base.origin}: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(
+      `Failed to reach serve-sim at ${base.origin} (from ${describeRemoteUrlSource(remote.source)}): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
     process.exit(1);
   }
   if (res.status === 401 || res.status === 403) {
@@ -2332,6 +2346,7 @@ async function serve(
   theme: SimulatorTheme | undefined,
   exitOnSimulatorShutdown = false,
   allowExec = false,
+  onListening?: (port: number) => Promise<void>,
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -2425,15 +2440,20 @@ async function serve(
   const exposedToLan = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
   const networkIP = getLocalNetworkIP();
   console.log("");
-  console.log(`  - Local:   http://localhost:${boundPort}`);
+  // `--tunnel` prints its own Local/Public/Viewer block once the tunnel is up.
+  if (!onListening) console.log(`  - Local:   http://localhost:${boundPort}`);
   if (exposedToLan && networkIP) {
     console.log(`  - Network: http://${networkIP}:${boundPort}`);
+  } else if (onListening) {
+    // Loopback only: reachable through the tunnel, not the LAN.
   } else if (networkIP) {
     console.log(`  - Network: \x1b[2muse --host 0.0.0.0 to expose on http://${networkIP}:${boundPort}\x1b[0m`);
   } else {
     console.log("  - Network: \x1b[2muse --host 0.0.0.0 to expose on the LAN\x1b[0m");
   }
-  if (resolveAuthToken(undefined)) {
+  if (onListening) {
+    console.log("  - Remote:  every tunneled request requires the auth token");
+  } else if (resolveAuthToken(undefined)) {
     console.log("  - Remote:  non-loopback requests require the auth token");
     // The token rides in the fragment, which browsers never send: it stays
     // out of request lines and server/proxy logs.
@@ -2450,6 +2470,7 @@ async function serve(
   // Exit cleanly on Ctrl+C
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
+  if (onListening) await onListening(boundPort);
 
   // Detached / --no-preview helpers should not sit forever as PPID-1 orphans
   // after `simctl shutdown`. The interactive preview omits this flag so the
@@ -2503,6 +2524,17 @@ program
       "and .ipa installs from the preview. Off by default; other preview tools " +
       "don't need it. `serve-sim exec` reads its token from an owner-only file. " +
       "--detach/--no-preview won't reuse a running server whose --allow-exec differs.",
+  )
+  .option(
+    "--tunnel",
+    "Expose the preview through a free Cloudflare quick tunnel (needs `cloudflared`) and print a " +
+      "copy-paste `serve-sim connect` recipe. Generates an auth token unless --auth-token is set. " +
+      "Stays bound to 127.0.0.1. See docs/remote.md.",
+  )
+  .option(
+    "--public-origin <url>",
+    "With --tunnel: you already run a tunnel/proxy (cloudflared, ngrok, Tailscale) to this port; " +
+      "skip starting cloudflared and print URLs for this origin.",
   )
   .option("--detach", "Spawn helper and exit (daemon mode)")
   .option(
@@ -2587,6 +2619,14 @@ Examples:
   serve-sim --no-preview                 Auto-detect booted sim, stream in foreground
   serve-sim --no-preview "iPhone 16 Pro" Stream a specific device (no preview)
   serve-sim --allow-exec                 Enable \`serve-sim exec\` and .ipa drag-to-install
+  serve-sim --tunnel                     Share over a cloudflared quick tunnel; prints token + connect recipe
+  serve-sim --tunnel --public-origin https://sim.example.com   Reuse a tunnel you already run
+
+Remote (another Mac, Linux, a cloud agent; see docs/remote.md):
+  export SERVE_SIM_AUTH_TOKEN=<token>
+  serve-sim connect https://<tunnel>     Route input commands there (token is never saved)
+  serve-sim tap 0.5 0.5 && serve-sim screenshot shot.png && serve-sim open https://example.com
+  serve-sim disconnect                   Back to the local simulator
   serve-sim --detach                     Start streaming in background (daemon)
   serve-sim --list                       Show all running streams
   serve-sim --kill                       Stop all streams`,
@@ -2616,6 +2656,40 @@ Examples:
       return;
     }
     const startPort: number | undefined = opts.port;
+    let onListening: ((port: number) => Promise<void>) | undefined;
+    if (opts.tunnel || opts.publicOrigin !== undefined) {
+      if (opts.detach || opts.preview === false) {
+        console.error("--tunnel runs the preview in the foreground; drop --detach / --no-preview.");
+        process.exit(1);
+      }
+      if (opts.allowExec) {
+        console.error("warning: --allow-exec on a tunneled server. The host shell stays loopback-only, but .ipa installs are enabled.");
+      }
+      let plan;
+      try {
+        plan = planTunnel({ publicOrigin: opts.publicOrigin, env: process.env, tokenEnv: AUTH_TOKEN_ENV });
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exit(1);
+      }
+      const startTunnel = tunnelOnListening(plan, {
+        host: opts.host,
+        log: (text) => console.log(text),
+        onExit: (handler) => process.on("exit", handler),
+        onTunnelLost: (message) => {
+          console.error(`[serve-sim] ${message}`);
+          process.exit(1);
+        },
+      });
+      onListening = async (port) => {
+        try {
+          await startTunnel(port);
+        } catch (error) {
+          console.error(`[serve-sim] ${error instanceof Error ? error.message : String(error)}`);
+          process.exit(1);
+        }
+      };
+    }
     if (opts.detach) {
       const states = await detach(devices, startPort ?? 3100, !!opts.allowExec);
       printStatesJSON(states);
@@ -2637,6 +2711,7 @@ Examples:
         opts.theme,
         !!opts.exitOnSimulatorShutdown,
         !!opts.allowExec,
+        onListening,
       );
     }
   });
@@ -2882,10 +2957,67 @@ for (const verb of BUFFER_VERBS) {
   });
 }
 
+program
+  .command("screenshot")
+  .description("Save one frame of the simulator screen on this machine (works against a remote server)")
+  .argument("[file]", "Output file (.png → PNG, otherwise JPEG; default: serve-sim-screenshot-<time>.jpg, or stdout when piped)")
+  .option("-o, --out <file>", "Output file (same as the positional argument)")
+  .option("--format <format>", "png (full resolution, simctl) or jpeg (live capture frame)")
+  .option(...deviceOpt)
+  .action(async (file: string | undefined, opts: { out?: string; format?: string; device?: string }) => {
+    const target = await resolveAxTarget(opts.device);
+    const out = opts.out ?? file;
+    process.exitCode = await screenshotCommand(target, {
+      file: out === "-" ? undefined : out,
+      format: opts.format,
+      toStdout: out === "-" || (out === undefined && !process.stdout.isTTY),
+    });
+  });
+
+program
+  .command("open")
+  .description("Open a URL or deep link in the simulator (simctl openurl on the host; works remotely)")
+  .argument("<url>", "e.g. https://example.com or myapp://path")
+  .option(...deviceOpt)
+  .action(async (url: string, opts: { device?: string }) => {
+    const target = await resolveAxTarget(opts.device);
+    process.exitCode = await openUrlCommand(target, url);
+  });
+
+program
+  .command("connect")
+  .description("Remember a remote serve-sim URL so input commands go there (the token is never saved)")
+  .argument("[url]", "Preview URL printed by `serve-sim --tunnel`; omit to show the current one")
+  .option("--auth-token <token>", `Token to check the connection with (or ${AUTH_TOKEN_ENV}); not saved`)
+  .option("--no-check", "Save the URL without checking /api")
+  .addHelpText(
+    "after",
+    `
+Example:
+  export ${AUTH_TOKEN_ENV}=<token>
+  serve-sim connect https://example.trycloudflare.com
+  serve-sim tap 0.5 0.5
+  serve-sim disconnect
+
+--url and ${REMOTE_URL_ENV} still override the saved URL.`,
+  )
+  .action(async (url: string | undefined, opts: { check?: boolean }, command: Command) => {
+    const o = command.optsWithGlobals() as { authToken?: string };
+    process.exitCode = await connectCommand(url, { token: resolveAuthToken(o.authToken), check: opts.check });
+  });
+
+program
+  .command("disconnect")
+  .description("Forget the URL saved by `serve-sim connect`; commands go back to the local simulator")
+  .action(() => {
+    process.exitCode = disconnectCommand();
+  });
+
 // Input subcommands can drive a remote preview (e.g. through an
 // authenticated tunnel) instead of the local state file.
 const REMOTE_INPUT_COMMANDS = new Set([
   "gesture", "tap", "button", "type", "paste", "rotate", "fold", "ca-debug", "memory-warning", "event-log", "record", "settle", "ax",
+  "screenshot", "open",
 ]);
 for (const cmd of program.commands) {
   if (!REMOTE_INPUT_COMMANDS.has(cmd.name())) continue;

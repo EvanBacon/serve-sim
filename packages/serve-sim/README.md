@@ -135,6 +135,12 @@ serve-sim ax --refs [--all] [--text]  Compact snapshot with element refs (@e1…
 serve-sim tap @e2 [--settle] [--timeout <ms>]
                                       Tap an element ref; --settle prints the diff
 serve-sim settle [--timeout <ms>]     Wait for the screen to settle; print the diff
+serve-sim screenshot [file] [-d udid] Save one frame on this machine (.png → PNG,
+                                      else JPEG; - or a pipe → stdout)
+serve-sim open <url> [-d udid]        Open a URL or deep link (simctl openurl)
+serve-sim connect <url>               Send commands to a remote serve-sim (saves the
+                                      URL only; token from SERVE_SIM_AUTH_TOKEN)
+serve-sim disconnect                  Forget it; back to the local simulator
 serve-sim control [status|start|stop] Persistent control process that keeps short
                                       commands fast (automatic; see below)
 
@@ -152,6 +158,10 @@ serve-sim camera --stop-webcam [-d udid]
 Options:
   -p, --port <port>   Starting port (preview default: 3200; helper default: 3100)
       --detach        Spawn helper and exit (daemon mode)
+      --tunnel        Share through a cloudflared quick tunnel; prints a
+                      token and a `serve-sim connect` recipe
+      --public-origin <url>
+                      With --tunnel: reuse a tunnel you already run
       --allow-exec    Enable the host shell (/exec, {command} frames on
                       /exec-ws, `serve-sim exec`) and .ipa installs from
                       the preview. Off by default
@@ -201,6 +211,7 @@ serve-sim --theme dark                 # start the simulator in Dark Mode
 serve-sim --allow-exec                 # enable `serve-sim exec` and .ipa drag-to-install
 serve-sim --max-bitrate 8              # cap H.264 at 8 Mbps (slow links / shared hosts)
 serve-sim --device-set ~/pool <udid>   # a simulator of another device set
+serve-sim --tunnel                     # share over a quick tunnel (see docs/remote.md)
 
 # Type text into the focused field
 serve-sim type "Hello, world!"
@@ -238,6 +249,8 @@ Multiple booted simulators are supported — pass several device names, or leave
 Helpers started by `--detach` or `--no-preview` exit after their target simulators remain shut down beyond the grace period. A failed check keeps the helper alive.
 
 ### Remote access (`--auth-token`)
+
+To drive this Mac's simulator from Linux or a cloud agent, run `serve-sim --tunnel` and follow the `serve-sim connect` recipe it prints. See [docs/remote.md](https://github.com/EvanBacon/serve-sim/blob/main/docs/remote.md).
 
 Requests that don't come straight from this machine — LAN clients, tunnels, reverse proxies — are refused unless the server is started with `--auth-token <token>` (or `SERVE_SIM_AUTH_TOKEN`). CLI and scripted clients send `Authorization: Bearer <token>`. To share the preview with a browser, send the link with the token in the URL fragment:
 

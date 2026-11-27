@@ -660,6 +660,13 @@ export class DeviceSession {
     }
   }
 
+  /** One JPEG of the current screen for `GET /screenshot` (starts capture if needed). */
+  async snapshotJpeg(): Promise<Uint8Array | null> {
+    await this.start();
+    if (this.isStopped()) return null;
+    return this.seedJpeg();
+  }
+
   /** Write a multipart JPEG part (header + shared frame + boundary) without copying the JPEG. */
   private writeMjpegFrame(res: ServerResponse, jpeg: Uint8Array): boolean {
     const headerAccepted = res.write(mjpegHeader(jpeg.length));
