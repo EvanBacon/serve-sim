@@ -55,6 +55,11 @@ export class AvccDemuxer {
   private len = 0;
   private start = 0;
 
+  /** Bytes held without a complete chunk yet (diagnostics). */
+  get buffered(): number {
+    return this.len - this.start;
+  }
+
   private append(bytes: Uint8Array): void {
     if (this.len + bytes.length > this.buffer.length) {
       // Reclaim the consumed prefix first; only grow if still short.

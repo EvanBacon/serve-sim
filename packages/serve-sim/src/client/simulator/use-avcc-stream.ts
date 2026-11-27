@@ -5,6 +5,7 @@ import {
   isAvccSupported,
   type AvccChunkType,
 } from "../avcc-codec.js";
+import { noteStreamChunk, type StreamReadStats } from "../utils/stream-stale-diagnostics";
 
 export interface UseAvccStreamOptions {
   /** Base server URL, e.g. "http://localhost:3100". */
@@ -28,6 +29,8 @@ export interface UseAvccStreamOptions {
    * failure is recovered from rather than surfaced as a user-facing error.
    */
   onDecoderError?: () => void;
+  /** Read-side counters for the stale-stream warning; updated in place. */
+  stats?: StreamReadStats;
 }
 
 const RETRY_DELAY_MS = 1000;
@@ -51,7 +54,10 @@ export function useAvccStream({
   onFrame,
   onError,
   onDecoderError,
+  stats,
 }: UseAvccStreamOptions): void {
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
   // Latest-callback ref: keeps the decode effect off the callback identities.
   const callbacks = useRef({ onFirstFrame, onFrame, onError, onDecoderError });
   callbacks.current = { onFirstFrame, onFrame, onError, onDecoderError };
@@ -183,13 +189,17 @@ export function useAvccStream({
         });
         const reader = res.body?.getReader();
         if (!reader) return;
+        if (statsRef.current) statsRef.current.connections++;
         for (;;) {
-          const { done, value } = await reader.read();
+          if (statsRef.current) statsRef.current.readPending = true;
+          const { done, value } = await reader.read().finally(() => { if (statsRef.current) statsRef.current.readPending = false; });
           if (done) break;
           if (!value) continue;
+          noteStreamChunk(statsRef.current, value.length);
           for (const chunk of demuxer.push(value)) {
             handleChunk(chunk.type, chunk.payload);
           }
+          if (statsRef.current) statsRef.current.bufferedBytes = demuxer.buffered;
         }
       } catch {
         /* aborted or network error — falls through to retry */

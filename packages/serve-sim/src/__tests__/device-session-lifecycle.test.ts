@@ -166,6 +166,53 @@ describe("DeviceSession capture lifecycle", () => {
     session.close();
   });
 
+  test("diagnostics report each MJPEG viewer's drain wait and last write age", async () => {
+    const callbacks: Array<(frame: { data: Uint8Array; width: number; height: number }) => Promise<void>> = [];
+    const session = new DeviceSession("TEST-UDID", dependencies({
+      subscribeMjpeg: async (callback) => {
+        callbacks.push(callback);
+        return () => {};
+      },
+    }));
+    await session.start();
+    const viewers = async () => (await session.diagnostics()).mjpeg_viewers as Array<Record<string, number | null>>;
+
+    const response = new FakeServerResponse();
+    session.handleMjpeg({ url: "/stream.mjpeg" } as IncomingMessage, response as unknown as ServerResponse);
+    await waitFor(() => callbacks.length === 1);
+    expect(await viewers()).toEqual([
+      { open_ms: expect.any(Number), waiting_for_drain_ms: null, last_write_age_ms: null, writable_length: 0 },
+    ]);
+
+    // The socket stops draining: the viewer reports how long it has waited.
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    response.onWrite = (chunk) => {
+      if (!chunk.equals(jpeg)) return;
+      response.writableNeedDrain = true;
+      response.writableLength = 4096;
+      return false;
+    };
+    const delivery = callbacks[0]!({ data: jpeg, width: 10, height: 20 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const stuck = (await viewers())[0]!;
+    expect(stuck.waiting_for_drain_ms).toBeGreaterThanOrEqual(20);
+    expect(stuck.last_write_age_ms).toBeGreaterThanOrEqual(20);
+    expect(stuck.writable_length).toBe(4096);
+
+    response.writableNeedDrain = false;
+    response.writableLength = 0;
+    response.emit("drain");
+    await delivery;
+    const drained = (await viewers())[0]!;
+    expect(drained.waiting_for_drain_ms).toBeNull();
+    expect(drained.last_write_age_ms).toBeGreaterThanOrEqual(stuck.last_write_age_ms!);
+
+    response.writableEnded = true;
+    response.emit("close");
+    expect(await viewers()).toEqual([]);
+    session.close();
+  });
+
   test("holds a native AVCC buffer until its queued write drains", async () => {
     const callbacks: Array<(frame: {
       data: Uint8Array;

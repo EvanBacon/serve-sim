@@ -210,12 +210,25 @@ const ORIENTATION_BY_NAME: Record<string, number> = {
   landscape_right: Orientation.landscapeRight,
 };
 
-function waitForDrain(res: ServerResponse): Promise<void> {
+/**
+ * Per-viewer write bookkeeping surfaced by `/api/diagnostics` (#103): tells a
+ * viewer whose socket stopped draining apart from one that is still being
+ * written to. Epoch ms; updated in place by `writeAndDrain`, no timers.
+ */
+type StreamWriteState = {
+  openedAt: number;
+  drainWaitSince: number | null;
+  lastWriteAt: number | null;
+};
+
+function waitForDrain(res: ServerResponse, state?: StreamWriteState): Promise<void> {
   if (res.writableEnded || res.destroyed || !res.writableNeedDrain) return Promise.resolve();
 
+  if (state) state.drainWaitSince ??= Date.now();
   return new Promise((resolve) => {
     const done = () => {
       cleanup();
+      if (state) state.drainWaitSince = null;
       resolve();
     };
     const cleanup = () => {
@@ -232,12 +245,14 @@ function waitForDrain(res: ServerResponse): Promise<void> {
 async function writeAndDrain(
   res: ServerResponse,
   write: () => boolean,
+  state?: StreamWriteState,
 ): Promise<boolean> {
-  await waitForDrain(res);
+  await waitForDrain(res, state);
   if (res.writableEnded || res.destroyed) return false;
 
   const accepted = write();
-  if (!accepted || res.writableNeedDrain) await waitForDrain(res);
+  if (state) state.lastWriteAt = Date.now();
+  if (!accepted || res.writableNeedDrain) await waitForDrain(res, state);
   return !res.writableEnded && !res.destroyed;
 }
 
@@ -398,6 +413,7 @@ export class DeviceSession {
   private hardwareKeyboardQueue: Promise<void> = Promise.resolve();
   private duoStateQueue: Promise<void> = Promise.resolve();
   private readonly streamResponses = new Set<ServerResponse>();
+  private readonly mjpegWriteStates = new Map<ServerResponse, StreamWriteState>();
   private touchGestureLog?: TouchGestureLog;
   private readonly streamHealth: Record<StreamEndpoint, StreamHealth> = {
     mjpeg: newStreamHealth(),
@@ -689,6 +705,9 @@ export class DeviceSession {
       Connection: "keep-alive",
     });
     if (!this.trackStreamResponse(res, "mjpeg")) return;
+    const writeState: StreamWriteState = { openedAt: Date.now(), drainWaitSince: null, lastWriteAt: null };
+    this.mjpegWriteStates.set(res, writeState);
+    res.once("close", () => this.mjpegWriteStates.delete(res));
 
     // The native subscriber reuses its frame buffer after this callback
     // resolves. Keep the callback pending through HTTP backpressure so the
@@ -712,7 +731,7 @@ export class DeviceSession {
       if (writeInFlight || res.writableEnded || res.destroyed) return;
       writeInFlight = true;
       try {
-        if (await writeAndDrain(res, () => this.writeMjpegFrame(res, jpeg))) {
+        if (await writeAndDrain(res, () => this.writeMjpegFrame(res, jpeg), writeState)) {
           lastSentAt = Date.now();
           this.noteStreamFrame("mjpeg");
         }
@@ -1942,6 +1961,21 @@ export class DeviceSession {
     return this.deviceHubShadowed === true;
   }
 
+  /**
+   * One entry per open MJPEG response. A viewer whose `waiting_for_drain_ms`
+   * keeps growing has a socket that stopped accepting bytes; a large
+   * `last_write_age_ms` with no drain wait means nothing is being written.
+   */
+  private mjpegViewerDiagnostics(): Array<Record<string, number | null>> {
+    const now = Date.now();
+    return [...this.mjpegWriteStates].map(([res, state]) => ({
+      open_ms: now - state.openedAt,
+      waiting_for_drain_ms: state.drainWaitSince == null ? null : now - state.drainWaitSince,
+      last_write_age_ms: state.lastWriteAt == null ? null : now - state.lastWriteAt,
+      writable_length: res.writableLength ?? null,
+    }));
+  }
+
   /** JSON-safe live state for `/api/diagnostics` / `serve-sim doctor`. */
   async diagnostics(): Promise<Record<string, unknown>> {
     let native: unknown = null;
@@ -1959,6 +1993,7 @@ export class DeviceSession {
       phase: this.phase,
       screen: this.screenConfig(),
       streams: structuredClone(this.streamHealth),
+      mjpeg_viewers: this.mjpegViewerDiagnostics(),
       native,
       duo: {
         ...this.duo.diagnostics(),
