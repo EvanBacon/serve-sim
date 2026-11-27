@@ -57,8 +57,8 @@ function setup(mode: "ready" | "slow" | "exit" = "ready") {
   return { udid, record, socketPath, read, logPath: join(CAMERA_STATE_DIR, `${udid}.log`) };
 }
 
-function spawnFake(t: ReturnType<typeof setup>, extra: { arg?: string; width?: number; height?: number } = {}) {
-  const pid = spawnCameraHelper({
+async function spawnFake(t: ReturnType<typeof setup>, extra: { arg?: string; width?: number; height?: number } = {}) {
+  const pid = await spawnCameraHelper({
     udid: t.udid,
     helperBin,
     shmName: "/serve-sim-cam-1a2b3c4d",
@@ -98,9 +98,9 @@ afterAll(() => {
 });
 
 describe("camera helper spawn", () => {
-  test("passes the shm name, socket and source the helper parses, in order", () => {
+  test("passes the shm name, socket and source the helper parses, in order", async () => {
     const t = setup();
-    spawnFake(t);
+    await spawnFake(t);
     expect(t.read("argv").split("\n").slice(0, -1)).toEqual([
       "--shm", "/serve-sim-cam-1a2b3c4d",
       "--socket", t.socketPath,
@@ -108,9 +108,9 @@ describe("camera helper spawn", () => {
     ]);
   });
 
-  test("a source argument and frame size are appended as their own flags", () => {
+  test("a source argument and frame size are appended as their own flags", async () => {
     const t = setup();
-    spawnFake(t, { arg: "/Users/me/Pictures/face with space.png", width: 1280, height: 720 });
+    await spawnFake(t, { arg: "/Users/me/Pictures/face with space.png", width: 1280, height: 720 });
     expect(t.read("argv").split("\n").slice(0, -1)).toEqual([
       "--shm", "/serve-sim-cam-1a2b3c4d",
       "--socket", t.socketPath,
@@ -121,11 +121,11 @@ describe("camera helper spawn", () => {
     ]);
   });
 
-  test("the helper inherits the host env (Xcode selection, device set, PATH, HOME)", () => {
+  test("the helper inherits the host env (Xcode selection, device set, PATH, HOME)", async () => {
     process.env.DEVELOPER_DIR = "/Applications/Xcode-beta.app/Contents/Developer";
     process.env.SERVE_SIM_DEVICE_SET = join(dir, "private set");
     const t = setup();
-    spawnFake(t);
+    await spawnFake(t);
     const env = new Map(t.read("env").split("\n").map((line) => {
       const eq = line.indexOf("=");
       return [line.slice(0, eq), line.slice(eq + 1)] as const;
@@ -136,25 +136,25 @@ describe("camera helper spawn", () => {
     expect(env.get("HOME")).toBe(process.env.HOME);
   });
 
-  test("runs in its own process group so it outlives the CLI, with output appended to the per-UDID log", () => {
+  test("runs in its own process group so it outlives the CLI, with output appended to the per-UDID log", async () => {
     const t = setup();
-    const first = spawnFake(t);
+    const first = await spawnFake(t);
     const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(first)], { encoding: "utf8" }).trim());
     expect(pgid).toBe(first);
     expect(pgid).not.toBe(Number(execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" }).trim()));
 
     stopExistingHelper(t.udid);
-    spawnFake(t);
+    await spawnFake(t);
     const log = readFileSync(t.logPath, "utf8");
     expect(log.match(/fake helper stdout/g)).toHaveLength(2);
     expect(log.match(/fake helper stderr/g)).toHaveLength(2);
   });
 
-  test("records the helper pid, drops the previous helper's bundles, and returns once the socket exists", () => {
+  test("records the helper pid, drops the previous helper's bundles, and returns once the socket exists", async () => {
     const t = setup("slow");
     writeFileSync(cameraHelperBundlesFile(t.udid), JSON.stringify({ helperPid: 1, bundleIds: ["com.stale.App"] }));
     const started = Date.now();
-    const pid = spawnFake(t);
+    const pid = await spawnFake(t);
     expect(Date.now() - started).toBeGreaterThanOrEqual(350);
     expect(existsSync(t.socketPath)).toBe(true);
     expect(readFileSync(cameraHelperPidFile(t.udid), "utf8")).toBe(String(pid));
@@ -168,7 +168,7 @@ describe("camera helper spawn", () => {
     const missing = join(dir, "no-such-helper");
     const script = `
       import { spawnCameraHelper } from ${JSON.stringify(join(import.meta.dir, "..", "camera-helper-process.ts"))};
-      spawnCameraHelper({ udid: ${JSON.stringify(udid)}, helperBin: ${JSON.stringify(missing)},
+      await spawnCameraHelper({ udid: ${JSON.stringify(udid)}, helperBin: ${JSON.stringify(missing)},
         shmName: "/x", socketPath: ${JSON.stringify(join(dir, "never.sock"))}, source: "placeholder" });
       console.log("SPAWNED");
     `;
@@ -179,20 +179,19 @@ describe("camera helper spawn", () => {
     expect(existsSync(cameraHelperPidFile(udid))).toBe(false);
   }, 20_000);
 
-  // Known gap: the wait loop polls kill(pid, 0) synchronously, so a helper
-  // that dies at startup stays an unreaped zombie, looks alive, and the spawn
-  // returns its pid after the 3 s timeout instead of reporting the log. Flip
-  // to `test` once the early exit is detected.
-  test.failing("a helper that exits at startup is reported with its log path", () => {
+  test("a helper that exits at startup is reported promptly with its log path", async () => {
     const t = setup("exit");
-    expect(() => spawnFake(t)).toThrow(`camera helper exited early — see log at ${t.logPath}`);
+    const started = Date.now();
+    await expect(spawnFake(t)).rejects.toThrow(`camera helper exited early — see log at ${t.logPath}`);
+    // Well under the 3 s socket wait: the exit is seen, not timed out.
+    expect(Date.now() - started).toBeLessThan(1500);
   }, 10_000);
 });
 
 describe("camera helper stop", () => {
-  test("SIGTERMs the helper, waits for it to exit, and removes its pid and bundles files", () => {
+  test("SIGTERMs the helper, waits for it to exit, and removes its pid and bundles files", async () => {
     const t = setup();
-    const pid = spawnFake(t);
+    const pid = await spawnFake(t);
     writeFileSync(cameraHelperBundlesFile(t.udid), JSON.stringify({ helperPid: pid, bundleIds: ["com.acme.App"] }));
     stopExistingHelper(t.udid);
     expect(alive(pid)).toBe(false);
