@@ -9,6 +9,7 @@ import {
   SIM_SHUTDOWN_E2E_TEST_FILE,
   bootstatusOutcome,
   describeSimulatorState,
+  elapsedLine,
   isDarwinSkipPath,
   isDarwinTestFile,
   needsDarwinE2E,
@@ -131,6 +132,25 @@ describe("CI workflow factory invariants", () => {
     expect(bootstatusOutcome(null, list("Booted"), "OTHER")).toBe("fail");
     expect(bootstatusOutcome(null, undefined, "U")).toBe("fail");
     expect(bootstatusOutcome(null, "not json", "U")).toBe("fail");
+  });
+
+  test("elapsedLine reports a file's time and the runner's total against the job budget", () => {
+    // CI: a camera retry plus the shutdown e2e ran the job into its 25-minute
+    // timeout with no running total in the log.
+    expect(elapsedLine("a.test.ts attempt 1", 75_400, 312_000, 25 * 60_000)).toBe(
+      "::notice title=sim e2e timing::a.test.ts attempt 1 took 75.4s; runner total 5m12s of the 25m job budget (21%)",
+    );
+    expect(elapsedLine("b.test.ts retry", 1_000, 24 * 60_000, 25 * 60_000)).toBe(
+      "::warning title=sim e2e timing::b.test.ts retry took 1.0s; runner total 24m00s of the 25m job budget (96%)",
+    );
+  });
+
+  test("the runner logs elapsed time for every e2e attempt", () => {
+    const runner = readFileSync(join(REPO, "packages/serve-sim/scripts/run-sim-e2e.ts"), "utf-8");
+    const run = runner.slice(runner.indexOf("function runBunTest"), runner.indexOf("function alreadyBooted"));
+    expect(run).toContain("elapsedLine(");
+    expect(runner).toMatch(/JOB_BUDGET_MS = 25 \* 60_000/);
+    expect(workflow("sim-test.yml")).toMatch(/timeout-minutes: 25\b/);
   });
 
   test("the shutdown e2e runs last, opted in on the CI-owned simulator", () => {

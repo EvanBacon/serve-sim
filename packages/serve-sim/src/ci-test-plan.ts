@@ -72,6 +72,20 @@ export function describeSimulatorState(listJson: string, udid: string): string {
 }
 
 /**
+ * One log line for a finished e2e attempt: its time and the runner's running
+ * total against the job budget, so a job that times out shows where its
+ * minutes went. A warning annotation once the total passes 80% of the budget.
+ */
+export function elapsedLine(label: string, fileMs: number, totalMs: number, budgetMs: number): string {
+  const totalSeconds = Math.round(totalMs / 1000);
+  const total = `${Math.floor(totalSeconds / 60)}m${String(totalSeconds % 60).padStart(2, "0")}s`;
+  const percent = Math.round((totalMs / budgetMs) * 100);
+  const level = percent >= 80 ? "warning" : "notice";
+  return `::${level} title=sim e2e timing::${label} took ${(fileMs / 1000).toFixed(1)}s; ` +
+    `runner total ${total} of the ${Math.round(budgetMs / 60_000)}m job budget (${percent}%)`;
+}
+
+/**
  * What the CI runner does after `simctl bootstatus` during a reboot. On the
  * macOS runner (Xcode 27, iOS 26.4) bootstatus can hang until its timeout
  * kills it even though `simctl list` already says Booted. Then a readiness
