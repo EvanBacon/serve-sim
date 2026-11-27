@@ -122,7 +122,11 @@ async function locationAuthEventually(bundleId: string, expected: number): Promi
  * the CLI call took, how long the poll ran, when locationd last wrote
  * clients.plist, and what the bundle's entry holds now.
  */
-function locationMismatch(bundleId: string, cliMs: number, pollMs: number): string {
+function locationMismatch(bundleId: string, cliMs: number, pollMs: number, cliOut: string): string {
+  return `${locationState(bundleId, cliMs, pollMs)}\nCLI output: ${cliOut.trim() || "(none)"}`;
+}
+
+function locationState(bundleId: string, cliMs: number, pollMs: number): string {
   let plist: string;
   let mtime: Date;
   try {
@@ -144,10 +148,11 @@ function locationMismatch(bundleId: string, cliMs: number, pollMs: number): stri
     `(${Date.now() - mtime.getTime()}ms ago)\n${entry}`;
 }
 
-function timed(run: () => void): number {
+/** Runs the CLI, returning its wall time and stdout (for a failed readback's message). */
+function timedCli(...args: string[]): { ms: number; out: string } {
   const started = Date.now();
-  run();
-  return Date.now() - started;
+  const out = cli(...args);
+  return { ms: Date.now() - started, out };
 }
 
 // Each case shells the built CLI a few times, and a cold `simctl privacy`
@@ -213,17 +218,17 @@ describeIfSim("serve-sim permissions (real simulator)", () => {
   }, T);
 
   test("grant location --value always writes Authorization=4", async () => {
-    const cliMs = timed(() => cli("grant", "location", REAL_APP, "--value", "always"));
+    const grant = timedCli("grant", "location", REAL_APP, "--value", "always");
     const polled = Date.now();
     const auth = await locationAuthEventually(REAL_APP, 4);
-    expect(auth, auth === 4 ? "" : locationMismatch(REAL_APP, cliMs, Date.now() - polled)).toBe(4);
+    expect(auth, auth === 4 ? "" : locationMismatch(REAL_APP, grant.ms, Date.now() - polled, grant.out)).toBe(4);
   }, T);
 
   test("revoke location downgrades Authorization to never (1)", async () => {
-    const cliMs = timed(() => cli("revoke", "location", REAL_APP));
+    const revoke = timedCli("revoke", "location", REAL_APP);
     const polled = Date.now();
     const auth = await locationAuthEventually(REAL_APP, 1);
-    expect(auth, auth === 1 ? "" : locationMismatch(REAL_APP, cliMs, Date.now() - polled)).toBe(1);
+    expect(auth, auth === 1 ? "" : locationMismatch(REAL_APP, revoke.ms, Date.now() - polled, revoke.out)).toBe(1);
     cli("reset", "location", REAL_APP);
   }, T);
 

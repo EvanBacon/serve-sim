@@ -17,23 +17,34 @@ import {
   SIM_SHUTDOWN_E2E_TEST_FILE,
   bootstatusOutcome,
   describeSimulatorState,
+  elapsedLine,
 } from "../src/ci-test-plan";
 
 const repoRoot = resolve(import.meta.dir, "../../..");
 const udid = process.env.UDID ?? "";
 const serialArgs = ["--max-concurrency=1"];
 const failed: string[] = [];
+/** sim-test.yml's timeout-minutes. Build and boot ran before this, so the real headroom is less. */
+const JOB_BUDGET_MS = 25 * 60_000;
+const runnerStarted = Date.now();
+const attempts = new Map<string, number>();
 
 function runBunTest(
   files: readonly string[],
   extraArgs: string[] = [],
   env: NodeJS.ProcessEnv = process.env,
 ): number {
+  const key = files.join(" ");
+  const attempt = (attempts.get(key) ?? 0) + 1;
+  attempts.set(key, attempt);
+  const started = Date.now();
   const result = spawnSync("bun", ["test", ...extraArgs, ...files], {
     cwd: repoRoot,
     stdio: "inherit",
     env,
   });
+  const now = Date.now();
+  console.log(elapsedLine(`${key} attempt ${attempt}`, now - started, now - runnerStarted, JOB_BUDGET_MS));
   return result.status ?? 1;
 }
 

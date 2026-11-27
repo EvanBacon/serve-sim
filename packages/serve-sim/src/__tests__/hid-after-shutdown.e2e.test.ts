@@ -67,6 +67,23 @@ function hangContext(): string {
   return `${http}; device ${deviceState()}`;
 }
 
+/**
+ * Where the guest's boot is, from a 4s `simctl bootstatus` read: its last
+ * "Waiting on …" line, or that it is booted. Tells "the guest never finished
+ * booting" (a slow runner: on a throttled local sim SpringBoard took 155s)
+ * apart from "booted, but input still refused". Failure messages only.
+ */
+function guestBootPhase(): string {
+  const started = Date.now();
+  const r = spawnSync("xcrun", simctl("bootstatus", udid!), { encoding: "utf-8", timeout: 4_000 });
+  const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+  if (/already booted|Finished/i.test(out)) return `booted (bootstatus answered in ${Date.now() - started}ms)`;
+  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const status = lines.filter((l) => /^\[.*Status=/.test(l)).at(-1) ?? "no status line";
+  const waiting = lines.filter((l) => /^Waiting on /.test(l)).at(-1) ?? "no Waiting line";
+  return `still booting after a ${Date.now() - started}ms bootstatus read: ${status} ${waiting}`;
+}
+
 interface TapResult { status: number | null; stderr: string; ms: number; hung: boolean }
 
 function tap(timeoutMs = 8_000): TapResult {
@@ -106,7 +123,10 @@ function bootAndWait(): void {
   const boot = spawnSync("xcrun", simctl("boot", udid!), { encoding: "utf-8" });
   const booted = Date.now();
   const status = spawnSync("xcrun", simctl("bootstatus", udid!), { encoding: "utf-8", timeout: 120_000 });
-  if (status.status === 0) return;
+  if (status.status === 0) {
+    console.log(`hid e2e bootAndWait: simctl boot ${booted - started}ms, bootstatus ${Date.now() - booted}ms`);
+    return;
+  }
   throw new Error(
     `simctl bootstatus ${udid} failed after ${Date.now() - booted}ms ` +
       `(status ${status.status}${status.error ? `, ${status.error}` : ""}); device ${deviceState()}\n` +
@@ -243,10 +263,16 @@ describeIfOptedIn(`HID input across simctl shutdown + boot (${udid ?? "<skipped>
     }
     if (firstOkAt == null) {
       throw new Error(
-        `no successful tap within 90s of simctl boot (boot returned at +${bootReturnedMs}ms; device now ${deviceState()})\n` +
+        `no successful tap within 90s of simctl boot (boot returned at +${bootReturnedMs}ms; device now ${deviceState()}; ` +
+          `first not-ready log ${notReadyAt == null ? "never" : `at +${notReadyAt - bootIssued}ms`}; guest ${guestBootPhase()})\n` +
           `${lastFail}${lastTap?.hung ? `\n[test] at failure: ${hangContext()}` : ""}\n${timeline(attempts, bootIssued)}\n${serverLog.slice(logAtStart)}`,
       );
     }
+    console.log(
+      `hid e2e post-boot: boot returned +${bootReturnedMs}ms, first not-ready log ` +
+        `${notReadyAt == null ? "never" : `+${notReadyAt - bootIssued}ms`}, first ok tap +${firstOkAt - bootIssued}ms ` +
+        `after ${attempts.length} taps`,
+    );
     if (notReadyAt != null) {
       expect(
         firstOkAt - notReadyAt,
