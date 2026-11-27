@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createMjpegFrameParser } from "../utils/mjpeg-frame-parser";
 import { runStreamWithRetry, type StreamError } from "../utils/stream-retry";
+import { createStreamReadStats, noteStreamFrame, type StreamReadStats } from "../utils/stream-stale-diagnostics";
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
@@ -21,6 +22,8 @@ export function useMjpegStream(streamUrl: string | null, onStreamingChange?: (st
   streamingCallback.current = onStreamingChange;
   const subscribersRef = useRef<Set<(blobUrl: string) => void>>(new Set());
   const [error, setError] = useState<StreamError | null>(null);
+  // Read-side counters for SimulatorView's stale-stream warning (#103).
+  const statsRef = useRef<StreamReadStats>(createStreamReadStats());
 
   const subscribeFrame = useCallback(
     (cb: (blobUrl: string) => void) => {
@@ -34,6 +37,7 @@ export function useMjpegStream(streamUrl: string | null, onStreamingChange?: (st
     if (!streamUrl) return;
     const controller = new AbortController();
     setError(null);
+    const stats = statsRef.current;
 
     // ?raw=1 tells the server to use Content-Type application/octet-stream
     // instead of multipart/x-mixed-replace; WebKit refuses to expose
@@ -42,6 +46,7 @@ export function useMjpegStream(streamUrl: string | null, onStreamingChange?: (st
     fetchUrlObj.searchParams.set("raw", "1");
 
     const emit = (jpeg: Uint8Array) => {
+      noteStreamFrame(stats);
       streamingCallback.current?.(true);
       if (subscribersRef.current.size === 0) return;
       // Blob copies the bytes, so handing it a subarray view is safe even as
@@ -54,9 +59,13 @@ export function useMjpegStream(streamUrl: string | null, onStreamingChange?: (st
     void runStreamWithRetry({
       url: fetchUrlObj.toString(),
       signal: controller.signal,
+      stats,
       connect: () => {
         const parser = createMjpegFrameParser(emit);
-        return (chunk) => parser.push(chunk);
+        return (chunk) => {
+          parser.push(chunk);
+          stats.bufferedBytes = parser.buffered();
+        };
       },
       onOpen: () => setError(null),
       onClose: () => streamingCallback.current?.(false),
@@ -72,5 +81,5 @@ export function useMjpegStream(streamUrl: string | null, onStreamingChange?: (st
     };
   }, [streamUrl]);
 
-  return { subscribeFrame, frame: null, error };
+  return { subscribeFrame, frame: null, error, stats: statsRef.current };
 }

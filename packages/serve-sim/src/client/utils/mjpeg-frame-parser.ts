@@ -23,6 +23,8 @@
 export interface MjpegFrameParser {
   /** Feed the next chunk of stream bytes; emits any frames it completes. */
   push(value: Uint8Array): void;
+  /** Bytes held without a complete frame yet (diagnostics). */
+  buffered(): number;
 }
 
 export function createMjpegFrameParser(
@@ -139,5 +141,6 @@ export function createMjpegFrameParser(
       append(value);
       drain();
     },
+    buffered: () => len - start,
   };
 }
