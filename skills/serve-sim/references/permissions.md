@@ -20,7 +20,12 @@ npx serve-sim permissions list   [bundle-id] [-d <udid|name>]
   every permission for the bundle id.
 - `list` — print current state as JSON: a `tcc` map (keyed by the same
   permission names `grant`/`revoke`/`reset` accept), plus `location` and
-  `notifications`. Pass `-q` for single-line JSON.
+  `notifications`. With a bundle id it also adds `statuses` (each permission
+  as `granted` / `denied` / `limited` / `unset`) and `requested` (permissions
+  the app's Info.plist declares usage descriptions for, with notifications
+  inferred from the `remote-notification` background mode; `null` when the
+  app isn't installed or its Info.plist can't be read). Pass `-q` for
+  single-line JSON.
 
 `<bundle-id>` is required for every verb except `list`. The app must be
 installed; `location` in particular silently no-ops on an uninstalled bundle.
