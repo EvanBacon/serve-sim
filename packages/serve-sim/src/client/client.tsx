@@ -1288,6 +1288,7 @@ function AppWithConfig({
                 codec={useAvccVideo ? "avcc" : "mjpeg"}
                 onAvccError={() => dispatchAvccFallback("error")}
                 subscribeFrame={useAvccVideo ? undefined : mjpeg.subscribeFrame}
+                streamStats={useAvccVideo ? undefined : mjpeg.stats}
                 streamFrame={useAvccVideo ? undefined : mjpeg.frame}
                 streamConfig={activeStreamConfig}
                 enableDigitalCrown={deviceType === "watch"}
